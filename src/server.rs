@@ -19,6 +19,7 @@ const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
 struct AppState {
     base_dir: PathBuf,
+    source_file: Option<PathBuf>,
     current_html: RwLock<String>,
     tx: broadcast::Sender<String>,
     scroll_tx: broadcast::Sender<u32>,
@@ -82,6 +83,7 @@ pub async fn run_stdin(
 
     let state = Arc::new(AppState {
         base_dir,
+        source_file: None,
         current_html: RwLock::new(content_html),
         tx,
         scroll_tx,
@@ -126,6 +128,7 @@ pub async fn start(
 
     let state = Arc::new(AppState {
         base_dir,
+        source_file: Some(file.clone()),
         current_html: RwLock::new(content_html),
         tx: tx.clone(),
         scroll_tx,
@@ -219,6 +222,64 @@ async fn scroll_handler(Path(line): Path<u32>, State(state): State<Arc<AppState>
     StatusCode::NO_CONTENT
 }
 
+/// Handle incoming WebSocket text messages from the browser.
+fn handle_ws_message(text: &str, state: &AppState) {
+    // Simple JSON parsing without serde — messages are {"type":"checkbox","line":N,"checked":B}
+    if !text.starts_with('{') {
+        return;
+    }
+
+    if let Some(rest) = text.strip_prefix(r#"{"type":"checkbox","line":"#) {
+        // Parse: N,"checked":true/false}
+        if let Some(comma_pos) = rest.find(',') {
+            let line_str = &rest[..comma_pos];
+            let checked = rest.contains(r#""checked":true"#);
+            if let Ok(line) = line_str.parse::<usize>() {
+                if let Err(e) = toggle_checkbox(state, line, checked) {
+                    eprintln!("sheen: checkbox toggle failed: {e}");
+                }
+            }
+        }
+    }
+}
+
+/// Toggle a checkbox in the source file at the given line.
+fn toggle_checkbox(state: &AppState, line: usize, checked: bool) -> anyhow::Result<()> {
+    let path = state
+        .source_file
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("no source file (stdin mode)"))?;
+
+    let content = std::fs::read_to_string(path)?;
+    let mut lines: Vec<&str> = content.lines().collect();
+
+    if line == 0 || line > lines.len() {
+        anyhow::bail!("line {line} out of range");
+    }
+
+    let target = lines[line - 1];
+    let new_line = if checked {
+        target.replacen("[ ]", "[x]", 1)
+    } else {
+        target.replacen("[x]", "[ ]", 1)
+    };
+
+    if new_line == target {
+        return Ok(()); // no change needed
+    }
+
+    lines[line - 1] = &new_line;
+
+    // Preserve trailing newline if original had one
+    let mut output = lines.join("\n");
+    if content.ends_with('\n') {
+        output.push('\n');
+    }
+
+    std::fs::write(path, output)?;
+    Ok(())
+}
+
 async fn local_file_handler(
     Path(path): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -285,9 +346,12 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
                 }
             }
             msg = socket.recv() => {
-                // Client disconnected or sent close frame
-                if msg.is_none() || msg.is_some_and(|m| m.is_err()) {
-                    break;
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        handle_ws_message(&text, &state);
+                    }
+                    Some(Ok(_)) => {} // ignore binary/ping/pong
+                    _ => break,       // disconnected or error
                 }
             }
         }
@@ -311,6 +375,7 @@ mod tests {
         let (scroll_tx, _) = broadcast::channel(16);
         let state = Arc::new(AppState {
             base_dir: PathBuf::from("."),
+            source_file: None,
             current_html: RwLock::new("<p>hello</p>".to_string()),
             tx,
             scroll_tx,
@@ -371,6 +436,7 @@ mod tests {
         let (scroll_tx, _) = broadcast::channel(16);
         let state = Arc::new(AppState {
             base_dir,
+            source_file: None,
             current_html: RwLock::new("<p>hello</p>".to_string()),
             tx,
             scroll_tx,

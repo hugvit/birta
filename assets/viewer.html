@@ -142,7 +142,24 @@
       }
     }
 
+    // Checkbox write-back
+    // Enable task list checkboxes and send toggle messages via WebSocket
+    function enableCheckboxes() {
+      content.querySelectorAll('input[type="checkbox"][disabled]').forEach(function(cb) {
+        cb.disabled = false;
+        cb.addEventListener('change', function(e) {
+          var li = e.target.closest('li[data-sourcepos]');
+          if (!li || !currentWs || currentWs.readyState !== WebSocket.OPEN) return;
+          var line = parseInt(li.getAttribute('data-sourcepos'), 10);
+          currentWs.send(JSON.stringify({
+            type: 'checkbox', line: line, checked: e.target.checked
+          }));
+        });
+      });
+    }
+
     // WebSocket live reload
+    var currentWs = null;
     (function() {
       var content = document.getElementById('content');
       var status = document.getElementById('status');
@@ -161,6 +178,7 @@
       function connect() {
         var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         var ws = new WebSocket(proto + '//' + location.host + '/ws');
+        currentWs = ws;
 
         ws.onopen = function() {
           reconnectDelay = 1000;
@@ -177,9 +195,11 @@
           content.innerHTML = data;
           renderMath();
           renderMermaid();
+          enableCheckboxes();
         };
 
         ws.onclose = function() {
+          currentWs = null;
           showStatus('Disconnected — reconnecting…');
           setTimeout(function() {
             reconnectDelay = Math.min(reconnectDelay * 2, maxDelay);
@@ -190,6 +210,9 @@
 
       connect();
     })();
+
+    // Enable checkboxes on initial page load
+    enableCheckboxes();
   </script>
 </body>
 </html>

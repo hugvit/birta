@@ -79,9 +79,18 @@ pub async fn start(file: PathBuf, listener: TcpListener) -> anyhow::Result<()> {
     let _debouncer = watcher::watch(file, tx)?;
 
     let app = router(page, state);
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     Ok(())
+}
+
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to listen for ctrl-c");
+    eprintln!("\nsheen: shutting down...");
 }
 
 fn router(page: String, state: Arc<AppState>) -> Router {
@@ -90,6 +99,7 @@ fn router(page: String, state: Arc<AppState>) -> Router {
         .route("/health", get(|| async { "ok" }))
         .route("/ws", get(ws_handler))
         .route("/local/{*path}", get(local_file_handler))
+        .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
         .with_state(state)
 }
 

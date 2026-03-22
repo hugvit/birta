@@ -23,5 +23,19 @@ struct Cli {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    if !cli.file.exists() {
+        anyhow::bail!("file not found: {}", cli.file.display());
+    }
+
+    if let Some(ext) = cli.file.extension().and_then(|e| e.to_str()) {
+        if ext != "md" && ext != "markdown" {
+            eprintln!(
+                "sheen: warning: {} does not have a .md or .markdown extension",
+                cli.file.display()
+            );
+        }
+    }
+
     sheen::server::run(cli.file, cli.port, cli.no_open).await
 }

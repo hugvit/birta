@@ -29,7 +29,7 @@ fn options() -> Options<'static> {
     options.extension.footnotes = true;
     options.extension.description_lists = true;
     options.extension.shortcodes = true;
-    options.extension.header_ids = Some("user-content-".to_string());
+    options.extension.header_ids = Some(String::new());
     options.extension.alerts = true;
 
     // Rewrite relative image paths to go through /local/

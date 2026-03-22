@@ -3,9 +3,9 @@ source: tests/render_test.rs
 expression: html
 input_file: tests/fixtures/headings.md
 ---
-<h1><a href="#heading-1" aria-hidden="true" class="anchor" id="user-content-heading-1"></a>Heading 1</h1>
-<h2><a href="#heading-2" aria-hidden="true" class="anchor" id="user-content-heading-2"></a>Heading 2</h2>
-<h3><a href="#heading-3" aria-hidden="true" class="anchor" id="user-content-heading-3"></a>Heading 3</h3>
-<h4><a href="#heading-4" aria-hidden="true" class="anchor" id="user-content-heading-4"></a>Heading 4</h4>
-<h5><a href="#heading-5" aria-hidden="true" class="anchor" id="user-content-heading-5"></a>Heading 5</h5>
-<h6><a href="#heading-6" aria-hidden="true" class="anchor" id="user-content-heading-6"></a>Heading 6</h6>
+<h1><a href="#heading-1" aria-hidden="true" class="anchor" id="heading-1"></a>Heading 1</h1>
+<h2><a href="#heading-2" aria-hidden="true" class="anchor" id="heading-2"></a>Heading 2</h2>
+<h3><a href="#heading-3" aria-hidden="true" class="anchor" id="heading-3"></a>Heading 3</h3>
+<h4><a href="#heading-4" aria-hidden="true" class="anchor" id="heading-4"></a>Heading 4</h4>
+<h5><a href="#heading-5" aria-hidden="true" class="anchor" id="heading-5"></a>Heading 5</h5>
+<h6><a href="#heading-6" aria-hidden="true" class="anchor" id="heading-6"></a>Heading 6</h6>

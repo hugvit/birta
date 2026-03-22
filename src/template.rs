@@ -3,6 +3,7 @@ const GITHUB_CSS: &str = include_str!("../assets/github-markdown.css");
 const THEME_OVERRIDES: &str = include_str!("../assets/theme-overrides.css");
 const PAGE_CSS: &str = include_str!("../assets/page.css");
 const SYNTAX_CSS: &str = include_str!("../assets/syntax.css");
+const ALERTS_CSS: &str = include_str!("../assets/alerts.css");
 
 pub fn render_page(filename: &str, content_html: &str) -> String {
     VIEWER_HTML
@@ -10,6 +11,7 @@ pub fn render_page(filename: &str, content_html: &str) -> String {
         .replace("{{THEME_OVERRIDES}}", THEME_OVERRIDES)
         .replace("{{PAGE_CSS}}", PAGE_CSS)
         .replace("{{SYNTAX_CSS}}", SYNTAX_CSS)
+        .replace("{{ALERTS_CSS}}", ALERTS_CSS)
         .replace("{{FILENAME}}", filename)
         .replace("{{CONTENT}}", content_html)
 }

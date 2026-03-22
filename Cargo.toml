@@ -1,0 +1,8 @@
+[package]
+name = "sheen"
+version = "0.1.0"
+edition = "2024"
+description = "Preview markdown files in the browser with GitHub-style rendering"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }

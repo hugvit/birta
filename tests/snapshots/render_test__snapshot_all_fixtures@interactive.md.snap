@@ -1,0 +1,17 @@
+---
+source: tests/render_test.rs
+expression: html
+input_file: tests/fixtures/interactive.md
+---
+<details>
+<summary>Click to expand</summary>
+<p>This content is hidden by default.</p>
+<ul>
+<li>Item one</li>
+<li>Item two</li>
+</ul>
+</details>
+<details open>
+<summary>Already open</summary>
+<p>This section starts expanded.</p>
+</details>

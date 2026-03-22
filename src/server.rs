@@ -47,6 +47,43 @@ pub async fn run(file: PathBuf, port: u16, no_open: bool) -> anyhow::Result<()> 
     start(file, listener).await
 }
 
+/// Serve markdown read from stdin (no file watching).
+pub async fn run_stdin(markdown: &str, port: u16, no_open: bool) -> anyhow::Result<()> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = TcpListener::bind(addr).await?;
+    let actual_addr = listener.local_addr()?;
+
+    eprintln!("sheen: serving stdin at http://{actual_addr}");
+
+    if !no_open {
+        let url = format!("http://{actual_addr}");
+        if let Err(e) = open::that(&url) {
+            eprintln!("sheen: could not open browser: {e}");
+        }
+    }
+
+    let content_html = render::render(markdown);
+    let page = template::render_page("stdin", &content_html);
+    let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    let (tx, _rx) = broadcast::channel::<String>(16);
+
+    let state = Arc::new(AppState {
+        base_dir,
+        current_html: RwLock::new(content_html),
+        tx,
+        connections: AtomicUsize::new(0),
+        all_disconnected: Notify::new(),
+    });
+
+    let app = router(page, state.clone());
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(state))
+        .await?;
+
+    Ok(())
+}
+
 /// Start serving a markdown file on the given listener.
 ///
 /// Watches the file for changes and pushes updates over WebSocket.

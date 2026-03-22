@@ -134,6 +134,17 @@ input_file: tests/fixtures/kitchen_sink.md
 </div>
 <h2><a href="#autolink" aria-hidden="true" class="anchor" id="autolink"></a>Autolink</h2>
 <p>Visit <a href="https://example.com">https://example.com</a> or email <a href="mailto:user@example.com">user@example.com</a>.</p>
+<h2><a href="#math" aria-hidden="true" class="anchor" id="math"></a>Math</h2>
+<p>Inline math: <span data-math-style="inline">E = mc^2</span></p>
+<p>Display math:</p>
+<p><span data-math-style="display">
+\int_{-\infty}^{\infty} e^{-x^2} dx = \sqrt{\pi}
+</span></p>
+<p>Code-style inline: <code data-math-style="inline">\alpha + \beta</code></p>
+<p>Code-style display:</p>
+<pre lang="math" data-math-style="display"><code>\sum_{i=1}^{n} i = \frac{n(n+1)}{2}
+</code></pre>
+<p>Mixed: The equation <span data-math-style="inline">a^2 + b^2 = c^2</span> is well known.</p>
 <section class="footnotes" data-footnotes>
 <ol>
 <li id="fn-1">

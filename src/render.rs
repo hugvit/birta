@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
+use comrak::nodes::NodeValue;
 use comrak::plugins::syntect::SyntectAdapter;
-use comrak::{Options, markdown_to_html_with_plugins, options};
+use comrak::{Arena, Options, format_html_with_plugins, options, parse_document};
 
 use crate::highlight;
 
@@ -9,7 +10,30 @@ pub fn render(markdown: &str) -> String {
     let options = options();
     let adapter = highlight::adapter();
     let plugins = plugins(&adapter);
-    markdown_to_html_with_plugins(markdown, &options, &plugins)
+
+    let arena = Arena::new();
+    let root = parse_document(&arena, markdown, &options);
+
+    // Convert mermaid code blocks to raw HTML so syntect doesn't process them
+    for node in root.descendants() {
+        let mut data = node.data.borrow_mut();
+        if let NodeValue::CodeBlock(ref code_block) = data.value {
+            if code_block.info == "mermaid" {
+                let html = format!(
+                    "<pre class=\"mermaid\">{}</pre>\n",
+                    html_escape(&code_block.literal)
+                );
+                data.value = NodeValue::HtmlBlock(comrak::nodes::NodeHtmlBlock {
+                    block_type: 6,
+                    literal: html,
+                });
+            }
+        }
+    }
+
+    let mut html = String::new();
+    format_html_with_plugins(root, &options, &mut html, &plugins).unwrap();
+    html
 }
 
 fn plugins(adapter: &SyntectAdapter) -> options::Plugins<'_> {
@@ -61,4 +85,18 @@ fn should_rewrite(src: &str) -> bool {
         && !src.starts_with('/')
         && !src.starts_with("data:")
         && !src.starts_with('#')
+}
+
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }

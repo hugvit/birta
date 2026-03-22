@@ -12,6 +12,7 @@
   {{CUSTOM_CSS}}
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css" crossorigin="anonymous">
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js" crossorigin="anonymous"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 </head>
 <body>
   <header class="header">
@@ -87,12 +88,32 @@
       });
     }
 
-    // Render math on initial load (KaTeX script is defer, so wait for it)
+    // Mermaid diagram rendering
+    // comrak (via AST transform) emits <pre class="mermaid">...</pre>
+    var mermaidReady = false;
+    function initMermaid() {
+      if (typeof mermaid === 'undefined') return;
+      if (mermaidReady) return;
+      var theme = (document.documentElement.getAttribute('data-theme') === 'dark' ||
+        (!document.documentElement.getAttribute('data-theme') &&
+         window.matchMedia('(prefers-color-scheme: dark)').matches)) ? 'dark' : 'default';
+      mermaid.initialize({ startOnLoad: false, theme: theme });
+      mermaidReady = true;
+    }
+
+    function renderMermaid() {
+      if (typeof mermaid === 'undefined') return;
+      initMermaid();
+      // mermaid.run() renders all <pre class="mermaid"> elements
+      mermaid.run({ querySelector: 'pre.mermaid' });
+    }
+
+    // Render math and diagrams on initial load (scripts are defer)
+    function renderAll() { renderMath(); renderMermaid(); }
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', renderMath);
+      document.addEventListener('DOMContentLoaded', renderAll);
     } else {
-      // defer script may not have executed yet
-      setTimeout(renderMath, 0);
+      setTimeout(renderAll, 0);
     }
 
     // WebSocket live reload
@@ -123,6 +144,7 @@
         ws.onmessage = function(event) {
           content.innerHTML = event.data;
           renderMath();
+          renderMermaid();
         };
 
         ws.onclose = function() {

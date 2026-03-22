@@ -1,0 +1,15 @@
+---
+source: tests/render_test.rs
+expression: html
+input_file: tests/fixtures/mermaid.md
+---
+<pre class="mermaid">graph TD
+    A[Start] --&gt; B{Decision}
+    B --&gt;|Yes| C[OK]
+    B --&gt;|No| D[End]
+</pre>
+<p>Text between diagrams.</p>
+<pre class="mermaid">sequenceDiagram
+    Alice-&gt;&gt;Bob: Hello
+    Bob--&gt;&gt;Alice: Hi
+</pre>

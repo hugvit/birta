@@ -1,9 +1,43 @@
-use comrak::{Options, markdown_to_html};
+use comrak::plugins::syntect::SyntectAdapter;
+use comrak::{Options, markdown_to_html_with_plugins, options};
+
+use crate::highlight;
 
 pub fn render(markdown: &str) -> String {
     let options = options();
-    let html = markdown_to_html(markdown, &options);
+    let adapter = highlight::adapter();
+    let plugins = plugins(&adapter);
+    let html = markdown_to_html_with_plugins(markdown, &options, &plugins);
     rewrite_local_image_paths(&html)
+}
+
+fn plugins(adapter: &SyntectAdapter) -> options::Plugins<'_> {
+    let mut plugins = options::Plugins::default();
+    plugins.render.codefence_syntax_highlighter = Some(adapter);
+    plugins
+}
+
+fn options() -> Options<'static> {
+    let mut options = Options::default();
+
+    // GFM extensions
+    options.extension.table = true;
+    options.extension.strikethrough = true;
+    options.extension.autolink = true;
+    options.extension.tasklist = true;
+    options.extension.footnotes = true;
+    options.extension.description_lists = true;
+    options.extension.shortcodes = true;
+    options.extension.header_ids = Some("user-content-".to_string());
+
+    // Parsing
+    options.parse.smart = true;
+
+    // Rendering
+    options.render.github_pre_lang = true;
+    options.render.r#unsafe = true;
+
+    options
 }
 
 /// Rewrite relative image `src` attributes to go through `/local/`.
@@ -56,27 +90,4 @@ fn should_rewrite(src: &str) -> bool {
         && !src.starts_with('/')
         && !src.starts_with("data:")
         && !src.starts_with('#')
-}
-
-fn options() -> Options<'static> {
-    let mut options = Options::default();
-
-    // GFM extensions
-    options.extension.table = true;
-    options.extension.strikethrough = true;
-    options.extension.autolink = true;
-    options.extension.tasklist = true;
-    options.extension.footnotes = true;
-    options.extension.description_lists = true;
-    options.extension.shortcodes = true;
-    options.extension.header_ids = Some("user-content-".to_string());
-
-    // Parsing
-    options.parse.smart = true;
-
-    // Rendering
-    options.render.github_pre_lang = true;
-    options.render.r#unsafe = true;
-
-    options
 }

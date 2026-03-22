@@ -1,0 +1,162 @@
+/* Syntax highlighting — GitHub-inspired colors for syntect TextMate scope classes */
+
+pre.syntax-highlighting {
+  padding: 16px;
+  overflow: auto;
+  font-size: 85%;
+  line-height: 1.45;
+  border-radius: 6px;
+}
+
+/* Light theme (default) */
+pre.syntax-highlighting {
+  background-color: #f6f8fa;
+  color: #1f2328;
+}
+
+/* Keywords, storage */
+.keyword, .storage { color: #cf222e; }
+.storage.type { color: #cf222e; }
+.storage.modifier { color: #cf222e; }
+
+/* Functions, methods */
+.entity.name.function { color: #8250df; }
+.entity.name.type, .entity.name.class { color: #953800; }
+.entity.name.tag { color: #116329; }
+
+/* Strings */
+.string { color: #0a3069; }
+
+/* Numbers, constants */
+.constant, .constant.numeric { color: #0550ae; }
+.constant.language { color: #0550ae; }
+
+/* Comments */
+.comment { color: #6e7781; font-style: italic; }
+
+/* Variables, parameters */
+.variable { color: #953800; }
+.variable.parameter { color: #24292f; }
+
+/* Punctuation */
+.punctuation { color: #1f2328; }
+
+/* Operators */
+.keyword.operator { color: #cf222e; }
+
+/* Types, support */
+.support.type, .support.class { color: #953800; }
+.support.function { color: #8250df; }
+
+/* Meta */
+.meta.function-call { color: #8250df; }
+
+/* Attributes */
+.entity.other.attribute-name { color: #0550ae; }
+
+/* Embedded/special */
+.variable.other { color: #0550ae; }
+
+/* Dark theme overrides */
+[data-theme="dark"] pre.syntax-highlighting,
+:root[data-theme="dark"] pre.syntax-highlighting {
+  background-color: #161b22;
+  color: #e6edf3;
+}
+
+[data-theme="dark"] .keyword,
+[data-theme="dark"] .storage,
+[data-theme="dark"] .storage.type,
+[data-theme="dark"] .storage.modifier {
+  color: #ff7b72;
+}
+
+[data-theme="dark"] .entity.name.function {
+  color: #d2a8ff;
+}
+
+[data-theme="dark"] .entity.name.type,
+[data-theme="dark"] .entity.name.class {
+  color: #ffa657;
+}
+
+[data-theme="dark"] .entity.name.tag {
+  color: #7ee787;
+}
+
+[data-theme="dark"] .string {
+  color: #a5d6ff;
+}
+
+[data-theme="dark"] .constant,
+[data-theme="dark"] .constant.numeric,
+[data-theme="dark"] .constant.language {
+  color: #79c0ff;
+}
+
+[data-theme="dark"] .comment {
+  color: #8b949e;
+}
+
+[data-theme="dark"] .variable {
+  color: #ffa657;
+}
+
+[data-theme="dark"] .variable.parameter {
+  color: #e6edf3;
+}
+
+[data-theme="dark"] .punctuation {
+  color: #e6edf3;
+}
+
+[data-theme="dark"] .keyword.operator {
+  color: #ff7b72;
+}
+
+[data-theme="dark"] .support.type,
+[data-theme="dark"] .support.class {
+  color: #ffa657;
+}
+
+[data-theme="dark"] .support.function {
+  color: #d2a8ff;
+}
+
+[data-theme="dark"] .entity.other.attribute-name {
+  color: #79c0ff;
+}
+
+[data-theme="dark"] .variable.other {
+  color: #79c0ff;
+}
+
+/* System preference dark mode (no explicit data-theme) */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) pre.syntax-highlighting {
+    background-color: #161b22;
+    color: #e6edf3;
+  }
+  :root:not([data-theme="light"]) .keyword,
+  :root:not([data-theme="light"]) .storage,
+  :root:not([data-theme="light"]) .storage.type,
+  :root:not([data-theme="light"]) .storage.modifier { color: #ff7b72; }
+  :root:not([data-theme="light"]) .entity.name.function { color: #d2a8ff; }
+  :root:not([data-theme="light"]) .entity.name.type,
+  :root:not([data-theme="light"]) .entity.name.class { color: #ffa657; }
+  :root:not([data-theme="light"]) .entity.name.tag { color: #7ee787; }
+  :root:not([data-theme="light"]) .string { color: #a5d6ff; }
+  :root:not([data-theme="light"]) .constant,
+  :root:not([data-theme="light"]) .constant.numeric,
+  :root:not([data-theme="light"]) .constant.language { color: #79c0ff; }
+  :root:not([data-theme="light"]) .comment { color: #8b949e; }
+  :root:not([data-theme="light"]) .variable { color: #ffa657; }
+  :root:not([data-theme="light"]) .variable.parameter { color: #e6edf3; }
+  :root:not([data-theme="light"]) .punctuation { color: #e6edf3; }
+  :root:not([data-theme="light"]) .keyword.operator { color: #ff7b72; }
+  :root:not([data-theme="light"]) .support.type,
+  :root:not([data-theme="light"]) .support.class { color: #ffa657; }
+  :root:not([data-theme="light"]) .support.function { color: #d2a8ff; }
+  :root:not([data-theme="light"]) .entity.other.attribute-name { color: #79c0ff; }
+  :root:not([data-theme="light"]) .variable.other { color: #79c0ff; }
+}

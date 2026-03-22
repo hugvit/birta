@@ -4,13 +4,15 @@ expression: html
 input_file: tests/fixtures/code_blocks.md
 ---
 <p>Inline <code>code</code> here.</p>
-<pre lang="rust"><code>fn main() {
-    println!(&quot;Hello, world!&quot;);
-}
-</code></pre>
-<pre lang="python"><code>def greet(name):
-    print(f&quot;Hello, {name}!&quot;)
-</code></pre>
-<pre><code>indented code block
+<pre class="syntax-highlighting"><code><span class="source rust"><span class="meta function rust"><span class="meta function rust"><span class="storage type function rust">fn</span> </span><span class="entity name function rust">main</span></span><span class="meta function rust"><span class="meta function parameters rust"><span class="punctuation section parameters begin rust">(</span></span><span class="meta function rust"><span class="meta function parameters rust"><span class="punctuation section parameters end rust">)</span></span></span></span><span class="meta function rust"> </span><span class="meta function rust"><span class="meta block rust"><span class="punctuation section block begin rust">{</span>
+    <span class="support macro rust">println!</span><span class="meta group rust"><span class="punctuation section group begin rust">(</span></span><span class="meta group rust"><span class="string quoted double rust"><span class="punctuation definition string begin rust">&quot;</span>Hello, world!<span class="punctuation definition string end rust">&quot;</span></span></span><span class="meta group rust"><span class="punctuation section group end rust">)</span></span><span class="punctuation terminator rust">;</span>
+</span><span class="meta block rust"><span class="punctuation section block end rust">}</span></span></span>
+</span></code></pre>
+<pre class="syntax-highlighting"><code><span class="source python"><span class="meta function python"><span class="storage type function python">def</span> <span class="entity name function python"><span class="meta generic-name python">greet</span></span></span><span class="meta function parameters python"><span class="punctuation section parameters begin python">(</span></span><span class="meta function parameters python"><span class="variable parameter python">name</span><span class="punctuation section parameters end python">)</span></span><span class="meta function python"><span class="punctuation section function begin python">:</span></span>
+    <span class="meta function-call python"><span class="meta qualified-name python"><span class="support function builtin python">print</span></span><span class="punctuation section arguments begin python">(</span><span class="meta function-call arguments python"><span class="storage type string python">f</span><span class="meta string interpolated python"><span class="string quoted double python"><span class="punctuation definition string begin python">&quot;</span></span></span><span class="meta string interpolated python"><span class="string quoted double python">Hello, </span><span class="meta interpolation python"><span class="punctuation section interpolation begin python">{</span><span class="source python embedded"><span class="meta qualified-name python"><span class="meta generic-name python">name</span></span></span></span><span class="meta interpolation python"><span class="punctuation section interpolation end python">}</span></span><span class="string quoted double python">!<span class="punctuation definition string end python">&quot;</span></span></span></span><span class="punctuation section arguments end python">)</span></span>
+</span></code></pre>
+<pre class="syntax-highlighting"><code><span class="text plain">indented code block
 with two lines
-</code></pre>
+</span></code></pre>
+<pre class="syntax-highlighting"><code><span class="text plain">this should render as plain text
+</span></code></pre>

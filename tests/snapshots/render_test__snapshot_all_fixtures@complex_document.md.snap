@@ -13,8 +13,8 @@ input_file: tests/fixtures/complex_document.md
 <li><input type="checkbox" disabled="" /> Syntax highlighting</li>
 </ul>
 <h2><a href="#installation" aria-hidden="true" class="anchor" id="user-content-installation"></a>Installation</h2>
-<pre lang="bash"><code>cargo install sheen
-</code></pre>
+<pre class="syntax-highlighting"><code><span class="source shell bash"><span class="meta function-call shell"><span class="variable function shell">cargo</span></span><span class="meta function-call arguments shell"> install sheen</span>
+</span></code></pre>
 <h2><a href="#usage" aria-hidden="true" class="anchor" id="user-content-usage"></a>Usage</h2>
 <table>
 <thead>
@@ -36,9 +36,9 @@ input_file: tests/fixtures/complex_document.md
 </table>
 <h2><a href="#api" aria-hidden="true" class="anchor" id="user-content-api"></a>API</h2>
 <p>The main function accepts a <code>&amp;str</code> and returns rendered HTML:</p>
-<pre lang="rust"><code>let html = sheen::render(&quot;# Hello&quot;);
-assert!(html.contains(&quot;&lt;h1&gt;&quot;));
-</code></pre>
+<pre class="syntax-highlighting"><code><span class="source rust"><span class="storage type rust">let</span> html <span class="keyword operator rust">=</span> <span class="meta path rust">sheen<span class="punctuation accessor rust">::</span></span>render<span class="meta group rust"><span class="punctuation section group begin rust">(</span><span class="string quoted double rust"><span class="punctuation definition string begin rust">&quot;</span># Hello<span class="punctuation definition string end rust">&quot;</span></span></span><span class="meta group rust"><span class="punctuation section group end rust">)</span></span><span class="punctuation terminator rust">;</span>
+<span class="support macro rust">assert!</span><span class="meta group rust"><span class="punctuation section group begin rust">(</span>html.<span class="support function rust">contains</span><span class="meta group rust"><span class="punctuation section group begin rust">(</span><span class="string quoted double rust"><span class="punctuation definition string begin rust">&quot;</span>&lt;h1&gt;<span class="punctuation definition string end rust">&quot;</span></span></span><span class="meta group rust"><span class="punctuation section group end rust">)</span></span></span><span class="meta group rust"><span class="punctuation section group end rust">)</span></span><span class="punctuation terminator rust">;</span>
+</span></code></pre>
 <h2><a href="#notes" aria-hidden="true" class="anchor" id="user-content-notes"></a>Notes</h2>
 <p>This project uses comrak<sup class="footnote-ref"><a href="#fn-1" id="fnref-1" data-footnote-ref>1</a></sup> for parsing.</p>
 <blockquote>

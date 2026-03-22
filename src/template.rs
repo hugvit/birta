@@ -1,10 +1,12 @@
 const VIEWER_HTML: &str = include_str!("../assets/viewer.html");
 const GITHUB_CSS: &str = include_str!("../assets/github-markdown.css");
+const THEME_OVERRIDES: &str = include_str!("../assets/theme-overrides.css");
 const PAGE_CSS: &str = include_str!("../assets/page.css");
 
 pub fn render_page(filename: &str, content_html: &str) -> String {
     VIEWER_HTML
         .replace("{{GITHUB_CSS}}", GITHUB_CSS)
+        .replace("{{THEME_OVERRIDES}}", THEME_OVERRIDES)
         .replace("{{PAGE_CSS}}", PAGE_CSS)
         .replace("{{FILENAME}}", filename)
         .replace("{{CONTENT}}", content_html)

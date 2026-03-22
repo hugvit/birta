@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::response::{Html, IntoResponse};
+use axum::extract::{Path, State};
+use axum::http::{StatusCode, header};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use tokio::net::TcpListener;
 use tokio::sync::{RwLock, broadcast};
@@ -13,6 +14,7 @@ use tokio::sync::{RwLock, broadcast};
 use crate::{render, template, watcher};
 
 struct AppState {
+    base_dir: PathBuf,
     current_html: RwLock<String>,
     tx: broadcast::Sender<String>,
 }
@@ -53,9 +55,15 @@ pub async fn start(file: PathBuf, listener: TcpListener) -> anyhow::Result<()> {
 
     let page = template::render_page(&filename, &content_html);
 
+    let base_dir = file
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+
     let (tx, _rx) = broadcast::channel::<String>(16);
 
     let state = Arc::new(AppState {
+        base_dir,
         current_html: RwLock::new(content_html),
         tx: tx.clone(),
     });
@@ -81,7 +89,36 @@ fn router(page: String, state: Arc<AppState>) -> Router {
         .route("/", get(move || async move { Html(page) }))
         .route("/health", get(|| async { "ok" }))
         .route("/ws", get(ws_handler))
+        .route("/local/{*path}", get(local_file_handler))
         .with_state(state)
+}
+
+async fn local_file_handler(
+    Path(path): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    if path.contains("..") {
+        return (StatusCode::BAD_REQUEST, "path traversal not allowed").into_response();
+    }
+
+    let file_path = state.base_dir.join(&path);
+
+    let content = match tokio::fs::read(&file_path).await {
+        Ok(bytes) => bytes,
+        Err(_) => return StatusCode::NOT_FOUND.into_response(),
+    };
+
+    let content_type = match file_path.extension().and_then(|e| e.to_str()) {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("svg") => "image/svg+xml",
+        Some("webp") => "image/webp",
+        Some("ico") => "image/x-icon",
+        _ => "application/octet-stream",
+    };
+
+    ([(header::CONTENT_TYPE, content_type)], content).into_response()
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -115,6 +152,7 @@ mod tests {
         let page = template::render_page("test.md", "<p>hello</p>");
         let (tx, _rx) = broadcast::channel(16);
         let state = Arc::new(AppState {
+            base_dir: PathBuf::from("."),
             current_html: RwLock::new("<p>hello</p>".to_string()),
             tx,
         });
@@ -164,5 +202,73 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), 200);
+    }
+
+    fn test_router_with_base_dir(base_dir: PathBuf) -> Router {
+        let page = template::render_page("test.md", "<p>hello</p>");
+        let (tx, _rx) = broadcast::channel(16);
+        let state = Arc::new(AppState {
+            base_dir,
+            current_html: RwLock::new("<p>hello</p>".to_string()),
+            tx,
+        });
+        router(page, state)
+    }
+
+    #[tokio::test]
+    async fn local_file_serves_image() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("photo.png"), b"\x89PNG\r\n\x1a\nfake").unwrap();
+
+        let app = test_router_with_base_dir(dir.path().to_path_buf());
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/local/photo.png")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["content-type"], "image/png");
+    }
+
+    #[tokio::test]
+    async fn local_file_rejects_path_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = test_router_with_base_dir(dir.path().to_path_buf());
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/local/../../../etc/passwd")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 400);
+    }
+
+    #[tokio::test]
+    async fn local_file_returns_404_for_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = test_router_with_base_dir(dir.path().to_path_buf());
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/local/nonexistent.png")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), 404);
     }
 }

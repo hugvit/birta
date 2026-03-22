@@ -7,4 +7,4 @@ input_file: tests/fixtures/inline_formatting.md
 <p><del>Strikethrough text</del> is supported.</p>
 <p>This is an autolink: <a href="https://example.com">https://example.com</a></p>
 <p>And a regular <a href="https://example.com" title="Example">link</a>.</p>
-<p><img src="image.png" alt="Alt text" /></p>
+<p><img src="/local/image.png" alt="Alt text" /></p>

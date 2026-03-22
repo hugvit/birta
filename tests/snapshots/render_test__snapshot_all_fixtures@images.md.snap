@@ -1,0 +1,10 @@
+---
+source: tests/render_test.rs
+expression: html
+input_file: tests/fixtures/images.md
+---
+<p><img src="/local/photo.png" alt="local" /></p>
+<p><img src="/local/assets/diagram.svg" alt="relative" /></p>
+<p><img src="https://example.com/image.png" alt="absolute" /></p>
+<p><img src="data:image/png;base64,abc" alt="data uri" /></p>
+<p><img src="/images/logo.png" alt="root relative" /></p>

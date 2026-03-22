@@ -20,12 +20,8 @@ struct Cli {
     no_open: bool,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    eprintln!(
-        "sheen: file={}, port={}, no_open={}",
-        cli.file.display(),
-        cli.port,
-        cli.no_open
-    );
+    sheen::server::run(cli.file, cli.port, cli.no_open).await
 }

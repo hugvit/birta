@@ -1,4 +1,3 @@
-mod render;
+pub mod render;
+pub mod server;
 pub mod template;
-
-pub use render::render;

@@ -48,6 +48,19 @@ local function teardown_scroll(buf)
   end
 end
 
+--- Stop all running previews on Neovim exit.
+vim.api.nvim_create_autocmd("VimLeavePre", {
+  callback = function()
+    for buf, state in pairs(buffers) do
+      teardown_scroll(buf)
+      if state.job_id then
+        vim.fn.jobstop(state.job_id)
+      end
+    end
+    buffers = {}
+  end,
+})
+
 --- Start preview for the current buffer.
 function M.preview()
   local buf = vim.api.nvim_get_current_buf()
@@ -68,7 +81,6 @@ function M.preview()
 
   local cmd = { SHEEN_CMD, file }
   local job_id = vim.fn.jobstart(cmd, {
-    detach = true,
     on_stderr = function(_, data)
       for _, line in ipairs(data) do
         local p = line:match("http://127%.0%.0%.1:(%d+)")

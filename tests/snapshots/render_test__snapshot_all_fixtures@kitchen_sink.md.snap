@@ -145,6 +145,12 @@ input_file: tests/fixtures/kitchen_sink.md
 <pre lang="math" data-math-style="display"><code>\sum_{i=1}^{n} i = \frac{n(n+1)}{2}
 </code></pre>
 <p>Mixed: The equation <span data-math-style="inline">a^2 + b^2 = c^2</span> is well known.</p>
+<h2><a href="#mermaid-diagrams" aria-hidden="true" class="anchor" id="mermaid-diagrams"></a>Mermaid Diagrams</h2>
+<pre class="mermaid">graph TD
+    A[Start] --&gt; B{Decision}
+    B --&gt;|Yes| C[OK]
+    B --&gt;|No| D[End]
+</pre>
 <section class="footnotes" data-footnotes>
 <ol>
 <li id="fn-1">

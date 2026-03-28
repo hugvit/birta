@@ -576,14 +576,20 @@ pub fn resolve_by_name(name: &str) -> anyhow::Result<ResolvedTheme> {
 pub struct ThemeRegistry {
     themes: HashMap<String, ResolvedTheme>,
     active: String,
+    preferred_variant: Variant,
 }
 
 impl ThemeRegistry {
     pub fn new(initial: ResolvedTheme) -> Self {
         let active = initial.name.clone();
+        let preferred_variant = initial.active_variant;
         let mut themes = HashMap::new();
         themes.insert(initial.name.clone(), initial);
-        Self { themes, active }
+        Self {
+            themes,
+            active,
+            preferred_variant,
+        }
     }
 
     /// Discover and load all themes from config + data dirs.
@@ -614,14 +620,20 @@ impl ThemeRegistry {
     }
 
     pub fn set_active(&mut self, name: &str) -> anyhow::Result<()> {
-        if !self.themes.contains_key(name) {
-            anyhow::bail!("theme '{name}' not found in registry");
+        let theme = self
+            .themes
+            .get_mut(name)
+            .ok_or_else(|| anyhow::anyhow!("theme '{name}' not found in registry"))?;
+        // Apply preferred variant if the theme supports it
+        if theme.has_toggle() {
+            theme.active_variant = self.preferred_variant;
         }
         self.active = name.to_string();
         Ok(())
     }
 
     pub fn set_variant(&mut self, variant: Variant) {
+        self.preferred_variant = variant;
         let theme = self.active_mut();
         if theme.has_toggle() {
             theme.active_variant = variant;

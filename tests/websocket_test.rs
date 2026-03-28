@@ -35,6 +35,7 @@ async fn start_server(tmpfile: &NamedTempFile) -> u16 {
             theme,
             enable_swap: false,
             enable_toggle: true,
+            show_header: true,
         };
         sheen::server::start(path, listener, opts)
             .await

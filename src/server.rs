@@ -27,6 +27,7 @@ pub struct ServerOptions {
     pub theme: ResolvedTheme,
     pub enable_swap: bool,
     pub enable_toggle: bool,
+    pub show_header: bool,
 }
 
 pub(crate) struct AppState {
@@ -46,6 +47,7 @@ pub(crate) struct AppState {
     pub(crate) registry: RwLock<ThemeRegistry>,
     pub(crate) enable_toggle: bool,
     pub(crate) font_css: Option<String>,
+    pub(crate) show_header: bool,
 }
 
 pub async fn run(file: PathBuf, opts: ServerOptions) -> anyhow::Result<()> {
@@ -111,6 +113,7 @@ pub async fn run_stdin(markdown: &str, opts: ServerOptions) -> anyhow::Result<()
         registry: RwLock::new(registry),
         enable_toggle: opts.enable_toggle,
         font_css: opts.font_css,
+        show_header: opts.show_header,
     });
 
     let app = router(state.clone());
@@ -159,6 +162,7 @@ pub async fn start(file: PathBuf, listener: TcpListener, opts: ServerOptions) ->
         registry: RwLock::new(registry),
         enable_toggle: opts.enable_toggle,
         font_css: opts.font_css,
+        show_header: opts.show_header,
     });
 
     let state_for_task = Arc::clone(&state);
@@ -250,6 +254,7 @@ async fn index_handler(State(state): State<Arc<AppState>>) -> Html<String> {
         &content_html,
         state.custom_css.as_deref(),
         state.font_css.as_deref(),
+        state.show_header,
         theme,
         &theme_names,
     );
@@ -543,6 +548,7 @@ mod tests {
             registry: RwLock::new(registry),
             enable_toggle: true,
             font_css: None,
+            show_header: true,
         })
     }
 
@@ -616,6 +622,7 @@ mod tests {
             registry: RwLock::new(registry),
             enable_toggle: true,
             font_css: None,
+            show_header: true,
         });
         router(state)
     }

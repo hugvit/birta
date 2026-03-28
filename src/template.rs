@@ -12,6 +12,7 @@ pub fn render_page(
     content_html: &str,
     custom_css: Option<&str>,
     font_css: Option<&str>,
+    show_header: bool,
     theme: &ResolvedTheme,
     theme_names: &[&str],
 ) -> String {
@@ -83,6 +84,7 @@ pub fn render_page(
         .replace("{{THEME_VARS_CSS}}", &theme_vars_css)
         .replace("{{FONT_CSS}}", font_css.unwrap_or(""))
         .replace("{{CUSTOM_CSS}}", &custom_style)
+        .replace("{{HEADER_CLASS}}", if show_header { "" } else { " header-hidden" })
         .replace("{{THEME_MODE}}", theme_mode)
         .replace("{{THEME_ATTR}}", &theme_attr)
         .replace("{{ACTIVE_VARIANT}}", active_variant)
@@ -121,6 +123,7 @@ mod tests {
             "<p>hello</p>",
             None,
             None,
+            true,
             &github_theme(),
             &["github"],
         );
@@ -137,6 +140,7 @@ mod tests {
             "<p>hello</p>",
             None,
             None,
+            true,
             &github_theme(),
             &["github"],
         );
@@ -148,7 +152,7 @@ mod tests {
 
     #[test]
     fn render_page_contains_markdown_body_class() {
-        let page = render_page("test.md", "", None, None, &github_theme(), &["github"]);
+        let page = render_page("test.md", "", None, None, true, &github_theme(), &["github"]);
         assert!(
             page.contains("markdown-body"),
             "rendered page should contain the markdown-body class"
@@ -157,7 +161,7 @@ mod tests {
 
     #[test]
     fn render_page_contains_github_css() {
-        let page = render_page("test.md", "", None, None, &github_theme(), &["github"]);
+        let page = render_page("test.md", "", None, None, true, &github_theme(), &["github"]);
         assert!(
             page.contains(".markdown-body"),
             "rendered page should contain github-markdown-css rules"
@@ -171,6 +175,7 @@ mod tests {
             "",
             Some("body { color: red; }"),
             None,
+            true,
             &github_theme(),
             &["github"],
         );

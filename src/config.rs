@@ -62,6 +62,8 @@ pub struct ControlFlags {
     pub theme_swap: bool,
     #[serde(default = "default_true")]
     pub theme_toggle: bool,
+    #[serde(default = "default_true")]
+    pub header: bool,
 }
 
 impl Default for ControlFlags {
@@ -69,6 +71,7 @@ impl Default for ControlFlags {
         Self {
             theme_swap: false,
             theme_toggle: true,
+            header: true,
         }
     }
 }

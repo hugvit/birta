@@ -35,6 +35,26 @@ struct Cli {
     /// List available theme presets and exit
     #[arg(long)]
     list_themes: bool,
+
+    /// Enable runtime theme switching dropdown
+    #[arg(long)]
+    theme_swap: bool,
+
+    /// Disable the light/dark variant toggle
+    #[arg(long)]
+    no_toggle: bool,
+
+    /// Override body font family (e.g. "Georgia, serif")
+    #[arg(long)]
+    font_body: Option<String>,
+
+    /// Override monospace font family (e.g. "JetBrains Mono, monospace")
+    #[arg(long)]
+    font_mono: Option<String>,
+
+    /// Hide the header bar
+    #[arg(long)]
+    no_header: bool,
 }
 
 #[tokio::main]
@@ -83,9 +103,15 @@ async fn main() -> anyhow::Result<()> {
 
     let theme = sheen::theme::resolve(&config, cli.theme.as_deref(), cli.syntax_theme.as_deref())?;
 
-    let enable_swap = config.theme.controls.show_controls.theme_swap;
-    let enable_toggle = config.theme.controls.show_controls.theme_toggle;
-    let font_css = config.font.to_css();
+    let enable_swap = cli.theme_swap || config.theme.controls.show_controls.theme_swap;
+    let enable_toggle = !cli.no_toggle && config.theme.controls.show_controls.theme_toggle;
+    let show_header = !cli.no_header && config.theme.controls.show_controls.header;
+
+    let font_config = sheen::config::FontConfig {
+        body: cli.font_body.or(config.font.body),
+        mono: cli.font_mono.or(config.font.mono),
+    };
+    let font_css = font_config.to_css();
 
     if file.as_os_str() == "-" {
         let mut markdown = String::new();
@@ -98,6 +124,7 @@ async fn main() -> anyhow::Result<()> {
             theme,
             enable_swap,
             enable_toggle,
+            show_header,
         };
         return sheen::server::run_stdin(&markdown, opts).await;
     }
@@ -123,6 +150,7 @@ async fn main() -> anyhow::Result<()> {
         theme,
         enable_swap,
         enable_toggle,
+        show_header,
     };
     sheen::server::run(file, opts).await
 }

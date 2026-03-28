@@ -76,6 +76,12 @@ html, body {
 .header-right {
   display: flex;
   align-items: center;
+  gap: 16px;
+}
+
+.theme-controls {
+  display: flex;
+  align-items: center;
   gap: 8px;
 }
 
@@ -121,6 +127,12 @@ html, body {
 .reading-toggle:hover,
 .theme-toggle:hover {
   border-color: var(--sheen-fg);
+}
+
+.theme-toggle.disabled {
+  opacity: 0.25;
+  cursor: default;
+  pointer-events: none;
 }
 
 .theme-toggle svg {

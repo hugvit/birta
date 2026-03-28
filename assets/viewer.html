@@ -25,20 +25,22 @@
       <span class="filename" id="filename">{{FILENAME}}</span>
     </div>
     <div class="header-right">
+      <div class="theme-controls">
+        <select class="theme-select" id="theme-select" title="Switch theme">
+          {{THEME_OPTIONS}}
+        </select>
+        <button class="theme-toggle" id="theme-toggle" title="Toggle light/dark">
+          <svg id="icon-sun" width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M8 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0-1.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5ZM8 0a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0V.75A.75.75 0 0 1 8 0Zm0 13a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 8 13ZM2.343 2.343a.75.75 0 0 1 1.061 0l1.06 1.061a.75.75 0 0 1-1.06 1.06l-1.06-1.06a.75.75 0 0 1 0-1.06Zm8.193 8.192a.75.75 0 0 1 1.06 0l1.061 1.061a.75.75 0 0 1-1.06 1.061l-1.06-1.061a.75.75 0 0 1 0-1.06ZM0 8a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 0 1.5H.75A.75.75 0 0 1 0 8Zm13 0a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 0 1.5h-1.5A.75.75 0 0 1 13 8ZM2.343 13.657a.75.75 0 0 1 0-1.06l1.06-1.061a.75.75 0 0 1 1.061 1.06l-1.06 1.061a.75.75 0 0 1-1.061 0Zm8.193-8.192a.75.75 0 0 1 0-1.061l1.061-1.06a.75.75 0 1 1 1.06 1.06l-1.06 1.06a.75.75 0 0 1-1.06 0Z"/>
+          </svg>
+          <svg id="icon-moon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M9.598 1.591a.749.749 0 0 1 .785-.175 7.001 7.001 0 1 1-8.967 8.967.75.75 0 0 1 .961-.96 5.5 5.5 0 0 0 7.046-7.046.75.75 0 0 1 .175-.786Zm1.616 1.945a7 7 0 0 1-7.678 7.678 5.499 5.499 0 1 0 7.678-7.678Z"/>
+          </svg>
+        </button>
+      </div>
       <button class="reading-toggle" id="reading-toggle" title="Reading mode (r)">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
           <path d="M0 1.75A.75.75 0 0 1 .75 1h4.253c1.227 0 2.317.59 3 1.501A3.743 3.743 0 0 1 11.006 1h4.245a.75.75 0 0 1 .75.75v10.5a.75.75 0 0 1-.75.75h-4.507a2.25 2.25 0 0 0-1.591.659l-.622.621a.75.75 0 0 1-1.06 0l-.622-.621A2.25 2.25 0 0 0 5.258 13H.75a.75.75 0 0 1-.75-.75Zm7.251 10.324.004-5.073-.002-2.253A2.25 2.25 0 0 0 5.003 2.5H1.5v9h3.757a3.75 3.75 0 0 1 1.994.574ZM8.755 4.75l-.004 7.322a3.752 3.752 0 0 1 1.992-.572H14.5v-9h-3.495a2.25 2.25 0 0 0-2.25 2.25Z"/>
-        </svg>
-      </button>
-      <select class="theme-select" id="theme-select" title="Switch theme">
-        {{THEME_OPTIONS}}
-      </select>
-      <button class="theme-toggle" id="theme-toggle" title="Toggle light/dark">
-        <svg id="icon-sun" width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M8 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0-1.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5ZM8 0a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0V.75A.75.75 0 0 1 8 0Zm0 13a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 8 13ZM2.343 2.343a.75.75 0 0 1 1.061 0l1.06 1.061a.75.75 0 0 1-1.06 1.06l-1.06-1.06a.75.75 0 0 1 0-1.06Zm8.193 8.192a.75.75 0 0 1 1.06 0l1.061 1.061a.75.75 0 0 1-1.06 1.061l-1.06-1.061a.75.75 0 0 1 0-1.06ZM0 8a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 0 1.5H.75A.75.75 0 0 1 0 8Zm13 0a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 0 1.5h-1.5A.75.75 0 0 1 13 8ZM2.343 13.657a.75.75 0 0 1 0-1.06l1.06-1.061a.75.75 0 0 1 1.061 1.06l-1.06 1.061a.75.75 0 0 1-1.061 0Zm8.193-8.192a.75.75 0 0 1 0-1.061l1.061-1.06a.75.75 0 1 1 1.06 1.06l-1.06 1.06a.75.75 0 0 1-1.06 0Z"/>
-        </svg>
-        <svg id="icon-moon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-          <path d="M9.598 1.591a.749.749 0 0 1 .785-.175 7.001 7.001 0 1 1-8.967 8.967.75.75 0 0 1 .961-.96 5.5 5.5 0 0 0 7.046-7.046.75.75 0 0 1 .175-.786Zm1.616 1.945a7 7 0 0 1-7.678 7.678 5.499 5.499 0 1 0 7.678-7.678Z"/>
         </svg>
       </button>
     </div>
@@ -138,7 +140,7 @@
 
     function updateToggleVisibility() {
       var canToggle = variants.length === 2 && THEME_MODE === 'toggle';
-      toggleBtn.style.display = canToggle ? '' : 'none';
+      toggleBtn.classList.toggle('disabled', !canToggle);
     }
 
     function updateThemeSelect(themeName) {
@@ -157,6 +159,7 @@
 
       // Toggle sends variant change to server
       toggleBtn.addEventListener('click', function() {
+        if (toggleBtn.classList.contains('disabled')) return;
         if (!currentWs || currentWs.readyState !== WebSocket.OPEN) return;
         var next = activeVariant === 'dark' ? 'light' : 'dark';
         currentWs.send(JSON.stringify({ type: 'variant_change', variant: next }));

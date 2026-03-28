@@ -20,6 +20,11 @@ alert_tip = "#40a02b"
 alert_important = "#8839ef"
 alert_warning = "#df8e1d"
 alert_caution = "#d20f39"
+alert_note_bg = "#1e66f533"
+alert_tip_bg = "#40a02b33"
+alert_important_bg = "#8839ef33"
+alert_warning_bg = "#df8e1d33"
+alert_caution_bg = "#d20f3933"
 
 [theme.light.syntax]
 filepath = "./syntax/catppuccin-latte.tmTheme"
@@ -43,6 +48,11 @@ alert_tip = "#a6e3a1"
 alert_important = "#cba6f7"
 alert_warning = "#fab387"
 alert_caution = "#f38ba8"
+alert_note_bg = "#89b4fa33"
+alert_tip_bg = "#a6e3a133"
+alert_important_bg = "#cba6f733"
+alert_warning_bg = "#fab38733"
+alert_caution_bg = "#f38ba833"
 
 [theme.dark.syntax]
 filepath = "./syntax/catppuccin-mocha.tmTheme"

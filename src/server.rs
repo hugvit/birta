@@ -21,6 +21,8 @@ const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
 pub(crate) struct AppState {
     pub(crate) base_dir: PathBuf,
     pub(crate) source_file: Option<PathBuf>,
+    pub(crate) filename: String,
+    pub(crate) custom_css: Option<String>,
     /// Raw rendered HTML (not JSON-wrapped).
     pub(crate) current_html: RwLock<String>,
     /// Sends raw HTML content updates (from watcher file changes).
@@ -101,14 +103,6 @@ pub async fn run_stdin(
     if enable_swap {
         registry.discover_all();
     }
-    let theme_names: Vec<&str> = registry.theme_names().into_iter().collect();
-    let page = template::render_page(
-        "stdin",
-        &content_html,
-        custom_css,
-        registry.active(),
-        &theme_names,
-    );
     let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let (tx, _rx) = broadcast::channel::<String>(16);
@@ -118,6 +112,8 @@ pub async fn run_stdin(
     let state = Arc::new(AppState {
         base_dir,
         source_file: None,
+        filename: "stdin".to_string(),
+        custom_css: custom_css.map(String::from),
         current_html: RwLock::new(content_html),
         tx,
         theme_tx,
@@ -128,7 +124,7 @@ pub async fn run_stdin(
         enable_toggle,
     });
 
-    let app = router(page, state.clone());
+    let app = router(state.clone());
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(state))
         .await?;
@@ -157,14 +153,6 @@ pub async fn start(
     if enable_swap {
         registry.discover_all();
     }
-    let theme_names: Vec<&str> = registry.theme_names().into_iter().collect();
-    let page = template::render_page(
-        &filename,
-        &content_html,
-        custom_css,
-        registry.active(),
-        &theme_names,
-    );
 
     let base_dir = file
         .parent()
@@ -178,6 +166,8 @@ pub async fn start(
     let state = Arc::new(AppState {
         base_dir,
         source_file: Some(file.clone()),
+        filename,
+        custom_css: custom_css.map(String::from),
         current_html: RwLock::new(content_html),
         tx: tx.clone(),
         theme_tx,
@@ -199,7 +189,7 @@ pub async fn start(
     let state_for_watcher = Arc::clone(&state);
     let _debouncer = watcher::watch(file, tx, state_for_watcher)?;
 
-    let app = router(page, state.clone());
+    let app = router(state.clone());
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(state))
         .await?;
@@ -256,15 +246,30 @@ async fn auto_shutdown_loop(state: Arc<AppState>) {
     }
 }
 
-fn router(page: String, state: Arc<AppState>) -> Router {
+fn router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/", get(move || async move { Html(page) }))
+        .route("/", get(index_handler))
         .route("/health", get(|| async { "ok" }))
         .route("/ws", get(ws_handler))
         .route("/scroll/{line}", post(scroll_handler))
         .route("/local/{*path}", get(local_file_handler))
         .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
         .with_state(state)
+}
+
+async fn index_handler(State(state): State<Arc<AppState>>) -> Html<String> {
+    let registry = state.registry.read().await;
+    let theme = registry.active();
+    let theme_names: Vec<&str> = registry.theme_names();
+    let content_html = state.current_html.read().await;
+    let page = template::render_page(
+        &state.filename,
+        &content_html,
+        state.custom_css.as_deref(),
+        theme,
+        &theme_names,
+    );
+    Html(page)
 }
 
 async fn scroll_handler(Path(line): Path<u32>, State(state): State<Arc<AppState>>) -> StatusCode {
@@ -326,8 +331,11 @@ async fn broadcast_theme_update(state: &AppState) {
         state.current_html.read().await.clone()
     };
 
-    let css_vars = active.css_vars.clone();
-    let theme_attr = theme.name.clone();
+    let (css_vars, theme_attr) = if theme.is_github() {
+        (String::new(), String::new())
+    } else {
+        (active.css_vars.clone(), theme.name.clone())
+    };
 
     let has_toggle = theme.has_toggle() && state.enable_toggle;
 
@@ -540,6 +548,8 @@ mod tests {
         Arc::new(AppState {
             base_dir: PathBuf::from("."),
             source_file: None,
+            filename: "test.md".to_string(),
+            custom_css: None,
             current_html: RwLock::new("<p>hello</p>".to_string()),
             tx,
             theme_tx,
@@ -553,9 +563,7 @@ mod tests {
 
     fn test_router() -> Router {
         let state = test_state();
-        let theme = github_theme();
-        let page = template::render_page("test.md", "<p>hello</p>", None, &theme, &["github"]);
-        router(page, state)
+        router(state)
     }
 
     #[tokio::test]
@@ -605,7 +613,6 @@ mod tests {
 
     fn test_router_with_base_dir(base_dir: PathBuf) -> Router {
         let theme = github_theme();
-        let page = template::render_page("test.md", "<p>hello</p>", None, &theme, &["github"]);
         let registry = ThemeRegistry::new(theme);
         let (tx, _rx) = broadcast::channel(16);
         let (theme_tx, _) = broadcast::channel(16);
@@ -613,6 +620,8 @@ mod tests {
         let state = Arc::new(AppState {
             base_dir,
             source_file: None,
+            filename: "test.md".to_string(),
+            custom_css: None,
             current_html: RwLock::new("<p>hello</p>".to_string()),
             tx,
             theme_tx,
@@ -622,7 +631,7 @@ mod tests {
             registry: RwLock::new(registry),
             enable_toggle: true,
         });
-        router(page, state)
+        router(state)
     }
 
     #[tokio::test]

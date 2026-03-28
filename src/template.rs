@@ -5,6 +5,7 @@ const GITHUB_CSS: &str = include_str!("../assets/github-markdown.css");
 const PAGE_CSS: &str = include_str!("../assets/page.css");
 const SYNTAX_CSS: &str = include_str!("../assets/syntax.css");
 const ALERTS_CSS: &str = include_str!("../assets/alerts.css");
+const THEME_OVERRIDES: &str = include_str!("../assets/theme-overrides.css");
 
 pub fn render_page(
     filename: &str,
@@ -20,18 +21,28 @@ pub fn render_page(
 
     let active = theme.active_data();
     let has_syntax_theme = active.syntax.is_some();
+    let is_github = theme.is_github();
 
     // When a syntax theme is active, omit syntax.css (inline styles replace it)
     let syntax_css = if has_syntax_theme { "" } else { SYNTAX_CSS };
 
-    // Theme CSS variables — injected as a replaceable <style> block
-    // All themes (including github) need this for variant toggling to work,
-    // since the vendored github-markdown.css wraps [data-theme] inside
-    // @media (prefers-color-scheme) queries that only fire when OS matches.
-    let theme_vars_css = active.css_vars.clone();
+    // GitHub uses the vendored CSS untouched — theme-overrides.css provides
+    // standalone [data-theme] selectors so the dark/light toggle works
+    // regardless of OS preference. Always included since custom theme CSS vars
+    // (injected after, in the theme-vars block) override at equal specificity.
+    let theme_vars_css = if is_github {
+        String::new()
+    } else {
+        active.css_vars.clone()
+    };
 
-    // Theme attribute on <html> — gates alert color overrides in alerts.css
-    let theme_attr = format!("data-sheen-theme=\"{}\"", theme.name);
+    // data-sheen-theme gates alert color overrides — skip for github
+    // so the vendored github-markdown.css alert rules apply untouched.
+    let theme_attr = if is_github {
+        String::new()
+    } else {
+        format!("data-sheen-theme=\"{}\"", theme.name)
+    };
 
     // Theme mode for the browser JS
     let theme_mode = if theme.has_toggle() {
@@ -62,6 +73,7 @@ pub fn render_page(
 
     VIEWER_HTML
         .replace("{{GITHUB_CSS}}", GITHUB_CSS)
+        .replace("{{THEME_OVERRIDES}}", THEME_OVERRIDES)
         .replace("{{PAGE_CSS}}", PAGE_CSS)
         .replace("{{SYNTAX_CSS}}", syntax_css)
         .replace("{{ALERTS_CSS}}", ALERTS_CSS)

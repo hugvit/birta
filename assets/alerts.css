@@ -64,13 +64,16 @@
 }
 
 /*
- * Theme-only alert color overrides.
- * Scoped to [data-sheen-theme] so they never interfere with the vendored
- * github-markdown.css alert rules in default (non-themed) mode.
+ * Alert color overrides using theme CSS variables.
+ * Scoped to [data-sheen-theme] so they apply when any custom theme is active.
+ * GitHub (no data-sheen-theme) uses the vendored github-markdown.css alert rules.
+ *
+ * Backgrounds use --alert-*-bg variables set by themes. If a theme doesn't
+ * set them, backgrounds default to transparent.
  */
 [data-sheen-theme] .markdown-body .markdown-alert.markdown-alert-note {
   border-left-color: var(--alert-note);
-  background-color: color-mix(in srgb, var(--alert-note) 20%, transparent);
+  background-color: var(--alert-note-bg, transparent);
 }
 [data-sheen-theme] .markdown-body .markdown-alert.markdown-alert-note .markdown-alert-title {
   color: var(--alert-note);
@@ -78,7 +81,7 @@
 
 [data-sheen-theme] .markdown-body .markdown-alert.markdown-alert-tip {
   border-left-color: var(--alert-tip);
-  background-color: color-mix(in srgb, var(--alert-tip) 20%, transparent);
+  background-color: var(--alert-tip-bg, transparent);
 }
 [data-sheen-theme] .markdown-body .markdown-alert.markdown-alert-tip .markdown-alert-title {
   color: var(--alert-tip);
@@ -86,7 +89,7 @@
 
 [data-sheen-theme] .markdown-body .markdown-alert.markdown-alert-important {
   border-left-color: var(--alert-important);
-  background-color: color-mix(in srgb, var(--alert-important) 20%, transparent);
+  background-color: var(--alert-important-bg, transparent);
 }
 [data-sheen-theme] .markdown-body .markdown-alert.markdown-alert-important .markdown-alert-title {
   color: var(--alert-important);
@@ -94,7 +97,7 @@
 
 [data-sheen-theme] .markdown-body .markdown-alert.markdown-alert-warning {
   border-left-color: var(--alert-warning);
-  background-color: color-mix(in srgb, var(--alert-warning) 20%, transparent);
+  background-color: var(--alert-warning-bg, transparent);
 }
 [data-sheen-theme] .markdown-body .markdown-alert.markdown-alert-warning .markdown-alert-title {
   color: var(--alert-warning);
@@ -102,7 +105,7 @@
 
 [data-sheen-theme] .markdown-body .markdown-alert.markdown-alert-caution {
   border-left-color: var(--alert-caution);
-  background-color: color-mix(in srgb, var(--alert-caution) 20%, transparent);
+  background-color: var(--alert-caution-bg, transparent);
 }
 [data-sheen-theme] .markdown-body .markdown-alert.markdown-alert-caution .markdown-alert-title {
   color: var(--alert-caution);

@@ -20,6 +20,11 @@ alert_tip = "#50fa7b"
 alert_important = "#bd93f9"
 alert_warning = "#f1fa8c"
 alert_caution = "#ff5555"
+alert_note_bg = "#8be9fd33"
+alert_tip_bg = "#50fa7b33"
+alert_important_bg = "#bd93f933"
+alert_warning_bg = "#f1fa8c33"
+alert_caution_bg = "#ff555533"
 
 [theme.dark.syntax]
 filepath = "./syntax/dracula.tmTheme"

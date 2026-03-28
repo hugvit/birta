@@ -82,6 +82,11 @@ pub struct VariantDef {
     pub alert_important: Option<String>,
     pub alert_warning: Option<String>,
     pub alert_caution: Option<String>,
+    pub alert_note_bg: Option<String>,
+    pub alert_tip_bg: Option<String>,
+    pub alert_important_bg: Option<String>,
+    pub alert_warning_bg: Option<String>,
+    pub alert_caution_bg: Option<String>,
     pub syntax: Option<SyntaxRef>,
 }
 
@@ -90,26 +95,31 @@ pub struct SyntaxRef {
     pub filepath: PathBuf,
 }
 
-/// CSS variable mapping: (toml_field_accessor, css_variable_name)
-const CSS_VAR_MAP: &[(&str, &str)] = &[
-    ("fg_primary", "--fgColor-default"),
-    ("fg_muted", "--fgColor-muted"),
-    ("fg_accent", "--fgColor-accent"),
-    ("bg_primary", "--bgColor-default"),
-    ("bg_muted", "--bgColor-muted"),
-    ("bg_neutral_muted", "--bgColor-neutral-muted"),
-    ("bg_attention_muted", "--bgColor-attention-muted"),
-    ("bg_secondary", "--sheen-bg-secondary"),
-    ("border_primary", "--borderColor-default"),
-    ("border_muted", "--borderColor-muted"),
-    ("fg_sheen", "--sheen-fg"),
-    ("bg_sheen", "--sheen-bg"),
-    ("border_sheen", "--sheen-border"),
-    ("alert_note", "--alert-note"),
-    ("alert_tip", "--alert-tip"),
-    ("alert_important", "--alert-important"),
-    ("alert_warning", "--alert-warning"),
-    ("alert_caution", "--alert-caution"),
+/// CSS variable mapping: (toml_field, css_variable, warn_if_missing)
+const CSS_VAR_MAP: &[(&str, &str, bool)] = &[
+    ("fg_primary", "--fgColor-default", true),
+    ("fg_muted", "--fgColor-muted", true),
+    ("fg_accent", "--fgColor-accent", true),
+    ("bg_primary", "--bgColor-default", true),
+    ("bg_muted", "--bgColor-muted", true),
+    ("bg_neutral_muted", "--bgColor-neutral-muted", true),
+    ("bg_attention_muted", "--bgColor-attention-muted", true),
+    ("bg_secondary", "--sheen-bg-secondary", true),
+    ("border_primary", "--borderColor-default", true),
+    ("border_muted", "--borderColor-muted", true),
+    ("fg_sheen", "--sheen-fg", true),
+    ("bg_sheen", "--sheen-bg", true),
+    ("border_sheen", "--sheen-border", true),
+    ("alert_note", "--alert-note", true),
+    ("alert_tip", "--alert-tip", true),
+    ("alert_important", "--alert-important", true),
+    ("alert_warning", "--alert-warning", true),
+    ("alert_caution", "--alert-caution", true),
+    ("alert_note_bg", "--alert-note-bg", false),
+    ("alert_tip_bg", "--alert-tip-bg", false),
+    ("alert_important_bg", "--alert-important-bg", false),
+    ("alert_warning_bg", "--alert-warning-bg", false),
+    ("alert_caution_bg", "--alert-caution-bg", false),
 ];
 
 fn variant_field<'a>(variant: &'a VariantDef, field: &str) -> Option<&'a str> {
@@ -132,6 +142,11 @@ fn variant_field<'a>(variant: &'a VariantDef, field: &str) -> Option<&'a str> {
         "alert_important" => variant.alert_important.as_deref(),
         "alert_warning" => variant.alert_warning.as_deref(),
         "alert_caution" => variant.alert_caution.as_deref(),
+        "alert_note_bg" => variant.alert_note_bg.as_deref(),
+        "alert_tip_bg" => variant.alert_tip_bg.as_deref(),
+        "alert_important_bg" => variant.alert_important_bg.as_deref(),
+        "alert_warning_bg" => variant.alert_warning_bg.as_deref(),
+        "alert_caution_bg" => variant.alert_caution_bg.as_deref(),
         _ => None,
     }
 }
@@ -139,12 +154,13 @@ fn variant_field<'a>(variant: &'a VariantDef, field: &str) -> Option<&'a str> {
 /// Generate CSS variable declarations from a variant definition.
 pub fn variant_to_css(variant: &VariantDef, theme_name: &str) -> String {
     let mut decls = Vec::new();
-    for &(field, css_var) in CSS_VAR_MAP {
+    for &(field, css_var, warn) in CSS_VAR_MAP {
         match variant_field(variant, field) {
             Some(value) => decls.push(format!("  {css_var}: {value};")),
-            None => {
+            None if warn => {
                 eprintln!("sheen: warning: theme '{theme_name}' missing '{field}'");
             }
+            None => {}
         }
     }
     // Apply to :root, .markdown-body, and both data-theme selectors
@@ -252,15 +268,12 @@ fn data_themes_dir() -> Option<PathBuf> {
 // Auto-install bundled themes
 // ---------------------------------------------------------------------------
 
-/// Write bundled themes to `~/.local/share/sheen/themes/` if the directory
-/// does not exist yet.
+/// Write bundled themes to `~/.local/share/sheen/themes/`.
+/// Always overwrites bundled files to keep them in sync with the binary.
 pub fn ensure_bundled_themes() {
     let Some(dir) = data_themes_dir() else {
         return;
     };
-    if dir.exists() {
-        return;
-    }
     if let Err(e) = write_bundled_themes(&dir) {
         eprintln!("sheen: warning: failed to install bundled themes: {e}");
     }
@@ -685,6 +698,11 @@ mod tests {
             alert_important: Some("#e03".to_string()),
             alert_warning: Some("#e04".to_string()),
             alert_caution: Some("#e05".to_string()),
+            alert_note_bg: Some("#e0133".to_string()),
+            alert_tip_bg: Some("#e0233".to_string()),
+            alert_important_bg: Some("#e0333".to_string()),
+            alert_warning_bg: Some("#e0433".to_string()),
+            alert_caution_bg: Some("#e0533".to_string()),
             syntax: None,
         };
         let css = variant_to_css(&variant, "test");
@@ -692,6 +710,7 @@ mod tests {
         assert!(css.contains("--bgColor-default: #444;"));
         assert!(css.contains("--sheen-fg: #bbb;"));
         assert!(css.contains("--alert-note: #e01;"));
+        assert!(css.contains("--alert-note-bg: #e0133;"));
         assert!(css.contains(":root,"));
         assert!(css.contains(".markdown-body,"));
     }
@@ -717,6 +736,11 @@ mod tests {
             alert_important: None,
             alert_warning: None,
             alert_caution: None,
+            alert_note_bg: None,
+            alert_tip_bg: None,
+            alert_important_bg: None,
+            alert_warning_bg: None,
+            alert_caution_bg: None,
             syntax: None,
         };
         let css = variant_to_css(&variant, "partial");

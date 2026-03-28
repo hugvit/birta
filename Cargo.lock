@@ -1468,6 +1468,7 @@ dependencies = [
  "open",
  "predicates",
  "serde",
+ "serde_json",
  "syntect",
  "tempfile",
  "tokio",

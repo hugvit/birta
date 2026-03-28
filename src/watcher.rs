@@ -1,18 +1,21 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
 use tokio::sync::broadcast;
 
 use crate::render;
-use crate::theme::SyntaxTheme;
+use crate::server::AppState;
 
-pub fn watch(
+pub(crate) fn watch(
     path: PathBuf,
     tx: broadcast::Sender<String>,
-    syntax_theme: Option<SyntaxTheme>,
+    state: Arc<AppState>,
 ) -> anyhow::Result<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>> {
     let canonical = path.canonicalize()?;
     let watch_dir = canonical.parent().map(|p| p.to_path_buf());
+
+    let rt = tokio::runtime::Handle::current();
 
     let mut debouncer = new_debouncer(
         std::time::Duration::from_millis(200),
@@ -45,8 +48,13 @@ pub fn watch(
                 }
             };
 
+            // Read current syntax theme from the registry
+            let syntax_theme = rt.block_on(async {
+                let reg = state.registry.read().await;
+                reg.active().active_data().syntax.clone()
+            });
+
             let html = render::render(&markdown, syntax_theme.as_ref());
-            // Ignore send errors (no active receivers)
             let _ = tx.send(html);
         },
     )?;

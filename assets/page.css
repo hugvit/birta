@@ -72,7 +72,39 @@ html, body {
   text-overflow: ellipsis;
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.theme-select {
+  background: var(--sheen-bg-secondary);
+  border: 1px solid var(--sheen-border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  cursor: pointer;
+  color: var(--sheen-fg);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  transition: border-color 0.2s;
+  appearance: auto;
+}
+
+.theme-select:hover {
+  border-color: var(--sheen-fg);
+}
+
+.theme-select option {
+  background: var(--sheen-bg);
+  color: var(--sheen-fg);
+}
+
 .theme-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background: none;
   border: 1px solid var(--sheen-border);
   border-radius: 6px;
@@ -86,6 +118,10 @@ html, body {
 
 .theme-toggle:hover {
   border-color: var(--sheen-fg);
+}
+
+.theme-toggle svg {
+  display: none;
 }
 
 .container {

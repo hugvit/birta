@@ -1,0 +1,25 @@
+[theme]
+name = "dracula"
+
+[theme.dark]
+fg_primary = "#f8f8f2"
+fg_muted = "#6272a4"
+fg_accent = "#8be9fd"
+bg_primary = "#282a36"
+bg_muted = "#44475a"
+bg_neutral_muted = "#44475a66"
+bg_attention_muted = "#f1fa8c26"
+bg_secondary = "#21222c"
+border_primary = "#6272a4"
+border_muted = "#44475a"
+fg_sheen = "#f8f8f2"
+bg_sheen = "#282a36"
+border_sheen = "#6272a4"
+alert_note = "#8be9fd"
+alert_tip = "#50fa7b"
+alert_important = "#bd93f9"
+alert_warning = "#f1fa8c"
+alert_caution = "#ff5555"
+
+[theme.dark.syntax]
+filepath = "./syntax/dracula.tmTheme"

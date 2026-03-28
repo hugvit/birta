@@ -13,19 +13,25 @@ use axum::routing::{get, post};
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, RwLock, broadcast};
 
-use crate::theme::ResolvedTheme;
+use crate::theme::{ResolvedTheme, ThemeRegistry, Variant};
 use crate::{render, template, watcher};
 
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
-struct AppState {
-    base_dir: PathBuf,
-    source_file: Option<PathBuf>,
-    current_html: RwLock<String>,
-    tx: broadcast::Sender<String>,
-    scroll_tx: broadcast::Sender<u32>,
-    connections: AtomicUsize,
-    all_disconnected: Notify,
+pub(crate) struct AppState {
+    pub(crate) base_dir: PathBuf,
+    pub(crate) source_file: Option<PathBuf>,
+    /// Raw rendered HTML (not JSON-wrapped).
+    pub(crate) current_html: RwLock<String>,
+    /// Sends raw HTML content updates (from watcher file changes).
+    pub(crate) tx: broadcast::Sender<String>,
+    /// Sends ready-to-send JSON strings (theme_update messages).
+    pub(crate) theme_tx: broadcast::Sender<String>,
+    pub(crate) scroll_tx: broadcast::Sender<u32>,
+    pub(crate) connections: AtomicUsize,
+    pub(crate) all_disconnected: Notify,
+    pub(crate) registry: RwLock<ThemeRegistry>,
+    pub(crate) enable_toggle: bool,
 }
 
 pub async fn run(
@@ -33,7 +39,9 @@ pub async fn run(
     port: u16,
     no_open: bool,
     custom_css: Option<&str>,
-    theme: &ResolvedTheme,
+    theme: ResolvedTheme,
+    enable_swap: bool,
+    enable_toggle: bool,
 ) -> anyhow::Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = TcpListener::bind(addr).await?;
@@ -53,7 +61,15 @@ pub async fn run(
         }
     }
 
-    start(file, listener, custom_css, theme).await
+    start(
+        file,
+        listener,
+        custom_css,
+        theme,
+        enable_swap,
+        enable_toggle,
+    )
+    .await
 }
 
 /// Serve markdown read from stdin (no file watching).
@@ -62,7 +78,9 @@ pub async fn run_stdin(
     port: u16,
     no_open: bool,
     custom_css: Option<&str>,
-    theme: &ResolvedTheme,
+    theme: ResolvedTheme,
+    enable_swap: bool,
+    enable_toggle: bool,
 ) -> anyhow::Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = TcpListener::bind(addr).await?;
@@ -77,11 +95,24 @@ pub async fn run_stdin(
         }
     }
 
-    let content_html = render::render(markdown, theme.syntax.as_ref());
-    let page = template::render_page("stdin", &content_html, custom_css, theme);
+    let content_html = render::render(markdown, theme.active_data().syntax.as_ref());
+
+    let mut registry = ThemeRegistry::new(theme);
+    if enable_swap {
+        registry.discover_all();
+    }
+    let theme_names: Vec<&str> = registry.theme_names().into_iter().collect();
+    let page = template::render_page(
+        "stdin",
+        &content_html,
+        custom_css,
+        registry.active(),
+        &theme_names,
+    );
     let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let (tx, _rx) = broadcast::channel::<String>(16);
+    let (theme_tx, _) = broadcast::channel::<String>(16);
     let (scroll_tx, _) = broadcast::channel::<u32>(16);
 
     let state = Arc::new(AppState {
@@ -89,9 +120,12 @@ pub async fn run_stdin(
         source_file: None,
         current_html: RwLock::new(content_html),
         tx,
+        theme_tx,
         scroll_tx,
         connections: AtomicUsize::new(0),
         all_disconnected: Notify::new(),
+        registry: RwLock::new(registry),
+        enable_toggle,
     });
 
     let app = router(page, state.clone());
@@ -103,24 +137,34 @@ pub async fn run_stdin(
 }
 
 /// Start serving a markdown file on the given listener.
-///
-/// Watches the file for changes and pushes updates over WebSocket.
-/// Shuts down automatically when the last browser tab disconnects.
 pub async fn start(
     file: PathBuf,
     listener: TcpListener,
     custom_css: Option<&str>,
-    theme: &ResolvedTheme,
+    theme: ResolvedTheme,
+    enable_swap: bool,
+    enable_toggle: bool,
 ) -> anyhow::Result<()> {
     let markdown = std::fs::read_to_string(&file)?;
-    let content_html = render::render(&markdown, theme.syntax.as_ref());
+    let content_html = render::render(&markdown, theme.active_data().syntax.as_ref());
 
     let filename = file
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "untitled".to_string());
 
-    let page = template::render_page(&filename, &content_html, custom_css, theme);
+    let mut registry = ThemeRegistry::new(theme);
+    if enable_swap {
+        registry.discover_all();
+    }
+    let theme_names: Vec<&str> = registry.theme_names().into_iter().collect();
+    let page = template::render_page(
+        &filename,
+        &content_html,
+        custom_css,
+        registry.active(),
+        &theme_names,
+    );
 
     let base_dir = file
         .parent()
@@ -128,6 +172,7 @@ pub async fn start(
         .unwrap_or_else(|| PathBuf::from("."));
 
     let (tx, _rx) = broadcast::channel::<String>(16);
+    let (theme_tx, _) = broadcast::channel::<String>(16);
     let (scroll_tx, _) = broadcast::channel::<u32>(16);
 
     let state = Arc::new(AppState {
@@ -135,9 +180,12 @@ pub async fn start(
         source_file: Some(file.clone()),
         current_html: RwLock::new(content_html),
         tx: tx.clone(),
+        theme_tx,
         scroll_tx,
         connections: AtomicUsize::new(0),
         all_disconnected: Notify::new(),
+        registry: RwLock::new(registry),
+        enable_toggle,
     });
 
     let state_for_task = Arc::clone(&state);
@@ -148,8 +196,8 @@ pub async fn start(
         }
     });
 
-    let syntax_theme_for_watcher = theme.syntax.clone();
-    let _debouncer = watcher::watch(file, tx, syntax_theme_for_watcher)?;
+    let state_for_watcher = Arc::clone(&state);
+    let _debouncer = watcher::watch(file, tx, state_for_watcher)?;
 
     let app = router(page, state.clone());
     axum::serve(listener, app)
@@ -168,7 +216,6 @@ async fn shutdown_signal(state: Arc<AppState>) {
     };
 
     let auto_shutdown = async {
-        // Wait for at least one connection before monitoring disconnects
         loop {
             state.all_disconnected.notified().await;
 
@@ -177,13 +224,11 @@ async fn shutdown_signal(state: Arc<AppState>) {
             }
         }
 
-        // Grace period — allow reconnects (page refresh, etc.)
         tokio::time::sleep(SHUTDOWN_GRACE_PERIOD).await;
 
         if state.connections.load(Ordering::Relaxed) == 0 {
             eprintln!("sheen: all tabs closed, shutting down...");
         } else {
-            // Reconnected during grace period, keep waiting
             Box::pin(auto_shutdown_loop(state)).await;
         }
     };
@@ -227,25 +272,97 @@ async fn scroll_handler(Path(line): Path<u32>, State(state): State<Arc<AppState>
     StatusCode::NO_CONTENT
 }
 
-/// Handle incoming WebSocket text messages from the browser.
-fn handle_ws_message(text: &str, state: &AppState) {
-    // Simple JSON parsing without serde — messages are {"type":"checkbox","line":N,"checked":B}
-    if !text.starts_with('{') {
-        return;
-    }
+/// Handle incoming WebSocket JSON messages from the browser.
+async fn handle_ws_message(text: &str, state: &AppState) {
+    let msg: serde_json::Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
 
-    if let Some(rest) = text.strip_prefix(r#"{"type":"checkbox","line":"#) {
-        // Parse: N,"checked":true/false}
-        if let Some(comma_pos) = rest.find(',') {
-            let line_str = &rest[..comma_pos];
-            let checked = rest.contains(r#""checked":true"#);
-            if let Ok(line) = line_str.parse::<usize>() {
-                if let Err(e) = toggle_checkbox(state, line, checked) {
-                    eprintln!("sheen: checkbox toggle failed: {e}");
+    match msg.get("type").and_then(|t| t.as_str()) {
+        Some("checkbox") => {
+            let line = msg.get("line").and_then(|l| l.as_u64()).unwrap_or(0) as usize;
+            let checked = msg
+                .get("checked")
+                .and_then(|c| c.as_bool())
+                .unwrap_or(false);
+            if let Err(e) = toggle_checkbox(state, line, checked) {
+                eprintln!("sheen: checkbox toggle failed: {e}");
+            }
+        }
+        Some("theme_change") => {
+            if let Some(theme_name) = msg.get("theme").and_then(|t| t.as_str()) {
+                handle_theme_change(state, theme_name).await;
+            }
+        }
+        Some("variant_change") => {
+            if let Some(variant_str) = msg.get("variant").and_then(|v| v.as_str()) {
+                if let Some(variant) = Variant::parse(variant_str) {
+                    handle_variant_change(state, variant).await;
                 }
             }
         }
+        _ => {}
     }
+}
+
+/// Re-render and broadcast a theme update to all clients.
+async fn broadcast_theme_update(state: &AppState) {
+    let registry = state.registry.read().await;
+    let theme = registry.active();
+    let active = theme.active_data();
+
+    // Re-render markdown with new syntax theme
+    let html = if let Some(source_file) = &state.source_file {
+        match std::fs::read_to_string(source_file) {
+            Ok(markdown) => render::render(&markdown, active.syntax.as_ref()),
+            Err(e) => {
+                eprintln!("sheen: failed to re-read file for theme change: {e}");
+                return;
+            }
+        }
+    } else {
+        // stdin mode — use current HTML since we can't re-render
+        state.current_html.read().await.clone()
+    };
+
+    let css_vars = active.css_vars.clone();
+    let theme_attr = theme.name.clone();
+
+    let has_toggle = theme.has_toggle() && state.enable_toggle;
+
+    let msg = serde_json::json!({
+        "type": "theme_update",
+        "css_vars": css_vars,
+        "html": html,
+        "theme_name": theme.name,
+        "theme_attr": theme_attr,
+        "variants": theme.variant_names(),
+        "active_variant": theme.active_variant.as_str(),
+        "has_toggle": has_toggle,
+    });
+
+    // Update stored content HTML (raw HTML, not JSON-wrapped)
+    *state.current_html.write().await = html;
+
+    let _ = state.theme_tx.send(msg.to_string());
+}
+
+async fn handle_theme_change(state: &AppState, theme_name: &str) {
+    let mut registry = state.registry.write().await;
+    if let Err(e) = registry.set_active(theme_name) {
+        eprintln!("sheen: theme change failed: {e}");
+        return;
+    }
+    drop(registry);
+    broadcast_theme_update(state).await;
+}
+
+async fn handle_variant_change(state: &AppState, variant: Variant) {
+    let mut registry = state.registry.write().await;
+    registry.set_variant(variant);
+    drop(registry);
+    broadcast_theme_update(state).await;
 }
 
 /// Toggle a checkbox in the source file at the given line.
@@ -270,12 +387,11 @@ fn toggle_checkbox(state: &AppState, line: usize, checked: bool) -> anyhow::Resu
     };
 
     if new_line == target {
-        return Ok(()); // no change needed
+        return Ok(());
     }
 
     lines[line - 1] = &new_line;
 
-    // Preserve trailing newline if original had one
     let mut output = lines.join("\n");
     if content.ends_with('\n') {
         output.push('\n');
@@ -320,14 +436,24 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) ->
 async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
     state.connections.fetch_add(1, Ordering::Relaxed);
 
+    // Send initial content as JSON
     let current = state.current_html.read().await.clone();
-    if socket.send(Message::Text(current.into())).await.is_err() {
+    let init_msg = serde_json::json!({
+        "type": "content",
+        "html": current,
+    });
+    if socket
+        .send(Message::Text(init_msg.to_string().into()))
+        .await
+        .is_err()
+    {
         state.connections.fetch_sub(1, Ordering::Relaxed);
         state.all_disconnected.notify_one();
         return;
     }
 
     let mut rx = state.tx.subscribe();
+    let mut theme_rx = state.theme_tx.subscribe();
     let mut scroll_rx = state.scroll_tx.subscribe();
 
     loop {
@@ -335,7 +461,20 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
             result = rx.recv() => {
                 match result {
                     Ok(html) => {
-                        if socket.send(Message::Text(html.into())).await.is_err() {
+                        // tx carries raw HTML — wrap in JSON content message
+                        let msg = serde_json::json!({"type": "content", "html": html});
+                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            result = theme_rx.recv() => {
+                match result {
+                    Ok(json_str) => {
+                        // theme_tx carries ready-to-send JSON (theme_update messages)
+                        if socket.send(Message::Text(json_str.into())).await.is_err() {
                             break;
                         }
                     }
@@ -344,8 +483,8 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
             }
             result = scroll_rx.recv() => {
                 if let Ok(line) = result {
-                    let msg = format!(r#"{{"type":"scroll","line":{line}}}"#);
-                    if socket.send(Message::Text(msg.into())).await.is_err() {
+                    let msg = serde_json::json!({"type": "scroll", "line": line});
+                    if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
                         break;
                     }
                 }
@@ -353,10 +492,10 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        handle_ws_message(&text, &state);
+                        handle_ws_message(&text, &state).await;
                     }
-                    Some(Ok(_)) => {} // ignore binary/ping/pong
-                    _ => break,       // disconnected or error
+                    Some(Ok(_)) => {}
+                    _ => break,
                 }
             }
         }
@@ -373,32 +512,49 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::theme;
+    use crate::theme::{self, ThemeVariants, VariantData};
 
-    fn default_theme() -> theme::ResolvedTheme {
+    fn github_theme() -> theme::ResolvedTheme {
         theme::ResolvedTheme {
             name: "github".to_string(),
-            syntax: None,
-            body_css: String::new(),
-            toggle: true,
-            is_light: false,
+            variants: ThemeVariants::Both {
+                light: Box::new(VariantData {
+                    css_vars: String::new(),
+                    syntax: None,
+                }),
+                dark: Box::new(VariantData {
+                    css_vars: String::new(),
+                    syntax: None,
+                }),
+            },
+            active_variant: Variant::Dark,
         }
     }
 
-    fn test_router() -> Router {
-        let theme = default_theme();
-        let page = template::render_page("test.md", "<p>hello</p>", None, &theme);
+    fn test_state() -> Arc<AppState> {
+        let theme = github_theme();
+        let registry = ThemeRegistry::new(theme);
         let (tx, _rx) = broadcast::channel(16);
+        let (theme_tx, _) = broadcast::channel(16);
         let (scroll_tx, _) = broadcast::channel(16);
-        let state = Arc::new(AppState {
+        Arc::new(AppState {
             base_dir: PathBuf::from("."),
             source_file: None,
             current_html: RwLock::new("<p>hello</p>".to_string()),
             tx,
+            theme_tx,
             scroll_tx,
             connections: AtomicUsize::new(0),
             all_disconnected: Notify::new(),
-        });
+            registry: RwLock::new(registry),
+            enable_toggle: true,
+        })
+    }
+
+    fn test_router() -> Router {
+        let state = test_state();
+        let theme = github_theme();
+        let page = template::render_page("test.md", "<p>hello</p>", None, &theme, &["github"]);
         router(page, state)
     }
 
@@ -448,18 +604,23 @@ mod tests {
     }
 
     fn test_router_with_base_dir(base_dir: PathBuf) -> Router {
-        let theme = default_theme();
-        let page = template::render_page("test.md", "<p>hello</p>", None, &theme);
+        let theme = github_theme();
+        let page = template::render_page("test.md", "<p>hello</p>", None, &theme, &["github"]);
+        let registry = ThemeRegistry::new(theme);
         let (tx, _rx) = broadcast::channel(16);
+        let (theme_tx, _) = broadcast::channel(16);
         let (scroll_tx, _) = broadcast::channel(16);
         let state = Arc::new(AppState {
             base_dir,
             source_file: None,
             current_html: RwLock::new("<p>hello</p>".to_string()),
             tx,
+            theme_tx,
             scroll_tx,
             connections: AtomicUsize::new(0),
             all_disconnected: Notify::new(),
+            registry: RwLock::new(registry),
+            enable_toggle: true,
         });
         router(page, state)
     }

@@ -5,12 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{FILENAME}} — sheen</title>
   <style>{{GITHUB_CSS}}</style>
-  <style>{{THEME_OVERRIDES}}</style>
   <style>{{PAGE_CSS}}</style>
   <style>{{SYNTAX_CSS}}</style>
-  <style>{{ALERTS_COLORS_CSS}}</style>
   <style>{{ALERTS_CSS}}</style>
-  {{THEME_BODY_CSS}}
+  <style id="theme-vars">{{THEME_VARS_CSS}}</style>
   {{CUSTOM_CSS}}
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css" crossorigin="anonymous">
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js" crossorigin="anonymous"></script>
@@ -24,9 +22,19 @@
       </svg>
       <span class="filename" id="filename">{{FILENAME}}</span>
     </div>
-    <button class="theme-toggle" id="theme-toggle" title="Toggle theme">
-      <span id="theme-icon">☀️</span>
-    </button>
+    <div class="header-right">
+      <select class="theme-select" id="theme-select" title="Switch theme">
+        {{THEME_OPTIONS}}
+      </select>
+      <button class="theme-toggle" id="theme-toggle" title="Toggle light/dark">
+        <svg id="icon-sun" width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M8 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0-1.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5ZM8 0a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0V.75A.75.75 0 0 1 8 0Zm0 13a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 8 13ZM2.343 2.343a.75.75 0 0 1 1.061 0l1.06 1.061a.75.75 0 0 1-1.06 1.06l-1.06-1.06a.75.75 0 0 1 0-1.06Zm8.193 8.192a.75.75 0 0 1 1.06 0l1.061 1.061a.75.75 0 0 1-1.06 1.061l-1.06-1.061a.75.75 0 0 1 0-1.06ZM0 8a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 0 1.5H.75A.75.75 0 0 1 0 8Zm13 0a.75.75 0 0 1 .75-.75h1.5a.75.75 0 0 1 0 1.5h-1.5A.75.75 0 0 1 13 8ZM2.343 13.657a.75.75 0 0 1 0-1.06l1.06-1.061a.75.75 0 0 1 1.061 1.06l-1.06 1.061a.75.75 0 0 1-1.061 0Zm8.193-8.192a.75.75 0 0 1 0-1.061l1.061-1.06a.75.75 0 1 1 1.06 1.06l-1.06 1.06a.75.75 0 0 1-1.06 0Z"/>
+        </svg>
+        <svg id="icon-moon" width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M9.598 1.591a.749.749 0 0 1 .785-.175 7.001 7.001 0 1 1-8.967 8.967.75.75 0 0 1 .961-.96 5.5 5.5 0 0 0 7.046-7.046.75.75 0 0 1 .175-.786Zm1.616 1.945a7 7 0 0 1-7.678 7.678 5.499 5.499 0 1 0 7.678-7.678Z"/>
+        </svg>
+      </button>
+    </div>
   </header>
 
   <main class="container">
@@ -36,57 +44,68 @@
   <div class="status" id="status"></div>
 
   <script>
-    // Theme handling
+    // --- State ---
     var THEME_MODE = '{{THEME_MODE}}';
+    var activeVariant = '{{ACTIVE_VARIANT}}';
+    var variants = {{VARIANTS_JSON}};
+
+    var html = document.documentElement;
+    var mdBody = document.getElementById('content');
+    var toggleBtn = document.getElementById('theme-toggle');
+    var iconSun = document.getElementById('icon-sun');
+    var iconMoon = document.getElementById('icon-moon');
+    var themeSelect = document.getElementById('theme-select');
+    var themeVarsEl = document.getElementById('theme-vars');
+    var currentWs = null;
+
+    // --- Theme UI ---
+    function applyVariant(variant) {
+      activeVariant = variant;
+      html.setAttribute('data-theme', variant);
+      mdBody.setAttribute('data-theme', variant);
+      updateToggleIcon();
+    }
+
+    function updateToggleIcon() {
+      var isDark = activeVariant === 'dark';
+      iconSun.style.display = isDark ? 'block' : 'none';
+      iconMoon.style.display = isDark ? 'none' : 'block';
+    }
+
+    function updateToggleVisibility() {
+      var canToggle = variants.length === 2 && THEME_MODE === 'toggle';
+      toggleBtn.style.display = canToggle ? '' : 'none';
+    }
+
+    function updateThemeSelect(themeName) {
+      themeSelect.value = themeName;
+    }
+
+    // Initial setup
     (function() {
-      var html = document.documentElement;
-      var mdBody = document.getElementById('content');
-      var btn = document.getElementById('theme-toggle');
-      var icon = document.getElementById('theme-icon');
-      var stored = localStorage.getItem('sheen-theme');
-
-      // Fixed themes (presets) hide the toggle and force a data-theme
-      if (THEME_MODE.indexOf('fixed') === 0) {
-        btn.style.display = 'none';
-        var fixedMode = THEME_MODE === 'fixed-light' ? 'light' : 'dark';
-        html.setAttribute('data-theme', fixedMode);
-        mdBody.setAttribute('data-theme', fixedMode);
-        return;
+      // If only one option in select, hide it
+      if (themeSelect.options.length <= 1) {
+        themeSelect.style.display = 'none';
       }
 
-      function applyTheme(theme) {
-        if (theme === 'dark' || theme === 'light') {
-          html.setAttribute('data-theme', theme);
-          mdBody.setAttribute('data-theme', theme);
-        } else {
-          html.removeAttribute('data-theme');
-          mdBody.removeAttribute('data-theme');
-        }
-        icon.textContent = getEffectiveTheme() === 'dark' ? '☀️' : '🌙';
-      }
+      applyVariant(activeVariant);
+      updateToggleVisibility();
 
-      function getEffectiveTheme() {
-        var explicit = html.getAttribute('data-theme');
-        if (explicit) return explicit;
-        return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-      }
-
-      applyTheme(stored);
-
-      btn.addEventListener('click', function() {
-        var next = getEffectiveTheme() === 'dark' ? 'light' : 'dark';
-        localStorage.setItem('sheen-theme', next);
-        applyTheme(next);
+      // Toggle sends variant change to server
+      toggleBtn.addEventListener('click', function() {
+        if (!currentWs || currentWs.readyState !== WebSocket.OPEN) return;
+        var next = activeVariant === 'dark' ? 'light' : 'dark';
+        currentWs.send(JSON.stringify({ type: 'variant_change', variant: next }));
       });
 
-      window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function() {
-        if (!localStorage.getItem('sheen-theme')) applyTheme(null);
+      // Dropdown sends theme change to server
+      themeSelect.addEventListener('change', function() {
+        if (!currentWs || currentWs.readyState !== WebSocket.OPEN) return;
+        currentWs.send(JSON.stringify({ type: 'theme_change', theme: themeSelect.value }));
       });
     })();
 
-    // Math rendering via KaTeX
-    // comrak emits: <span data-math-style="...">, <code data-math-style="...">,
-    // and <pre data-math-style="display"><code>...</code></pre>
+    // --- Math rendering via KaTeX ---
     function renderMath() {
       if (typeof katex === 'undefined') return;
       document.querySelectorAll('[data-math-style]').forEach(function(el) {
@@ -100,15 +119,12 @@
       });
     }
 
-    // Mermaid diagram rendering
-    // comrak (via AST transform) emits <pre class="mermaid">...</pre>
+    // --- Mermaid diagram rendering ---
     var mermaidReady = false;
     function initMermaid() {
       if (typeof mermaid === 'undefined') return;
       if (mermaidReady) return;
-      var theme = (document.documentElement.getAttribute('data-theme') === 'dark' ||
-        (!document.documentElement.getAttribute('data-theme') &&
-         window.matchMedia('(prefers-color-scheme: dark)').matches)) ? 'dark' : 'default';
+      var theme = activeVariant === 'dark' ? 'dark' : 'default';
       mermaid.initialize({ startOnLoad: false, theme: theme });
       mermaidReady = true;
     }
@@ -116,11 +132,10 @@
     function renderMermaid() {
       if (typeof mermaid === 'undefined') return;
       initMermaid();
-      // mermaid.run() renders all <pre class="mermaid"> elements
       mermaid.run({ querySelector: 'pre.mermaid' });
     }
 
-    // Render math and diagrams on initial load (scripts are defer)
+    // Render on initial load
     function renderAll() { renderMath(); renderMermaid(); }
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', renderAll);
@@ -128,14 +143,10 @@
       setTimeout(renderAll, 0);
     }
 
-    // Scroll synchronization
-    // Finds the nearest element at or before the given source line and scrolls to it.
-    // comrak's sourcepos format: "start_line:start_col-end_line:end_col"
+    // --- Scroll synchronization ---
     function scrollToLine(targetLine) {
-      var els = content.querySelectorAll('[data-sourcepos]');
+      var els = mdBody.querySelectorAll('[data-sourcepos]');
       if (!els.length) return;
-
-      // Binary search for the last element with start_line <= targetLine
       var best = null;
       var lo = 0, hi = els.length - 1;
       while (lo <= hi) {
@@ -148,16 +159,14 @@
           hi = mid - 1;
         }
       }
-
       if (best) {
         best.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }
     }
 
-    // Checkbox write-back
-    // Enable task list checkboxes and send toggle messages via WebSocket
+    // --- Checkbox write-back ---
     function enableCheckboxes() {
-      content.querySelectorAll('input[type="checkbox"][disabled]').forEach(function(cb) {
+      mdBody.querySelectorAll('input[type="checkbox"][disabled]').forEach(function(cb) {
         cb.disabled = false;
         cb.addEventListener('change', function(e) {
           var li = e.target.closest('li[data-sourcepos]');
@@ -170,10 +179,8 @@
       });
     }
 
-    // WebSocket live reload
-    var currentWs = null;
+    // --- WebSocket ---
     (function() {
-      var content = document.getElementById('content');
       var status = document.getElementById('status');
       var reconnectDelay = 1000;
       var maxDelay = 10000;
@@ -198,21 +205,54 @@
         };
 
         ws.onmessage = function(event) {
-          var data = event.data;
-          if (data.charAt(0) === '{') {
-            var msg = JSON.parse(data);
-            if (msg.type === 'scroll') scrollToLine(msg.line);
+          try {
+            var msg = JSON.parse(event.data);
+          } catch (e) {
             return;
           }
-          content.innerHTML = data;
-          renderMath();
-          renderMermaid();
-          enableCheckboxes();
+
+          switch (msg.type) {
+            case 'content':
+              mdBody.innerHTML = msg.html;
+              renderMath();
+              renderMermaid();
+              enableCheckboxes();
+              break;
+
+            case 'theme_update':
+              // Update CSS variables
+              themeVarsEl.textContent = msg.css_vars;
+              // Update theme attribute
+              if (msg.theme_attr) {
+                html.setAttribute('data-sheen-theme', msg.theme_attr);
+              } else {
+                html.removeAttribute('data-sheen-theme');
+              }
+              // Update variant state
+              variants = msg.variants;
+              activeVariant = msg.active_variant;
+              THEME_MODE = msg.has_toggle ? 'toggle' : 'fixed-' + msg.active_variant;
+              applyVariant(activeVariant);
+              updateToggleVisibility();
+              updateThemeSelect(msg.theme_name);
+              // Update content HTML (re-rendered with new syntax theme)
+              mdBody.innerHTML = msg.html;
+              renderMath();
+              // Re-init mermaid with correct theme
+              mermaidReady = false;
+              renderMermaid();
+              enableCheckboxes();
+              break;
+
+            case 'scroll':
+              scrollToLine(msg.line);
+              break;
+          }
         };
 
         ws.onclose = function() {
           currentWs = null;
-          showStatus('Disconnected — reconnecting…');
+          showStatus('Disconnected \u2014 reconnecting\u2026');
           setTimeout(function() {
             reconnectDelay = Math.min(reconnectDelay * 2, maxDelay);
             connect();

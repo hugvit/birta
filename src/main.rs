@@ -24,7 +24,7 @@ struct Cli {
     #[arg(long)]
     css: Option<PathBuf>,
 
-    /// Theme preset name or path to theme directory
+    /// Theme preset name or path to theme file
     #[arg(long)]
     theme: Option<String>,
 
@@ -41,25 +41,21 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // Auto-install bundled themes to ~/.local/share/sheen/themes/ on first run
+    sheen::theme::ensure_bundled_themes();
+
     if cli.list_themes {
-        let themes = sheen::theme::list_installed();
-        if themes.is_empty() {
-            eprintln!("no themes installed");
-            eprintln!(
-                "install themes to: {}",
-                dirs::home_dir()
-                    .map(|d| {
-                        d.join(".config")
-                            .join("sheen")
-                            .join("themes")
-                            .display()
-                            .to_string()
-                    })
-                    .unwrap_or_else(|| "~/.config/sheen/themes/".to_string())
-            );
+        let entries = sheen::theme::list_installed();
+        if entries.is_empty() {
+            eprintln!("no themes found");
         } else {
-            for name in themes {
-                println!("{name}");
+            let max_name = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
+            for entry in &entries {
+                let source = match entry.source {
+                    sheen::theme::ThemeSource::User => "user",
+                    sheen::theme::ThemeSource::Bundled => "bundled",
+                };
+                println!("  {:<width$}  ({source})", entry.name, width = max_name);
             }
         }
         return Ok(());
@@ -87,11 +83,22 @@ async fn main() -> anyhow::Result<()> {
 
     let theme = sheen::theme::resolve(&config, cli.theme.as_deref(), cli.syntax_theme.as_deref())?;
 
+    let enable_swap = config.theme.controls.show_controls.theme_swap;
+    let enable_toggle = config.theme.controls.show_controls.theme_toggle;
+
     if file.as_os_str() == "-" {
         let mut markdown = String::new();
         std::io::stdin().read_to_string(&mut markdown)?;
-        return sheen::server::run_stdin(&markdown, port, no_open, custom_css.as_deref(), &theme)
-            .await;
+        return sheen::server::run_stdin(
+            &markdown,
+            port,
+            no_open,
+            custom_css.as_deref(),
+            theme,
+            enable_swap,
+            enable_toggle,
+        )
+        .await;
     }
 
     if !file.exists() {
@@ -107,5 +114,14 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    sheen::server::run(file, port, no_open, custom_css.as_deref(), &theme).await
+    sheen::server::run(
+        file,
+        port,
+        no_open,
+        custom_css.as_deref(),
+        theme,
+        enable_swap,
+        enable_toggle,
+    )
+    .await
 }

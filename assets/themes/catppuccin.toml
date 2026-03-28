@@ -1,0 +1,48 @@
+[theme]
+name = "catppuccin"
+
+[theme.light]
+fg_primary = "#4c4f69"
+fg_muted = "#6c6f85"
+fg_accent = "#1e66f5"
+bg_primary = "#eff1f5"
+bg_muted = "#ccd0da"
+bg_neutral_muted = "#ccd0da66"
+bg_attention_muted = "#df8e1d26"
+bg_secondary = "#e6e9ef"
+border_primary = "#9ca0b0"
+border_muted = "#bcc0cc"
+fg_sheen = "#4c4f69"
+bg_sheen = "#eff1f5"
+border_sheen = "transparent"
+alert_note = "#1e66f5"
+alert_tip = "#40a02b"
+alert_important = "#8839ef"
+alert_warning = "#df8e1d"
+alert_caution = "#d20f39"
+
+[theme.light.syntax]
+filepath = "./syntax/catppuccin-latte.tmTheme"
+
+[theme.dark]
+fg_primary = "#cdd6f4"
+fg_muted = "#a6adc8"
+fg_accent = "#89b4fa"
+bg_primary = "#1e1e2e"
+bg_muted = "#181825"
+bg_neutral_muted = "#31324466"
+bg_attention_muted = "#f9e2af26"
+bg_secondary = "#181825"
+border_primary = "#585b70"
+border_muted = "#45475a"
+fg_sheen = "#cdd6f4"
+bg_sheen = "#1e1e2e"
+border_sheen = "transparent"
+alert_note = "#89b4fa"
+alert_tip = "#a6e3a1"
+alert_important = "#cba6f7"
+alert_warning = "#fab387"
+alert_caution = "#f38ba8"
+
+[theme.dark.syntax]
+filepath = "./syntax/catppuccin-mocha.tmTheme"

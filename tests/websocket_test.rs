@@ -15,12 +15,19 @@ async fn start_server(tmpfile: &NamedTempFile) -> u16 {
     tokio::spawn(async move {
         let theme = sheen::theme::ResolvedTheme {
             name: "github".to_string(),
-            syntax: None,
-            body_css: String::new(),
-            toggle: true,
-            is_light: false,
+            variants: sheen::theme::ThemeVariants::Both {
+                light: Box::new(sheen::theme::VariantData {
+                    css_vars: String::new(),
+                    syntax: None,
+                }),
+                dark: Box::new(sheen::theme::VariantData {
+                    css_vars: String::new(),
+                    syntax: None,
+                }),
+            },
+            active_variant: sheen::theme::Variant::Dark,
         };
-        sheen::server::start(path, listener, None, &theme)
+        sheen::server::start(path, listener, None, theme, false, true)
             .await
             .unwrap();
     });
@@ -48,8 +55,11 @@ async fn ws_sends_initial_html_on_connect() {
         .expect("ws error");
 
     if let Message::Text(text) = msg {
+        // Messages are now JSON
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("expected JSON");
+        assert_eq!(parsed["type"], "content");
         assert!(
-            text.contains("Initial"),
+            parsed["html"].as_str().unwrap().contains("Initial"),
             "initial WS message should contain rendered content"
         );
     } else {
@@ -84,9 +94,11 @@ async fn ws_sends_update_on_file_change() {
         .expect("ws error");
 
     if let Message::Text(text) = msg {
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("expected JSON");
+        assert_eq!(parsed["type"], "content");
         assert!(
-            text.contains("After change"),
-            "update should contain new content, got: {text}"
+            parsed["html"].as_str().unwrap().contains("After change"),
+            "update should contain new content"
         );
     } else {
         panic!("expected text message, got {msg:?}");

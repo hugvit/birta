@@ -56,6 +56,7 @@ html, body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
   font-size: 14px;
   color: var(--sheen-fg);
+  transition: transform 0.3s ease, opacity 0.3s ease;
 }
 
 .header-left {
@@ -101,6 +102,7 @@ html, body {
   color: var(--sheen-fg);
 }
 
+.reading-toggle,
 .theme-toggle {
   display: flex;
   align-items: center;
@@ -116,6 +118,7 @@ html, body {
   transition: border-color 0.2s;
 }
 
+.reading-toggle:hover,
 .theme-toggle:hover {
   border-color: var(--sheen-fg);
 }
@@ -127,13 +130,43 @@ html, body {
 .container {
   max-width: 1012px;
   margin: 24px auto;
-  padding: 40px;
+  padding: 0;
   border: 1px solid var(--sheen-border);
   border-radius: 6px;
 }
 
+.container .markdown-body {
+  padding: 40px;
+}
+
+/* File header bar — GitHub-style */
+.file-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background-color: var(--sheen-bg-secondary);
+  border-bottom: 1px solid var(--sheen-border);
+  border-radius: 6px 6px 0 0;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 32px;
+}
+
+.file-header-icon {
+  flex-shrink: 0;
+  opacity: 0.6;
+}
+
+.file-header-name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 @media (max-width: 767px) {
-  .container {
+  .container .markdown-body {
     padding: 16px;
   }
 
@@ -160,6 +193,82 @@ html, body {
 
 .status.visible {
   opacity: 1;
+}
+
+/* --- Reading mode --- */
+body.reading-mode .header {
+  transform: translateY(-100%);
+  pointer-events: none;
+  opacity: 0;
+}
+
+body.reading-mode .file-header {
+  display: none;
+}
+
+body.reading-mode .container {
+  border-color: transparent;
+  margin-top: 0;
+}
+
+.reading-progress {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 3px;
+  width: 0;
+  background-color: var(--sheen-fg);
+  opacity: 0.25;
+  z-index: 200;
+  pointer-events: none;
+  transition: width 80ms linear;
+}
+
+.reading-exit-zone {
+  display: none;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 12px;
+  z-index: 300;
+}
+
+.reading-exit-bar {
+  position: fixed;
+  top: 8px;
+  right: 16px;
+  z-index: 301;
+  transform: translateY(-48px);
+  transition: transform 0.2s ease, opacity 0.2s ease;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.reading-exit-zone:hover ~ .reading-exit-bar,
+.reading-exit-bar:hover {
+  transform: translateY(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.reading-exit-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background-color: var(--sheen-bg-secondary);
+  border: 1px solid var(--sheen-border);
+  border-radius: 6px;
+  color: var(--sheen-fg);
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+
+.reading-exit-btn:hover {
+  border-color: var(--sheen-fg);
 }
 
 /* Override inline background-color from syntect on themed code blocks */

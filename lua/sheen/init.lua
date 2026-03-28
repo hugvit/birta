@@ -1,9 +1,37 @@
 local M = {}
 
-local SHEEN_CMD = "sheen"
+local config = {
+  cmd = "sheen",
+  theme = nil,
+  syntax_theme = nil,
+  css = nil,
+  port = nil,
+  no_open = false,
+  theme_swap = false,
+  no_toggle = false,
+  no_header = false,
+  font_body = nil,
+  font_mono = nil,
+}
 
 -- Per-buffer state: buf -> { job_id, port, scroll_timer, scroll_augroup }
 local buffers = {}
+
+local function build_cmd(file)
+  local cmd = { config.cmd }
+  if config.theme then table.insert(cmd, "--theme"); table.insert(cmd, config.theme) end
+  if config.syntax_theme then table.insert(cmd, "--syntax-theme"); table.insert(cmd, config.syntax_theme) end
+  if config.css then table.insert(cmd, "--css"); table.insert(cmd, config.css) end
+  if config.port then table.insert(cmd, "--port"); table.insert(cmd, tostring(config.port)) end
+  if config.no_open then table.insert(cmd, "--no-open") end
+  if config.theme_swap then table.insert(cmd, "--theme-swap") end
+  if config.no_toggle then table.insert(cmd, "--no-toggle") end
+  if config.no_header then table.insert(cmd, "--no-header") end
+  if config.font_body then table.insert(cmd, "--font-body"); table.insert(cmd, config.font_body) end
+  if config.font_mono then table.insert(cmd, "--font-mono"); table.insert(cmd, config.font_mono) end
+  table.insert(cmd, file)
+  return cmd
+end
 
 local function setup_scroll(buf, port)
   local timer = vim.uv.new_timer()
@@ -79,7 +107,7 @@ function M.preview()
   local state = { job_id = nil, port = nil, scroll_timer = nil, scroll_augroup = nil }
   buffers[buf] = state
 
-  local cmd = { SHEEN_CMD, file }
+  local cmd = build_cmd(file)
   local job_id = vim.fn.jobstart(cmd, {
     on_stderr = function(_, data)
       for _, line in ipairs(data) do
@@ -105,7 +133,7 @@ function M.preview()
 
   if job_id <= 0 then
     buffers[buf] = nil
-    vim.notify("sheen: failed to start (is sheen in PATH?)", vim.log.levels.ERROR)
+    vim.notify("sheen: failed to start (is " .. config.cmd .. " in PATH?)", vim.log.levels.ERROR)
     return
   end
 
@@ -152,6 +180,12 @@ end
 function M.is_running(buf)
   buf = buf or vim.api.nvim_get_current_buf()
   return buffers[buf] ~= nil
+end
+
+--- Configure sheen options. Call before :SheenPreview.
+---@param opts? table
+function M.setup(opts)
+  config = vim.tbl_deep_extend("force", config, opts or {})
 end
 
 return M

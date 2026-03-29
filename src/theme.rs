@@ -421,18 +421,17 @@ fn collect_toml_themes(
     };
     for entry in read_dir.filter_map(|e| e.ok()) {
         let path = entry.path();
-        if path.extension().is_some_and(|e| e == "toml") {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if seen.insert(stem.to_string()) {
-                    entries.push(ThemeEntry {
-                        name: stem.to_string(),
-                        source: match &source {
-                            ThemeSource::User => ThemeSource::User,
-                            ThemeSource::Bundled => ThemeSource::Bundled,
-                        },
-                    });
-                }
-            }
+        if path.extension().is_some_and(|e| e == "toml")
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            && seen.insert(stem.to_string())
+        {
+            entries.push(ThemeEntry {
+                name: stem.to_string(),
+                source: match &source {
+                    ThemeSource::User => ThemeSource::User,
+                    ThemeSource::Bundled => ThemeSource::Bundled,
+                },
+            });
         }
     }
 }

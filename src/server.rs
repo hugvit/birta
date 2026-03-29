@@ -305,10 +305,10 @@ async fn handle_ws_message(text: &str, state: &AppState) {
             }
         }
         Some("variant_change") => {
-            if let Some(variant_str) = msg.get("variant").and_then(|v| v.as_str()) {
-                if let Some(variant) = Variant::parse(variant_str) {
-                    handle_variant_change(state, variant).await;
-                }
+            if let Some(variant_str) = msg.get("variant").and_then(|v| v.as_str())
+                && let Some(variant) = Variant::parse(variant_str)
+            {
+                handle_variant_change(state, variant).await;
             }
         }
         _ => {}

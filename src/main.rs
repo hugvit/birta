@@ -25,7 +25,6 @@ struct Cli {
     file: Option<PathBuf>,
 
     // -- Server ---------------------------------------------------------------
-
     /// Port to serve on [default: auto-assign]
     #[arg(short, long, help_heading = "Server")]
     port: Option<u16>,
@@ -35,7 +34,6 @@ struct Cli {
     no_open: bool,
 
     // -- Theme ----------------------------------------------------------------
-
     /// Theme name or path to .toml theme file
     #[arg(long, help_heading = "Theme")]
     theme: Option<String>,
@@ -57,7 +55,6 @@ struct Cli {
     list_themes: bool,
 
     // -- Display --------------------------------------------------------------
-
     /// Custom CSS file to inject after default styles
     #[arg(long, help_heading = "Display")]
     css: Option<PathBuf>,

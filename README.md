@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/readme/birta-logo.png" width="120" alt="birta logo"/>
+</p>
+
 <h3 align="center">
   birta
 </h3>

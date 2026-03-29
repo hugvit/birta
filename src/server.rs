@@ -17,6 +17,7 @@ use crate::theme::{ResolvedTheme, ThemeRegistry, Variant};
 use crate::{render, template, watcher};
 
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
+const FAVICON: &[u8] = include_bytes!("../assets/favicon.png");
 
 /// Options for starting the server.
 pub struct ServerOptions {
@@ -248,8 +249,13 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/ws", get(ws_handler))
         .route("/scroll/{line}", post(scroll_handler))
         .route("/local/{*path}", get(local_file_handler))
-        .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
+        .route("/favicon.png", get(favicon_handler))
+        .route("/favicon.ico", get(favicon_handler))
         .with_state(state)
+}
+
+async fn favicon_handler() -> Response {
+    ([(header::CONTENT_TYPE, "image/png")], FAVICON).into_response()
 }
 
 async fn index_handler(State(state): State<Arc<AppState>>) -> Html<String> {

@@ -18,11 +18,11 @@ pub fn render(markdown: &str, syntax_theme: Option<&SyntaxTheme>) -> String {
     let arena = Arena::new();
     let root = parse_document(&arena, markdown, &options);
 
-    // Convert mermaid code blocks to raw HTML so syntect doesn't process them
     for node in root.descendants() {
         let mut data = node.data.borrow_mut();
-        if let NodeValue::CodeBlock(ref code_block) = data.value {
-            if code_block.info == "mermaid" {
+        match &mut data.value {
+            // Convert mermaid code blocks to raw HTML so syntect doesn't process them
+            NodeValue::CodeBlock(code_block) if code_block.info == "mermaid" => {
                 let html = format!(
                     "<pre class=\"mermaid\">{}</pre>\n",
                     html_escape(&code_block.literal)
@@ -32,6 +32,14 @@ pub fn render(markdown: &str, syntax_theme: Option<&SyntaxTheme>) -> String {
                     literal: html,
                 });
             }
+            // Rewrite relative image src= in raw HTML (not handled by image_url_rewriter)
+            NodeValue::HtmlBlock(block) => {
+                block.literal = rewrite_html_img_srcs(&block.literal);
+            }
+            NodeValue::HtmlInline(raw) => {
+                *raw = rewrite_html_img_srcs(raw);
+            }
+            _ => {}
         }
     }
 
@@ -90,6 +98,33 @@ fn should_rewrite(src: &str) -> bool {
         && !src.starts_with('/')
         && !src.starts_with("data:")
         && !src.starts_with('#')
+}
+
+/// Rewrite `src="..."` attributes in raw HTML `<img>` tags to go through `/local/`.
+fn rewrite_html_img_srcs(html: &str) -> String {
+    let mut result = String::with_capacity(html.len());
+    let mut rest = html;
+
+    while let Some(pos) = rest.find("src=\"") {
+        result.push_str(&rest[..pos]);
+        let after_src = &rest[pos + 5..]; // skip past src="
+        if let Some(end) = after_src.find('"') {
+            let url = &after_src[..end];
+            if should_rewrite(url) {
+                let clean = url.strip_prefix("./").unwrap_or(url);
+                result.push_str(&format!("src=\"/local/{clean}\""));
+            } else {
+                result.push_str(&format!("src=\"{url}\""));
+            }
+            rest = &after_src[end + 1..];
+        } else {
+            result.push_str(&rest[pos..]);
+            rest = "";
+            break;
+        }
+    }
+    result.push_str(rest);
+    result
 }
 
 fn html_escape(s: &str) -> String {

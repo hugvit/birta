@@ -16,6 +16,7 @@ pub struct PageOptions<'a> {
     pub reading_mode: bool,
     pub theme: &'a ResolvedTheme,
     pub theme_names: &'a [&'a str],
+    pub static_mode: bool,
 }
 
 pub fn render_page(opts: &PageOptions<'_>) -> String {
@@ -27,7 +28,7 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
         show_header,
         reading_mode,
         theme,
-        theme_names,
+        theme_names, ..
     } = opts;
     let custom_style = match custom_css {
         Some(css) => format!("<style>{css}</style>"),
@@ -111,6 +112,10 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
         .replace("{{THEME_OPTIONS}}", &theme_options)
         .replace("{{VARIANTS_JSON}}", &variants_json)
         .replace("{{FILENAME}}", filename)
+        .replace(
+            "{{STATIC_MODE}}",
+            if opts.static_mode { "true" } else { "false" },
+        )
         .replace("{{CONTENT}}", content_html)
 }
 
@@ -147,6 +152,7 @@ mod tests {
             reading_mode: false,
             theme: &theme,
             theme_names: &["github"],
+            static_mode: false,
         })
     }
 

@@ -272,6 +272,7 @@ async fn index_handler(State(state): State<Arc<AppState>>) -> Html<String> {
         reading_mode: state.reading_mode,
         theme,
         theme_names: &theme_names,
+        static_mode: false,
     });
     Html(page)
 }

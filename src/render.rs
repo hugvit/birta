@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use comrak::nodes::NodeValue;
@@ -7,8 +8,49 @@ use comrak::{Arena, Options, format_html_with_plugins, options, parse_document};
 use crate::highlight;
 use crate::theme::SyntaxTheme;
 
+/// Strategy for rewriting relative image URLs.
+#[derive(Clone)]
+enum RewriteMode {
+    /// Rewrite to `/local/{path}` for the server to serve.
+    Server,
+    /// Rewrite to `file:///{base_dir}/{path}` for self-contained HTML.
+    Static(PathBuf),
+}
+
+impl RewriteMode {
+    fn rewrite(&self, url: &str) -> String {
+        let clean = url.strip_prefix("./").unwrap_or(url);
+        match self {
+            RewriteMode::Server => format!("/local/{clean}"),
+            RewriteMode::Static(base) => format!("file://{}", base.join(clean).display()),
+        }
+    }
+}
+
+/// Render markdown to HTML, rewriting relative image paths to `/local/` server URLs.
 pub fn render(markdown: &str, syntax_theme: Option<&SyntaxTheme>) -> String {
-    let options = options();
+    render_with_mode(markdown, syntax_theme, RewriteMode::Server)
+}
+
+/// Render markdown to HTML, rewriting relative image paths to absolute `file:///` URLs.
+pub fn render_static(
+    markdown: &str,
+    syntax_theme: Option<&SyntaxTheme>,
+    base_dir: &Path,
+) -> String {
+    render_with_mode(
+        markdown,
+        syntax_theme,
+        RewriteMode::Static(base_dir.to_path_buf()),
+    )
+}
+
+fn render_with_mode(
+    markdown: &str,
+    syntax_theme: Option<&SyntaxTheme>,
+    mode: RewriteMode,
+) -> String {
+    let options = options(&mode);
     let adapter = match syntax_theme {
         Some(st) => highlight::adapter_with_theme(st),
         None => highlight::adapter(),
@@ -34,10 +76,10 @@ pub fn render(markdown: &str, syntax_theme: Option<&SyntaxTheme>) -> String {
             }
             // Rewrite relative image src= in raw HTML (not handled by image_url_rewriter)
             NodeValue::HtmlBlock(block) => {
-                block.literal = rewrite_html_img_srcs(&block.literal);
+                block.literal = rewrite_html_img_srcs(&block.literal, &mode);
             }
             NodeValue::HtmlInline(raw) => {
-                *raw = rewrite_html_img_srcs(raw);
+                *raw = rewrite_html_img_srcs(raw, &mode);
             }
             _ => {}
         }
@@ -54,7 +96,7 @@ fn plugins(adapter: &SyntectAdapter) -> options::Plugins<'_> {
     plugins
 }
 
-fn options() -> Options<'static> {
+fn options(mode: &RewriteMode) -> Options<'static> {
     let mut options = Options::default();
 
     // GFM extensions
@@ -70,11 +112,11 @@ fn options() -> Options<'static> {
     options.extension.math_dollars = true;
     options.extension.math_code = true;
 
-    // Rewrite relative image paths to go through /local/
-    options.extension.image_url_rewriter = Some(Arc::new(|url: &str| {
+    // Rewrite relative image paths using the selected strategy
+    let mode = mode.clone();
+    options.extension.image_url_rewriter = Some(Arc::new(move |url: &str| {
         if should_rewrite(url) {
-            let clean = url.strip_prefix("./").unwrap_or(url);
-            format!("/local/{clean}")
+            mode.rewrite(url)
         } else {
             url.to_string()
         }
@@ -100,8 +142,8 @@ fn should_rewrite(src: &str) -> bool {
         && !src.starts_with('#')
 }
 
-/// Rewrite `src="..."` attributes in raw HTML `<img>` tags to go through `/local/`.
-fn rewrite_html_img_srcs(html: &str) -> String {
+/// Rewrite `src="..."` attributes in raw HTML `<img>` tags.
+fn rewrite_html_img_srcs(html: &str, mode: &RewriteMode) -> String {
     let mut result = String::with_capacity(html.len());
     let mut rest = html;
 
@@ -111,8 +153,8 @@ fn rewrite_html_img_srcs(html: &str) -> String {
         if let Some(end) = after_src.find('"') {
             let url = &after_src[..end];
             if should_rewrite(url) {
-                let clean = url.strip_prefix("./").unwrap_or(url);
-                result.push_str(&format!("src=\"/local/{clean}\""));
+                let rewritten = mode.rewrite(url);
+                result.push_str(&format!("src=\"{rewritten}\""));
             } else {
                 result.push_str(&format!("src=\"{url}\""));
             }

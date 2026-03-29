@@ -33,6 +33,10 @@ struct Cli {
     #[arg(long, help_heading = "Server")]
     no_open: bool,
 
+    /// Render to a self-contained HTML file, open in browser, and exit
+    #[arg(long = "static", help_heading = "Server")]
+    static_mode: bool,
+
     // -- Theme ----------------------------------------------------------------
     /// Theme name or path to .toml theme file
     #[arg(long, help_heading = "Theme")]
@@ -178,6 +182,18 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    if cli.static_mode {
+        return run_static(
+            &file,
+            &theme,
+            custom_css.as_deref(),
+            font_css.as_deref(),
+            show_header,
+            cli.reading_mode,
+            no_open,
+        );
+    }
+
     let opts = birta::server::ServerOptions {
         port,
         no_open,
@@ -190,4 +206,61 @@ async fn main() -> anyhow::Result<()> {
         reading_mode: cli.reading_mode,
     };
     birta::server::run(file, opts).await
+}
+
+fn run_static(
+    file: &std::path::Path,
+    theme: &birta::theme::ResolvedTheme,
+    custom_css: Option<&str>,
+    font_css: Option<&str>,
+    show_header: bool,
+    reading_mode: bool,
+    no_open: bool,
+) -> anyhow::Result<()> {
+    let markdown = std::fs::read_to_string(file)?;
+    let base_dir = file
+        .parent()
+        .map(|p| {
+            if p.as_os_str().is_empty() {
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+            } else {
+                std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+            }
+        })
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    let content_html =
+        birta::render::render_static(&markdown, theme.active_data().syntax.as_ref(), &base_dir);
+
+    let page = birta::template::render_page(&birta::template::PageOptions {
+        filename: &file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "untitled".to_string()),
+        content_html: &content_html,
+        custom_css,
+        font_css,
+        show_header,
+        reading_mode,
+        theme,
+        theme_names: &[],
+        static_mode: true,
+    });
+
+    let filename = file
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "untitled".to_string());
+    let out_path = std::env::temp_dir().join(format!("birta-{filename}.html"));
+    std::fs::write(&out_path, &page)?;
+
+    eprintln!("birta: wrote {}", out_path.display());
+
+    if !no_open
+        && let Err(e) = open::that(&out_path)
+    {
+        eprintln!("birta: failed to open browser: {e}");
+    }
+
+    Ok(())
 }

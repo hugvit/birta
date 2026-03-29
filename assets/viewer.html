@@ -71,6 +71,7 @@
 
   <script>
     // --- State ---
+    var STATIC_MODE = {{STATIC_MODE}};
     var THEME_MODE = '{{THEME_MODE}}';
     var activeVariant = '{{ACTIVE_VARIANT}}';
     var variants = {{VARIANTS_JSON}};
@@ -158,7 +159,7 @@
     // Initial setup
     (function() {
       // If only one option in select, hide it
-      if (themeSelect.options.length <= 1) {
+      if (STATIC_MODE || themeSelect.options.length <= 1) {
         themeSelect.style.display = 'none';
       }
 
@@ -174,16 +175,22 @@
       // Toggle sends variant change to server
       toggleBtn.addEventListener('click', function() {
         if (toggleBtn.classList.contains('disabled')) return;
-        if (!currentWs || currentWs.readyState !== WebSocket.OPEN) return;
         var next = activeVariant === 'dark' ? 'light' : 'dark';
+        if (STATIC_MODE) {
+          applyVariant(next);
+          return;
+        }
+        if (!currentWs || currentWs.readyState !== WebSocket.OPEN) return;
         currentWs.send(JSON.stringify({ type: 'variant_change', variant: next }));
       });
 
       // Dropdown sends theme change to server
-      themeSelect.addEventListener('change', function() {
-        if (!currentWs || currentWs.readyState !== WebSocket.OPEN) return;
-        currentWs.send(JSON.stringify({ type: 'theme_change', theme: themeSelect.value }));
-      });
+      if (!STATIC_MODE) {
+        themeSelect.addEventListener('change', function() {
+          if (!currentWs || currentWs.readyState !== WebSocket.OPEN) return;
+          currentWs.send(JSON.stringify({ type: 'theme_change', theme: themeSelect.value }));
+        });
+      }
     })();
 
     // --- Math rendering via KaTeX ---
@@ -261,7 +268,7 @@
     }
 
     // --- WebSocket ---
-    (function() {
+    if (!STATIC_MODE) (function() {
       var status = document.getElementById('status');
       var reconnectDelay = 1000;
       var maxDelay = 10000;
@@ -344,8 +351,8 @@
       connect();
     })();
 
-    // Enable checkboxes on initial page load
-    enableCheckboxes();
+    // Enable checkboxes on initial page load (not in static mode)
+    if (!STATIC_MODE) enableCheckboxes();
   </script>
 </body>
 </html>

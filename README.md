@@ -16,11 +16,15 @@
 
 <p align="center">
   <a href="https://crates.io/crates/birta">
-    <img src="https://img.shields.io/crates/v/birta?style=for-the-badge&colorA=363a4f&colorB=b7bdf8" alt="crates.io"/>
+    <img src="https://img.shields.io/crates/v/birta?style=for-the-badge&colorA=363a4f&colorB=a3d5d4" alt="crates.io"/>
+  </a>
+  &nbsp;
+  <a href="https://github.com/andresthor/homebrew-tap">
+    <img src="https://img.shields.io/badge/homebrew-tap-ffdd98?style=for-the-badge&colorA=363a4f" alt="Homebrew"/>
   </a>
   &nbsp;
   <a href="https://github.com/andresthor/birta/blob/main/LICENSE">
-    <img src="https://img.shields.io/github/license/andresthor/birta?style=for-the-badge&colorA=363a4f&colorB=f5a97f" alt="License"/>
+    <img src="https://img.shields.io/github/license/andresthor/birta?style=for-the-badge&colorA=363a4f&colorB=c4d9a8" alt="License"/>
   </a>
 </p>
 
@@ -71,16 +75,14 @@ cargo install birta
 
 </details>
 
-<!--
 <details>
 <summary>Homebrew</summary>
 
 ```bash
-brew install birta
+brew install andresthor/tap/birta
 ```
 
 </details>
--->
 
 <details>
 <summary>From source</summary>

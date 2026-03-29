@@ -168,13 +168,14 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("file not found: {}", file.display());
     }
 
-    if let Some(ext) = file.extension().and_then(|e| e.to_str()) {
-        if ext != "md" && ext != "markdown" {
-            eprintln!(
-                "birta: warning: {} does not have a .md or .markdown extension",
-                file.display()
-            );
-        }
+    if let Some(ext) = file.extension().and_then(|e| e.to_str())
+        && ext != "md"
+        && ext != "markdown"
+    {
+        eprintln!(
+            "birta: warning: {} does not have a .md or .markdown extension",
+            file.display()
+        );
     }
 
     let opts = birta::server::ServerOptions {

@@ -118,11 +118,24 @@ async fn main() -> anyhow::Result<()> {
 
     let config = birta::config::load();
 
-    let port = cli.port.or(config.port).unwrap_or(0);
-    let no_open = cli.no_open || config.no_open.unwrap_or(false);
+    let cli_opts = birta::options::CliOptions {
+        port: cli.port,
+        no_open: cli.no_open,
+        css: cli.css,
+        theme: cli.theme,
+        syntax_theme: cli.syntax_theme,
+        light: cli.light,
+        dark: cli.dark,
+        font_body: cli.font_body,
+        font_mono: cli.font_mono,
+        reading_mode: cli.reading_mode,
+        no_header: cli.no_header,
+        no_theme_swap: cli.no_theme_swap,
+        no_toggle: cli.no_toggle,
+    };
+    let merged = birta::options::merge(cli_opts, &config);
 
-    let css_path = cli.css.or(config.css.clone());
-    let custom_css = match &css_path {
+    let custom_css = match &merged.css_path {
         Some(path) => {
             if !path.exists() {
                 anyhow::bail!("CSS file not found: {}", path.display());
@@ -132,22 +145,21 @@ async fn main() -> anyhow::Result<()> {
         None => None,
     };
 
-    let mut theme =
-        birta::theme::resolve(&config, cli.theme.as_deref(), cli.syntax_theme.as_deref())?;
+    let mut theme = birta::theme::resolve(
+        &config,
+        merged.theme_name.as_deref(),
+        merged.syntax_theme.as_deref(),
+    )?;
 
-    if cli.light {
+    if merged.light {
         theme.active_variant = birta::theme::Variant::Light;
-    } else if cli.dark {
+    } else if merged.dark {
         theme.active_variant = birta::theme::Variant::Dark;
     }
 
-    let enable_swap = !cli.no_theme_swap && config.theme.controls.show_controls.theme_swap;
-    let enable_toggle = !cli.no_toggle && config.theme.controls.show_controls.theme_toggle;
-    let show_header = !cli.no_header && config.theme.controls.show_controls.header;
-
     let font_config = birta::config::FontConfig {
-        body: cli.font_body.or(config.font.body),
-        mono: cli.font_mono.or(config.font.mono),
+        body: merged.font_body,
+        mono: merged.font_mono,
     };
     let font_css = font_config.to_css();
 
@@ -155,15 +167,15 @@ async fn main() -> anyhow::Result<()> {
         let mut markdown = String::new();
         std::io::stdin().read_to_string(&mut markdown)?;
         let opts = birta::server::ServerOptions {
-            port,
-            no_open,
+            port: merged.port,
+            no_open: merged.no_open,
             custom_css,
             font_css,
             theme,
-            enable_swap,
-            enable_toggle,
-            show_header,
-            reading_mode: cli.reading_mode,
+            enable_swap: merged.enable_swap,
+            enable_toggle: merged.enable_toggle,
+            show_header: merged.show_header,
+            reading_mode: merged.reading_mode,
         };
         return birta::server::run_stdin(&markdown, opts).await;
     }
@@ -188,22 +200,22 @@ async fn main() -> anyhow::Result<()> {
             &theme,
             custom_css.as_deref(),
             font_css.as_deref(),
-            show_header,
-            cli.reading_mode,
-            no_open,
+            merged.show_header,
+            merged.reading_mode,
+            merged.no_open,
         );
     }
 
     let opts = birta::server::ServerOptions {
-        port,
-        no_open,
+        port: merged.port,
+        no_open: merged.no_open,
         custom_css,
         font_css,
         theme,
-        enable_swap,
-        enable_toggle,
-        show_header,
-        reading_mode: cli.reading_mode,
+        enable_swap: merged.enable_swap,
+        enable_toggle: merged.enable_toggle,
+        show_header: merged.show_header,
+        reading_mode: merged.reading_mode,
     };
     birta::server::run(file, opts).await
 }

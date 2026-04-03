@@ -186,4 +186,180 @@ mod tests {
         let page = test_page("", Some("body { color: red; }"));
         assert!(page.contains("body { color: red; }"));
     }
+
+    /// Build PageOptions with full control over all fields.
+    fn render_with(
+        show_header: bool,
+        reading_mode: bool,
+        static_mode: bool,
+        font_css: Option<&str>,
+        theme: &ResolvedTheme,
+        theme_names: &[&str],
+    ) -> String {
+        render_page(&PageOptions {
+            filename: "test.md",
+            content_html: "<p>test</p>",
+            custom_css: None,
+            font_css,
+            show_header,
+            reading_mode,
+            theme,
+            theme_names,
+            static_mode,
+        })
+    }
+
+    fn dark_only_theme() -> ResolvedTheme {
+        ResolvedTheme {
+            name: "dracula".to_string(),
+            variants: ThemeVariants::Single(Box::new(VariantData {
+                css_vars: ":root { --birta-fg: #f8f8f2; }".to_string(),
+                syntax: None,
+            })),
+            active_variant: Variant::Dark,
+        }
+    }
+
+    #[test]
+    fn render_page_hidden_header() {
+        let theme = github_theme();
+        let page = render_with(false, false, false, None, &theme, &["github"]);
+        assert!(
+            page.contains("class=\"header header-hidden\""),
+            "should add header-hidden class when show_header is false"
+        );
+    }
+
+    #[test]
+    fn render_page_visible_header_has_no_hidden_class() {
+        let theme = github_theme();
+        let page = render_with(true, false, false, None, &theme, &["github"]);
+        assert!(
+            page.contains("class=\"header\""),
+            "header should have no hidden class when show_header is true"
+        );
+    }
+
+    #[test]
+    fn render_page_reading_mode_class() {
+        let theme = github_theme();
+        let page = render_with(true, true, false, None, &theme, &["github"]);
+        assert!(
+            page.contains("<body class=\" reading-mode\">"),
+            "should add reading-mode to body class"
+        );
+    }
+
+    #[test]
+    fn render_page_no_reading_mode_class() {
+        let theme = github_theme();
+        let page = render_with(true, false, false, None, &theme, &["github"]);
+        assert!(
+            page.contains("<body class=\"\">"),
+            "body class should be empty when reading mode is disabled"
+        );
+    }
+
+    #[test]
+    fn render_page_static_mode_true() {
+        let theme = github_theme();
+        let page = render_with(true, false, true, None, &theme, &["github"]);
+        assert!(
+            page.contains("var STATIC_MODE = true;"),
+            "should set STATIC_MODE to true"
+        );
+    }
+
+    #[test]
+    fn render_page_static_mode_false() {
+        let theme = github_theme();
+        let page = render_with(true, false, false, None, &theme, &["github"]);
+        assert!(
+            page.contains("var STATIC_MODE = false;"),
+            "should set STATIC_MODE to false"
+        );
+    }
+
+    #[test]
+    fn render_page_theme_mode_toggle() {
+        let theme = github_theme();
+        let page = render_with(true, false, false, None, &theme, &["github"]);
+        assert!(
+            page.contains("var THEME_MODE = 'toggle';"),
+            "dual-variant theme should produce toggle mode"
+        );
+    }
+
+    #[test]
+    fn render_page_theme_mode_fixed_dark() {
+        let theme = dark_only_theme();
+        let page = render_with(true, false, false, None, &theme, &["dracula"]);
+        assert!(
+            page.contains("var THEME_MODE = 'fixed-dark';"),
+            "single dark-only theme should produce fixed-dark mode"
+        );
+    }
+
+    #[test]
+    fn render_page_theme_mode_fixed_light() {
+        let theme = ResolvedTheme {
+            name: "custom-light".to_string(),
+            variants: ThemeVariants::Single(Box::new(VariantData {
+                css_vars: String::new(),
+                syntax: None,
+            })),
+            active_variant: Variant::Light,
+        };
+        let page = render_with(true, false, false, None, &theme, &["custom-light"]);
+        assert!(
+            page.contains("var THEME_MODE = 'fixed-light';"),
+            "single light-only theme should produce fixed-light mode"
+        );
+    }
+
+    #[test]
+    fn render_page_font_css_injected() {
+        let theme = github_theme();
+        let css = ".markdown-body { font-family: Georgia, serif !important; }";
+        let page = render_with(true, false, false, Some(css), &theme, &["github"]);
+        assert!(
+            page.contains(css),
+            "font CSS should appear in rendered page"
+        );
+    }
+
+    #[test]
+    fn render_page_theme_dropdown_options() {
+        let theme = github_theme();
+        let page = render_with(true, false, false, None, &theme, &["github", "dracula"]);
+        assert!(
+            page.contains("<option value=\"github\" selected>github</option>"),
+            "active theme should be selected in dropdown"
+        );
+        assert!(
+            page.contains("<option value=\"dracula\">dracula</option>"),
+            "other themes should appear in dropdown"
+        );
+    }
+
+    #[test]
+    fn render_page_custom_theme_sets_data_attr() {
+        let theme = dark_only_theme();
+        let page = render_with(true, false, false, None, &theme, &["dracula"]);
+        assert!(
+            page.contains("data-birta-theme=\"dracula\""),
+            "non-github theme should set data-birta-theme attribute"
+        );
+    }
+
+    #[test]
+    fn render_page_github_theme_no_data_attr() {
+        let theme = github_theme();
+        let page = render_with(true, false, false, None, &theme, &["github"]);
+        // The html tag should not have data-birta-theme for github
+        assert!(
+            !page.contains("data-birta-theme=\"github\""),
+            "github theme should not set data-birta-theme attribute on html element"
+        );
+    }
 }

@@ -1,3 +1,20 @@
 [workspace]
 # cargo-dist handles GitHub Releases, so disable release-plz's own
 git_release_enable = false
+# Catch accidental breaking changes before publish
+semver_check = true
+# Label release PRs for easy filtering
+pr_labels = ["release"]
+# Clean PR body without emoji
+pr_body = """
+{% for release in releases %}
+{% if release.title %}
+### {{ release.title }}
+{% endif %}
+{{ release.package }} {{ release.previous_version }} -> {{ release.next_version }}
+{% if release.changelog %}
+
+{{ release.changelog }}
+{% endif %}
+{% endfor %}
+"""

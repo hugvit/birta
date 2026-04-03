@@ -75,6 +75,7 @@
     var THEME_MODE = '{{THEME_MODE}}';
     var activeVariant = '{{ACTIVE_VARIANT}}';
     var variants = {{VARIANTS_JSON}};
+    var KEYBINDINGS = {{KEYBINDINGS_JSON}};
 
     var html = document.documentElement;
     var mdBody = document.getElementById('content');
@@ -122,14 +123,52 @@
       updateProgress();
     }
 
+    // --- Keybinding matcher ---
+    // Uses e.key for plain keys (e.g. "r", "Escape") and e.code for modified
+    // keys (e.g. "Alt+r") because macOS Option/Alt produces special characters
+    // in e.key (e.g. Option+r = "®"), making e.key unreliable with modifiers.
+    function matchesBinding(e, binding) {
+      if (!binding) return false;
+      var parts = binding.split('+');
+      var key = parts[parts.length - 1];
+      var needAlt = parts.indexOf('Alt') !== -1;
+      var needCtrl = parts.indexOf('Ctrl') !== -1;
+      var needShift = parts.indexOf('Shift') !== -1;
+      var needMeta = parts.indexOf('Meta') !== -1;
+      var hasModifiers = needAlt || needCtrl || needMeta;
+      var keyMatches;
+      if (!hasModifiers) {
+        keyMatches = e.key === key;
+      } else if (key.length === 1 && key >= 'a' && key <= 'z') {
+        keyMatches = e.code === 'Key' + key.toUpperCase();
+      } else if (key.length === 1 && key >= '0' && key <= '9') {
+        keyMatches = e.code === 'Digit' + key;
+      } else {
+        // Special keys (Escape, etc.) or unknown — fall back to e.key,
+        // then e.code if that fails
+        keyMatches = e.key === key || e.code === key;
+      }
+      return keyMatches
+        && e.altKey === needAlt
+        && e.ctrlKey === needCtrl
+        && e.shiftKey === needShift
+        && e.metaKey === needMeta;
+    }
+
     document.addEventListener('keydown', function(e) {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
-      if (e.key === 'r' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (matchesBinding(e, KEYBINDINGS.toggle_reading)) {
         e.preventDefault();
         toggleReadingMode();
-      } else if (e.key === 'Escape' && isReadingMode) {
+      } else if (matchesBinding(e, KEYBINDINGS.exit_reading) && isReadingMode) {
         e.preventDefault();
         toggleReadingMode(false);
+      } else if (matchesBinding(e, KEYBINDINGS.toggle_dark)) {
+        e.preventDefault();
+        if (!toggleBtn.classList.contains('disabled')) toggleBtn.click();
+      } else if (matchesBinding(e, KEYBINDINGS.focus_theme)) {
+        e.preventDefault();
+        themeSelect.focus();
       }
     });
 

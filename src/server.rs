@@ -30,6 +30,7 @@ pub struct ServerOptions {
     pub enable_toggle: bool,
     pub show_header: bool,
     pub reading_mode: bool,
+    pub keybindings_json: String,
 }
 
 pub(crate) struct AppState {
@@ -51,6 +52,7 @@ pub(crate) struct AppState {
     pub(crate) font_css: Option<String>,
     pub(crate) show_header: bool,
     pub(crate) reading_mode: bool,
+    pub(crate) keybindings_json: String,
 }
 
 pub async fn run(file: PathBuf, opts: ServerOptions) -> anyhow::Result<()> {
@@ -118,6 +120,7 @@ pub async fn run_stdin(markdown: &str, opts: ServerOptions) -> anyhow::Result<()
         font_css: opts.font_css,
         show_header: opts.show_header,
         reading_mode: opts.reading_mode,
+        keybindings_json: opts.keybindings_json,
     });
 
     let app = router(state.clone());
@@ -172,6 +175,7 @@ pub async fn start(
         font_css: opts.font_css,
         show_header: opts.show_header,
         reading_mode: opts.reading_mode,
+        keybindings_json: opts.keybindings_json,
     });
 
     let state_for_task = Arc::clone(&state);
@@ -273,6 +277,7 @@ async fn index_handler(State(state): State<Arc<AppState>>) -> Html<String> {
         theme,
         theme_names: &theme_names,
         static_mode: false,
+        keybindings_json: &state.keybindings_json,
     });
     Html(page)
 }
@@ -566,6 +571,7 @@ mod tests {
             font_css: None,
             show_header: true,
             reading_mode: false,
+            keybindings_json: "{}".to_string(),
         })
     }
 
@@ -641,6 +647,7 @@ mod tests {
             font_css: None,
             show_header: true,
             reading_mode: false,
+            keybindings_json: "{}".to_string(),
         });
         router(state)
     }

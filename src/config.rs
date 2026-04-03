@@ -1,22 +1,95 @@
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Deserialize)]
 pub struct Config {
     pub port: Option<u16>,
     pub no_open: Option<bool>,
     pub css: Option<PathBuf>,
+    pub reading_mode: Option<bool>,
+    pub syntax_theme: Option<PathBuf>,
     #[serde(default, deserialize_with = "deserialize_theme_config")]
     pub theme: ThemeConfig,
     #[serde(default)]
     pub font: FontConfig,
+    #[serde(default)]
+    pub keybindings: KeybindingsConfig,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct FontConfig {
     pub body: Option<String>,
     pub mono: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct KeybindingsConfig {
+    #[serde(default = "default_toggle_reading")]
+    pub toggle_reading: String,
+    #[serde(default = "default_exit_reading")]
+    pub exit_reading: String,
+    #[serde(default = "default_toggle_dark")]
+    pub toggle_dark: String,
+    #[serde(default = "default_focus_theme")]
+    pub focus_theme: String,
+}
+
+fn default_toggle_reading() -> String {
+    "r".to_string()
+}
+fn default_exit_reading() -> String {
+    "Escape".to_string()
+}
+fn default_toggle_dark() -> String {
+    "d".to_string()
+}
+fn default_focus_theme() -> String {
+    "t".to_string()
+}
+
+impl Default for KeybindingsConfig {
+    fn default() -> Self {
+        Self {
+            toggle_reading: default_toggle_reading(),
+            exit_reading: default_exit_reading(),
+            toggle_dark: default_toggle_dark(),
+            focus_theme: default_focus_theme(),
+        }
+    }
+}
+
+impl KeybindingsConfig {
+    /// Serialize to JSON for injection into a `<script>` block in the viewer
+    /// template. Safe because serde_json escapes special characters and the
+    /// source data is local (config file / CLI args, not network input).
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    /// Apply CLI `--bind action=key` overrides. Unknown actions are warned about.
+    pub fn apply_overrides(&mut self, overrides: &[String]) {
+        for entry in overrides {
+            let Some((action, key)) = entry.split_once('=') else {
+                eprintln!("birta: warning: invalid --bind format '{entry}', expected ACTION=KEY");
+                continue;
+            };
+            let key = if key == "none" {
+                String::new()
+            } else {
+                key.to_string()
+            };
+            match action {
+                "toggle_reading" => self.toggle_reading = key,
+                "exit_reading" => self.exit_reading = key,
+                "toggle_dark" => self.toggle_dark = key,
+                "focus_theme" => self.focus_theme = key,
+                _ => {
+                    eprintln!("birta: warning: unknown keybinding action '{action}'");
+                }
+            }
+        }
+    }
 }
 
 impl FontConfig {
@@ -46,6 +119,7 @@ impl FontConfig {
 #[derive(Debug, Default, Deserialize)]
 pub struct ThemeConfig {
     pub name: Option<String>,
+    pub variant: Option<String>,
     #[serde(default)]
     pub controls: ThemeControls,
 }
@@ -101,6 +175,7 @@ where
             );
             Ok(ThemeConfig {
                 name: Some(name),
+                variant: None,
                 controls: ThemeControls::default(),
             })
         }
@@ -197,5 +272,110 @@ name = "github"
         assert_eq!(config.theme.name.as_deref(), Some("github"));
         assert!(config.theme.controls.show_controls.theme_swap);
         assert!(config.theme.controls.show_controls.theme_toggle);
+    }
+
+    #[test]
+    fn parse_reading_mode() {
+        let config: Config = toml::from_str("reading_mode = true").unwrap();
+        assert_eq!(config.reading_mode, Some(true));
+    }
+
+    #[test]
+    fn parse_reading_mode_default_none() {
+        let config: Config = toml::from_str("").unwrap();
+        assert!(config.reading_mode.is_none());
+    }
+
+    #[test]
+    fn parse_syntax_theme() {
+        let config: Config =
+            toml::from_str(r#"syntax_theme = "/path/to/monokai.tmTheme""#).unwrap();
+        assert_eq!(
+            config.syntax_theme,
+            Some(PathBuf::from("/path/to/monokai.tmTheme"))
+        );
+    }
+
+    #[test]
+    fn parse_theme_variant() {
+        let toml_str = r#"
+[theme]
+name = "catppuccin"
+variant = "dark"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.theme.variant.as_deref(), Some("dark"));
+    }
+
+    #[test]
+    fn parse_theme_variant_default_none() {
+        let toml_str = r#"
+[theme]
+name = "github"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.theme.variant.is_none());
+    }
+
+    #[test]
+    fn keybindings_defaults() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.keybindings.toggle_reading, "r");
+        assert_eq!(config.keybindings.exit_reading, "Escape");
+        assert_eq!(config.keybindings.toggle_dark, "d");
+        assert_eq!(config.keybindings.focus_theme, "t");
+    }
+
+    #[test]
+    fn keybindings_partial_override() {
+        let toml_str = r#"
+[keybindings]
+toggle_reading = "Alt+r"
+toggle_dark = "Alt+d"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.keybindings.toggle_reading, "Alt+r");
+        assert_eq!(config.keybindings.toggle_dark, "Alt+d");
+        // Unset fields keep defaults
+        assert_eq!(config.keybindings.exit_reading, "Escape");
+        assert_eq!(config.keybindings.focus_theme, "t");
+    }
+
+    #[test]
+    fn keybindings_disabled_binding() {
+        let toml_str = r#"
+[keybindings]
+toggle_dark = ""
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.keybindings.toggle_dark, "");
+    }
+
+    #[test]
+    fn keybindings_to_json() {
+        let kb = KeybindingsConfig::default();
+        let json = kb.to_json();
+        assert!(json.contains("\"toggle_reading\":\"r\""));
+        assert!(json.contains("\"exit_reading\":\"Escape\""));
+    }
+
+    #[test]
+    fn keybindings_apply_overrides() {
+        let mut kb = KeybindingsConfig::default();
+        kb.apply_overrides(&[
+            "toggle_reading=Alt+r".to_string(),
+            "toggle_dark=Alt+d".to_string(),
+        ]);
+        assert_eq!(kb.toggle_reading, "Alt+r");
+        assert_eq!(kb.toggle_dark, "Alt+d");
+        // Unaffected bindings keep defaults
+        assert_eq!(kb.exit_reading, "Escape");
+    }
+
+    #[test]
+    fn keybindings_apply_overrides_none_disables() {
+        let mut kb = KeybindingsConfig::default();
+        kb.apply_overrides(&["toggle_dark=none".to_string()]);
+        assert_eq!(kb.toggle_dark, "");
     }
 }

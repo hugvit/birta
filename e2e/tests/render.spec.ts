@@ -78,10 +78,10 @@ test("markdown body has correct class", async ({ page }) => {
 test.describe("visual regression", () => {
   test("light theme rendering", async ({ page }) => {
     await page.goto("/");
-    // Force light theme
     await page.evaluate(() => {
       document.documentElement.setAttribute("data-theme", "light");
       document.getElementById("content")!.setAttribute("data-theme", "light");
+      document.querySelector<HTMLElement>(".header")!.style.display = "none";
     });
     await expect(page.locator(".markdown-body")).toHaveScreenshot(
       "markdown-body-light.png",
@@ -91,10 +91,10 @@ test.describe("visual regression", () => {
 
   test("dark theme rendering", async ({ page }) => {
     await page.goto("/");
-    // Force dark theme
     await page.evaluate(() => {
       document.documentElement.setAttribute("data-theme", "dark");
       document.getElementById("content")!.setAttribute("data-theme", "dark");
+      document.querySelector<HTMLElement>(".header")!.style.display = "none";
     });
     await expect(page.locator(".markdown-body")).toHaveScreenshot(
       "markdown-body-dark.png",

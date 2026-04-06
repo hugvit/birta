@@ -48,6 +48,7 @@
 - **Syntax highlighting** — server-side via syntect, with per-theme tmTheme support
 - **Reading mode** — distraction-free viewing with scroll progress indicator
 - **Single binary** — no runtime dependencies, no Node.js, no Python
+- **Directory navigation** — relative markdown links are clickable, letting you browse across files in a project
 - **Interactive checkboxes** — click task list items in the browser to toggle them in the source file
 - **Stdin support** — pipe markdown from any source: `cat notes.md | birta -`
 

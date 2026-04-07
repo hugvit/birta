@@ -7,7 +7,7 @@
 </h3>
 
 <p align="center">
-  <em>from the Icelandic for brighten and publish, because that's what it does to your markdown.</em>
+  <em>from the Icelandic word for brighten and publish, because that's what it does to your markdown.</em>
 </p>
 
 <p align="center">

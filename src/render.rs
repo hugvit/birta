@@ -74,6 +74,29 @@ pub fn render_dir(
     render_with_mode(markdown, syntax_theme, RewriteMode::Directory { file_dir })
 }
 
+/// Render markdown source as syntax-highlighted HTML for raw mode.
+///
+/// Returns a side-by-side layout with line numbers and highlighted source:
+/// a flex container with a line-number column and a `<pre><code>` block.
+pub fn render_source(markdown: &str, syntax_theme: Option<&SyntaxTheme>) -> String {
+    let highlighted = crate::highlight::highlight_source(markdown, syntax_theme);
+    let line_count = markdown.lines().count().max(1);
+
+    let mut html = String::with_capacity(highlighted.len() + line_count * 60);
+    html.push_str("<div class=\"source-lines\">");
+    for i in 1..=line_count {
+        html.push_str("<span data-line=\"");
+        html.push_str(&i.to_string());
+        html.push_str("\">");
+        html.push_str(&i.to_string());
+        html.push_str("</span>");
+    }
+    html.push_str("</div><pre class=\"source-code\"><code>");
+    html.push_str(&highlighted);
+    html.push_str("</code></pre>");
+    html
+}
+
 /// Render markdown to HTML, rewriting relative image paths to absolute `file:///` URLs.
 pub fn render_static(
     markdown: &str,
@@ -246,7 +269,7 @@ fn normalize_path(path: &Path) -> PathBuf {
     parts.iter().collect()
 }
 
-fn html_escape(s: &str) -> String {
+pub(crate) fn html_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -372,6 +395,64 @@ mod tests {
         assert!(
             html.contains("href=\"other.md\""),
             "plain render should not rewrite links, got: {html}"
+        );
+    }
+
+    #[test]
+    fn render_source_contains_line_numbers() {
+        let source = render_source("# Hello\nworld\n", None);
+        assert!(
+            source.contains("data-line=\"1\""),
+            "should contain line number 1, got: {source}"
+        );
+        assert!(
+            source.contains("data-line=\"2\""),
+            "should contain line number 2, got: {source}"
+        );
+    }
+
+    #[test]
+    fn render_source_contains_pre_code_block() {
+        let source = render_source("# Hello", None);
+        assert!(
+            source.contains("<pre class=\"source-code\"><code>"),
+            "should contain source code pre/code block, got: {source}"
+        );
+        assert!(
+            source.contains("</code></pre>"),
+            "should close pre/code block, got: {source}"
+        );
+    }
+
+    #[test]
+    fn render_source_contains_highlighted_content() {
+        let source = render_source("# Hello\n\n**bold**\n", None);
+        // Syntect should produce span elements for Markdown tokens
+        assert!(
+            source.contains("<span"),
+            "highlighted source should contain span elements, got: {source}"
+        );
+    }
+
+    #[test]
+    fn render_source_empty_input() {
+        let source = render_source("", None);
+        assert!(
+            source.contains("data-line=\"1\""),
+            "empty input should still have at least line 1"
+        );
+    }
+
+    #[test]
+    fn render_source_single_line_no_newline() {
+        let source = render_source("hello", None);
+        assert!(
+            source.contains("data-line=\"1\""),
+            "single line without newline should have line 1"
+        );
+        assert!(
+            !source.contains("data-line=\"2\""),
+            "single line should not have line 2"
         );
     }
 }

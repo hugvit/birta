@@ -15,6 +15,7 @@ pub struct CliOptions {
     pub font_body: Option<String>,
     pub font_mono: Option<String>,
     pub reading_mode: bool,
+    pub raw_mode: bool,
     pub no_header: bool,
     pub no_theme_swap: bool,
     pub no_toggle: bool,
@@ -32,6 +33,7 @@ pub struct MergedOptions {
     pub font_body: Option<String>,
     pub font_mono: Option<String>,
     pub reading_mode: bool,
+    pub raw_mode: bool,
     pub enable_swap: bool,
     pub enable_toggle: bool,
     pub show_header: bool,
@@ -66,6 +68,7 @@ pub fn merge(cli: CliOptions, config: &Config) -> MergedOptions {
     let show_header = !cli.no_header && config.theme.controls.show_controls.header;
 
     let reading_mode = cli.reading_mode || config.reading_mode.unwrap_or(false);
+    let raw_mode = cli.raw_mode || config.raw_mode.unwrap_or(false);
 
     // CLI --light/--dark override config variant preference
     let (light, dark) = if cli.light || cli.dark {
@@ -95,6 +98,7 @@ pub fn merge(cli: CliOptions, config: &Config) -> MergedOptions {
         font_body,
         font_mono,
         reading_mode,
+        raw_mode,
         enable_swap,
         enable_toggle,
         show_header,

@@ -44,7 +44,8 @@
 
 - **GitHub-style rendering** — full GFM compliance via comrak, including tables, task lists, footnotes, alerts, and math
 - **Live reload** — file changes push to the browser instantly over WebSocket
-- **11 bundled themes** — github, catppuccin, dracula, gruvbox, nord, rose-pine, solarized, and more, with runtime hot-swap
+- **Raw mode** — toggle between rendered preview and syntax-highlighted source with line numbers
+- **11 bundled themes** — github, catppuccin, dracula, gruvbox, nord, rose-pine, tokyo-night, and more, with runtime hot-swap
 - **Syntax highlighting** — server-side via syntect, with per-theme tmTheme support
 - **Reading mode** — distraction-free viewing with scroll progress indicator
 - **Single binary** — no runtime dependencies, no Node.js, no Python
@@ -112,6 +113,12 @@ Use a specific theme in light mode:
 birta --theme catppuccin --light README.md
 ```
 
+View the raw markdown source with syntax highlighting:
+
+```bash
+birta --raw README.md
+```
+
 Distraction-free reading:
 
 ```bash
@@ -153,7 +160,7 @@ Run `birta --help` for the full flag reference.
 </details>
 -->
 
-Bundled: `github` `catppuccin` `dracula` `gruvbox` `monokai` `night-owl` `nord` `one-dark` `rose-pine` `solarized` `synthwave-84` `tokyo-night`
+Bundled: `github` `catppuccin` `dracula` `gruvbox` `monokai` `night-owl` `nord` `one-dark` `rose-pine` `synthwave-84` `tokyo-night`
 
 Themes with both light and dark variants get a toggle in the header. Switch themes at runtime from the dropdown — no restart needed.
 
@@ -174,9 +181,15 @@ name = "catppuccin"
 [font]
 body = "Georgia, serif"
 mono = "JetBrains Mono, monospace"
+
+[keybindings]
+toggle_reading = "r"       # reading mode
+toggle_dark = "d"          # light/dark toggle
+toggle_raw = "u"           # preview/raw toggle
+focus_theme = "t"          # open theme picker
 ```
 
-All settings can be overridden with CLI flags. Run `birta --help` for the complete list.
+All settings can be overridden with CLI flags. Keybindings support modifiers: `--bind toggle_raw=Alt+u`. Run `birta --help` for the complete list.
 
 &nbsp;
 

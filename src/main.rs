@@ -75,6 +75,10 @@ struct Cli {
     #[arg(long, help_heading = "Display")]
     reading_mode: bool,
 
+    /// Start in raw mode (show source instead of rendered preview)
+    #[arg(long, help_heading = "Display")]
+    raw: bool,
+
     /// Hide the header bar
     #[arg(long, help_heading = "Display")]
     no_header: bool,
@@ -133,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
         font_body: cli.font_body,
         font_mono: cli.font_mono,
         reading_mode: cli.reading_mode,
+        raw_mode: cli.raw,
         no_header: cli.no_header,
         no_theme_swap: cli.no_theme_swap,
         no_toggle: cli.no_toggle,
@@ -184,6 +189,7 @@ async fn main() -> anyhow::Result<()> {
             enable_toggle: merged.enable_toggle,
             show_header: merged.show_header,
             reading_mode: merged.reading_mode,
+            raw_mode: merged.raw_mode,
             keybindings_json,
         };
         return birta::server::run_stdin(&markdown, opts).await;
@@ -212,6 +218,7 @@ async fn main() -> anyhow::Result<()> {
                 font_css: font_css.as_deref(),
                 show_header: merged.show_header,
                 reading_mode: merged.reading_mode,
+                raw_mode: merged.raw_mode,
                 no_open: merged.no_open,
                 keybindings_json: &keybindings_json,
             },
@@ -228,6 +235,7 @@ async fn main() -> anyhow::Result<()> {
         enable_toggle: merged.enable_toggle,
         show_header: merged.show_header,
         reading_mode: merged.reading_mode,
+        raw_mode: merged.raw_mode,
         keybindings_json,
     };
     birta::server::run(file, opts).await
@@ -239,6 +247,7 @@ struct StaticOptions<'a> {
     font_css: Option<&'a str>,
     show_header: bool,
     reading_mode: bool,
+    raw_mode: bool,
     no_open: bool,
     keybindings_json: &'a str,
 }
@@ -256,11 +265,9 @@ fn run_static(file: &std::path::Path, opts: StaticOptions<'_>) -> anyhow::Result
         })
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    let content_html = birta::render::render_static(
-        &markdown,
-        opts.theme.active_data().syntax.as_ref(),
-        &base_dir,
-    );
+    let syntax = opts.theme.active_data().syntax.as_ref();
+    let content_html = birta::render::render_static(&markdown, syntax, &base_dir);
+    let source_html = birta::render::render_source(&markdown, syntax);
 
     let page = birta::template::render_page(&birta::template::PageOptions {
         filename: &file
@@ -268,10 +275,12 @@ fn run_static(file: &std::path::Path, opts: StaticOptions<'_>) -> anyhow::Result
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "untitled".to_string()),
         content_html: &content_html,
+        source_html: Some(&source_html),
         custom_css: opts.custom_css,
         font_css: opts.font_css,
         show_header: opts.show_header,
         reading_mode: opts.reading_mode,
+        raw_mode: opts.raw_mode,
         theme: opts.theme,
         theme_names: &[],
         static_mode: true,

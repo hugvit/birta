@@ -6,12 +6,12 @@ use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
 use tokio::sync::broadcast;
 
 use crate::render;
-use crate::server::AppState;
+use crate::server::{AppState, ContentUpdate};
 
 /// Watch a directory recursively and broadcast rendered HTML for changed `.md` files.
 pub(crate) fn watch_dir(
     base_dir: PathBuf,
-    tx: broadcast::Sender<(String, String)>,
+    tx: broadcast::Sender<ContentUpdate>,
     state: Arc<AppState>,
 ) -> anyhow::Result<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>> {
     let canonical_base = base_dir.canonicalize()?;
@@ -77,7 +77,12 @@ pub(crate) fn watch_dir(
                     syntax_theme.as_ref(),
                     std::path::Path::new(&relpath),
                 );
-                let _ = tx.send((relpath, html));
+                let source = render::render_source(&markdown, syntax_theme.as_ref());
+                let _ = tx.send(ContentUpdate {
+                    relpath,
+                    rendered_html: html,
+                    source_html: source,
+                });
             }
         },
     )?;

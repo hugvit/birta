@@ -10,10 +10,12 @@ const THEME_OVERRIDES: &str = include_str!("../assets/theme-overrides.css");
 pub struct PageOptions<'a> {
     pub filename: &'a str,
     pub content_html: &'a str,
+    pub source_html: Option<&'a str>,
     pub custom_css: Option<&'a str>,
     pub font_css: Option<&'a str>,
     pub show_header: bool,
     pub reading_mode: bool,
+    pub raw_mode: bool,
     pub theme: &'a ResolvedTheme,
     pub theme_names: &'a [&'a str],
     pub static_mode: bool,
@@ -78,15 +80,17 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
     // Active variant for the browser JS
     let active_variant = theme.active_variant.as_str();
 
-    // Theme dropdown options (for hot-swap)
+    // Theme dropdown items (for hot-swap)
     let theme_options: String = theme_names
         .iter()
         .map(|&name| {
-            let selected = if name == theme.name { " selected" } else { "" };
-            format!("<option value=\"{name}\"{selected}>{name}</option>")
+            let active = if name == theme.name { " active" } else { "" };
+            format!(
+                "<button class=\"theme-dropdown-item{active}\" data-theme=\"{name}\">{name}</button>"
+            )
         })
         .collect::<Vec<_>>()
-        .join("\n      ");
+        .join("\n            ");
 
     // Available variants for JS
     let variants_json =
@@ -112,6 +116,7 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
         .replace("{{THEME_MODE}}", theme_mode)
         .replace("{{THEME_ATTR}}", &theme_attr)
         .replace("{{ACTIVE_VARIANT}}", active_variant)
+        .replace("{{ACTIVE_THEME}}", &theme.name)
         .replace("{{THEME_OPTIONS}}", &theme_options)
         .replace("{{VARIANTS_JSON}}", &variants_json)
         .replace("{{FILENAME}}", filename)
@@ -120,7 +125,12 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
             if opts.static_mode { "true" } else { "false" },
         )
         .replace("{{KEYBINDINGS_JSON}}", opts.keybindings_json)
+        .replace(
+            "{{INITIAL_VIEW}}",
+            if opts.raw_mode { "raw" } else { "preview" },
+        )
         .replace("{{CURRENT_PATH}}", opts.current_path.unwrap_or(""))
+        .replace("{{SOURCE_HTML}}", opts.source_html.unwrap_or(""))
         .replace("{{CONTENT}}", content_html)
 }
 
@@ -151,10 +161,12 @@ mod tests {
         render_page(&PageOptions {
             filename: "test.md",
             content_html: content,
+            source_html: None,
             custom_css,
             font_css: None,
             show_header: true,
             reading_mode: false,
+            raw_mode: false,
             theme: &theme,
             theme_names: &["github"],
             static_mode: false,
@@ -205,10 +217,12 @@ mod tests {
         render_page(&PageOptions {
             filename: "test.md",
             content_html: "<p>test</p>",
+            source_html: None,
             custom_css: None,
             font_css,
             show_header,
             reading_mode,
+            raw_mode: false,
             theme,
             theme_names,
             static_mode,
@@ -341,11 +355,15 @@ mod tests {
         let theme = github_theme();
         let page = render_with(true, false, false, None, &theme, &["github", "dracula"]);
         assert!(
-            page.contains("<option value=\"github\" selected>github</option>"),
-            "active theme should be selected in dropdown"
+            page.contains("data-theme=\"github\">github</button>"),
+            "active theme should appear in dropdown"
         );
         assert!(
-            page.contains("<option value=\"dracula\">dracula</option>"),
+            page.contains("theme-dropdown-item active"),
+            "active theme should have active class"
+        );
+        assert!(
+            page.contains("data-theme=\"dracula\">dracula</button>"),
             "other themes should appear in dropdown"
         );
     }

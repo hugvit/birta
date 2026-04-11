@@ -16,6 +16,14 @@ use tokio::sync::{Notify, RwLock, broadcast};
 use crate::theme::{ResolvedTheme, ThemeRegistry, Variant};
 use crate::{render, template, watcher};
 
+/// A content update broadcast from the watcher or theme change.
+#[derive(Clone)]
+pub(crate) struct ContentUpdate {
+    pub(crate) relpath: String,
+    pub(crate) rendered_html: String,
+    pub(crate) source_html: String,
+}
+
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
 const FAVICON: &[u8] = include_bytes!("../assets/favicon.png");
 
@@ -30,6 +38,7 @@ pub struct ServerOptions {
     pub enable_toggle: bool,
     pub show_header: bool,
     pub reading_mode: bool,
+    pub raw_mode: bool,
     pub keybindings_json: String,
 }
 
@@ -42,8 +51,10 @@ pub(crate) struct AppState {
     pub(crate) custom_css: Option<String>,
     /// Raw rendered HTML (not JSON-wrapped).
     pub(crate) current_html: RwLock<String>,
-    /// Sends `(relative_path, rendered_html)` content updates from watcher.
-    pub(crate) tx: broadcast::Sender<(String, String)>,
+    /// Syntax-highlighted source HTML for the code view.
+    pub(crate) current_source_html: RwLock<String>,
+    /// Sends content updates from the watcher.
+    pub(crate) tx: broadcast::Sender<ContentUpdate>,
     /// Sends ready-to-send JSON strings (theme_update messages).
     pub(crate) theme_tx: broadcast::Sender<String>,
     pub(crate) scroll_tx: broadcast::Sender<u32>,
@@ -54,6 +65,7 @@ pub(crate) struct AppState {
     pub(crate) font_css: Option<String>,
     pub(crate) show_header: bool,
     pub(crate) reading_mode: bool,
+    pub(crate) raw_mode: bool,
     pub(crate) keybindings_json: String,
     /// Epoch seconds of the last HTTP request (prevents premature auto-shutdown).
     pub(crate) last_request: AtomicU64,
@@ -96,7 +108,9 @@ pub async fn run_stdin(markdown: &str, opts: ServerOptions) -> anyhow::Result<()
         }
     }
 
-    let content_html = render::render(markdown, opts.theme.active_data().syntax.as_ref());
+    let syntax = opts.theme.active_data().syntax.as_ref();
+    let content_html = render::render(markdown, syntax);
+    let source_html = render::render_source(markdown, syntax);
 
     let mut registry = ThemeRegistry::new(opts.theme);
     if opts.enable_swap {
@@ -104,7 +118,7 @@ pub async fn run_stdin(markdown: &str, opts: ServerOptions) -> anyhow::Result<()
     }
     let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    let (tx, _rx) = broadcast::channel::<(String, String)>(16);
+    let (tx, _rx) = broadcast::channel::<ContentUpdate>(16);
     let (theme_tx, _) = broadcast::channel::<String>(16);
     let (scroll_tx, _) = broadcast::channel::<u32>(16);
 
@@ -115,6 +129,7 @@ pub async fn run_stdin(markdown: &str, opts: ServerOptions) -> anyhow::Result<()
         initial_relpath: None,
         custom_css: opts.custom_css,
         current_html: RwLock::new(content_html),
+        current_source_html: RwLock::new(source_html),
         tx,
         theme_tx,
         scroll_tx,
@@ -125,6 +140,7 @@ pub async fn run_stdin(markdown: &str, opts: ServerOptions) -> anyhow::Result<()
         font_css: opts.font_css,
         show_header: opts.show_header,
         reading_mode: opts.reading_mode,
+        raw_mode: opts.raw_mode,
         keybindings_json: opts.keybindings_json,
         last_request: AtomicU64::new(now_secs()),
     });
@@ -155,15 +171,13 @@ pub async fn start(
         .ok()
         .map(|p| p.to_string_lossy().into_owned());
 
+    let syntax = opts.theme.active_data().syntax.as_ref();
     let content_html = if let Some(ref relpath) = initial_relpath {
-        render::render_dir(
-            &markdown,
-            opts.theme.active_data().syntax.as_ref(),
-            StdPath::new(relpath),
-        )
+        render::render_dir(&markdown, syntax, StdPath::new(relpath))
     } else {
-        render::render(&markdown, opts.theme.active_data().syntax.as_ref())
+        render::render(&markdown, syntax)
     };
+    let source_html = render::render_source(&markdown, syntax);
 
     let filename = file
         .file_name()
@@ -175,7 +189,7 @@ pub async fn start(
         registry.discover_all();
     }
 
-    let (tx, _rx) = broadcast::channel::<(String, String)>(16);
+    let (tx, _rx) = broadcast::channel::<ContentUpdate>(16);
     let (theme_tx, _) = broadcast::channel::<String>(16);
     let (scroll_tx, _) = broadcast::channel::<u32>(16);
 
@@ -191,6 +205,7 @@ pub async fn start(
         initial_relpath,
         custom_css: opts.custom_css,
         current_html: RwLock::new(content_html),
+        current_source_html: RwLock::new(source_html),
         tx: tx.clone(),
         theme_tx,
         scroll_tx,
@@ -201,6 +216,7 @@ pub async fn start(
         font_css: opts.font_css,
         show_header: opts.show_header,
         reading_mode: opts.reading_mode,
+        raw_mode: opts.raw_mode,
         keybindings_json: opts.keybindings_json,
         last_request: AtomicU64::new(now_secs),
     });
@@ -208,9 +224,10 @@ pub async fn start(
     let state_for_task = Arc::clone(&state);
     let mut rx = tx.subscribe();
     tokio::spawn(async move {
-        while let Ok((relpath, html)) = rx.recv().await {
-            if state_for_task.initial_relpath.as_deref() == Some(&relpath) {
-                *state_for_task.current_html.write().await = html;
+        while let Ok(update) = rx.recv().await {
+            if state_for_task.initial_relpath.as_deref() == Some(&update.relpath) {
+                *state_for_task.current_html.write().await = update.rendered_html;
+                *state_for_task.current_source_html.write().await = update.source_html;
             }
         }
     });
@@ -309,13 +326,16 @@ async fn index_handler(State(state): State<Arc<AppState>>) -> Response {
     let theme = registry.active();
     let theme_names: Vec<&str> = registry.theme_names();
     let content_html = state.current_html.read().await;
+    let source_html = state.current_source_html.read().await;
     let page = template::render_page(&template::PageOptions {
         filename: &state.filename,
         content_html: &content_html,
+        source_html: Some(&source_html),
         custom_css: state.custom_css.as_deref(),
         font_css: state.font_css.as_deref(),
         show_header: state.show_header,
         reading_mode: state.reading_mode,
+        raw_mode: state.raw_mode,
         theme,
         theme_names: &theme_names,
         static_mode: false,
@@ -374,6 +394,7 @@ async fn view_handler(Path(path): Path<String>, State(state): State<Arc<AppState
     };
 
     let html = render::render_dir(&markdown, syntax_theme.as_ref(), StdPath::new(&path));
+    let source_html = render::render_source(&markdown, syntax_theme.as_ref());
 
     let filename = canonical
         .file_name()
@@ -386,10 +407,12 @@ async fn view_handler(Path(path): Path<String>, State(state): State<Arc<AppState
     let page = template::render_page(&template::PageOptions {
         filename: &filename,
         content_html: &html,
+        source_html: Some(&source_html),
         custom_css: state.custom_css.as_deref(),
         font_css: state.font_css.as_deref(),
         show_header: state.show_header,
         reading_mode: state.reading_mode,
+        raw_mode: state.raw_mode,
         theme,
         theme_names: &theme_names,
         static_mode: false,
@@ -401,7 +424,12 @@ async fn view_handler(Path(path): Path<String>, State(state): State<Arc<AppState
 
 /// Return just the rendered HTML fragment for a markdown file (no page chrome).
 /// Used by the client to re-render content after theme changes.
-async fn render_handler(Path(path): Path<String>, State(state): State<Arc<AppState>>) -> Response {
+/// Accepts `?mode=source` to return highlighted source instead of rendered HTML.
+async fn render_handler(
+    Path(path): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    State(state): State<Arc<AppState>>,
+) -> Response {
     let canonical = match resolve_safe_path(&state.base_dir, &path).await {
         Ok(p) => p,
         Err(status) => return status.into_response(),
@@ -421,6 +449,11 @@ async fn render_handler(Path(path): Path<String>, State(state): State<Arc<AppSta
         let reg = state.registry.read().await;
         reg.active().active_data().syntax.clone()
     };
+
+    if params.get("mode").map(|m| m.as_str()) == Some("source") {
+        let source = render::render_source(&markdown, syntax_theme.as_ref());
+        return Html(source).into_response();
+    }
 
     let html = render::render_dir(&markdown, syntax_theme.as_ref(), StdPath::new(&path));
     Html(html).into_response()
@@ -468,14 +501,16 @@ async fn broadcast_theme_update(state: &AppState) {
     let active = theme.active_data();
 
     // Re-render markdown with new syntax theme
-    let html = if let Some(source_file) = &state.source_file {
+    let (html, source) = if let Some(source_file) = &state.source_file {
         match std::fs::read_to_string(source_file) {
             Ok(markdown) => {
-                if let Some(relpath) = &state.initial_relpath {
+                let rendered = if let Some(relpath) = &state.initial_relpath {
                     render::render_dir(&markdown, active.syntax.as_ref(), StdPath::new(relpath))
                 } else {
                     render::render(&markdown, active.syntax.as_ref())
-                }
+                };
+                let source = render::render_source(&markdown, active.syntax.as_ref());
+                (rendered, source)
             }
             Err(e) => {
                 eprintln!("birta: failed to re-read file for theme change: {e}");
@@ -484,7 +519,9 @@ async fn broadcast_theme_update(state: &AppState) {
         }
     } else {
         // stdin mode — use current HTML since we can't re-render
-        state.current_html.read().await.clone()
+        let html = state.current_html.read().await.clone();
+        let source = state.current_source_html.read().await.clone();
+        (html, source)
     };
 
     let (css_vars, theme_attr) = if theme.is_github() {
@@ -499,6 +536,7 @@ async fn broadcast_theme_update(state: &AppState) {
         "type": "theme_update",
         "css_vars": css_vars,
         "html": html,
+        "source": source,
         "path": state.initial_relpath.as_deref().unwrap_or(""),
         "theme_name": theme.name,
         "theme_attr": theme_attr,
@@ -507,8 +545,9 @@ async fn broadcast_theme_update(state: &AppState) {
         "has_toggle": has_toggle,
     });
 
-    // Update stored content HTML (raw HTML, not JSON-wrapped)
+    // Update stored content
     *state.current_html.write().await = html;
+    *state.current_source_html.write().await = source;
 
     let _ = state.theme_tx.send(msg.to_string());
 }
@@ -525,9 +564,12 @@ async fn handle_theme_change(state: &AppState, theme_name: &str) {
 
 async fn handle_variant_change(state: &AppState, variant: Variant) {
     let mut registry = state.registry.write().await;
+    let changed = registry.active().active_variant != variant;
     registry.set_variant(variant);
     drop(registry);
-    broadcast_theme_update(state).await;
+    if changed {
+        broadcast_theme_update(state).await;
+    }
 }
 
 /// Toggle a checkbox in a source file at the given line.
@@ -619,9 +661,11 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
 
     // Send initial content as JSON
     let current = state.current_html.read().await.clone();
+    let current_source = state.current_source_html.read().await.clone();
     let init_msg = serde_json::json!({
         "type": "content",
         "html": current,
+        "source": current_source,
         "path": state.initial_relpath.as_deref().unwrap_or(""),
     });
     if socket
@@ -642,8 +686,13 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
         tokio::select! {
             result = rx.recv() => {
                 match result {
-                    Ok((relpath, html)) => {
-                        let msg = serde_json::json!({"type": "content", "html": html, "path": relpath});
+                    Ok(update) => {
+                        let msg = serde_json::json!({
+                            "type": "content",
+                            "html": update.rendered_html,
+                            "source": update.source_html,
+                            "path": update.relpath,
+                        });
                         if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
                             break;
                         }
@@ -715,7 +764,7 @@ mod tests {
     fn test_state() -> Arc<AppState> {
         let theme = github_theme();
         let registry = ThemeRegistry::new(theme);
-        let (tx, _rx) = broadcast::channel(16);
+        let (tx, _rx) = broadcast::channel::<ContentUpdate>(16);
         let (theme_tx, _) = broadcast::channel(16);
         let (scroll_tx, _) = broadcast::channel(16);
         Arc::new(AppState {
@@ -725,6 +774,7 @@ mod tests {
             initial_relpath: None,
             custom_css: None,
             current_html: RwLock::new("<p>hello</p>".to_string()),
+            current_source_html: RwLock::new(String::new()),
             tx,
             theme_tx,
             scroll_tx,
@@ -735,6 +785,7 @@ mod tests {
             font_css: None,
             show_header: true,
             reading_mode: false,
+            raw_mode: false,
             keybindings_json: "{}".to_string(),
             last_request: AtomicU64::new(0),
         })
@@ -793,7 +844,7 @@ mod tests {
     fn test_router_with_base_dir(base_dir: PathBuf) -> Router {
         let theme = github_theme();
         let registry = ThemeRegistry::new(theme);
-        let (tx, _rx) = broadcast::channel(16);
+        let (tx, _rx) = broadcast::channel::<ContentUpdate>(16);
         let (theme_tx, _) = broadcast::channel(16);
         let (scroll_tx, _) = broadcast::channel(16);
         let state = Arc::new(AppState {
@@ -803,6 +854,7 @@ mod tests {
             initial_relpath: None,
             custom_css: None,
             current_html: RwLock::new("<p>hello</p>".to_string()),
+            current_source_html: RwLock::new(String::new()),
             tx,
             theme_tx,
             scroll_tx,
@@ -813,6 +865,7 @@ mod tests {
             font_css: None,
             show_header: true,
             reading_mode: false,
+            raw_mode: false,
             keybindings_json: "{}".to_string(),
             last_request: AtomicU64::new(0),
         });
@@ -949,7 +1002,7 @@ mod tests {
     async fn index_redirects_when_initial_relpath_set() {
         let theme = github_theme();
         let registry = ThemeRegistry::new(theme);
-        let (tx, _rx) = broadcast::channel(16);
+        let (tx, _rx) = broadcast::channel::<ContentUpdate>(16);
         let (theme_tx, _) = broadcast::channel(16);
         let (scroll_tx, _) = broadcast::channel(16);
         let state = Arc::new(AppState {
@@ -959,6 +1012,7 @@ mod tests {
             initial_relpath: Some("test.md".to_string()),
             custom_css: None,
             current_html: RwLock::new("<p>hello</p>".to_string()),
+            current_source_html: RwLock::new(String::new()),
             tx,
             theme_tx,
             scroll_tx,
@@ -969,6 +1023,7 @@ mod tests {
             font_css: None,
             show_header: true,
             reading_mode: false,
+            raw_mode: false,
             keybindings_json: "{}".to_string(),
             last_request: AtomicU64::new(0),
         });

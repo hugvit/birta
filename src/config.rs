@@ -8,6 +8,7 @@ pub struct Config {
     pub no_open: Option<bool>,
     pub css: Option<PathBuf>,
     pub reading_mode: Option<bool>,
+    pub raw_mode: Option<bool>,
     pub syntax_theme: Option<PathBuf>,
     #[serde(default, deserialize_with = "deserialize_theme_config")]
     pub theme: ThemeConfig,
@@ -33,6 +34,8 @@ pub struct KeybindingsConfig {
     pub toggle_dark: String,
     #[serde(default = "default_focus_theme")]
     pub focus_theme: String,
+    #[serde(default = "default_toggle_raw")]
+    pub toggle_raw: String,
 }
 
 fn default_toggle_reading() -> String {
@@ -47,6 +50,9 @@ fn default_toggle_dark() -> String {
 fn default_focus_theme() -> String {
     "t".to_string()
 }
+fn default_toggle_raw() -> String {
+    "u".to_string()
+}
 
 impl Default for KeybindingsConfig {
     fn default() -> Self {
@@ -55,6 +61,7 @@ impl Default for KeybindingsConfig {
             exit_reading: default_exit_reading(),
             toggle_dark: default_toggle_dark(),
             focus_theme: default_focus_theme(),
+            toggle_raw: default_toggle_raw(),
         }
     }
 }
@@ -84,6 +91,7 @@ impl KeybindingsConfig {
                 "exit_reading" => self.exit_reading = key,
                 "toggle_dark" => self.toggle_dark = key,
                 "focus_theme" => self.focus_theme = key,
+                "toggle_raw" => self.toggle_raw = key,
                 _ => {
                     eprintln!("birta: warning: unknown keybinding action '{action}'");
                 }
@@ -324,6 +332,7 @@ name = "github"
         assert_eq!(config.keybindings.exit_reading, "Escape");
         assert_eq!(config.keybindings.toggle_dark, "d");
         assert_eq!(config.keybindings.focus_theme, "t");
+        assert_eq!(config.keybindings.toggle_raw, "u");
     }
 
     #[test]
@@ -357,6 +366,7 @@ toggle_dark = ""
         let json = kb.to_json();
         assert!(json.contains("\"toggle_reading\":\"r\""));
         assert!(json.contains("\"exit_reading\":\"Escape\""));
+        assert!(json.contains("\"toggle_raw\":\"u\""));
     }
 
     #[test]
@@ -365,9 +375,11 @@ toggle_dark = ""
         kb.apply_overrides(&[
             "toggle_reading=Alt+r".to_string(),
             "toggle_dark=Alt+d".to_string(),
+            "toggle_raw=s".to_string(),
         ]);
         assert_eq!(kb.toggle_reading, "Alt+r");
         assert_eq!(kb.toggle_dark, "Alt+d");
+        assert_eq!(kb.toggle_raw, "s");
         // Unaffected bindings keep defaults
         assert_eq!(kb.exit_reading, "Escape");
     }

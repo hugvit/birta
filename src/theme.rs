@@ -393,10 +393,17 @@ pub fn list_installed() -> Vec<ThemeEntry> {
         collect_toml_themes(&dir, ThemeSource::User, &mut entries, &mut seen);
     }
     if let Some(dir) = data_themes_dir() {
-        collect_toml_themes(&dir, ThemeSource::Bundled, &mut entries, &mut seen);
+        collect_toml_themes(&dir, ThemeSource::User, &mut entries, &mut seen);
     }
 
-    // Also include bundled themes not yet on disk
+    // Mark themes that match a bundled name, and add any not yet on disk
+    let bundled_names: std::collections::HashSet<&str> =
+        BUNDLED_THEMES.iter().map(|b| b.name).collect();
+    for entry in &mut entries {
+        if bundled_names.contains(entry.name.as_str()) {
+            entry.source = ThemeSource::Bundled;
+        }
+    }
     for bundled in BUNDLED_THEMES {
         if seen.insert(bundled.name.to_string()) {
             entries.push(ThemeEntry {
@@ -874,5 +881,41 @@ mod tests {
 
         registry.set_active("dracula").unwrap();
         assert_eq!(registry.active().name, "dracula");
+    }
+
+    #[test]
+    fn theme_registry_preserves_variant_across_theme_switch() {
+        let github_toml: ThemeToml =
+            toml::from_str(include_str!("../assets/themes/github.toml")).unwrap();
+        let mut resolved = build_resolved_theme(github_toml, None).unwrap();
+        // Simulate --light or client variant sync setting Light before registry init
+        resolved.active_variant = Variant::Light;
+
+        let mut registry = ThemeRegistry::new(resolved);
+        assert_eq!(registry.active().active_variant, Variant::Light);
+
+        // Add catppuccin (also dual-variant, defaults to Dark internally)
+        let catppuccin_toml: ThemeToml =
+            toml::from_str(include_str!("../assets/themes/catppuccin.toml")).unwrap();
+        let catppuccin = build_resolved_theme(catppuccin_toml, None).unwrap();
+        assert_eq!(catppuccin.active_variant, Variant::Dark);
+        registry.themes.insert("catppuccin".to_string(), catppuccin);
+
+        // Switch to catppuccin — must inherit Light from preferred_variant,
+        // not catppuccin's own Dark default
+        registry.set_active("catppuccin").unwrap();
+        assert_eq!(
+            registry.active().active_variant,
+            Variant::Light,
+            "switching themes should preserve the user's variant preference"
+        );
+
+        // Switch back to github — still Light
+        registry.set_active("github").unwrap();
+        assert_eq!(
+            registry.active().active_variant,
+            Variant::Light,
+            "switching back should still preserve variant preference"
+        );
     }
 }

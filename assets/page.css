@@ -49,7 +49,7 @@ html, body {
   z-index: 100;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   padding: 8px 24px;
   background-color: var(--birta-bg-secondary);
   border-bottom: 1px solid var(--birta-border);
@@ -61,20 +61,6 @@ html, body {
 
 .header.header-hidden {
   display: none;
-}
-
-.header-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.filename {
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .header-right {
@@ -89,27 +75,73 @@ html, body {
   gap: 8px;
 }
 
-.theme-select {
+.theme-dropdown {
+  position: relative;
+}
+
+.theme-dropdown-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   background: var(--birta-bg-secondary);
   border: 1px solid var(--birta-border);
   border-radius: 6px;
-  padding: 4px 8px;
+  padding: 4px 10px;
   cursor: pointer;
   color: var(--birta-fg);
   font-family: inherit;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.4;
   transition: border-color 0.2s;
-  appearance: auto;
+  white-space: nowrap;
 }
 
-.theme-select:hover {
+.theme-dropdown-btn:hover {
   border-color: var(--birta-fg);
 }
 
-.theme-select option {
+.theme-dropdown-menu {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 160px;
+  max-height: 320px;
+  overflow-y: auto;
   background: var(--birta-bg);
+  border: 1px solid var(--birta-border);
+  border-radius: 6px;
+  padding: 4px 0;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  z-index: 200;
+}
+
+.theme-dropdown.open .theme-dropdown-menu {
+  display: block;
+}
+
+.theme-dropdown-item {
+  display: block;
+  width: 100%;
+  padding: 6px 16px;
+  background: none;
+  border: none;
+  cursor: pointer;
   color: var(--birta-fg);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  text-align: left;
+  transition: background-color 0.1s;
+}
+
+.theme-dropdown-item:hover {
+  background-color: var(--birta-bg-secondary);
+}
+
+.theme-dropdown-item.active {
+  font-weight: 600;
+  background-color: var(--birta-bg-secondary);
 }
 
 .reading-toggle,
@@ -169,6 +201,44 @@ html, body {
   line-height: 32px;
 }
 
+/* View toggle (Preview / Raw) — segmented control in file header */
+.view-toggle {
+  display: flex;
+  margin-left: auto;
+  border: 1px solid var(--birta-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.view-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 10px;
+  background: none;
+  border: none;
+  border-right: 1px solid var(--birta-border);
+  cursor: pointer;
+  color: var(--birta-fg);
+  opacity: 0.6;
+  transition: background-color 0.15s, opacity 0.15s;
+  line-height: 1;
+}
+
+.view-btn:last-child {
+  border-right: none;
+}
+
+.view-btn:hover {
+  opacity: 0.9;
+  background-color: var(--birta-bg);
+}
+
+.view-btn.active {
+  background-color: var(--birta-bg);
+  opacity: 1;
+}
+
 .file-header-icon {
   flex-shrink: 0;
   opacity: 0.6;
@@ -222,6 +292,10 @@ body.reading-mode .file-header {
   display: none;
 }
 
+body.reading-mode .source-container {
+  display: none;
+}
+
 body.reading-mode .container {
   border-color: transparent;
   margin-top: 0;
@@ -247,7 +321,7 @@ body.reading-mode .container {
   top: 0;
   left: 0;
   right: 0;
-  height: 12px;
+  height: 48px;
   z-index: 300;
 }
 
@@ -258,6 +332,7 @@ body.reading-mode .container {
   z-index: 301;
   transform: translateY(-48px);
   transition: transform 0.2s ease, opacity 0.2s ease;
+  transition-delay: 0.3s;
   opacity: 0;
   pointer-events: none;
 }
@@ -267,6 +342,7 @@ body.reading-mode .container {
   transform: translateY(0);
   opacity: 1;
   pointer-events: auto;
+  transition-delay: 0s;
 }
 
 .reading-exit-btn {
@@ -285,6 +361,58 @@ body.reading-mode .container {
 
 .reading-exit-btn:hover {
   border-color: var(--birta-fg);
+}
+
+/* --- Source / Raw view --- */
+.source-container {
+  display: flex;
+  overflow-x: auto;
+}
+
+.source-lines {
+  flex-shrink: 0;
+  padding: 16px 0;
+  user-select: none;
+  text-align: right;
+  background-color: var(--birta-bg);
+}
+
+.source-lines span {
+  display: block;
+  padding: 0 12px 0 16px;
+  color: var(--birta-fg);
+  opacity: 0.35;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.source-code {
+  flex: 1;
+  margin: 0;
+  padding: 16px 16px 16px 12px;
+  overflow-x: auto;
+  background-color: var(--birta-bg) !important;
+  color: var(--birta-fg);
+  tab-size: 4;
+}
+
+.source-code code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+/* Prevent page CSS (e.g. .header) from affecting syntect scope class names */
+.source-code span {
+  display: inline;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: none;
+  position: static;
+  float: none;
 }
 
 /* Override inline background-color from syntect on themed code blocks */

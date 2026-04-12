@@ -7,7 +7,7 @@
 </h3>
 
 <p align="center">
-  <em>from the Icelandic word for brighten and publish, because that's what it does to your markdown.</em>
+  <em>from the Icelandic word for brighten and publish</em>
 </p>
 
 <p align="center">
@@ -201,13 +201,14 @@ The Neovim plugin lives in a separate repo: [birta.nvim](https://github.com/hugv
 -- lazy.nvim
 {
   "hugvit/birta.nvim",
-  cmd = { "BirtaPreview", "BirtaStop", "BirtaToggle" },
+  cmd = { "Birta" },
   opts = {
     theme = "catppuccin",
   },
 }
 ```
 
+Most flags can be accessed through the plugin's config.
 &nbsp;
 
 ## License

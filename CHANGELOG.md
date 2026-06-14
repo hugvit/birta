@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/hugvit/birta/compare/v0.6.0...v0.7.0) - 2026-06-14
+
+### Added
+
+- update docs for new release
+- *(static)* export linked files as a portable bundle
+
+### Fixed
+
+- honour --light/--dark over OS color-scheme preference
+
+### Other
+
+- *(render)* drop dead single-file static render path
+- ignore .DS_Store
+
 ## [0.6.0](https://github.com/hugvit/birta/compare/v0.5.0...v0.6.0) - 2026-04-12
 
 ### Added

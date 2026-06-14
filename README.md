@@ -50,6 +50,7 @@
 - **Reading mode** — distraction-free viewing with scroll progress indicator
 - **Single binary** — no runtime dependencies, no Node.js, no Python
 - **Directory navigation** — relative markdown links are clickable, letting you browse across files in a project
+- **Static export** — render a self-contained, portable HTML bundle of a file and everything it links to, with assets copied in — no server required
 - **Interactive checkboxes** — click task list items in the browser to toggle them in the source file
 - **Stdin support** — pipe markdown from any source: `cat notes.md | birta -`
 
@@ -130,6 +131,15 @@ Preview from stdin:
 ```bash
 cat notes.md | birta -
 ```
+
+Export a self-contained static bundle (crawls relative `.md` links, copies assets):
+
+```bash
+birta --static README.md                 # writes a temp birta-README/ folder and opens it
+birta --static --out ./site README.md    # writes the bundle to ./site
+```
+
+The bundle mirrors your source tree as `.html` files with relative links, so it works offline and can be zipped or moved.
 
 List all available themes:
 

@@ -13,8 +13,6 @@ use crate::theme::SyntaxTheme;
 enum RewriteMode {
     /// Rewrite images to `/local/{path}`. No link rewriting.
     Server,
-    /// Rewrite images to `file:///{base_dir}/{path}`. No link rewriting.
-    Static(PathBuf),
     /// Rewrite images to `/local/{dir}/{path}` and `.md` links to `/view/{dir}/{path}`.
     /// `file_dir` is the directory of the current file relative to `base_dir`.
     Directory { file_dir: PathBuf },
@@ -58,7 +56,6 @@ impl RewriteMode {
         let clean = url.strip_prefix("./").unwrap_or(url);
         match self {
             RewriteMode::Server => format!("/local/{clean}"),
-            RewriteMode::Static(base) => format!("file://{}", base.join(clean).display()),
             RewriteMode::Directory { file_dir } => {
                 let resolved = file_dir.join(clean);
                 let normalized = normalize_path(&resolved);
@@ -79,7 +76,7 @@ impl RewriteMode {
         let (path_part, fragment) = split_fragment(clean);
 
         match self {
-            RewriteMode::Server | RewriteMode::Static(_) => url.to_string(),
+            RewriteMode::Server => url.to_string(),
             RewriteMode::Directory { file_dir } => {
                 if path_part.ends_with(".md") || path_part.ends_with(".markdown") {
                     let resolved = file_dir.join(path_part);
@@ -172,20 +169,6 @@ pub fn render_source(markdown: &str, syntax_theme: Option<&SyntaxTheme>) -> Stri
     html.push_str(&highlighted);
     html.push_str("</code></pre>");
     html
-}
-
-/// Render markdown to HTML, rewriting relative image paths to absolute `file:///` URLs.
-pub fn render_static(
-    markdown: &str,
-    syntax_theme: Option<&SyntaxTheme>,
-    base_dir: &Path,
-) -> String {
-    render_with_mode(
-        markdown,
-        syntax_theme,
-        RewriteMode::Static(base_dir.to_path_buf()),
-    )
-    .0
 }
 
 fn render_with_mode(

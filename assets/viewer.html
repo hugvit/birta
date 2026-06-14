@@ -92,6 +92,7 @@
     var STATIC_MODE = {{STATIC_MODE}};
     var THEME_MODE = '{{THEME_MODE}}';
     var activeVariant = '{{ACTIVE_VARIANT}}';
+    var VARIANT_EXPLICIT = {{VARIANT_EXPLICIT}};
     var variants = {{VARIANTS_JSON}};
     var KEYBINDINGS = {{KEYBINDINGS_JSON}};
     var CURRENT_PATH = '{{CURRENT_PATH}}';
@@ -282,11 +283,13 @@
 
       // Restore variant from session (persists across navigation), fall back
       // to OS preference for dual-variant themes, then to server-rendered value.
+      // An explicit --light/--dark (or config theme.variant) wins over the OS
+      // preference, so skip the matchMedia fallback when VARIANT_EXPLICIT is set.
       var storedVariant = null;
       try { storedVariant = sessionStorage.getItem('birta-variant'); } catch(e) {}
       if (storedVariant === 'dark' || storedVariant === 'light') {
         activeVariant = storedVariant;
-      } else if (THEME_MODE === 'toggle' && window.matchMedia) {
+      } else if (!VARIANT_EXPLICIT && THEME_MODE === 'toggle' && window.matchMedia) {
         var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
         activeVariant = prefersDark ? 'dark' : 'light';
       }

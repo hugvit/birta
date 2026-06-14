@@ -19,6 +19,10 @@ pub struct PageOptions<'a> {
     pub raw_mode: bool,
     pub theme: &'a ResolvedTheme,
     pub theme_names: &'a [&'a str],
+    /// True when the variant was explicitly chosen via `--light`/`--dark` or
+    /// config `theme.variant`. When true, the browser must not override it with
+    /// the OS `prefers-color-scheme` preference.
+    pub variant_explicit: bool,
     pub static_mode: bool,
     pub keybindings_json: &'a str,
     pub current_path: Option<&'a str>,
@@ -81,6 +85,14 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
     // Active variant for the browser JS
     let active_variant = theme.active_variant.as_str();
 
+    // Whether the active variant was explicitly requested (gates the browser's
+    // OS-preference fallback so `--light`/`--dark` is honoured).
+    let variant_explicit = if opts.variant_explicit {
+        "true"
+    } else {
+        "false"
+    };
+
     // Theme dropdown items (for hot-swap)
     let theme_options: String = theme_names
         .iter()
@@ -117,6 +129,7 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
         .replace("{{THEME_MODE}}", theme_mode)
         .replace("{{THEME_ATTR}}", &theme_attr)
         .replace("{{ACTIVE_VARIANT}}", active_variant)
+        .replace("{{VARIANT_EXPLICIT}}", variant_explicit)
         .replace("{{ACTIVE_THEME}}", &theme.name)
         .replace("{{THEME_OPTIONS}}", &theme_options)
         .replace("{{VARIANTS_JSON}}", &variants_json)
@@ -172,6 +185,7 @@ mod tests {
             raw_mode: false,
             theme: &theme,
             theme_names: &["github"],
+            variant_explicit: false,
             static_mode: false,
             keybindings_json: "{}",
             current_path: None,
@@ -235,6 +249,7 @@ mod tests {
             raw_mode: false,
             theme,
             theme_names,
+            variant_explicit: false,
             static_mode,
             keybindings_json: "{}",
             current_path: None,
@@ -346,6 +361,48 @@ mod tests {
         assert!(
             page.contains("var THEME_MODE = 'fixed-light';"),
             "single light-only theme should produce fixed-light mode"
+        );
+    }
+
+    /// Build a page with explicit control over the `variant_explicit` flag.
+    fn render_with_explicit(variant_explicit: bool, theme: &ResolvedTheme) -> String {
+        render_page(&PageOptions {
+            filename: "test.md",
+            file_stats: "1 lines (1 loc) · 7 B",
+            content_html: "<p>test</p>",
+            source_html: None,
+            custom_css: None,
+            font_css: None,
+            show_header: true,
+            reading_mode: false,
+            raw_mode: false,
+            theme,
+            theme_names: &["github"],
+            variant_explicit,
+            static_mode: false,
+            keybindings_json: "{}",
+            current_path: None,
+        })
+    }
+
+    #[test]
+    fn render_page_variant_explicit_true() {
+        let theme = github_theme();
+        let page = render_with_explicit(true, &theme);
+        assert!(
+            page.contains("var VARIANT_EXPLICIT = true;"),
+            "explicit --light/--dark should set VARIANT_EXPLICIT to true so the \
+             browser does not override it with the OS preference"
+        );
+    }
+
+    #[test]
+    fn render_page_variant_explicit_false() {
+        let theme = github_theme();
+        let page = render_with_explicit(false, &theme);
+        assert!(
+            page.contains("var VARIANT_EXPLICIT = false;"),
+            "without an explicit variant the browser should fall back to OS preference"
         );
     }
 

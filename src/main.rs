@@ -166,6 +166,11 @@ async fn main() -> anyhow::Result<()> {
         theme.active_variant = birta::theme::Variant::Dark;
     }
 
+    // Whether the variant was explicitly requested (CLI flags or config
+    // `theme.variant`). When set, the browser must not override it with the OS
+    // `prefers-color-scheme` preference.
+    let variant_explicit = merged.light || merged.dark;
+
     let font_config = birta::config::FontConfig {
         body: merged.font_body,
         mono: merged.font_mono,
@@ -191,6 +196,7 @@ async fn main() -> anyhow::Result<()> {
             reading_mode: merged.reading_mode,
             raw_mode: merged.raw_mode,
             keybindings_json,
+            variant_explicit,
         };
         return birta::server::run_stdin(&markdown, opts).await;
     }
@@ -221,6 +227,7 @@ async fn main() -> anyhow::Result<()> {
                 raw_mode: merged.raw_mode,
                 no_open: merged.no_open,
                 keybindings_json: &keybindings_json,
+                variant_explicit,
             },
         );
     }
@@ -237,6 +244,7 @@ async fn main() -> anyhow::Result<()> {
         reading_mode: merged.reading_mode,
         raw_mode: merged.raw_mode,
         keybindings_json,
+        variant_explicit,
     };
     birta::server::run(file, opts).await
 }
@@ -250,6 +258,7 @@ struct StaticOptions<'a> {
     raw_mode: bool,
     no_open: bool,
     keybindings_json: &'a str,
+    variant_explicit: bool,
 }
 
 fn run_static(file: &std::path::Path, opts: StaticOptions<'_>) -> anyhow::Result<()> {
@@ -285,6 +294,7 @@ fn run_static(file: &std::path::Path, opts: StaticOptions<'_>) -> anyhow::Result
         raw_mode: opts.raw_mode,
         theme: opts.theme,
         theme_names: &[],
+        variant_explicit: opts.variant_explicit,
         static_mode: true,
         keybindings_json: opts.keybindings_json,
         current_path: None,

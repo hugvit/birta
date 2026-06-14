@@ -41,6 +41,8 @@ pub struct ServerOptions {
     pub reading_mode: bool,
     pub raw_mode: bool,
     pub keybindings_json: String,
+    /// Variant was explicitly chosen via `--light`/`--dark` or config.
+    pub variant_explicit: bool,
 }
 
 pub(crate) struct AppState {
@@ -70,6 +72,8 @@ pub(crate) struct AppState {
     pub(crate) reading_mode: bool,
     pub(crate) raw_mode: bool,
     pub(crate) keybindings_json: String,
+    /// Variant was explicitly chosen via `--light`/`--dark` or config.
+    pub(crate) variant_explicit: bool,
     /// Epoch seconds of the last HTTP request (prevents premature auto-shutdown).
     pub(crate) last_request: AtomicU64,
 }
@@ -146,6 +150,7 @@ pub async fn run_stdin(markdown: &str, opts: ServerOptions) -> anyhow::Result<()
         show_header: opts.show_header,
         reading_mode: opts.reading_mode,
         raw_mode: opts.raw_mode,
+        variant_explicit: opts.variant_explicit,
         keybindings_json: opts.keybindings_json,
         last_request: AtomicU64::new(now_secs()),
     });
@@ -224,6 +229,7 @@ pub async fn start(
         show_header: opts.show_header,
         reading_mode: opts.reading_mode,
         raw_mode: opts.raw_mode,
+        variant_explicit: opts.variant_explicit,
         keybindings_json: opts.keybindings_json,
         last_request: AtomicU64::new(now_secs),
     });
@@ -348,6 +354,7 @@ async fn index_handler(State(state): State<Arc<AppState>>) -> Response {
         raw_mode: state.raw_mode,
         theme,
         theme_names: &theme_names,
+        variant_explicit: state.variant_explicit,
         static_mode: false,
         keybindings_json: &state.keybindings_json,
         current_path: None,
@@ -427,6 +434,7 @@ async fn view_handler(Path(path): Path<String>, State(state): State<Arc<AppState
         raw_mode: state.raw_mode,
         theme,
         theme_names: &theme_names,
+        variant_explicit: state.variant_explicit,
         static_mode: false,
         keybindings_json: &state.keybindings_json,
         current_path: Some(&path),
@@ -802,6 +810,7 @@ mod tests {
             show_header: true,
             reading_mode: false,
             raw_mode: false,
+            variant_explicit: false,
             keybindings_json: "{}".to_string(),
             last_request: AtomicU64::new(0),
         })
@@ -883,6 +892,7 @@ mod tests {
             show_header: true,
             reading_mode: false,
             raw_mode: false,
+            variant_explicit: false,
             keybindings_json: "{}".to_string(),
             last_request: AtomicU64::new(0),
         });
@@ -1042,6 +1052,7 @@ mod tests {
             show_header: true,
             reading_mode: false,
             raw_mode: false,
+            variant_explicit: false,
             keybindings_json: "{}".to_string(),
             last_request: AtomicU64::new(0),
         });

@@ -33,9 +33,13 @@ struct Cli {
     #[arg(long, help_heading = "Server")]
     no_open: bool,
 
-    /// Render to a self-contained HTML file, open in browser, and exit
+    /// Render a self-contained HTML bundle (crawls linked files), open it, and exit
     #[arg(long = "static", help_heading = "Server")]
     static_mode: bool,
+
+    /// Output directory for --static [default: a temp birta-<name> folder]
+    #[arg(long, value_name = "DIR", help_heading = "Server")]
+    out: Option<PathBuf>,
 
     // -- Theme ----------------------------------------------------------------
     /// Theme name or path to .toml theme file
@@ -228,6 +232,7 @@ async fn main() -> anyhow::Result<()> {
                 no_open: merged.no_open,
                 keybindings_json: &keybindings_json,
                 variant_explicit,
+                out: cli.out.as_deref(),
             },
         );
     }
@@ -259,10 +264,10 @@ struct StaticOptions<'a> {
     no_open: bool,
     keybindings_json: &'a str,
     variant_explicit: bool,
+    out: Option<&'a std::path::Path>,
 }
 
 fn run_static(file: &std::path::Path, opts: StaticOptions<'_>) -> anyhow::Result<()> {
-    let markdown = std::fs::read_to_string(file)?;
     let base_dir = file
         .parent()
         .map(|p| {
@@ -274,43 +279,40 @@ fn run_static(file: &std::path::Path, opts: StaticOptions<'_>) -> anyhow::Result
         })
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    let syntax = opts.theme.active_data().syntax.as_ref();
-    let content_html = birta::render::render_static(&markdown, syntax, &base_dir);
-    let source_html = birta::render::render_source(&markdown, syntax);
-    let file_stats = birta::render::format_file_stats(&markdown);
-
-    let page = birta::template::render_page(&birta::template::PageOptions {
-        filename: &file
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "untitled".to_string()),
-        file_stats: &file_stats,
-        content_html: &content_html,
-        source_html: Some(&source_html),
-        custom_css: opts.custom_css,
-        font_css: opts.font_css,
-        show_header: opts.show_header,
-        reading_mode: opts.reading_mode,
-        raw_mode: opts.raw_mode,
-        theme: opts.theme,
-        theme_names: &[],
-        variant_explicit: opts.variant_explicit,
-        static_mode: true,
-        keybindings_json: opts.keybindings_json,
-        current_path: None,
-    });
-
-    let filename = file
+    let stem = file
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "untitled".to_string());
-    let out_path = std::env::temp_dir().join(format!("birta-{filename}.html"));
-    std::fs::write(&out_path, &page)?;
+    let out_dir = opts
+        .out
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("birta-{stem}")));
 
-    eprintln!("birta: wrote {}", out_path.display());
+    let result = birta::static_export::export_bundle(
+        file,
+        &base_dir,
+        &out_dir,
+        &birta::static_export::BundleOptions {
+            theme: opts.theme,
+            custom_css: opts.custom_css,
+            font_css: opts.font_css,
+            show_header: opts.show_header,
+            reading_mode: opts.reading_mode,
+            raw_mode: opts.raw_mode,
+            variant_explicit: opts.variant_explicit,
+            keybindings_json: opts.keybindings_json,
+        },
+    )?;
+
+    eprintln!(
+        "birta: wrote bundle to {} ({} page(s), {} asset(s))",
+        out_dir.display(),
+        result.pages,
+        result.assets
+    );
 
     if !opts.no_open
-        && let Err(e) = open::that(&out_path)
+        && let Err(e) = open::that(&result.entry_html)
     {
         eprintln!("birta: failed to open browser: {e}");
     }

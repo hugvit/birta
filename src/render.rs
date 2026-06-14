@@ -18,6 +18,39 @@ enum RewriteMode {
     /// Rewrite images to `/local/{dir}/{path}` and `.md` links to `/view/{dir}/{path}`.
     /// `file_dir` is the directory of the current file relative to `base_dir`.
     Directory { file_dir: PathBuf },
+    /// Multi-file static bundle: rewrite `.md`/`.markdown` links to relative `.html`
+    /// (position-invariant on a mirrored output tree) and leave images/assets as
+    /// relative URLs. Referenced paths are collected into `References` by the caller.
+    StaticBundle,
+}
+
+/// Relative URLs discovered while rendering in `StaticBundle` mode, used by the
+/// bundle crawler to know which pages to follow and which assets to copy.
+/// All entries are raw relative URLs with any `#fragment`/`?query` stripped.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct References {
+    /// Relative `.md`/`.markdown` links to other pages (to crawl).
+    pub md_links: Vec<String>,
+    /// Relative image/non-markdown links (to copy into the bundle).
+    pub assets: Vec<String>,
+}
+
+/// True if `path` ends with a markdown extension, case-insensitively.
+fn is_md_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".md") || lower.ends_with(".markdown")
+}
+
+/// Swap a trailing `.md`/`.markdown` (case-insensitive) extension for `.html`.
+/// `path` must already satisfy `is_md_path`.
+fn swap_md_to_html(path: &str) -> String {
+    let lower = path.to_ascii_lowercase();
+    let stem_len = if lower.ends_with(".markdown") {
+        path.len() - ".markdown".len()
+    } else {
+        path.len() - ".md".len()
+    };
+    format!("{}.html", &path[..stem_len])
 }
 
 impl RewriteMode {
@@ -31,6 +64,9 @@ impl RewriteMode {
                 let normalized = normalize_path(&resolved);
                 format!("/local/{}", normalized.display())
             }
+            // Keep the relative URL (query stripped); the asset is copied to the
+            // mirrored location in the bundle, so the relative src still resolves.
+            RewriteMode::StaticBundle => split_fragment(clean).0.to_string(),
         }
     }
 
@@ -53,13 +89,22 @@ impl RewriteMode {
                     url.to_string()
                 }
             }
+            // Mirrored tree: keep the relative link, swap `.md`→`.html`. Non-md
+            // links pass through (the file is copied as an asset).
+            RewriteMode::StaticBundle => {
+                if is_md_path(path_part) {
+                    format!("{}{fragment}", swap_md_to_html(path_part))
+                } else {
+                    url.to_string()
+                }
+            }
         }
     }
 }
 
 /// Render markdown to HTML, rewriting relative image paths to `/local/` server URLs.
 pub fn render(markdown: &str, syntax_theme: Option<&SyntaxTheme>) -> String {
-    render_with_mode(markdown, syntax_theme, RewriteMode::Server)
+    render_with_mode(markdown, syntax_theme, RewriteMode::Server).0
 }
 
 /// Render markdown to HTML with directory navigation support.
@@ -71,7 +116,14 @@ pub fn render_dir(
     file_relpath: &Path,
 ) -> String {
     let file_dir = file_relpath.parent().unwrap_or(Path::new("")).to_path_buf();
-    render_with_mode(markdown, syntax_theme, RewriteMode::Directory { file_dir })
+    render_with_mode(markdown, syntax_theme, RewriteMode::Directory { file_dir }).0
+}
+
+/// Render markdown to HTML for a multi-file static bundle: `.md` links become
+/// relative `.html`, images/assets stay relative. Returns the HTML and the set of
+/// relative URLs referenced (pages to crawl + assets to copy).
+pub fn render_bundle(markdown: &str, syntax_theme: Option<&SyntaxTheme>) -> (String, References) {
+    render_with_mode(markdown, syntax_theme, RewriteMode::StaticBundle)
 }
 
 /// Format file stats for the raw-mode file header, e.g. "215 lines (154 loc) · 5.25 KB".
@@ -133,13 +185,14 @@ pub fn render_static(
         syntax_theme,
         RewriteMode::Static(base_dir.to_path_buf()),
     )
+    .0
 }
 
 fn render_with_mode(
     markdown: &str,
     syntax_theme: Option<&SyntaxTheme>,
     mode: RewriteMode,
-) -> String {
+) -> (String, References) {
     let options = options(&mode);
     let adapter = match syntax_theme {
         Some(st) => highlight::adapter_with_theme(st),
@@ -149,6 +202,10 @@ fn render_with_mode(
 
     let arena = Arena::new();
     let root = parse_document(&arena, markdown, &options);
+
+    // Collect referenced relative URLs only for bundle export.
+    let collect = matches!(mode, RewriteMode::StaticBundle);
+    let mut refs = References::default();
 
     for node in root.descendants() {
         let mut data = node.data.borrow_mut();
@@ -166,18 +223,50 @@ fn render_with_mode(
             }
             // Rewrite relative image src= in raw HTML (not handled by image_url_rewriter)
             NodeValue::HtmlBlock(block) => {
-                block.literal = rewrite_html_img_srcs(&block.literal, &mode);
+                block.literal = rewrite_html_img_srcs(&block.literal, &mode, collect, &mut refs);
             }
             NodeValue::HtmlInline(raw) => {
-                *raw = rewrite_html_img_srcs(raw, &mode);
+                *raw = rewrite_html_img_srcs(raw, &mode, collect, &mut refs);
             }
+            // Collect markdown link/image targets for the bundle crawler.
+            NodeValue::Link(link) if collect => collect_link(&link.url, &mut refs),
+            NodeValue::Image(link) if collect => collect_asset(&link.url, &mut refs),
             _ => {}
         }
     }
 
     let mut html = String::new();
     format_html_with_plugins(root, &options, &mut html, &plugins).unwrap();
-    html
+    (html, refs)
+}
+
+/// Record a markdown link target: `.md`/`.markdown` → page to crawl, else asset.
+fn collect_link(url: &str, refs: &mut References) {
+    if !should_rewrite_link(url) {
+        return;
+    }
+    let clean = url.strip_prefix("./").unwrap_or(url);
+    let path_part = split_fragment(clean).0;
+    if path_part.is_empty() {
+        return;
+    }
+    if is_md_path(path_part) {
+        refs.md_links.push(path_part.to_string());
+    } else {
+        refs.assets.push(path_part.to_string());
+    }
+}
+
+/// Record a relative asset reference (image), with query/fragment stripped.
+fn collect_asset(url: &str, refs: &mut References) {
+    if !should_rewrite(url) {
+        return;
+    }
+    let clean = url.strip_prefix("./").unwrap_or(url);
+    let path_part = split_fragment(clean).0;
+    if !path_part.is_empty() {
+        refs.assets.push(path_part.to_string());
+    }
 }
 
 fn plugins(adapter: &SyntectAdapter) -> options::Plugins<'_> {
@@ -212,8 +301,11 @@ fn options(mode: &RewriteMode) -> Options<'static> {
         }
     }));
 
-    // Rewrite relative link hrefs for directory navigation
-    if matches!(mode, RewriteMode::Directory { .. }) {
+    // Rewrite relative link hrefs for directory navigation and bundle export
+    if matches!(
+        mode,
+        RewriteMode::Directory { .. } | RewriteMode::StaticBundle
+    ) {
         let link_mode = mode.clone();
         options.extension.link_url_rewriter =
             Some(Arc::new(move |url: &str| link_mode.rewrite_link(url)));
@@ -239,8 +331,14 @@ fn should_rewrite(src: &str) -> bool {
         && !src.starts_with('#')
 }
 
-/// Rewrite `src="..."` attributes in raw HTML `<img>` tags.
-fn rewrite_html_img_srcs(html: &str, mode: &RewriteMode) -> String {
+/// Rewrite `src="..."` attributes in raw HTML `<img>` tags. When `collect` is set
+/// (bundle mode), rewritten relative srcs are also recorded as assets to copy.
+fn rewrite_html_img_srcs(
+    html: &str,
+    mode: &RewriteMode,
+    collect: bool,
+    refs: &mut References,
+) -> String {
     let mut result = String::with_capacity(html.len());
     let mut rest = html;
 
@@ -250,6 +348,9 @@ fn rewrite_html_img_srcs(html: &str, mode: &RewriteMode) -> String {
         if let Some(end) = after_src.find('"') {
             let url = &after_src[..end];
             if should_rewrite(url) {
+                if collect {
+                    collect_asset(url, refs);
+                }
                 let rewritten = mode.rewrite_image(url);
                 result.push_str(&format!("src=\"{rewritten}\""));
             } else {
@@ -521,6 +622,120 @@ mod tests {
         assert!(
             !source.contains("data-line=\"2\""),
             "single line should not have line 2"
+        );
+    }
+
+    // --- bundle mode ---------------------------------------------------------
+
+    #[test]
+    fn render_bundle_swaps_md_to_html() {
+        let (html, refs) = render_bundle("[guide](docs/guide.md)", None);
+        assert!(
+            html.contains("href=\"docs/guide.html\""),
+            "should swap .md link to relative .html, got: {html}"
+        );
+        assert_eq!(refs.md_links, vec!["docs/guide.md".to_string()]);
+        assert!(refs.assets.is_empty());
+    }
+
+    #[test]
+    fn render_bundle_preserves_fragment_in_href() {
+        let (html, refs) = render_bundle("[s](../README.md#sec)", None);
+        assert!(
+            html.contains("href=\"../README.html#sec\""),
+            "should swap ext and keep fragment, got: {html}"
+        );
+        // Collected target has the fragment stripped.
+        assert_eq!(refs.md_links, vec!["../README.md".to_string()]);
+    }
+
+    #[test]
+    fn render_bundle_collects_image_assets() {
+        let (html, refs) = render_bundle("![img](img/photo.png)", None);
+        assert!(
+            html.contains("src=\"img/photo.png\""),
+            "image src should stay relative, got: {html}"
+        );
+        assert_eq!(refs.assets, vec!["img/photo.png".to_string()]);
+    }
+
+    #[test]
+    fn render_bundle_strips_image_query() {
+        let (html, refs) = render_bundle("![img](photo.png?v=2)", None);
+        assert!(
+            html.contains("src=\"photo.png\""),
+            "image src query should be stripped, got: {html}"
+        );
+        assert_eq!(refs.assets, vec!["photo.png".to_string()]);
+    }
+
+    #[test]
+    fn render_bundle_uppercase_md_extension_is_a_page() {
+        let (html, refs) = render_bundle("[g](Guide.MD)", None);
+        assert_eq!(
+            refs.md_links,
+            vec!["Guide.MD".to_string()],
+            "uppercase .MD should be treated as a page, not an asset"
+        );
+        assert!(refs.assets.is_empty());
+        assert!(
+            html.contains("href=\"Guide.html\""),
+            "uppercase .MD href should swap to .html, got: {html}"
+        );
+    }
+
+    #[test]
+    fn render_bundle_uppercase_markdown_extension_swaps() {
+        let (html, refs) = render_bundle("[g](Guide.MARKDOWN)", None);
+        assert_eq!(refs.md_links, vec!["Guide.MARKDOWN".to_string()]);
+        assert!(
+            html.contains("href=\"Guide.html\""),
+            "uppercase .MARKDOWN href should swap to .html, got: {html}"
+        );
+    }
+
+    #[test]
+    fn render_bundle_link_strips_query_and_fragment_in_target() {
+        let (html, refs) = render_bundle("[x](p.md?q=1#s)", None);
+        assert_eq!(
+            refs.md_links,
+            vec!["p.md".to_string()],
+            "collected target drops query/fragment"
+        );
+        assert!(
+            html.contains("href=\"p.html?q=1#s\""),
+            "href keeps query+fragment after ext swap, got: {html}"
+        );
+    }
+
+    #[test]
+    fn render_bundle_non_md_link_is_asset() {
+        let (html, refs) = render_bundle("[dl](file.zip)", None);
+        assert!(
+            html.contains("href=\"file.zip\""),
+            "non-md link href should be unchanged, got: {html}"
+        );
+        assert_eq!(refs.assets, vec!["file.zip".to_string()]);
+        assert!(refs.md_links.is_empty());
+    }
+
+    #[test]
+    fn render_bundle_collects_raw_html_img() {
+        let (_html, refs) = render_bundle("<img src=\"logo.png\">", None);
+        assert_eq!(refs.assets, vec!["logo.png".to_string()]);
+    }
+
+    #[test]
+    fn render_bundle_ignores_external_and_anchor() {
+        let (_html, refs) = render_bundle(
+            "[a](https://x.com) [b](#h) [c](mailto:a@b.c) ![d](data:image/png;base64,AAAA)",
+            None,
+        );
+        assert!(refs.md_links.is_empty(), "no md links expected");
+        assert!(
+            refs.assets.is_empty(),
+            "external/anchor/mailto/data must not be collected, got: {:?}",
+            refs.assets
         );
     }
 }

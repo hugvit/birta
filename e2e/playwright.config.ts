@@ -26,7 +26,7 @@ export default defineConfig({
     {
       name: "webkit",
       use: { browserName: "webkit" },
-      testMatch: /(selection|patch|review\/).*\.spec\.ts/,
+      testMatch: /(selection|patch|review\/|csp).*\.spec\.ts/,
     },
     ...(process.env.BIRTA_FF === "1"
       ? [{ name: "firefox", use: { browserName: "firefox" as const } }]

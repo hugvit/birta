@@ -1,0 +1,13 @@
+---
+source: tests/static_export_test.rs
+expression: "redacted.split(\"; \").collect::<Vec<_>>().join(\"\\n\")"
+---
+script-src 'sha256-[hash]' https://cdn.jsdelivr.net/npm/katex@0.16.21/ https://cdn.jsdelivr.net/npm/mermaid@11.17.2/
+style-src 'unsafe-inline' https:
+font-src https: data:
+img-src file: data: http: https: 'self'
+media-src file: http: https: 'self'
+base-uri 'none'
+form-action 'none'
+object-src 'none'
+frame-src https:

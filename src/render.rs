@@ -358,7 +358,8 @@ fn rewrite_html_img_srcs(
 }
 
 /// Keeps raw HTML from forging the viewer's own markup: `birta-*` tags render as text
-/// and `data-sourcepos` / `data-br-*` attributes become `data-x-*`.
+/// and `data-sourcepos` / `data-br-*` attributes become `data-x-*`. `http-equiv` becomes
+/// `data-x-http-equiv`, since a meta refresh or policy is beyond the page CSP's reach.
 fn neutralize_reserved(literal: &str) -> String {
     let mut out = String::with_capacity(literal.len());
     let mut rest = literal;
@@ -456,10 +457,10 @@ fn scan_tag(s: &str, name_start: usize, out: &mut String, copied: &mut usize) ->
         while i < b.len() && !is_space(b[i]) && !matches!(b[i], b'/' | b'>' | b'=') {
             i += 1;
         }
-        if is_reserved_attr(&s[attr_start..i]) {
+        if let Some(kept) = reserved_attr_kept(&s[attr_start..i]) {
             out.push_str(&s[*copied..attr_start]);
             out.push_str("data-x-");
-            *copied = attr_start + "data-".len();
+            *copied = attr_start + kept;
         }
         while i < b.len() && is_space(b[i]) {
             i += 1;
@@ -494,11 +495,17 @@ fn is_reserved_tag(after_lt: &str) -> bool {
         .is_some_and(|name| name.eq_ignore_ascii_case("birta-"))
 }
 
-fn is_reserved_attr(name: &str) -> bool {
-    name.eq_ignore_ascii_case("data-sourcepos")
+/// For a reserved attribute name, the offset from which the original name follows `data-x-`.
+fn reserved_attr_kept(name: &str) -> Option<usize> {
+    let data = name.eq_ignore_ascii_case("data-sourcepos")
         || name
             .get(..8)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data-br-"))
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data-br-"));
+    if data {
+        Some("data-".len())
+    } else {
+        name.eq_ignore_ascii_case("http-equiv").then_some(0)
+    }
 }
 
 fn should_rewrite_link(url: &str) -> bool {
@@ -992,6 +999,44 @@ mod tests {
             "reserved attrs not renamed:\n{}",
             bad.join("\n")
         );
+    }
+
+    #[test]
+    fn raw_html_http_equiv_is_renamed() {
+        let cases = [
+            "<meta http-equiv=\"refresh\" content=\"5\">",
+            "<META HTTP-EQUIV=refresh content=5>",
+            "<meta http-equiv = 'refresh' content='5'>",
+            "<meta\tHttp-Equiv=\"refresh\">",
+            "<div>\n<meta/http-equiv=\"refresh\">\n</div>",
+            "a <meta http-equiv=\"refresh\" content=\"5\"> b",
+            "<meta content=\"5\" http-equiv=\"refresh\">",
+        ];
+        let mut bad = Vec::new();
+        for md in cases {
+            for (name, html) in all_renders(md) {
+                let names = attr_names_with_value(&html, "refresh");
+                if names.is_empty() || names.iter().any(|n| n != "data-x-http-equiv") {
+                    bad.push(format!("{name}({md:?}): got {names:?}\n  {html}"));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "http-equiv not renamed:\n{}",
+            bad.join("\n")
+        );
+
+        for (name, html) in all_renders("<meta http-equiv>") {
+            assert!(html.contains("<meta data-x-http-equiv>"), "{name}: {html}");
+        }
+        // Only the exact attribute name is reserved
+        for (name, html) in all_renders("<meta xhttp-equiv=\"refresh\" data-http-equiv=\"r\">") {
+            assert!(
+                html.contains("<meta xhttp-equiv=\"refresh\" data-http-equiv=\"r\">"),
+                "{name}: {html}"
+            );
+        }
     }
 
     #[test]

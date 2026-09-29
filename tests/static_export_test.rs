@@ -296,3 +296,193 @@ fn bundle_handles_cyclic_links() {
     assert!(out.path().join("index.html").is_file());
     assert!(out.path().join("page.html").is_file());
 }
+
+const DOC_SCRIPT_BODY: &str = "window.pwned=1";
+
+/// Base64 SHA-256 from `openssl`, an oracle independent of birta's hashing.
+fn sha256_b64(bytes: &[u8]) -> String {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("sh")
+        .args(["-c", "openssl dgst -sha256 -binary | openssl base64 -A"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(bytes).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+fn unescape(s: &str) -> String {
+    s.replace("&#39;", "'")
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&")
+}
+
+/// The CSP `<meta>` value; panics unless it is the first element in `<head>` and the only one.
+fn csp_meta(page: &str) -> String {
+    let head = page.find("<head>").expect("no <head>") + "<head>".len();
+    let first = page[head..].trim_start();
+    let open = "<meta http-equiv=\"Content-Security-Policy\" content=\"";
+    assert!(
+        first.starts_with(open),
+        "CSP meta is not first in <head>: {}",
+        &first[..first.len().min(200)]
+    );
+    assert_eq!(
+        page.to_ascii_lowercase()
+            .matches("http-equiv=\"content-security-policy\"")
+            .count(),
+        1,
+        "want one CSP meta"
+    );
+    let value = &first[open.len()..];
+    unescape(&value[..value.find('"').unwrap()])
+}
+
+/// Sources of `name`, without the directive name.
+fn sources<'a>(csp: &'a str, name: &str) -> Vec<&'a str> {
+    let directive = csp
+        .split(';')
+        .map(str::trim)
+        .find(|d| d.split_whitespace().next() == Some(name))
+        .unwrap_or_else(|| panic!("no {name}: {csp}"));
+    directive.split_whitespace().skip(1).collect()
+}
+
+/// `(open tag, body)` of every `<script>` in the page.
+fn scripts(page: &str) -> Vec<(&str, &str)> {
+    page.match_indices("<script")
+        .map(|(i, _)| {
+            let body = i + page[i..].find('>').unwrap() + 1;
+            let end = body + page[body..].find("</script>").unwrap();
+            (&page[i..body], &page[body..end])
+        })
+        .collect()
+}
+
+fn csp_bundle() -> (tempfile::TempDir, String, String) {
+    let src = tempdir().unwrap();
+    let base = src.path();
+    write(
+        &base.join("index.md"),
+        &format!("# Index\n\n[a](docs/a.md)\n\n<script>{DOC_SCRIPT_BODY}</script>\n"),
+    );
+    write(
+        &base.join("docs/a.md"),
+        "# A\n\n```mermaid\ngraph TD\n  A --> B\n```\n",
+    );
+    let out = tempdir().unwrap();
+    let theme = test_theme();
+    export_bundle(&base.join("index.md"), base, out.path(), &opts(&theme)).unwrap();
+    let index = fs::read_to_string(out.path().join("index.html")).unwrap();
+    let a = fs::read_to_string(out.path().join("docs/a.html")).unwrap();
+    (out, index, a)
+}
+
+#[test]
+fn bundle_csp_meta_allows_only_the_viewer_script_and_pinned_cdn() {
+    let (_out, index, a) = csp_bundle();
+    let csp = csp_meta(&index);
+    assert_eq!(csp, csp_meta(&a), "every page shares one policy");
+
+    let script_src = sources(&csp, "script-src");
+    for banned in [
+        "'unsafe-inline'",
+        "'unsafe-eval'",
+        "'strict-dynamic'",
+        "'self'",
+        "*",
+        "http:",
+        "https:",
+        "data:",
+        "file:",
+    ] {
+        assert!(!script_src.contains(&banned), "{banned} in {csp}");
+    }
+    assert!(
+        !script_src.iter().any(|s| s.starts_with("'nonce-")),
+        "a static nonce is public: {csp}"
+    );
+
+    // The hash covers the template's inline script bytes, and never the doc's.
+    let inline: Vec<&str> = scripts(&index)
+        .into_iter()
+        .filter(|(tag, _)| !tag.contains(" src=") && !tag.contains("application/json"))
+        .map(|(_, body)| body)
+        .filter(|body| *body != DOC_SCRIPT_BODY)
+        .collect();
+    assert!(!inline.is_empty(), "no viewer script found");
+    for body in &inline {
+        let hash = format!("'sha256-{}'", sha256_b64(body.as_bytes()));
+        assert!(script_src.contains(&hash.as_str()), "{hash} not in {csp}");
+    }
+    let doc_hash = format!("'sha256-{}'", sha256_b64(DOC_SCRIPT_BODY.as_bytes()));
+    assert!(
+        !script_src.contains(&doc_hash.as_str()),
+        "doc script allowed"
+    );
+    assert_eq!(
+        script_src
+            .iter()
+            .filter(|s| s.starts_with("'sha256-"))
+            .count(),
+        inline.len(),
+        "hashes beyond the template's inline scripts: {csp}"
+    );
+
+    // Host sources are exact-release path prefixes, and cover every CDN script.
+    let hosts: Vec<&str> = script_src
+        .iter()
+        .copied()
+        .filter(|s| !s.starts_with('\''))
+        .collect();
+    for host in &hosts {
+        let package = host
+            .strip_prefix("https://cdn.jsdelivr.net/npm/")
+            .and_then(|p| p.strip_suffix('/'))
+            .unwrap_or_else(|| panic!("not a jsdelivr package prefix: {host}"));
+        let version = package.split_once('@').map_or("", |(_, v)| v);
+        assert!(
+            version.split('.').count() == 3
+                && version
+                    .split('.')
+                    .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())),
+            "{host} is not an exact release"
+        );
+    }
+    let external: Vec<&str> = scripts(&index)
+        .into_iter()
+        .filter_map(|(tag, _)| {
+            let start = tag.find(" src=\"")? + 6;
+            Some(&tag[start..start + tag[start..].find('"')?])
+        })
+        .collect();
+    assert!(external.len() >= 2, "{external:?}");
+    for src in external {
+        assert!(
+            hosts.iter().any(|h| src.starts_with(h)),
+            "{src} is not allowed by {csp}"
+        );
+    }
+}
+
+#[test]
+fn bundle_csp_meta_snapshot() {
+    let (_out, index, _) = csp_bundle();
+    let csp = csp_meta(&index);
+    let redacted = csp
+        .split(' ')
+        .map(|s| {
+            if s.starts_with("'sha256-") {
+                "'sha256-[hash]'"
+            } else {
+                s
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    insta::assert_snapshot!(redacted.split("; ").collect::<Vec<_>>().join("\n"));
+}

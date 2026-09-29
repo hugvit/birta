@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -17,7 +17,7 @@ use tokio::sync::{Notify, RwLock, broadcast};
 use crate::doc_write::{self, Expect, Via, WriteErr, WriteTarget};
 use crate::paths::{Access, FileKind, Roots};
 use crate::rev::Rev;
-use crate::security::{HostGuard, base_headers, guard, sandbox_headers};
+use crate::security::{HostGuard, Nonce, base_headers, guard, page_headers, sandbox_headers};
 use crate::theme::{ResolvedTheme, ThemeRegistry, Variant};
 use crate::{render, template, watcher};
 
@@ -381,7 +381,8 @@ async fn auto_shutdown_loop(state: Arc<AppState>) {
 fn router(state: Arc<AppState>) -> Router {
     let pages = Router::new()
         .route("/", get(index_handler))
-        .route("/view/{*path}", get(view_handler));
+        .route("/view/{*path}", get(view_handler))
+        .layer(from_fn(page_headers));
     let frags = Router::new()
         .route("/render/{*path}", get(render_handler))
         .route("/local/{*path}", get(local_file_handler))
@@ -414,7 +415,10 @@ async fn favicon_handler() -> Response {
     ([(header::CONTENT_TYPE, "image/png")], FAVICON).into_response()
 }
 
-async fn index_handler(State(state): State<Arc<AppState>>) -> Response {
+async fn index_handler(
+    State(state): State<Arc<AppState>>,
+    Extension(nonce): Extension<Nonce>,
+) -> Response {
     if let Some(relpath) = &state.initial_relpath {
         return Redirect::temporary(&format!("/view/{relpath}")).into_response();
     }
@@ -442,7 +446,7 @@ async fn index_handler(State(state): State<Arc<AppState>>) -> Response {
         static_mode: false,
         keybindings_json: &state.keybindings_json,
         current_path: None,
-        nonce: "",
+        nonce: nonce.as_str(),
         extra_boot: None,
         rev: None,
     });
@@ -477,7 +481,11 @@ async fn read_doc(state: &AppState, rel: &str) -> Result<(PathBuf, Vec<u8>), Res
 }
 
 /// Render and serve a markdown file from the served directory.
-async fn view_handler(Path(path): Path<String>, State(state): State<Arc<AppState>>) -> Response {
+async fn view_handler(
+    Path(path): Path<String>,
+    State(state): State<Arc<AppState>>,
+    Extension(nonce): Extension<Nonce>,
+) -> Response {
     state.last_request.store(now_secs(), Ordering::Relaxed);
 
     let (canonical, bytes) = match read_doc(&state, &path).await {
@@ -522,7 +530,7 @@ async fn view_handler(Path(path): Path<String>, State(state): State<Arc<AppState
         static_mode: false,
         keybindings_json: &state.keybindings_json,
         current_path: Some(&path),
-        nonce: "",
+        nonce: nonce.as_str(),
         extra_boot: None,
         rev: Some(rev.as_str()),
     });
@@ -2504,5 +2512,316 @@ mod tests {
             assert_eq!(sync(&state, &mut ws, SENTINEL).await.len(), 0);
         })
         .await;
+    }
+
+    const DOC_SCRIPT: &str = "<script>window.pwned=1</script>";
+    const DOC_MD: &[u8] = b"# Doc\n\n<script>window.pwned=1</script>\n";
+
+    /// Serve mode with `/view/doc.md`, and stdin mode with `/`; both render `DOC_SCRIPT`.
+    fn page_apps() -> (Site, [(Router, &'static str); 2]) {
+        let site = Site::new(&[("root/doc.md", DOC_MD)]);
+        let serve = router(site.state());
+        let stdin = router(test_state(|init| {
+            init.html = format!("<p>hello</p>\n{DOC_SCRIPT}");
+        }));
+        (site, [(serve, "/view/doc.md"), (stdin, "/")])
+    }
+
+    /// The page's single CSP header and its body.
+    async fn page_with_csp(app: &Router, req: axum::http::Request<Body>) -> (String, String) {
+        let response = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), 200);
+        let csp: Vec<String> = response
+            .headers()
+            .get_all(header::CONTENT_SECURITY_POLICY)
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .collect();
+        let [csp] = <[String; 1]>::try_from(csp)
+            .unwrap_or_else(|all| panic!("want exactly one CSP header, got {all:?}"));
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (csp, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    fn directive<'a>(csp: &'a str, name: &str) -> Option<&'a str> {
+        csp.split(';')
+            .map(str::trim)
+            .find(|d| d.split_whitespace().next() == Some(name))
+    }
+
+    /// The value of the single `'nonce-…'` source in `script-src`.
+    fn nonce_of(csp: &str) -> &str {
+        let script = directive(csp, "script-src").unwrap_or_else(|| panic!("no script-src: {csp}"));
+        let nonces: Vec<&str> = script
+            .split_whitespace()
+            .filter_map(|s| s.strip_prefix("'nonce-")?.strip_suffix('\''))
+            .collect();
+        assert_eq!(nonces.len(), 1, "want one nonce source: {script}");
+        nonces[0]
+    }
+
+    /// Open tags of every `<script` in the page.
+    fn script_tags(page: &str) -> Vec<&str> {
+        page.match_indices("<script")
+            .map(|(i, _)| &page[i..i + page[i..].find('>').unwrap() + 1])
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn pages_carry_a_nonce_csp_matching_their_scripts() {
+        let (_site, apps) = page_apps();
+        for (app, uri) in &apps {
+            let (csp, page) = page_with_csp(app, get(uri)).await;
+            assert!(!csp.contains("sandbox"), "{uri}: {csp}");
+            let script_src: Vec<&str> = directive(&csp, "script-src")
+                .unwrap_or_else(|| panic!("{uri}: no script-src: {csp}"))
+                .split_whitespace()
+                .collect();
+            assert!(script_src.contains(&"'strict-dynamic'"), "{uri}: {csp}");
+            for banned in [
+                "'unsafe-inline'",
+                "'unsafe-eval'",
+                "'self'",
+                "*",
+                "http:",
+                "https:",
+                "data:",
+            ] {
+                assert!(!script_src.contains(&banned), "{uri}: {banned} in {csp}");
+            }
+
+            // CSP base64-value grammar, carrying at least 128 bits.
+            let nonce = nonce_of(&csp);
+            let digits = nonce.trim_end_matches('=');
+            assert!(nonce.len() - digits.len() <= 2, "{uri}: {nonce}");
+            assert!(
+                digits
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"+/-_".contains(&b)),
+                "{uri}: not base64: {nonce}"
+            );
+            assert!(digits.len() >= 22, "{uri}: under 128 bits: {nonce}");
+
+            let attr = format!("nonce=\"{nonce}\"");
+            let tags = script_tags(&page);
+            let (doc, template): (Vec<&str>, Vec<&str>) =
+                tags.iter().partition(|t| **t == "<script>");
+            assert_eq!(
+                doc.len(),
+                1,
+                "{uri}: doc script not rendered once: {tags:?}"
+            );
+            let missing: Vec<&&str> = template.iter().filter(|t| !t.contains(&attr)).collect();
+            assert!(
+                missing.is_empty(),
+                "{uri}: scripts without {attr}: {missing:?}"
+            );
+            assert!(template.len() >= 4, "{uri}: {template:?}");
+            assert_eq!(
+                page.matches(nonce).count(),
+                template.len(),
+                "{uri}: the nonce appears outside the template's script tags"
+            );
+            assert!(
+                !page
+                    .to_ascii_lowercase()
+                    .contains("http-equiv=\"content-security-policy\""),
+                "{uri}: served pages get the header, not the static meta"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn page_nonce_is_fresh_per_request() {
+        let (_site, apps) = page_apps();
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..20 {
+            let (app, uri) = &apps[i % 2];
+            let (csp, page) = page_with_csp(app, get(uri)).await;
+            let nonce = nonce_of(&csp).to_string();
+            assert!(
+                page.contains(&format!("nonce=\"{nonce}\"")),
+                "{uri}: body does not carry the header nonce {nonce}"
+            );
+            assert!(seen.insert(nonce.clone()), "{uri}: nonce repeated: {nonce}");
+        }
+    }
+
+    #[tokio::test]
+    async fn page_csp_connect_src_is_the_request_host() {
+        let (_site, apps) = page_apps();
+        for host in ["localhost:9999", "127.0.0.1:3456", "localhost"] {
+            for (app, uri) in &apps {
+                let req = raw_request("GET", uri, &[("host", host)]);
+                let (csp, _) = page_with_csp(app, req).await;
+                assert_eq!(
+                    directive(&csp, "connect-src"),
+                    Some(format!("connect-src 'self' ws://{host}").as_str()),
+                    "{uri} via {host}: {csp}"
+                );
+            }
+        }
+
+        // The Host reaches the header only after the guard has validated it.
+        for (app, uri) in &apps {
+            let req = raw_request("GET", uri, &[("host", "localhost:1; script-src *")]);
+            let response = app.clone().oneshot(req).await.unwrap();
+            assert_ne!(response.status(), 200, "{uri}");
+            assert!(
+                response
+                    .headers()
+                    .get(header::CONTENT_SECURITY_POLICY)
+                    .is_none_or(|v| !v.to_str().unwrap().contains("script-src *")),
+                "{uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn doc_cannot_borrow_page_nonce() {
+        let borrow = "<script nonce=\"{{NONCE}}\">window.pwned=1</script>";
+        let md = format!("# Doc\n\n{borrow}\n");
+        let site = Site::new(&[("root/doc.md", md.as_bytes())]);
+        let serve = router(site.state());
+        let stdin = router(test_state(|init| {
+            init.html = format!("<p>hello</p>\n{borrow}")
+        }));
+        for (app, uri) in [(serve, "/view/doc.md"), (stdin, "/")] {
+            let (csp, page) = page_with_csp(&app, get(uri)).await;
+            let nonce = nonce_of(&csp);
+            assert!(page.contains(borrow), "{uri}: doc tag was rewritten");
+            let template = script_tags(&page)
+                .into_iter()
+                .filter(|t| !t.contains("{{NONCE}}"))
+                .count();
+            assert_eq!(
+                page.matches(nonce).count(),
+                template,
+                "{uri}: the doc got the page nonce"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn page_csp_ignores_forwarded_host() {
+        let (_site, apps) = page_apps();
+        for forwarded in [
+            ("x-forwarded-host", "evil.example:1; script-src *"),
+            ("forwarded", "host=evil.example"),
+            ("x-forwarded-proto", "https"),
+        ] {
+            for (app, uri) in &apps {
+                let req = raw_request("GET", uri, &[("host", LOCAL_HOST), forwarded]);
+                let (csp, _) = page_with_csp(app, req).await;
+                assert_eq!(
+                    directive(&csp, "connect-src"),
+                    Some("connect-src 'self' ws://127.0.0.1:1"),
+                    "{uri} with {forwarded:?}: {csp}"
+                );
+                assert!(!csp.contains("evil"), "{uri}: {csp}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn page_nonce_is_unpredictable() {
+        let (_site, apps) = page_apps();
+        let mut nonces = Vec::new();
+        for i in 0..32 {
+            let (app, uri) = &apps[i % 2];
+            let (csp, _) = page_with_csp(app, get(uri)).await;
+            nonces.push(nonce_of(&csp).to_string());
+        }
+        assert!(
+            nonces.iter().all(|n| n.len() == nonces[0].len()),
+            "{nonces:?}"
+        );
+        // A counter or clock leaves leading positions fixed across requests.
+        for pos in 0..21 {
+            let values: std::collections::HashSet<u8> =
+                nonces.iter().map(|n| n.as_bytes()[pos]).collect();
+            assert!(values.len() >= 2, "position {pos} never varies: {nonces:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn every_html_response_carries_a_csp() {
+        let site = local_site();
+        let serve = router(site.state());
+        let stdin = router(test_state(|_| {}));
+        let mut targets: Vec<(&str, &str)> = ROUTES.to_vec();
+        targets.extend([
+            ("GET", "/view/doc.md"),
+            ("GET", "/view/missing.md"),
+            ("GET", "/view/notes.txt"),
+            ("GET", "/view/.git/x.md"),
+            ("GET", "/render/doc.md"),
+            ("GET", "/render/doc.md?mode=source"),
+            ("GET", "/render/missing.md"),
+            ("GET", "/local/pic.svg"),
+            ("GET", "/local/missing.png"),
+            ("GET", "/not-a-route"),
+            ("POST", "/"),
+        ]);
+        let mut bad = Vec::new();
+        let mut html_seen = 0;
+        for (mode, app) in [("serve", &serve), ("stdin", &stdin)] {
+            for (method, uri) in &targets {
+                let response = app.clone().oneshot(request(method, uri)).await.unwrap();
+                let headers = response.headers();
+                let is_html = headers
+                    .get(header::CONTENT_TYPE)
+                    .is_some_and(|v| v.to_str().unwrap().starts_with("text/html"));
+                if !is_html {
+                    continue;
+                }
+                html_seen += 1;
+                let csp: Vec<&str> = headers
+                    .get_all(header::CONTENT_SECURITY_POLICY)
+                    .iter()
+                    .map(|v| v.to_str().unwrap())
+                    .collect();
+                let ok = match csp.as_slice() {
+                    [one] => *one == crate::security::SANDBOX_CSP || one.contains("'nonce-"),
+                    _ => false,
+                };
+                if !ok {
+                    bad.push(format!("{mode} {method} {uri}: {csp:?}"));
+                }
+            }
+        }
+        assert!(html_seen >= 4, "too few HTML responses to mean anything");
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    #[tokio::test]
+    async fn page_csp_leaves_ipv6_hosts_to_self() {
+        // Browsers reject an IPv6 literal as a CSP source, so only 'self' can match it.
+        let (_site, apps) = page_apps();
+        for host in ["[::1]:1", "[::1]", "[::1]:3456"] {
+            for (app, uri) in &apps {
+                let req = raw_request("GET", uri, &[("host", host)]);
+                let (csp, _) = page_with_csp(app, req).await;
+                assert_eq!(
+                    directive(&csp, "connect-src"),
+                    Some("connect-src 'self'"),
+                    "{uri} via {host}: {csp}"
+                );
+                assert!(!csp.contains("ws://["), "{uri} via {host}: {csp}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn page_csp_snapshot() {
+        let (_site, apps) = page_apps();
+        let mut policies = Vec::new();
+        for (app, uri) in &apps {
+            let (csp, _) = page_with_csp(app, get(uri)).await;
+            let nonce = nonce_of(&csp).to_string();
+            policies.push(csp.replace(&nonce, "[nonce]"));
+        }
+        assert_eq!(policies[0], policies[1], "serve and stdin pages differ");
+        insta::assert_snapshot!(policies[0].split("; ").collect::<Vec<_>>().join("\n"));
     }
 }

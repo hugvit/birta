@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en" {{THEME_ATTR}}>
 <head>
+  {{CSP_META}}
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{FILENAME}} — birta</title>
@@ -13,10 +14,10 @@
   <style id="theme-vars">{{THEME_VARS_CSS}}</style>
   <style>{{FONT_CSS}}</style>
   {{CUSTOM_CSS}}
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css" crossorigin="anonymous">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css" integrity="sha384-zh0CIslj+VczCZtlzBcjt5ppRcsAmDnRem7ESsYwWwg3m/OaJ2l4x7YBZl9Kxxib" crossorigin="anonymous">
   <script type="application/json" id="birta-boot" nonce="{{NONCE}}">{{BOOT_JSON}}</script>
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js" crossorigin="anonymous" nonce="{{NONCE}}"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js" nonce="{{NONCE}}"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js" integrity="sha384-Rma6DA2IPUwhNxmrB/7S3Tno0YY7sFu9WSYMCuulLhIqYSGZ2gKCJWIqhBWqMQfh" crossorigin="anonymous" nonce="{{NONCE}}"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/mermaid@11.17.2/dist/mermaid.min.js" integrity="sha384-EOXBFmc3gx5mb+vn0vPvvGqACToJD24hhacX5Yx+8NUUQrHIle/Qi5Bg9o3zKwW2" crossorigin="anonymous" nonce="{{NONCE}}"></script>
 </head>
 <body class="{{BODY_CLASS}}">
   <header class="header{{HEADER_CLASS}}">
@@ -417,7 +418,7 @@
       if (typeof mermaid === 'undefined') return;
       if (mermaidReady) return;
       var theme = activeVariant === 'dark' ? 'dark' : 'default';
-      mermaid.initialize({ startOnLoad: false, theme: theme });
+      mermaid.initialize({ startOnLoad: false, theme: theme, securityLevel: 'strict' });
       mermaidReady = true;
     }
 

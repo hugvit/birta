@@ -1,3 +1,9 @@
+use std::sync::OnceLock;
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use sha2::{Digest, Sha256};
+
 use crate::security::{html_escape_attr, json_for_script};
 use crate::theme::ResolvedTheme;
 
@@ -7,6 +13,38 @@ const PAGE_CSS: &str = include_str!("../assets/page.css");
 const SYNTAX_CSS: &str = include_str!("../assets/syntax.css");
 const ALERTS_CSS: &str = include_str!("../assets/alerts.css");
 const THEME_OVERRIDES: &str = include_str!("../assets/theme-overrides.css");
+
+/// Path prefixes of the pinned CDN releases `viewer.html` loads.
+const KATEX_CDN: &str = "https://cdn.jsdelivr.net/npm/katex@0.16.21/";
+const MERMAID_CDN: &str = "https://cdn.jsdelivr.net/npm/mermaid@11.17.2/";
+
+/// Policy for exported pages. There is no server to send a header or a fresh nonce,
+/// so the viewer script is allowed by hash and the CDN by exact release.
+fn static_csp() -> &'static str {
+    static CSP: OnceLock<String> = OnceLock::new();
+    CSP.get_or_init(|| {
+        let hash = STANDARD.encode(Sha256::digest(viewer_script().as_bytes()));
+        format!(
+            "script-src 'sha256-{hash}' {KATEX_CDN} {MERMAID_CDN}; \
+             style-src 'unsafe-inline' https:; font-src https: data:; \
+             img-src file: data: http: https: 'self'; media-src file: http: https: 'self'; \
+             base-uri 'none'; form-action 'none'; object-src 'none'; frame-src https:"
+        )
+    })
+}
+
+/// Body of the viewer's inline script, which holds no placeholders and so is also its filled form.
+fn viewer_script() -> &'static str {
+    let open = "<script nonce=\"{{NONCE}}\">";
+    let start = VIEWER_HTML
+        .find(open)
+        .expect("viewer.html has no inline script")
+        + open.len();
+    let len = VIEWER_HTML[start..]
+        .find("</script>")
+        .expect("unclosed inline script");
+    &VIEWER_HTML[start..start + len]
+}
 
 pub struct PageOptions<'a> {
     pub filename: &'a str,
@@ -115,9 +153,19 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
         "extra": opts.extra_boot,
     }));
 
+    let csp_meta = if opts.static_mode {
+        format!(
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"{}\">",
+            html_escape_attr(static_csp())
+        )
+    } else {
+        String::new()
+    };
+
     fill_template(
         VIEWER_HTML,
         &[
+            ("CSP_META", &csp_meta),
             ("GITHUB_CSS", GITHUB_CSS),
             ("THEME_OVERRIDES", THEME_OVERRIDES),
             ("PAGE_CSS", PAGE_CSS),
@@ -983,5 +1031,121 @@ mod tests {
             ..base_opts(&theme)
         });
         insta::assert_snapshot!(boot_raw(&page));
+    }
+
+    /// Value of `name="…"` in an open tag.
+    fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+        let start = tag.find(&format!(" {name}=\""))? + name.len() + 3;
+        Some(&tag[start..start + tag[start..].find('"')?])
+    }
+
+    #[test]
+    fn cdn_scripts_are_pinned_with_sri() {
+        let theme = github_theme();
+        let page = render_page(&base_opts(&theme));
+        let external: Vec<&str> = scripts(&page)
+            .into_iter()
+            .map(|(tag, _)| tag)
+            .filter(|tag| tag.contains(" src="))
+            .collect();
+        assert!(
+            external.len() >= 2,
+            "expected KaTeX and mermaid: {external:?}"
+        );
+        let mut names = Vec::new();
+        for tag in external {
+            let src = attr(tag, "src").unwrap();
+            let package = src
+                .strip_prefix("https://cdn.jsdelivr.net/npm/")
+                .and_then(|rest| rest.split('/').next())
+                .unwrap_or_else(|| panic!("not a jsdelivr npm path: {src}"));
+            let (name, version) = package.split_once('@').expect("unversioned package");
+            let parts: Vec<&str> = version.split('.').collect();
+            assert!(
+                parts.len() == 3
+                    && parts
+                        .iter()
+                        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())),
+                "{src} is not pinned to an exact release"
+            );
+            let integrity = attr(tag, "integrity").unwrap_or_else(|| panic!("no SRI: {tag}"));
+            let digest = integrity.strip_prefix("sha384-").unwrap_or("");
+            assert!(
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/'),
+                "not a sha384 SRI: {tag}"
+            );
+            assert_eq!(attr(tag, "crossorigin"), Some("anonymous"), "{tag}");
+            names.push((name, parts[0]));
+        }
+        assert!(names.contains(&("katex", "0")), "{names:?}");
+        assert!(names.contains(&("mermaid", "11")), "{names:?}");
+    }
+
+    #[test]
+    fn cdn_stylesheets_are_pinned_with_sri() {
+        let theme = github_theme();
+        let page = render_page(&base_opts(&theme));
+        let links: Vec<&str> = page
+            .match_indices("<link")
+            .map(|(i, _)| &page[i..i + page[i..].find('>').unwrap() + 1])
+            .filter(|tag| attr(tag, "href").is_some_and(|h| h.starts_with("https:")))
+            .collect();
+        assert!(!links.is_empty(), "expected the KaTeX stylesheet");
+        for tag in links {
+            let href = attr(tag, "href").unwrap();
+            assert!(
+                href.starts_with("https://cdn.jsdelivr.net/npm/katex@0.16.21/"),
+                "{href}"
+            );
+            let digest = attr(tag, "integrity")
+                .and_then(|i| i.strip_prefix("sha384-"))
+                .unwrap_or_else(|| panic!("no sha384 SRI: {tag}"));
+            assert!(
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/'),
+                "not a sha384 SRI: {tag}"
+            );
+            assert_eq!(attr(tag, "crossorigin"), Some("anonymous"), "{tag}");
+        }
+    }
+
+    #[test]
+    fn static_hash_covers_the_whole_filled_viewer_script() {
+        assert!(
+            !viewer_script().contains("{{"),
+            "the hash would cover unfilled bytes"
+        );
+        let theme = github_theme();
+        let page = render_page(&PageOptions {
+            static_mode: true,
+            ..base_opts(&theme)
+        });
+        assert_eq!(executable_inline(&page), [viewer_script()]);
+    }
+
+    #[test]
+    fn mermaid_runs_at_strict_security_level() {
+        let theme = github_theme();
+        let page = render_page(&base_opts(&theme));
+        let inline = executable_inline(&page).concat();
+        let calls: Vec<&str> = inline
+            .match_indices("mermaid.initialize(")
+            .map(|(i, _)| {
+                let args = &inline[i..];
+                &args[..args.find(");").expect("unclosed initialize call")]
+            })
+            .collect();
+        assert!(!calls.is_empty(), "mermaid.initialize is never called");
+        for call in calls {
+            assert!(call.contains("securityLevel: 'strict'"), "{call}");
+        }
+        for weaker in ["'loose'", "\"loose\"", "'antiscript'", "\"antiscript\""] {
+            assert!(!page.contains(weaker), "{weaker} in the page");
+        }
     }
 }

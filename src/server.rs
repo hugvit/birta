@@ -17,7 +17,7 @@ use crate::theme::{ResolvedTheme, ThemeRegistry, Variant};
 use crate::{render, template, watcher};
 
 /// A content update broadcast from the watcher or theme change.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct ContentUpdate {
     pub(crate) relpath: String,
     pub(crate) rendered_html: String,
@@ -25,7 +25,23 @@ pub(crate) struct ContentUpdate {
     pub(crate) file_stats: String,
 }
 
+/// An outbound event fanned out to every WebSocket connection.
+#[derive(Clone, Debug)]
+pub(crate) enum WsEvent {
+    Content(ContentUpdate),
+    /// Ready-to-send JSON (e.g. `theme_update` messages).
+    Raw(Arc<str>),
+    Scroll(u32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Mode {
+    Stdin,
+    Serve,
+}
+
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
+const HUB_CAPACITY: usize = 64;
 const FAVICON: &[u8] = include_bytes!("../assets/favicon.png");
 
 /// Options for starting the server.
@@ -46,6 +62,11 @@ pub struct ServerOptions {
 }
 
 pub(crate) struct AppState {
+    /// Bound port, from the listener rather than the requested (possibly 0) port.
+    #[cfg_attr(not(test), expect(dead_code, reason = "not read by any handler yet"))]
+    pub(crate) port: u16,
+    #[cfg_attr(not(test), expect(dead_code, reason = "not read by any handler yet"))]
+    pub(crate) mode: Mode,
     pub(crate) base_dir: PathBuf,
     pub(crate) source_file: Option<PathBuf>,
     pub(crate) filename: String,
@@ -58,11 +79,7 @@ pub(crate) struct AppState {
     pub(crate) current_source_html: RwLock<String>,
     /// Formatted file stats string (e.g. "215 lines (154 loc) · 5.25 KB") for the raw-mode header.
     pub(crate) current_file_stats: RwLock<String>,
-    /// Sends content updates from the watcher.
-    pub(crate) tx: broadcast::Sender<ContentUpdate>,
-    /// Sends ready-to-send JSON strings (theme_update messages).
-    pub(crate) theme_tx: broadcast::Sender<String>,
-    pub(crate) scroll_tx: broadcast::Sender<u32>,
+    pub(crate) hub: broadcast::Sender<WsEvent>,
     pub(crate) connections: AtomicUsize,
     pub(crate) all_disconnected: Notify,
     pub(crate) registry: RwLock<ThemeRegistry>,
@@ -76,6 +93,149 @@ pub(crate) struct AppState {
     pub(crate) variant_explicit: bool,
     /// Epoch seconds of the last HTTP request (prevents premature auto-shutdown).
     pub(crate) last_request: AtomicU64,
+}
+
+/// Everything [`AppState::new`] needs; shared channels and counters are created there.
+pub(crate) struct AppInit {
+    pub(crate) port: u16,
+    pub(crate) mode: Mode,
+    pub(crate) base_dir: PathBuf,
+    pub(crate) source_file: Option<PathBuf>,
+    pub(crate) filename: String,
+    pub(crate) initial_relpath: Option<String>,
+    pub(crate) html: String,
+    pub(crate) source_html: String,
+    pub(crate) file_stats: String,
+    pub(crate) registry: ThemeRegistry,
+    pub(crate) custom_css: Option<String>,
+    pub(crate) font_css: Option<String>,
+    pub(crate) enable_toggle: bool,
+    pub(crate) show_header: bool,
+    pub(crate) reading_mode: bool,
+    pub(crate) raw_mode: bool,
+    pub(crate) keybindings_json: String,
+    pub(crate) variant_explicit: bool,
+}
+
+impl AppInit {
+    fn from_opts(opts: ServerOptions, listener: &TcpListener, mode: Mode) -> anyhow::Result<Self> {
+        let mut registry = ThemeRegistry::new(opts.theme);
+        if opts.enable_swap {
+            registry.discover_all();
+        }
+        Ok(Self {
+            port: listener.local_addr()?.port(),
+            mode,
+            base_dir: PathBuf::new(),
+            source_file: None,
+            filename: String::new(),
+            initial_relpath: None,
+            html: String::new(),
+            source_html: String::new(),
+            file_stats: String::new(),
+            registry,
+            custom_css: opts.custom_css,
+            font_css: opts.font_css,
+            enable_toggle: opts.enable_toggle,
+            show_header: opts.show_header,
+            reading_mode: opts.reading_mode,
+            raw_mode: opts.raw_mode,
+            keybindings_json: opts.keybindings_json,
+            variant_explicit: opts.variant_explicit,
+        })
+    }
+
+    pub(crate) fn stdin(
+        markdown: &str,
+        listener: &TcpListener,
+        opts: ServerOptions,
+    ) -> anyhow::Result<Self> {
+        let mut init = Self::from_opts(opts, listener, Mode::Stdin)?;
+        let syntax = init.registry.active().active_data().syntax.as_ref();
+        init.html = render::render(markdown, syntax);
+        init.source_html = render::render_source(markdown, syntax);
+        init.file_stats = render::format_file_stats(markdown);
+        init.base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        init.filename = "stdin".to_string();
+        Ok(init)
+    }
+
+    pub(crate) fn serve(
+        file: &StdPath,
+        listener: &TcpListener,
+        opts: ServerOptions,
+    ) -> anyhow::Result<Self> {
+        let markdown = std::fs::read_to_string(file)?;
+
+        let canonical_file = file.canonicalize()?;
+        let base_dir = canonical_file
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let initial_relpath = canonical_file
+            .strip_prefix(&base_dir)
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned());
+
+        let mut init = Self::from_opts(opts, listener, Mode::Serve)?;
+        let syntax = init.registry.active().active_data().syntax.as_ref();
+        init.html = if let Some(ref relpath) = initial_relpath {
+            render::render_dir(&markdown, syntax, StdPath::new(relpath))
+        } else {
+            render::render(&markdown, syntax)
+        };
+        init.source_html = render::render_source(&markdown, syntax);
+        init.file_stats = render::format_file_stats(&markdown);
+        init.filename = file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "untitled".to_string());
+        init.base_dir = base_dir;
+        init.source_file = Some(canonical_file);
+        init.initial_relpath = initial_relpath;
+        Ok(init)
+    }
+}
+
+impl AppState {
+    pub(crate) fn new(init: AppInit) -> Arc<Self> {
+        let (hub, _) = broadcast::channel(HUB_CAPACITY);
+        Arc::new(Self {
+            port: init.port,
+            mode: init.mode,
+            base_dir: init.base_dir,
+            source_file: init.source_file,
+            filename: init.filename,
+            initial_relpath: init.initial_relpath,
+            custom_css: init.custom_css,
+            current_html: RwLock::new(init.html),
+            current_source_html: RwLock::new(init.source_html),
+            current_file_stats: RwLock::new(init.file_stats),
+            hub,
+            connections: AtomicUsize::new(0),
+            all_disconnected: Notify::new(),
+            registry: RwLock::new(init.registry),
+            enable_toggle: init.enable_toggle,
+            font_css: init.font_css,
+            show_header: init.show_header,
+            reading_mode: init.reading_mode,
+            raw_mode: init.raw_mode,
+            keybindings_json: init.keybindings_json,
+            variant_explicit: init.variant_explicit,
+            last_request: AtomicU64::new(now_secs()),
+        })
+    }
+
+    /// Broadcast a rendered update, refreshing the cache first when it is the initial file.
+    /// The cache is written here because a lagging hub subscriber would lose the update.
+    pub(crate) async fn publish_content(&self, update: ContentUpdate) {
+        if self.initial_relpath.as_deref() == Some(&update.relpath) {
+            *self.current_html.write().await = update.rendered_html.clone();
+            *self.current_source_html.write().await = update.source_html.clone();
+            *self.current_file_stats.write().await = update.file_stats.clone();
+        }
+        let _ = self.hub.send(WsEvent::Content(update));
+    }
 }
 
 pub async fn run(file: PathBuf, opts: ServerOptions) -> anyhow::Result<()> {
@@ -115,45 +275,7 @@ pub async fn run_stdin(markdown: &str, opts: ServerOptions) -> anyhow::Result<()
         }
     }
 
-    let syntax = opts.theme.active_data().syntax.as_ref();
-    let content_html = render::render(markdown, syntax);
-    let source_html = render::render_source(markdown, syntax);
-    let file_stats = render::format_file_stats(markdown);
-
-    let mut registry = ThemeRegistry::new(opts.theme);
-    if opts.enable_swap {
-        registry.discover_all();
-    }
-    let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-
-    let (tx, _rx) = broadcast::channel::<ContentUpdate>(16);
-    let (theme_tx, _) = broadcast::channel::<String>(16);
-    let (scroll_tx, _) = broadcast::channel::<u32>(16);
-
-    let state = Arc::new(AppState {
-        base_dir,
-        source_file: None,
-        filename: "stdin".to_string(),
-        initial_relpath: None,
-        custom_css: opts.custom_css,
-        current_html: RwLock::new(content_html),
-        current_source_html: RwLock::new(source_html),
-        current_file_stats: RwLock::new(file_stats),
-        tx,
-        theme_tx,
-        scroll_tx,
-        connections: AtomicUsize::new(0),
-        all_disconnected: Notify::new(),
-        registry: RwLock::new(registry),
-        enable_toggle: opts.enable_toggle,
-        font_css: opts.font_css,
-        show_header: opts.show_header,
-        reading_mode: opts.reading_mode,
-        raw_mode: opts.raw_mode,
-        variant_explicit: opts.variant_explicit,
-        keybindings_json: opts.keybindings_json,
-        last_request: AtomicU64::new(now_secs()),
-    });
+    let state = AppState::new(AppInit::stdin(markdown, &listener, opts)?);
 
     let app = router(state.clone());
     axum::serve(listener, app)
@@ -169,85 +291,9 @@ pub async fn start(
     listener: TcpListener,
     opts: ServerOptions,
 ) -> anyhow::Result<()> {
-    let markdown = std::fs::read_to_string(&file)?;
+    let state = AppState::new(AppInit::serve(&file, &listener, opts)?);
 
-    let canonical_file = file.canonicalize()?;
-    let base_dir = canonical_file
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let initial_relpath = canonical_file
-        .strip_prefix(&base_dir)
-        .ok()
-        .map(|p| p.to_string_lossy().into_owned());
-
-    let syntax = opts.theme.active_data().syntax.as_ref();
-    let content_html = if let Some(ref relpath) = initial_relpath {
-        render::render_dir(&markdown, syntax, StdPath::new(relpath))
-    } else {
-        render::render(&markdown, syntax)
-    };
-    let source_html = render::render_source(&markdown, syntax);
-    let file_stats = render::format_file_stats(&markdown);
-
-    let filename = file
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "untitled".to_string());
-
-    let mut registry = ThemeRegistry::new(opts.theme);
-    if opts.enable_swap {
-        registry.discover_all();
-    }
-
-    let (tx, _rx) = broadcast::channel::<ContentUpdate>(16);
-    let (theme_tx, _) = broadcast::channel::<String>(16);
-    let (scroll_tx, _) = broadcast::channel::<u32>(16);
-
-    let now_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let state = Arc::new(AppState {
-        base_dir,
-        source_file: Some(canonical_file),
-        filename,
-        initial_relpath,
-        custom_css: opts.custom_css,
-        current_html: RwLock::new(content_html),
-        current_source_html: RwLock::new(source_html),
-        current_file_stats: RwLock::new(file_stats),
-        tx: tx.clone(),
-        theme_tx,
-        scroll_tx,
-        connections: AtomicUsize::new(0),
-        all_disconnected: Notify::new(),
-        registry: RwLock::new(registry),
-        enable_toggle: opts.enable_toggle,
-        font_css: opts.font_css,
-        show_header: opts.show_header,
-        reading_mode: opts.reading_mode,
-        raw_mode: opts.raw_mode,
-        variant_explicit: opts.variant_explicit,
-        keybindings_json: opts.keybindings_json,
-        last_request: AtomicU64::new(now_secs),
-    });
-
-    let state_for_task = Arc::clone(&state);
-    let mut rx = tx.subscribe();
-    tokio::spawn(async move {
-        while let Ok(update) = rx.recv().await {
-            if state_for_task.initial_relpath.as_deref() == Some(&update.relpath) {
-                *state_for_task.current_html.write().await = update.rendered_html;
-                *state_for_task.current_source_html.write().await = update.source_html;
-                *state_for_task.current_file_stats.write().await = update.file_stats;
-            }
-        }
-    });
-
-    let state_for_watcher = Arc::clone(&state);
-    let _debouncer = watcher::watch_dir(state.base_dir.clone(), tx, state_for_watcher)?;
+    let _debouncer = watcher::watch_dir(state.base_dir.clone(), Arc::clone(&state))?;
 
     let app = router(state.clone());
     axum::serve(listener, app)
@@ -313,17 +359,30 @@ async fn auto_shutdown_loop(state: Arc<AppState>) {
 }
 
 fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let pages = Router::new()
         .route("/", get(index_handler))
-        .route("/view/{*path}", get(view_handler))
+        .route("/view/{*path}", get(view_handler));
+    let frags = Router::new()
         .route("/render/{*path}", get(render_handler))
-        .route("/health", get(|| async { "ok" }))
-        .route("/ws", get(ws_handler))
-        .route("/scroll/{line}", post(scroll_handler))
         .route("/local/{*path}", get(local_file_handler))
         .route("/favicon.png", get(favicon_handler))
-        .route("/favicon.ico", get(favicon_handler))
+        .route("/favicon.ico", get(favicon_handler));
+    let live = Router::new()
+        .route("/health", get(|| async { "ok" }))
+        .route("/ws", get(ws_handler))
+        .route("/scroll/{line}", post(scroll_handler));
+    let assets = Router::new().route("/_birta/{*asset}", get(asset_handler));
+
+    pages
+        .merge(frags)
+        .merge(live)
+        .merge(assets)
         .with_state(state)
+}
+
+/// Reserved for embedded assets; nothing is served yet.
+async fn asset_handler() -> StatusCode {
+    StatusCode::NOT_FOUND
 }
 
 async fn favicon_handler() -> Response {
@@ -363,7 +422,7 @@ async fn index_handler(State(state): State<Arc<AppState>>) -> Response {
 }
 
 async fn scroll_handler(Path(line): Path<u32>, State(state): State<Arc<AppState>>) -> StatusCode {
-    let _ = state.scroll_tx.send(line);
+    let _ = state.hub.send(WsEvent::Scroll(line));
     StatusCode::NO_CONTENT
 }
 
@@ -569,7 +628,7 @@ async fn broadcast_theme_update(state: &AppState) {
     *state.current_html.write().await = html;
     *state.current_source_html.write().await = source;
 
-    let _ = state.theme_tx.send(msg.to_string());
+    let _ = state.hub.send(WsEvent::Raw(msg.to_string().into()));
 }
 
 async fn handle_theme_change(state: &AppState, theme_name: &str) {
@@ -676,72 +735,54 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) ->
     ws.on_upgrade(|socket| handle_ws(socket, state))
 }
 
+fn content_frame(path: &str, html: &str, source: &str, file_stats: &str) -> String {
+    serde_json::json!({
+        "type": "content",
+        "html": html,
+        "source": source,
+        "file_stats": file_stats,
+        "path": path,
+    })
+    .to_string()
+}
+
+async fn cached_content_frame(state: &AppState) -> String {
+    let html = state.current_html.read().await.clone();
+    let source = state.current_source_html.read().await.clone();
+    let file_stats = state.current_file_stats.read().await.clone();
+    let path = state.initial_relpath.as_deref().unwrap_or("");
+    content_frame(path, &html, &source, &file_stats)
+}
+
 async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
     state.connections.fetch_add(1, Ordering::Relaxed);
 
-    // Send initial content as JSON
-    let current = state.current_html.read().await.clone();
-    let current_source = state.current_source_html.read().await.clone();
-    let current_file_stats = state.current_file_stats.read().await.clone();
-    let init_msg = serde_json::json!({
-        "type": "content",
-        "html": current,
-        "source": current_source,
-        "file_stats": current_file_stats,
-        "path": state.initial_relpath.as_deref().unwrap_or(""),
-    });
-    if socket
-        .send(Message::Text(init_msg.to_string().into()))
-        .await
-        .is_err()
-    {
+    let init_msg = cached_content_frame(&state).await;
+    if socket.send(Message::Text(init_msg.into())).await.is_err() {
         state.connections.fetch_sub(1, Ordering::Relaxed);
         state.all_disconnected.notify_one();
         return;
     }
 
-    let mut rx = state.tx.subscribe();
-    let mut theme_rx = state.theme_tx.subscribe();
-    let mut scroll_rx = state.scroll_tx.subscribe();
+    let mut rx = state.hub.subscribe();
 
     loop {
-        tokio::select! {
-            result = rx.recv() => {
-                match result {
-                    Ok(update) => {
-                        let msg = serde_json::json!({
-                            "type": "content",
-                            "html": update.rendered_html,
-                            "source": update.source_html,
-                            "file_stats": update.file_stats,
-                            "path": update.relpath,
-                        });
-                        if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
+        let frame = tokio::select! {
+            result = rx.recv() => match result {
+                Ok(WsEvent::Content(update)) => content_frame(
+                    &update.relpath,
+                    &update.rendered_html,
+                    &update.source_html,
+                    &update.file_stats,
+                ),
+                Ok(WsEvent::Raw(json)) => json.to_string(),
+                Ok(WsEvent::Scroll(line)) => {
+                    serde_json::json!({"type": "scroll", "line": line}).to_string()
                 }
-            }
-            result = theme_rx.recv() => {
-                match result {
-                    Ok(json_str) => {
-                        // theme_tx carries ready-to-send JSON (theme_update messages)
-                        if socket.send(Message::Text(json_str.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            result = scroll_rx.recv() => {
-                if let Ok(line) = result {
-                    let msg = serde_json::json!({"type": "scroll", "line": line});
-                    if socket.send(Message::Text(msg.to_string().into())).await.is_err() {
-                        break;
-                    }
-                }
-            }
+                // Dropped events may include content, so resync this connection from the cache.
+                Err(broadcast::error::RecvError::Lagged(_)) => cached_content_frame(&state).await,
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
@@ -750,7 +791,11 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
                     Some(Ok(_)) => {}
                     _ => break,
                 }
+                continue;
             }
+        };
+        if socket.send(Message::Text(frame.into())).await.is_err() {
+            break;
         }
     }
 
@@ -784,41 +829,50 @@ mod tests {
         }
     }
 
-    fn test_state() -> Arc<AppState> {
-        let theme = github_theme();
-        let registry = ThemeRegistry::new(theme);
-        let (tx, _rx) = broadcast::channel::<ContentUpdate>(16);
-        let (theme_tx, _) = broadcast::channel(16);
-        let (scroll_tx, _) = broadcast::channel(16);
-        Arc::new(AppState {
+    fn test_opts() -> ServerOptions {
+        ServerOptions {
+            port: 0,
+            no_open: true,
+            custom_css: None,
+            font_css: None,
+            theme: github_theme(),
+            enable_swap: false,
+            enable_toggle: true,
+            show_header: true,
+            reading_mode: false,
+            raw_mode: false,
+            keybindings_json: "{}".to_string(),
+            variant_explicit: false,
+        }
+    }
+
+    fn test_state(customize: impl FnOnce(&mut AppInit)) -> Arc<AppState> {
+        let mut init = AppInit {
+            port: 0,
+            mode: Mode::Stdin,
             base_dir: PathBuf::from("."),
             source_file: None,
             filename: "test.md".to_string(),
             initial_relpath: None,
+            html: "<p>hello</p>".to_string(),
+            source_html: String::new(),
+            file_stats: String::new(),
+            registry: ThemeRegistry::new(github_theme()),
             custom_css: None,
-            current_html: RwLock::new("<p>hello</p>".to_string()),
-            current_source_html: RwLock::new(String::new()),
-            current_file_stats: RwLock::new(String::new()),
-            tx,
-            theme_tx,
-            scroll_tx,
-            connections: AtomicUsize::new(0),
-            all_disconnected: Notify::new(),
-            registry: RwLock::new(registry),
-            enable_toggle: true,
             font_css: None,
+            enable_toggle: true,
             show_header: true,
             reading_mode: false,
             raw_mode: false,
-            variant_explicit: false,
             keybindings_json: "{}".to_string(),
-            last_request: AtomicU64::new(0),
-        })
+            variant_explicit: false,
+        };
+        customize(&mut init);
+        AppState::new(init)
     }
 
     fn test_router() -> Router {
-        let state = test_state();
-        router(state)
+        router(test_state(|_| {}))
     }
 
     #[tokio::test]
@@ -850,6 +904,283 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn router_builds_with_all_groups() {
+        // A wrong method gets 405 only when the path is routed, so it proves registration.
+        let cases = [
+            ("GET", "/", 200),
+            ("GET", "/health", 200),
+            ("GET", "/favicon.png", 200),
+            ("GET", "/favicon.ico", 200),
+            ("GET", "/_birta/review.js", 404),
+            ("POST", "/", 405),
+            ("POST", "/view/a.md", 405),
+            ("POST", "/render/a.md", 405),
+            ("POST", "/local/a.png", 405),
+            ("POST", "/favicon.png", 405),
+            ("POST", "/favicon.ico", 405),
+            ("POST", "/health", 405),
+            ("POST", "/ws", 405),
+            ("GET", "/scroll/1", 405),
+            ("POST", "/_birta/review.js", 405),
+            ("POST", "/_birta/nested/review.css", 405),
+            ("POST", "/not-a-route", 404),
+        ];
+        let app = test_router();
+        for (method, uri, expected) in cases {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{method} {uri}");
+        }
+    }
+
+    type Client = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
+    const BARRIER: u32 = 1_000_001;
+    const SENTINEL: u32 = 1_000_002;
+
+    async fn serve(state: &Arc<AppState>) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = router(state.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        port
+    }
+
+    /// Connects and consumes the initial `content` frame.
+    async fn connect(port: u16) -> Client {
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws"))
+            .await
+            .unwrap();
+        assert_eq!(next_json(&mut ws).await["type"], "content");
+        ws
+    }
+
+    async fn next_json(ws: &mut Client) -> serde_json::Value {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message as TMessage;
+        loop {
+            match ws.next().await.expect("socket closed").expect("ws error") {
+                TMessage::Text(text) => return serde_json::from_str(&text).unwrap(),
+                TMessage::Close(_) => panic!("socket closed"),
+                _ => {}
+            }
+        }
+    }
+
+    /// Reads until scroll `line` arrives, returning the `content` frames seen on the way.
+    async fn contents_until(ws: &mut Client, line: u32) -> Vec<serde_json::Value> {
+        let mut contents = Vec::new();
+        loop {
+            let msg = next_json(ws).await;
+            if msg["type"] == "content" {
+                contents.push(msg);
+            } else if msg["type"] == "scroll" && msg["line"] == line {
+                return contents;
+            }
+        }
+    }
+
+    async fn sync(state: &AppState, ws: &mut Client, line: u32) -> Vec<serde_json::Value> {
+        state.hub.send(WsEvent::Scroll(line)).unwrap();
+        contents_until(ws, line).await
+    }
+
+    // Tests run on a current_thread runtime, so the server can't drain the hub mid-flood.
+    fn flood(state: &AppState, count: u32) {
+        for line in 0..count {
+            state.hub.send(WsEvent::Scroll(line)).unwrap();
+        }
+    }
+
+    async fn within<F: std::future::Future<Output = ()>>(fut: F) {
+        tokio::time::timeout(Duration::from_secs(5), fut)
+            .await
+            .expect("timed out");
+    }
+
+    fn doc_state() -> Arc<AppState> {
+        test_state(|init| init.initial_relpath = Some("doc.md".to_string()))
+    }
+
+    #[tokio::test]
+    async fn ws_survives_hub_lag() {
+        let state = doc_state();
+        let port = serve(&state).await;
+        within(async {
+            let mut ws = connect(port).await;
+            sync(&state, &mut ws, BARRIER).await;
+
+            *state.current_html.write().await = "<p>after lag</p>".to_string();
+            flood(&state, 256);
+
+            let resent = sync(&state, &mut ws, SENTINEL).await;
+            assert_eq!(resent.len(), 1, "{resent:?}");
+            assert_eq!(resent[0]["html"], "<p>after lag</p>");
+            assert_eq!(resent[0]["path"], "doc.md");
+            assert_eq!(sync(&state, &mut ws, BARRIER).await.len(), 0);
+            assert_eq!(state.connections.load(Ordering::Relaxed), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn lag_resend_carries_source_and_stats() {
+        let state = doc_state();
+        let port = serve(&state).await;
+        within(async {
+            let mut ws = connect(port).await;
+            sync(&state, &mut ws, BARRIER).await;
+
+            *state.current_html.write().await = "<p>html</p>".to_string();
+            *state.current_source_html.write().await = "<pre>source</pre>".to_string();
+            *state.current_file_stats.write().await = "3 lines".to_string();
+            flood(&state, 256);
+
+            let resent = sync(&state, &mut ws, SENTINEL).await;
+            assert_eq!(resent.len(), 1, "{resent:?}");
+            assert_eq!(resent[0]["html"], "<p>html</p>");
+            assert_eq!(resent[0]["source"], "<pre>source</pre>");
+            assert_eq!(resent[0]["file_stats"], "3 lines");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn ws_resyncs_on_every_lag() {
+        let state = doc_state();
+        let port = serve(&state).await;
+        within(async {
+            let mut ws = connect(port).await;
+            sync(&state, &mut ws, BARRIER).await;
+
+            for round in 0..3 {
+                let html = format!("<p>round {round}</p>");
+                *state.current_html.write().await = html.clone();
+                flood(&state, 256);
+                let resent = sync(&state, &mut ws, SENTINEL).await;
+                assert_eq!(resent.len(), 1, "round {round}: {resent:?}");
+                assert_eq!(resent[0]["html"], html.as_str());
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn lag_resend_is_local() {
+        let state = doc_state();
+        let port = serve(&state).await;
+        within(async {
+            let mut a = connect(port).await;
+            let mut b = connect(port).await;
+            state.hub.send(WsEvent::Scroll(BARRIER)).unwrap();
+            contents_until(&mut a, BARRIER).await;
+            contents_until(&mut b, BARRIER).await;
+
+            flood(&state, 256);
+            let mut spy = state.hub.subscribe();
+            state.hub.send(WsEvent::Scroll(SENTINEL)).unwrap();
+            assert_eq!(contents_until(&mut a, SENTINEL).await.len(), 1);
+            assert_eq!(contents_until(&mut b, SENTINEL).await.len(), 1);
+
+            while let Ok(event) = spy.try_recv() {
+                assert!(
+                    !matches!(event, WsEvent::Content(_)),
+                    "resend must not go through the hub"
+                );
+            }
+            assert_eq!(state.connections.load(Ordering::Relaxed), 2);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn html_cache_survives_hub_lag() {
+        let state = doc_state();
+        let mut spy = state.hub.subscribe();
+
+        state
+            .publish_content(ContentUpdate {
+                relpath: "doc.md".to_string(),
+                rendered_html: "<p>new</p>".to_string(),
+                source_html: "<pre>new</pre>".to_string(),
+                file_stats: "1 line".to_string(),
+            })
+            .await;
+        assert!(matches!(spy.try_recv(), Ok(WsEvent::Content(_))));
+        flood(&state, 100);
+
+        within(async {
+            while *state.current_html.read().await != "<p>new</p>" {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert_eq!(*state.current_source_html.read().await, "<pre>new</pre>");
+        assert_eq!(*state.current_file_stats.read().await, "1 line");
+    }
+
+    #[tokio::test]
+    async fn publish_content_leaves_cache_for_other_paths() {
+        let state = doc_state();
+        state
+            .publish_content(ContentUpdate {
+                relpath: "other.md".to_string(),
+                rendered_html: "<p>other</p>".to_string(),
+                source_html: String::new(),
+                file_stats: String::new(),
+            })
+            .await;
+        assert_eq!(*state.current_html.read().await, "<p>hello</p>");
+    }
+
+    #[tokio::test]
+    async fn scroll_post_reaches_hub() {
+        let state = test_state(|_| {});
+        let mut rx = state.hub.subscribe();
+        let response = router(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/scroll/42")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 204);
+        assert!(matches!(rx.try_recv(), Ok(WsEvent::Scroll(42))));
+    }
+
+    #[tokio::test]
+    async fn state_port_and_mode_from_listener() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert_ne!(port, 0);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("doc.md");
+        std::fs::write(&file, "# Doc").unwrap();
+
+        let served = AppState::new(AppInit::serve(&file, &listener, test_opts()).unwrap());
+        assert_eq!(served.port, port);
+        assert_eq!(served.mode, Mode::Serve);
+
+        let piped = AppState::new(AppInit::stdin("# Doc", &listener, test_opts()).unwrap());
+        assert_eq!(piped.port, port);
+        assert_eq!(piped.mode, Mode::Stdin);
+    }
+
+    #[tokio::test]
     async fn health_returns_200() {
         let app = test_router();
 
@@ -867,36 +1198,7 @@ mod tests {
     }
 
     fn test_router_with_base_dir(base_dir: PathBuf) -> Router {
-        let theme = github_theme();
-        let registry = ThemeRegistry::new(theme);
-        let (tx, _rx) = broadcast::channel::<ContentUpdate>(16);
-        let (theme_tx, _) = broadcast::channel(16);
-        let (scroll_tx, _) = broadcast::channel(16);
-        let state = Arc::new(AppState {
-            base_dir,
-            source_file: None,
-            filename: "test.md".to_string(),
-            initial_relpath: None,
-            custom_css: None,
-            current_html: RwLock::new("<p>hello</p>".to_string()),
-            current_source_html: RwLock::new(String::new()),
-            current_file_stats: RwLock::new(String::new()),
-            tx,
-            theme_tx,
-            scroll_tx,
-            connections: AtomicUsize::new(0),
-            all_disconnected: Notify::new(),
-            registry: RwLock::new(registry),
-            enable_toggle: true,
-            font_css: None,
-            show_header: true,
-            reading_mode: false,
-            raw_mode: false,
-            variant_explicit: false,
-            keybindings_json: "{}".to_string(),
-            last_request: AtomicU64::new(0),
-        });
-        router(state)
+        router(test_state(|init| init.base_dir = base_dir))
     }
 
     #[tokio::test]
@@ -1027,35 +1329,7 @@ mod tests {
 
     #[tokio::test]
     async fn index_redirects_when_initial_relpath_set() {
-        let theme = github_theme();
-        let registry = ThemeRegistry::new(theme);
-        let (tx, _rx) = broadcast::channel::<ContentUpdate>(16);
-        let (theme_tx, _) = broadcast::channel(16);
-        let (scroll_tx, _) = broadcast::channel(16);
-        let state = Arc::new(AppState {
-            base_dir: PathBuf::from("."),
-            source_file: None,
-            filename: "test.md".to_string(),
-            initial_relpath: Some("test.md".to_string()),
-            custom_css: None,
-            current_html: RwLock::new("<p>hello</p>".to_string()),
-            current_source_html: RwLock::new(String::new()),
-            current_file_stats: RwLock::new(String::new()),
-            tx,
-            theme_tx,
-            scroll_tx,
-            connections: AtomicUsize::new(0),
-            all_disconnected: Notify::new(),
-            registry: RwLock::new(registry),
-            enable_toggle: true,
-            font_css: None,
-            show_header: true,
-            reading_mode: false,
-            raw_mode: false,
-            variant_explicit: false,
-            keybindings_json: "{}".to_string(),
-            last_request: AtomicU64::new(0),
-        });
+        let state = test_state(|init| init.initial_relpath = Some("test.md".to_string()));
         let app = router(state);
 
         let response = app

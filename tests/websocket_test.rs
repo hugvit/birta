@@ -117,3 +117,42 @@ async fn ws_sends_update_on_file_change() {
         panic!("expected text message, got {msg:?}");
     }
 }
+
+#[tokio::test]
+async fn ws_reconnect_sees_latest_content() {
+    let mut tmpfile = TempBuilder::new().suffix(".md").tempfile().unwrap();
+    write!(tmpfile, "# Before").unwrap();
+    tmpfile.flush().unwrap();
+
+    let port = start_server(&tmpfile).await;
+    let url = format!("ws://127.0.0.1:{port}/ws");
+
+    let (mut first, _) = connect_async(&url).await.expect("failed to connect");
+    let _ = timeout(Duration::from_secs(5), first.next())
+        .await
+        .expect("timed out on initial message");
+
+    std::fs::write(tmpfile.path(), "# After change").unwrap();
+    let _ = timeout(Duration::from_secs(5), first.next())
+        .await
+        .expect("timed out waiting for update");
+
+    // A new connection's initial frame comes from the server-side cache.
+    let (mut second, _) = connect_async(&url).await.expect("failed to connect");
+    let msg = timeout(Duration::from_secs(5), second.next())
+        .await
+        .expect("timed out")
+        .expect("stream ended")
+        .expect("ws error");
+
+    if let Message::Text(text) = msg {
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("expected JSON");
+        assert_eq!(parsed["type"], "content");
+        assert!(
+            parsed["html"].as_str().unwrap().contains("After change"),
+            "reconnect should see the updated content"
+        );
+    } else {
+        panic!("expected text message, got {msg:?}");
+    }
+}

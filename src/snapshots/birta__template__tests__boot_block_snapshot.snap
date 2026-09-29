@@ -1,0 +1,5 @@
+---
+source: src/template.rs
+expression: boot_raw(&page)
+---
+{"activeVariant":"dark","currentPath":"dir/\u003c/script\u003e\u0026'\u2028.md","extra":{"k":"v"},"initialView":"preview","keybindings":{"toggle_dark":"\u003c!--"},"staticMode":false,"themeMode":"toggle","variantExplicit":false,"variants":["light","dark"]}

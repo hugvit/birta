@@ -1,3 +1,4 @@
+use crate::security::{html_escape_attr, json_for_script};
 use crate::theme::ResolvedTheme;
 
 const VIEWER_HTML: &str = include_str!("../assets/viewer.html");
@@ -26,6 +27,8 @@ pub struct PageOptions<'a> {
     pub static_mode: bool,
     pub keybindings_json: &'a str,
     pub current_path: Option<&'a str>,
+    pub nonce: &'a str,
+    pub extra_boot: Option<&'a serde_json::Value>,
 }
 
 pub fn render_page(opts: &PageOptions<'_>) -> String {
@@ -69,10 +72,9 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
     let theme_attr = if is_github {
         String::new()
     } else {
-        format!("data-birta-theme=\"{}\"", theme.name)
+        format!("data-birta-theme=\"{}\"", html_escape_attr(&theme.name))
     };
 
-    // Theme mode for the browser JS
     let theme_mode = if theme.has_toggle() {
         "toggle"
     } else {
@@ -82,22 +84,12 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
         }
     };
 
-    // Active variant for the browser JS
-    let active_variant = theme.active_variant.as_str();
-
-    // Whether the active variant was explicitly requested (gates the browser's
-    // OS-preference fallback so `--light`/`--dark` is honoured).
-    let variant_explicit = if opts.variant_explicit {
-        "true"
-    } else {
-        "false"
-    };
-
     // Theme dropdown items (for hot-swap)
     let theme_options: String = theme_names
         .iter()
         .map(|&name| {
             let active = if name == theme.name { " active" } else { "" };
+            let name = html_escape_attr(name);
             format!(
                 "<button class=\"theme-dropdown-item{active}\" data-theme=\"{name}\">{name}</button>"
             )
@@ -105,9 +97,20 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
         .collect::<Vec<_>>()
         .join("\n            ");
 
-    // Available variants for JS
-    let variants_json =
-        serde_json::to_string(&theme.variant_names()).unwrap_or_else(|_| "[]".to_string());
+    let keybindings: serde_json::Value =
+        serde_json::from_str(opts.keybindings_json).unwrap_or_else(|_| serde_json::json!({}));
+    // Read by the viewer script via JSON.parse, so that script is identical on every page
+    let boot_json = json_for_script(&serde_json::json!({
+        "staticMode": opts.static_mode,
+        "themeMode": theme_mode,
+        "activeVariant": theme.active_variant.as_str(),
+        "variantExplicit": opts.variant_explicit,
+        "variants": theme.variant_names(),
+        "keybindings": keybindings,
+        "currentPath": opts.current_path.unwrap_or(""),
+        "initialView": if opts.raw_mode { "raw" } else { "preview" },
+        "extra": opts.extra_boot,
+    }));
 
     fill_template(
         VIEWER_HTML,
@@ -128,25 +131,13 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
                 "BODY_CLASS",
                 if *reading_mode { " reading-mode" } else { "" },
             ),
-            ("THEME_MODE", theme_mode),
             ("THEME_ATTR", &theme_attr),
-            ("ACTIVE_VARIANT", active_variant),
-            ("VARIANT_EXPLICIT", variant_explicit),
-            ("ACTIVE_THEME", &theme.name),
+            ("ACTIVE_THEME", &html_escape_attr(&theme.name)),
             ("THEME_OPTIONS", &theme_options),
-            ("VARIANTS_JSON", &variants_json),
-            ("FILENAME", filename),
-            ("FILE_STATS", opts.file_stats),
-            (
-                "STATIC_MODE",
-                if opts.static_mode { "true" } else { "false" },
-            ),
-            ("KEYBINDINGS_JSON", opts.keybindings_json),
-            (
-                "INITIAL_VIEW",
-                if opts.raw_mode { "raw" } else { "preview" },
-            ),
-            ("CURRENT_PATH", opts.current_path.unwrap_or("")),
+            ("FILENAME", &html_escape_attr(filename)),
+            ("FILE_STATS", &html_escape_attr(opts.file_stats)),
+            ("BOOT_JSON", &boot_json),
+            ("NONCE", opts.nonce),
             ("SOURCE_HTML", opts.source_html.unwrap_or("")),
             ("CONTENT", content_html),
         ],
@@ -222,6 +213,8 @@ mod tests {
             static_mode: false,
             keybindings_json: "{}",
             current_path: None,
+            nonce: "",
+            extra_boot: None,
         })
     }
 
@@ -286,6 +279,8 @@ mod tests {
             static_mode,
             keybindings_json: "{}",
             current_path: None,
+            nonce: "",
+            extra_boot: None,
         })
     }
 
@@ -345,8 +340,8 @@ mod tests {
         let theme = github_theme();
         let page = render_with(true, false, true, None, &theme, &["github"]);
         assert!(
-            page.contains("var STATIC_MODE = true;"),
-            "should set STATIC_MODE to true"
+            boot(&page)["staticMode"] == true,
+            "should set staticMode to true"
         );
     }
 
@@ -355,8 +350,8 @@ mod tests {
         let theme = github_theme();
         let page = render_with(true, false, false, None, &theme, &["github"]);
         assert!(
-            page.contains("var STATIC_MODE = false;"),
-            "should set STATIC_MODE to false"
+            boot(&page)["staticMode"] == false,
+            "should set staticMode to false"
         );
     }
 
@@ -365,7 +360,7 @@ mod tests {
         let theme = github_theme();
         let page = render_with(true, false, false, None, &theme, &["github"]);
         assert!(
-            page.contains("var THEME_MODE = 'toggle';"),
+            boot(&page)["themeMode"] == "toggle",
             "dual-variant theme should produce toggle mode"
         );
     }
@@ -375,7 +370,7 @@ mod tests {
         let theme = dark_only_theme();
         let page = render_with(true, false, false, None, &theme, &["dracula"]);
         assert!(
-            page.contains("var THEME_MODE = 'fixed-dark';"),
+            boot(&page)["themeMode"] == "fixed-dark",
             "single dark-only theme should produce fixed-dark mode"
         );
     }
@@ -392,7 +387,7 @@ mod tests {
         };
         let page = render_with(true, false, false, None, &theme, &["custom-light"]);
         assert!(
-            page.contains("var THEME_MODE = 'fixed-light';"),
+            boot(&page)["themeMode"] == "fixed-light",
             "single light-only theme should produce fixed-light mode"
         );
     }
@@ -415,6 +410,8 @@ mod tests {
             static_mode: false,
             keybindings_json: "{}",
             current_path: None,
+            nonce: "",
+            extra_boot: None,
         })
     }
 
@@ -423,8 +420,8 @@ mod tests {
         let theme = github_theme();
         let page = render_with_explicit(true, &theme);
         assert!(
-            page.contains("var VARIANT_EXPLICIT = true;"),
-            "explicit --light/--dark should set VARIANT_EXPLICIT to true so the \
+            boot(&page)["variantExplicit"] == true,
+            "explicit --light/--dark should set variantExplicit to true so the \
              browser does not override it with the OS preference"
         );
     }
@@ -434,7 +431,7 @@ mod tests {
         let theme = github_theme();
         let page = render_with_explicit(false, &theme);
         assert!(
-            page.contains("var VARIANT_EXPLICIT = false;"),
+            boot(&page)["variantExplicit"] == false,
             "without an explicit variant the browser should fall back to OS preference"
         );
     }
@@ -496,6 +493,8 @@ mod tests {
             static_mode: false,
             keybindings_json: "{}",
             current_path: None,
+            nonce: "",
+            extra_boot: None,
         })
     }
 
@@ -567,5 +566,409 @@ mod tests {
             !page.contains("data-birta-theme=\"github\""),
             "github theme should not set data-birta-theme attribute on html element"
         );
+    }
+
+    fn base_opts(theme: &ResolvedTheme) -> PageOptions<'_> {
+        PageOptions {
+            filename: "test.md",
+            file_stats: "1 lines (1 loc) · 5 B",
+            content_html: "<p>test</p>",
+            source_html: Some("test"),
+            custom_css: None,
+            font_css: None,
+            show_header: true,
+            reading_mode: false,
+            raw_mode: false,
+            theme,
+            theme_names: &["github"],
+            variant_explicit: false,
+            static_mode: false,
+            keybindings_json: "{}",
+            current_path: Some("test.md"),
+            nonce: "",
+            extra_boot: None,
+        }
+    }
+
+    /// Raw text of the `birta-boot` data block; panics unless it is a JSON `<script>` in `<head>`.
+    fn boot_raw(page: &str) -> &str {
+        let id = page.find("id=\"birta-boot\"").expect("no birta-boot block");
+        let open = page[..id].rfind('<').unwrap();
+        let body = id + page[id..].find('>').unwrap() + 1;
+        let tag = &page[open..body];
+        assert!(
+            tag.starts_with("<script"),
+            "birta-boot is not a <script>: {tag}"
+        );
+        assert!(
+            tag.contains("type=\"application/json\""),
+            "not a JSON block: {tag}"
+        );
+        assert!(
+            open < page.find("</head>").unwrap(),
+            "birta-boot is not in <head>"
+        );
+        &page[body..body + page[body..].find("</script>").unwrap()]
+    }
+
+    fn boot(page: &str) -> serde_json::Value {
+        serde_json::from_str(boot_raw(page)).expect("birta-boot is not valid JSON")
+    }
+
+    /// `(open tag, body)` of every `<script>` in the page.
+    fn scripts(page: &str) -> Vec<(&str, &str)> {
+        page.match_indices("<script")
+            .map(|(i, _)| {
+                let body = i + page[i..].find('>').unwrap() + 1;
+                let end = body + page[body..].find("</script>").unwrap();
+                (&page[i..body], &page[body..end])
+            })
+            .collect()
+    }
+
+    /// Bodies of the inline scripts the browser executes.
+    fn executable_inline(page: &str) -> Vec<&str> {
+        scripts(page)
+            .into_iter()
+            .filter(|(tag, _)| !tag.contains(" src=") && !tag.contains("application/json"))
+            .map(|(_, body)| body)
+            .collect()
+    }
+
+    fn unescape(s: &str) -> String {
+        s.replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&#x27;", "'")
+            .replace("&amp;", "&")
+    }
+
+    /// Text between `start` and the next `end`.
+    fn between<'a>(page: &'a str, start: &str, end: &str) -> &'a str {
+        let from = page
+            .find(start)
+            .unwrap_or_else(|| panic!("{start} not found"))
+            + start.len();
+        &page[from..from + page[from..].find(end).unwrap()]
+    }
+
+    fn assert_script_safe(raw: &str) {
+        let bad: Vec<char> = raw
+            .chars()
+            .filter(|c| matches!(c, '<' | '>' | '&' | '\u{2028}' | '\u{2029}'))
+            .collect();
+        assert!(bad.is_empty(), "boot JSON has raw {bad:?}: {raw}");
+    }
+
+    const HOSTILE: [&str; 6] = [
+        "don't.md",
+        "x';alert(1);'.md",
+        "</script><script>alert(1)",
+        "<!--<script>.md",
+        "a\u{2028}b\u{2029}c&amp;.md",
+        "\"}]);alert(1);//.md",
+    ];
+
+    #[test]
+    fn boot_block_is_json_in_head() {
+        let theme = github_theme();
+        let page = render_page(&base_opts(&theme));
+        assert!(boot(&page).is_object());
+        let inline = executable_inline(&page);
+        assert!(
+            inline.iter().any(|body| body
+                .contains("JSON.parse(document.getElementById('birta-boot').textContent)")),
+            "the viewer script must read BOOT from the data block"
+        );
+    }
+
+    #[test]
+    fn boot_block_carries_page_fields() {
+        let theme = github_theme();
+        let page = render_page(&PageOptions {
+            static_mode: true,
+            raw_mode: true,
+            variant_explicit: true,
+            current_path: Some("dir/a.md"),
+            keybindings_json: r#"{"toggle_dark":"d"}"#,
+            ..base_opts(&theme)
+        });
+        assert_eq!(
+            boot(&page),
+            serde_json::json!({
+                "staticMode": true,
+                "themeMode": "toggle",
+                "activeVariant": "dark",
+                "variantExplicit": true,
+                "variants": ["light", "dark"],
+                "keybindings": {"toggle_dark": "d"},
+                "currentPath": "dir/a.md",
+                "initialView": "raw",
+                "extra": null,
+            })
+        );
+    }
+
+    #[test]
+    fn boot_block_without_current_path_is_falsy() {
+        let theme = github_theme();
+        let page = render_page(&PageOptions {
+            current_path: None,
+            ..base_opts(&theme)
+        });
+        let path = &boot(&page)["currentPath"];
+        assert!(path.is_null() || path == "", "got {path}");
+    }
+
+    #[test]
+    fn boot_block_round_trips_hostile_paths() {
+        let theme = github_theme();
+        let plain = scripts(&render_page(&base_opts(&theme))).len();
+        for path in HOSTILE {
+            let page = render_page(&PageOptions {
+                current_path: Some(path),
+                ..base_opts(&theme)
+            });
+            assert_eq!(boot(&page)["currentPath"], path);
+            assert_script_safe(boot_raw(&page));
+            assert_eq!(scripts(&page).len(), plain, "{path:?} added a <script>");
+            assert!(
+                !page.contains("<script>alert(1)"),
+                "{path:?} escaped the block"
+            );
+        }
+    }
+
+    #[test]
+    fn hostile_keybindings_are_inert() {
+        let theme = github_theme();
+        let bindings = serde_json::json!({
+            "toggle_dark": "</script><script>alert(1)</script>",
+            "toggle_raw": "<!--<script>",
+            "focus_theme": "\u{2028}&\u{2029}",
+        });
+        let json = bindings.to_string();
+        let page = render_page(&PageOptions {
+            keybindings_json: &json,
+            ..base_opts(&theme)
+        });
+        assert_eq!(boot(&page)["keybindings"], bindings);
+        assert_script_safe(boot_raw(&page));
+        assert!(!page.contains("<script>alert(1)"));
+    }
+
+    #[test]
+    fn extra_boot_is_embedded_and_escaped() {
+        let theme = github_theme();
+        let extra = serde_json::json!({"review": {"note": "</script><b>&'\u{2028}"}});
+        let page = render_page(&PageOptions {
+            extra_boot: Some(&extra),
+            ..base_opts(&theme)
+        });
+        assert_eq!(boot(&page)["extra"], extra);
+        assert_script_safe(boot_raw(&page));
+    }
+
+    #[test]
+    fn inline_script_is_byte_constant_across_pages() {
+        let github = github_theme();
+        let light = ResolvedTheme {
+            name: "custom-light".to_string(),
+            active_variant: Variant::Light,
+            ..dark_only_theme()
+        };
+        let extra = serde_json::json!({"k": 1});
+        let a = render_page(&base_opts(&github));
+        let b = render_page(&PageOptions {
+            filename: "x';y\".md",
+            file_stats: "2 lines",
+            content_html: "<p>other</p>",
+            source_html: Some("other"),
+            reading_mode: true,
+            raw_mode: true,
+            theme: &light,
+            theme_names: &["custom-light", "github"],
+            variant_explicit: true,
+            static_mode: true,
+            keybindings_json: r#"{"toggle_dark":"x"}"#,
+            current_path: Some("sub/x';y\".md"),
+            nonce: "abc123",
+            extra_boot: Some(&extra),
+            ..base_opts(&github)
+        });
+        let inline_a = executable_inline(&a);
+        assert!(!inline_a.is_empty());
+        assert_eq!(inline_a, executable_inline(&b));
+    }
+
+    #[test]
+    fn every_template_script_carries_the_nonce() {
+        let theme = github_theme();
+        let page = render_page(&PageOptions {
+            nonce: "n0nce",
+            ..base_opts(&theme)
+        });
+        let tags: Vec<&str> = scripts(&page).into_iter().map(|(tag, _)| tag).collect();
+        let missing: Vec<&&str> = tags
+            .iter()
+            .filter(|t| !t.contains("nonce=\"n0nce\""))
+            .collect();
+        assert!(missing.is_empty(), "scripts without the nonce: {missing:?}");
+        assert!(
+            tags.len() >= 4,
+            "expected CDN, boot and viewer scripts: {tags:?}"
+        );
+    }
+
+    #[test]
+    fn document_nonce_placeholder_stays_literal() {
+        let theme = github_theme();
+        let doc = "<script nonce=\"{{NONCE}}\">evil()</script>";
+        let plain = render_page(&PageOptions {
+            nonce: "n0nce",
+            ..base_opts(&theme)
+        });
+        let page = render_page(&PageOptions {
+            nonce: "n0nce",
+            content_html: doc,
+            source_html: Some(doc),
+            ..base_opts(&theme)
+        });
+        assert_eq!(page.matches(doc).count(), 2);
+        assert_eq!(
+            page.matches("nonce=\"n0nce\"").count(),
+            scripts(&plain).len(),
+            "only template scripts may carry the nonce"
+        );
+    }
+
+    #[test]
+    fn document_scripts_do_not_get_the_nonce() {
+        let theme = github_theme();
+        let page = render_page(&PageOptions {
+            nonce: "n0nce",
+            content_html: "<script>evil()</script>",
+            source_html: Some("<script>src()</script>"),
+            ..base_opts(&theme)
+        });
+        assert!(page.contains("<script>evil()</script>"));
+        assert!(page.contains("<script>src()</script>"));
+    }
+
+    #[test]
+    fn hostile_filename_is_escaped_in_title_and_header() {
+        let theme = github_theme();
+        for name in [
+            "<img src=x onerror=1>.md",
+            "</title><script>x</script>.md",
+            "a\"b'c&d.md",
+            "&lt;b&gt;&amp;.md",
+        ] {
+            let page = render_page(&PageOptions {
+                filename: name,
+                ..base_opts(&theme)
+            });
+            let title = between(&page, "<title>", "</title>");
+            assert!(!title.contains('<'), "raw < in <title>: {title}");
+            assert_eq!(unescape(title), format!("{name} — birta"));
+            let header = between(&page, "<span class=\"file-header-name\">", "</span>");
+            assert!(
+                !header.contains(['<', '"', '\'']),
+                "raw markup in header: {header}"
+            );
+            assert_eq!(unescape(header), name);
+            assert_eq!(page.matches("</title>").count(), 1);
+        }
+    }
+
+    #[test]
+    fn file_stats_are_escaped() {
+        let theme = github_theme();
+        let stats = "<b>1</b> & 'x' \"y\" &lt;x&gt;";
+        let page = render_page(&PageOptions {
+            file_stats: stats,
+            ..base_opts(&theme)
+        });
+        let shown = between(
+            &page,
+            "id=\"file-stats\" style=\"display:none\">",
+            "</span>",
+        );
+        assert!(
+            !shown.contains(['<', '"', '\'']),
+            "raw markup in stats: {shown}"
+        );
+        assert_eq!(unescape(shown), stats);
+    }
+
+    #[test]
+    fn hostile_theme_name_is_escaped() {
+        let name = "x\"><img src=x onerror=1>' &quot;t";
+        let theme = ResolvedTheme {
+            name: name.to_string(),
+            ..dark_only_theme()
+        };
+        let page = render_page(&PageOptions {
+            theme_names: &[name, "github"],
+            ..base_opts(&theme)
+        });
+        assert!(!page.contains("<img src=x onerror=1>"));
+        for (what, raw) in [
+            ("THEME_ATTR", between(&page, "data-birta-theme=\"", "\"")),
+            (
+                "ACTIVE_THEME",
+                between(&page, "id=\"theme-dropdown-label\">", "</span>"),
+            ),
+            (
+                "option attr",
+                between(&page, "theme-dropdown-item active\" data-theme=\"", "\""),
+            ),
+            (
+                "option text",
+                between(
+                    &page,
+                    "theme-dropdown-item active\" data-theme=\"",
+                    "</button>",
+                )
+                .split_once("\">")
+                .map_or("", |(_, text)| text),
+            ),
+        ] {
+            assert!(!raw.contains(['<', '>', '"', '\'']), "{what} raw: {raw}");
+            assert_eq!(unescape(raw), name, "{what}");
+        }
+    }
+
+    #[test]
+    fn inactive_theme_names_are_escaped() {
+        let theme = github_theme();
+        let name = "x\" autofocus onfocus=\"alert(1)";
+        let page = render_page(&PageOptions {
+            theme_names: &["github", name],
+            ..base_opts(&theme)
+        });
+        assert!(!page.contains("\" autofocus"));
+        let item = between(
+            &page,
+            "<button class=\"theme-dropdown-item\" data-theme=\"",
+            "</button>",
+        );
+        let (attr, text) = item.split_once("\">").expect("dropdown item");
+        assert_eq!(unescape(attr), name);
+        assert_eq!(unescape(text), name);
+    }
+
+    #[test]
+    fn boot_block_snapshot() {
+        let theme = github_theme();
+        let extra = serde_json::json!({"k": "v"});
+        let page = render_page(&PageOptions {
+            current_path: Some("dir/</script>&'\u{2028}.md"),
+            keybindings_json: r#"{"toggle_dark":"<!--"}"#,
+            extra_boot: Some(&extra),
+            ..base_opts(&theme)
+        });
+        insta::assert_snapshot!(boot_raw(&page));
     }
 }

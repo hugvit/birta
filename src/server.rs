@@ -422,6 +422,8 @@ async fn index_handler(State(state): State<Arc<AppState>>) -> Response {
         static_mode: false,
         keybindings_json: &state.keybindings_json,
         current_path: None,
+        nonce: "",
+        extra_boot: None,
     });
     Html(page).into_response()
 }
@@ -502,6 +504,8 @@ async fn view_handler(Path(path): Path<String>, State(state): State<Arc<AppState
         static_mode: false,
         keybindings_json: &state.keybindings_json,
         current_path: Some(&path),
+        nonce: "",
+        extra_boot: None,
     });
     Html(page).into_response()
 }

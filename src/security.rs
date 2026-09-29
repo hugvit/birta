@@ -1,4 +1,4 @@
-//! Request guard that keeps the local server reachable only from its own pages.
+//! Request guard for the local server, and escaping for values the page embeds.
 
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
@@ -115,4 +115,38 @@ pub(crate) async fn base_headers(req: Request, next: Next) -> Response {
     );
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     response
+}
+
+/// Escapes text for an HTML attribute value or element content.
+pub(crate) fn html_escape_attr(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// JSON that is inert inside `<script>`: no `</script>`, `<!--` or raw line separators.
+pub(crate) fn json_for_script(value: &serde_json::Value) -> String {
+    let json = value.to_string();
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        match c {
+            // These only occur inside JSON strings, where `\uXXXX` is equivalent
+            '<' => out.push_str("\\u003c"),
+            '>' => out.push_str("\\u003e"),
+            '&' => out.push_str("\\u0026"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            _ => out.push(c),
+        }
+    }
+    out
 }

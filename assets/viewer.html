@@ -14,8 +14,9 @@
   <style>{{FONT_CSS}}</style>
   {{CUSTOM_CSS}}
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css" crossorigin="anonymous">
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js" crossorigin="anonymous"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script type="application/json" id="birta-boot" nonce="{{NONCE}}">{{BOOT_JSON}}</script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js" crossorigin="anonymous" nonce="{{NONCE}}"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js" nonce="{{NONCE}}"></script>
 </head>
 <body class="{{BODY_CLASS}}">
   <header class="header{{HEADER_CLASS}}">
@@ -98,16 +99,17 @@
 
   <div class="status" id="status"></div>
 
-  <script>
+  <script nonce="{{NONCE}}">
     // --- State ---
-    var STATIC_MODE = {{STATIC_MODE}};
-    var THEME_MODE = '{{THEME_MODE}}';
-    var activeVariant = '{{ACTIVE_VARIANT}}';
-    var VARIANT_EXPLICIT = {{VARIANT_EXPLICIT}};
-    var variants = {{VARIANTS_JSON}};
-    var KEYBINDINGS = {{KEYBINDINGS_JSON}};
-    var CURRENT_PATH = '{{CURRENT_PATH}}';
-    var INITIAL_VIEW = '{{INITIAL_VIEW}}';
+    var BOOT = JSON.parse(document.getElementById('birta-boot').textContent);
+    var STATIC_MODE = BOOT.staticMode;
+    var THEME_MODE = BOOT.themeMode;
+    var activeVariant = BOOT.activeVariant;
+    var VARIANT_EXPLICIT = BOOT.variantExplicit;
+    var variants = BOOT.variants;
+    var KEYBINDINGS = BOOT.keybindings;
+    var CURRENT_PATH = BOOT.currentPath;
+    var INITIAL_VIEW = BOOT.initialView;
 
     var html = document.documentElement;
     var mdBody = document.getElementById('content');
@@ -491,7 +493,7 @@
           reconnectDelay = 1000;
           hideStatus();
           // Sync client variant preference to server (OS/session may differ from server default)
-          if (activeVariant !== '{{ACTIVE_VARIANT}}') {
+          if (activeVariant !== BOOT.activeVariant) {
             ws.send(JSON.stringify({ type: 'variant_change', variant: activeVariant }));
           }
         };

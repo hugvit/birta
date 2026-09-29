@@ -206,10 +206,12 @@ fn render_with_mode(
             }
             // Rewrite relative image src= in raw HTML (not handled by image_url_rewriter)
             NodeValue::HtmlBlock(block) => {
-                block.literal = rewrite_html_img_srcs(&block.literal, &mode, collect, &mut refs);
+                let html = rewrite_html_img_srcs(&block.literal, &mode, collect, &mut refs);
+                block.literal = neutralize_reserved(&html);
             }
             NodeValue::HtmlInline(raw) => {
-                *raw = rewrite_html_img_srcs(raw, &mode, collect, &mut refs);
+                let html = rewrite_html_img_srcs(raw, &mode, collect, &mut refs);
+                *raw = neutralize_reserved(&html);
             }
             // Collect markdown link/image targets for the bundle crawler.
             NodeValue::Link(link) if collect => collect_link(&link.url, &mut refs),
@@ -348,6 +350,150 @@ fn rewrite_html_img_srcs(
     }
     result.push_str(rest);
     result
+}
+
+/// Keeps raw HTML from forging the viewer's own markup: `birta-*` tags render as text
+/// and `data-sourcepos` / `data-br-*` attributes become `data-x-*`.
+fn neutralize_reserved(literal: &str) -> String {
+    let mut out = String::with_capacity(literal.len());
+    let mut rest = literal;
+    // A tag left open would absorb whatever the renderer emits next, so its `<` becomes text.
+    while let Some(open) = neutralize_tags(rest, &mut out) {
+        out.push_str("&lt;");
+        rest = &rest[open + 1..];
+    }
+    out
+}
+
+/// Appends `s` to `out`, rewritten. If `s` ends inside a tag, `out` is cut back to
+/// that tag and its offset in `s` is returned.
+fn neutralize_tags(s: &str, out: &mut String) -> Option<usize> {
+    let b = s.as_bytes();
+    let mut copied = 0;
+    let mut i = 0;
+    while let Some(lt) = s[i..].find('<').map(|p| p + i) {
+        let after = &s[lt + 1..];
+        if is_reserved_tag(after) {
+            out.push_str(&s[copied..lt]);
+            out.push_str("&lt;");
+            copied = lt + 1;
+            i = lt + 1;
+            continue;
+        }
+        let end_tag = after.starts_with('/');
+        let name_start = lt + 1 + usize::from(end_tag);
+        if !b.get(name_start).is_some_and(u8::is_ascii_alphabetic) {
+            i = match skip_markup(s, lt) {
+                Some(end) => end,
+                // Unterminated comments swallow what follows, which can't forge an attribute
+                None => break,
+            };
+            continue;
+        }
+        out.push_str(&s[copied..lt]);
+        copied = lt;
+        let mark = out.len();
+        match scan_tag(s, name_start, out, &mut copied) {
+            Some(end) => i = end,
+            None => {
+                out.truncate(mark);
+                return Some(lt);
+            }
+        }
+    }
+    out.push_str(&s[copied..]);
+    None
+}
+
+/// End of a comment, `<!…>`, `<?…>` or `</…>` starting at `lt`, or `lt + 1` for a literal `<`.
+fn skip_markup(s: &str, lt: usize) -> Option<usize> {
+    let after = &s[lt + 1..];
+    if let Some(body) = after.strip_prefix("!--") {
+        let start = lt + 4;
+        if body.starts_with('>') {
+            return Some(start + 1);
+        }
+        if body.starts_with("->") {
+            return Some(start + 2);
+        }
+        let close = ["-->", "--!>"]
+            .iter()
+            .filter_map(|end| body.find(end).map(|p| p + end.len()))
+            .min()?;
+        return Some(start + close);
+    }
+    if after.starts_with(['!', '?', '/']) {
+        return after.find('>').map(|p| lt + 1 + p + 1);
+    }
+    Some(lt + 1)
+}
+
+/// Walks a tag from its name as a browser tokenizer would, renaming reserved attributes.
+/// Returns the offset past `>`, or `None` if the tag is still open at the end of `s`.
+fn scan_tag(s: &str, name_start: usize, out: &mut String, copied: &mut usize) -> Option<usize> {
+    let b = s.as_bytes();
+    let is_space = |c: u8| matches!(c, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c');
+    let mut i = name_start;
+    while i < b.len() && !is_space(b[i]) && !matches!(b[i], b'/' | b'>') {
+        i += 1;
+    }
+    loop {
+        while i < b.len() && (is_space(b[i]) || b[i] == b'/') {
+            i += 1;
+        }
+        match b.get(i) {
+            None => return None,
+            Some(b'>') => return Some(i + 1),
+            Some(_) => {}
+        }
+        let attr_start = i;
+        i += 1;
+        while i < b.len() && !is_space(b[i]) && !matches!(b[i], b'/' | b'>' | b'=') {
+            i += 1;
+        }
+        if is_reserved_attr(&s[attr_start..i]) {
+            out.push_str(&s[*copied..attr_start]);
+            out.push_str("data-x-");
+            *copied = attr_start + "data-".len();
+        }
+        while i < b.len() && is_space(b[i]) {
+            i += 1;
+        }
+        if b.get(i) != Some(&b'=') {
+            continue;
+        }
+        i += 1;
+        while i < b.len() && is_space(b[i]) {
+            i += 1;
+        }
+        match b.get(i) {
+            None => return None,
+            Some(&quote @ (b'"' | b'\'')) => {
+                i += 1 + s[i + 1..].find(char::from(quote))? + 1;
+            }
+            Some(_) => {
+                while i < b.len() && !is_space(b[i]) && b[i] != b'>' {
+                    i += 1;
+                }
+            }
+        }
+    }
+}
+
+/// `<birta-…` or `</birta-…`, tolerating whitespace around the `/`.
+fn is_reserved_tag(after_lt: &str) -> bool {
+    let rest = after_lt.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    let rest = rest.strip_prefix('/').unwrap_or(rest);
+    let rest = rest.trim_start_matches(|c: char| c.is_ascii_whitespace());
+    rest.get(..6)
+        .is_some_and(|name| name.eq_ignore_ascii_case("birta-"))
+}
+
+fn is_reserved_attr(name: &str) -> bool {
+    name.eq_ignore_ascii_case("data-sourcepos")
+        || name
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data-br-"))
 }
 
 fn should_rewrite_link(url: &str) -> bool {
@@ -720,5 +866,221 @@ mod tests {
             "external/anchor/mailto/data must not be collected, got: {:?}",
             refs.assets
         );
+    }
+
+    /// Names of every attribute whose value is `value`, lowercased, as a browser would read them.
+    fn attr_names_with_value(html: &str, value: &str) -> Vec<String> {
+        html.match_indices(value)
+            .map(|(i, _)| {
+                let before = html[..i].trim_end_matches(['"', '\'']);
+                let before = before.trim_end().strip_suffix('=').unwrap_or(before);
+                let before = before.trim_end();
+                let start = before
+                    .rfind(|c: char| c.is_whitespace() || "/<>\"'".contains(c))
+                    .map_or(0, |j| j + 1);
+                before[start..].to_ascii_lowercase()
+            })
+            .collect()
+    }
+
+    /// True if `html` opens or closes a `birta-*` element, tolerating `< /` spacing.
+    fn has_reserved_tag(html: &str) -> bool {
+        html.match_indices('<').any(|(i, _)| {
+            let rest = html[i + 1..].trim_start();
+            let rest = rest.strip_prefix('/').unwrap_or(rest).trim_start();
+            rest.get(..6)
+                .is_some_and(|name| name.eq_ignore_ascii_case("birta-"))
+        })
+    }
+
+    /// Output of every render path that emits raw HTML.
+    fn all_renders(md: &str) -> [(&'static str, String); 3] {
+        [
+            ("render", render(md, None)),
+            ("render_dir", render_dir(md, None, Path::new("a.md"))),
+            ("render_bundle", render_bundle(md, None).0),
+        ]
+    }
+
+    #[test]
+    fn raw_html_reserved_attrs_are_renamed() {
+        let cases = [
+            (
+                "<div data-sourcepos=\"40:1-90:1\">x</div>",
+                "40:1-90:1",
+                "data-x-sourcepos",
+            ),
+            (
+                "<div DATA-SOURCEPOS=\"1:1-1:1\">x</div>",
+                "1:1-1:1",
+                "data-x-sourcepos",
+            ),
+            (
+                "<div data-sourcepos = '2:2-2:2'>x</div>",
+                "2:2-2:2",
+                "data-x-sourcepos",
+            ),
+            (
+                "<div data-sourcepos=3:3-3:3>x</div>",
+                "3:3-3:3",
+                "data-x-sourcepos",
+            ),
+            (
+                "<div Data-Br-x=\"4:4-4:4\">x</div>",
+                "4:4-4:4",
+                "data-x-br-x",
+            ),
+            (
+                "<div data-br-id=\"5:5-5:5\">x</div>",
+                "5:5-5:5",
+                "data-x-br-id",
+            ),
+            (
+                "a <span data-sourcepos=\"6:6-6:6\">b</span>",
+                "6:6-6:6",
+                "data-x-sourcepos",
+            ),
+            (
+                "a <span DATA-BR-id=\"7:7-7:7\">b</span>",
+                "7:7-7:7",
+                "data-x-br-id",
+            ),
+            (
+                "<section>\n<div/data-sourcepos=\"8:8-8:8\">x</div>\n</section>",
+                "8:8-8:8",
+                "data-x-sourcepos",
+            ),
+            (
+                "<div title=\"a>b\" data-sourcepos=\"10:10-10:10\">q</div>",
+                "10:10-10:10",
+                "data-x-sourcepos",
+            ),
+            (
+                "<div\n  data-sourcepos=\"11:11-11:11\">x</div>",
+                "11:11-11:11",
+                "data-x-sourcepos",
+            ),
+            (
+                "<div\tdata-sourcepos=\"12:12-12:12\">x</div>",
+                "12:12-12:12",
+                "data-x-sourcepos",
+            ),
+            (
+                "<div class=x\tdata-br-y=\"14:14-14:14\">x</div>",
+                "14:14-14:14",
+                "data-x-br-y",
+            ),
+        ];
+        let mut bad = Vec::new();
+        for (md, value, want) in cases {
+            for (name, html) in all_renders(md) {
+                let names = attr_names_with_value(&html, value);
+                if names.is_empty() || names.iter().any(|n| n != want) {
+                    bad.push(format!(
+                        "{name}({md:?}): got {names:?}, want {want}\n  {html}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "reserved attrs not renamed:\n{}",
+            bad.join("\n")
+        );
+    }
+
+    #[test]
+    fn raw_html_bare_reserved_attrs_are_renamed() {
+        for (name, html) in all_renders("<div data-sourcepos data-BR-x>x</div>") {
+            assert!(
+                html.to_ascii_lowercase()
+                    .contains("<div data-x-sourcepos data-x-br-x>"),
+                "{name}: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_html_open_tag_is_escaped() {
+        // (markdown, text that must appear, attribute value that must not be reserved)
+        let cases = [
+            // The attribute would land on the first block's `<div`
+            (
+                "<div title=\"\n\n<p>\" data-sourcepos=\"9:9-9:9\">x</p>",
+                "&lt;div title=\"",
+                None,
+            ),
+            // comrak decodes `&#39;`, closing the raw block's open attribute from paragraph text
+            (
+                "<div title='\n\n&#39; data-sourcepos=50:1-60:1 data-br-id=zz x=&#39;\n\n&#39;",
+                "&lt;div title='",
+                None,
+            ),
+            ("text\n\n<div data-a=\"1\"", "&lt;div data-a=\"1\"", None),
+            // Once the `<div` is text, the tag inside its old attribute value is live
+            (
+                "<div title=\"<span data-sourcepos='13:13-13:13'>\"",
+                "&lt;div title=\"<span data-x-sourcepos='13:13-13:13'>",
+                Some("13:13-13:13"),
+            ),
+        ];
+        let mut bad = Vec::new();
+        for (md, want, value) in cases {
+            for (name, html) in all_renders(md) {
+                let renamed = value.is_none_or(|v| {
+                    attr_names_with_value(&html, v)
+                        .iter()
+                        .all(|n| n == "data-x-sourcepos")
+                });
+                if !html.contains(want) || !renamed {
+                    bad.push(format!("{name}({md:?}):\n  {html}"));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "open tags not escaped:\n{}", bad.join("\n"));
+    }
+
+    #[test]
+    fn raw_html_reserved_tags_render_as_text() {
+        let cases = [
+            "<birta-flow>hi</birta-flow>",
+            "<BIRTA-flow>hi</BIRTA-flow>",
+            "<div>\n< /birta-flow>\n<birta-flow data-x=\"1\">\n</div>",
+            "<section>\n<Birta-Note>a</Birta-Note>\n</section>",
+            "x <birta-note>y</birta-note> z",
+        ];
+        let mut bad = Vec::new();
+        for md in cases {
+            for (name, html) in all_renders(md) {
+                if has_reserved_tag(&html) || !html.to_ascii_lowercase().contains("&lt;birta-") {
+                    bad.push(format!("{name}({md:?}):\n  {html}"));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "reserved tags not neutralized:\n{}",
+            bad.join("\n")
+        );
+    }
+
+    #[test]
+    fn neutralizer_leaves_rendered_markup_alone() {
+        let md = "para\n\n\
+                  <div title=\"data-sourcepos=1 <birta-x>\">data-sourcepos=\"1:2\" data-br-x=1 in text <!-- <birta-y> --></div>\n\n\
+                  `data-sourcepos=\"1:1\" data-br-x <birta-x>`\n\n\
+                  plain data-sourcepos= text\n\n\
+                  ```mermaid\nA[data-br-x=1] --> B[data-sourcepos=2]\n```\n";
+        for (name, html) in all_renders(md) {
+            for want in [
+                "<p data-sourcepos=\"1:1-1:4\">para</p>",
+                "<div title=\"data-sourcepos=1 <birta-x>\">data-sourcepos=\"1:2\" data-br-x=1 in text <!-- <birta-y> --></div>",
+                ">data-sourcepos=&quot;1:1&quot; data-br-x &lt;birta-x&gt;</code>",
+                ">plain data-sourcepos= text</p>",
+                "A[data-br-x=1] --&gt; B[data-sourcepos=2]",
+            ] {
+                assert!(html.contains(want), "{name} lost {want:?}:\n{html}");
+            }
+        }
     }
 }

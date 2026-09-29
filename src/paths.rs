@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
-use std::sync::RwLock;
+use std::sync::{OnceLock, RwLock};
 
 use axum::http::StatusCode;
 
@@ -67,11 +67,31 @@ pub(crate) struct DocRef {
     pub(crate) log_writable: bool,
 }
 
-/// The served root plus the targets of directory symlinks found inside it.
+/// A symlink under the root that was allowed to reach outside it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Link {
+    /// Where the link sits, relative to the root.
+    pub(crate) lexical: PathBuf,
+    pub(crate) target: PathBuf,
+    /// Folder targets are roots; file targets are single read-only files.
+    pub(crate) dir: bool,
+}
+
+/// The served root plus the targets of symlinks found inside it.
 pub(crate) struct Roots {
     root: PathBuf,
     home: Option<PathBuf>,
-    linked: RwLock<Vec<PathBuf>>,
+    links: RwLock<Vec<Link>>,
+    /// Told the lexical path of each link a request registers, so it gets watched.
+    observer: OnceLock<LinkObserver>,
+}
+
+type LinkObserver = Box<dyn Fn(&Path) + Send + Sync>;
+
+/// Where a canonical path was found: a folder root, or an allowed file's folder.
+struct Base {
+    dir: PathBuf,
+    folder_root: bool,
 }
 
 impl Roots {
@@ -82,8 +102,19 @@ impl Roots {
         Self {
             root: canonical(root),
             home: home.map(canonical),
-            linked: RwLock::new(Vec::new()),
+            links: RwLock::new(Vec::new()),
+            observer: OnceLock::new(),
         }
+    }
+
+    /// Sets the one observer of links first found by a request.
+    pub(crate) fn observe_links(&self, observer: impl Fn(&Path) + Send + Sync + 'static) {
+        let _ = self.observer.set(Box::new(observer));
+    }
+
+    /// The canonical served root.
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
     }
 
     /// Checks, in order: plain names, deny set and dot rules, extension, existence,
@@ -107,7 +138,7 @@ impl Roots {
         };
         // A link inside the root must not reach a name the lexical rules refuse.
         let inner = canonical
-            .strip_prefix(&base)
+            .strip_prefix(&base.dir)
             .map_err(|_| PathError::Denied)?;
         check_names(inner, kind)?;
         check_extension(inner, kind)?;
@@ -121,11 +152,12 @@ impl Roots {
         let canonical = self.resolve_file(rel, FileKind::Markdown)?;
         let mut review_path = OsString::from(canonical.as_os_str());
         review_path.push(REVIEW_SUFFIX);
+        // A file reached only through a file link is read-only, and so is its review.
+        let folder_root = self.base_of(&canonical).is_some_and(|b| b.folder_root);
         Ok(DocRef {
             rel: rel.to_string(),
-            writable: access == Access::Write && is_writable(&canonical),
-            // Only folders are ever roots, so a resolved doc always has one.
-            log_writable: self.base_of(&canonical).is_some(),
+            writable: access == Access::Write && folder_root && is_writable(&canonical),
+            log_writable: folder_root,
             review_path: review_path.into(),
             canonical,
         })
@@ -139,34 +171,92 @@ impl Roots {
         self.base_of(canonical).is_some()
     }
 
-    /// The root or linked folder holding `canonical`, preferring the served root.
-    fn base_of(&self, canonical: &Path) -> Option<PathBuf> {
+    /// Every registered link.
+    pub(crate) fn links(&self) -> Vec<Link> {
+        self.links.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Registers the symlink at `lexical` when its target is allowed: a folder, or a
+    /// markdown or image file. Replaces whatever that link pointed at before.
+    pub(crate) fn register_link(&self, lexical: &Path) -> Option<Link> {
+        let path = self.root.join(lexical);
+        let is_link = std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
+        let target = path.canonicalize().ok().filter(|_| is_link);
+        let link = target.and_then(|target| {
+            let dir = target.is_dir();
+            let allowed = if dir {
+                self.link_allowed(&target)
+            } else {
+                file_link_allowed(&target)
+            };
+            allowed.then(|| Link {
+                lexical: lexical.to_path_buf(),
+                target,
+                dir,
+            })
+        });
+        let mut links = self.links.write().unwrap_or_else(|e| e.into_inner());
+        links.retain(|l| l.lexical != lexical);
+        links.extend(link.clone());
+        link
+    }
+
+    /// Forgets every link at or below `lexical`, so a removed or moved link stops serving
+    /// its old target. Returns what was forgotten.
+    pub(crate) fn unregister_links(&self, lexical: &Path) -> Vec<Link> {
+        let mut links = self.links.write().unwrap_or_else(|e| e.into_inner());
+        let (gone, kept) = links
+            .drain(..)
+            .partition(|l| l.lexical.starts_with(lexical));
+        *links = kept;
+        gone
+    }
+
+    /// The folder root holding `canonical`, preferring the served root, else the folder of
+    /// an allowed file link to exactly `canonical`.
+    fn base_of(&self, canonical: &Path) -> Option<Base> {
         if canonical.starts_with(&self.root) {
-            return Some(self.root.clone());
+            return Some(Base {
+                dir: self.root.clone(),
+                folder_root: true,
+            });
         }
-        let linked = self.linked.read().unwrap_or_else(|e| e.into_inner());
-        linked.iter().find(|t| canonical.starts_with(t)).cloned()
+        let links = self.links.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(link) = links
+            .iter()
+            .find(|l| l.dir && canonical.starts_with(&l.target))
+        {
+            return Some(Base {
+                dir: link.target.clone(),
+                folder_root: true,
+            });
+        }
+        links
+            .iter()
+            .find(|l| !l.dir && l.target == canonical)
+            .and_then(|l| l.target.parent())
+            .map(|dir| Base {
+                dir: dir.to_path_buf(),
+                folder_root: false,
+            })
     }
 
     /// Registers every allowed folder symlink along `lexical`. Only links that already
     /// exist inside the root are reachable, so this trusts nothing a scan wouldn't.
+    /// File links are left to the walker and the watcher.
     fn register_links(&self, lexical: &Path) {
-        let mut path = self.root.clone();
+        let mut rel = PathBuf::new();
         for component in lexical.components() {
-            path.push(component);
+            rel.push(component);
+            let path = self.root.join(&rel);
             let is_link =
                 std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
-            if !is_link {
-                continue;
-            }
-            let Ok(target) = path.canonicalize() else {
-                return;
-            };
-            if self.link_allowed(&target) {
-                let mut linked = self.linked.write().unwrap_or_else(|e| e.into_inner());
-                if !linked.contains(&target) {
-                    linked.push(target);
-                }
+            if is_link
+                && path.is_dir()
+                && self.register_link(&rel).is_some()
+                && let Some(observer) = self.observer.get()
+            {
+                observer(&rel);
             }
         }
     }
@@ -181,6 +271,25 @@ impl Roots {
             && !self.root.starts_with(target)
             && !target.components().any(|c| is_denied_name(c.as_os_str()))
     }
+}
+
+/// A file link may reach a markdown or image file whose own names pass the name rules.
+fn file_link_allowed(target: &Path) -> bool {
+    let kind = if is_md(target) {
+        FileKind::Markdown
+    } else if is_image(target) {
+        FileKind::Image
+    } else {
+        return false;
+    };
+    let Some(parent) = target.parent() else {
+        return false;
+    };
+    target.is_file()
+        && !parent.components().any(|c| is_denied_name(c.as_os_str()))
+        && target
+            .file_name()
+            .is_some_and(|leaf| check_names(Path::new(leaf), kind).is_ok())
 }
 
 /// `rel` as a relative path of plain names only; anything else is [`PathError::Denied`].
@@ -222,7 +331,7 @@ fn has_extension(path: &Path, exts: &[&str]) -> bool {
         .is_some_and(|e| exts.iter().any(|x| x.eq_ignore_ascii_case(e)))
 }
 
-fn is_denied_name(name: &std::ffi::OsStr) -> bool {
+pub(crate) fn is_denied_name(name: &std::ffi::OsStr) -> bool {
     name.to_str()
         .is_some_and(|n| DENY_DIRS.iter().any(|d| d.eq_ignore_ascii_case(n)))
 }
@@ -767,6 +876,53 @@ mod tests {
         ];
         let bad = file_mismatches(&tree, &roots, FileKind::Image, rows);
         assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    #[test]
+    fn unregistered_links_stop_serving_their_targets() {
+        let tree = Tree::new();
+        let roots = tree.roots();
+        tree.link("root/linked", tree.base.join("outside"));
+        tree.link("root/ext.md", tree.base.join("outside/doc.md"));
+        let ext = roots.register_link(Path::new("ext.md")).unwrap();
+        assert!(!ext.dir);
+        assert_eq!(
+            roots.resolve_file("linked/a.png", FileKind::Image),
+            Ok(tree.base.join("outside/a.png"))
+        );
+        assert!(roots.resolve_file("ext.md", FileKind::Markdown).is_ok());
+
+        std::fs::remove_file(tree.root.join("linked")).unwrap();
+        std::fs::remove_file(tree.root.join("ext.md")).unwrap();
+        tree.link("root/ext.md", tree.base.join("outside/sub/deep.png"));
+        let gone = roots.unregister_links(Path::new("linked"));
+        assert_eq!(gone.len(), 1);
+        roots.unregister_links(Path::new("ext.md"));
+
+        assert!(!roots.contains(&tree.base.join("outside/a.png")));
+        assert!(!roots.contains(&tree.base.join("outside/doc.md")));
+        assert!(roots.links().is_empty());
+    }
+
+    #[test]
+    fn register_link_replaces_a_retargeted_link() {
+        let tree = Tree::new();
+        let roots = tree.roots();
+        tree.link("root/l", tree.base.join("outside"));
+        roots.register_link(Path::new("l")).unwrap();
+
+        std::fs::remove_file(tree.root.join("l")).unwrap();
+        tree.link("root/l", tree.base.join("o2"));
+        let link = roots.register_link(Path::new("l")).unwrap();
+
+        assert_eq!(link.target, tree.base.join("o2"));
+        assert!(!roots.contains(&tree.base.join("outside/a.png")));
+        assert!(roots.contains(&tree.base.join("o2/a.png")));
+
+        std::fs::remove_file(tree.root.join("l")).unwrap();
+        tree.link("root/l", tree.base.join(".ssh"));
+        assert_eq!(roots.register_link(Path::new("l")), None);
+        assert!(!roots.contains(&tree.base.join("o2/a.png")));
     }
 
     #[test]

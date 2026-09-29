@@ -6,6 +6,7 @@ pub mod options;
 mod paths;
 pub mod render;
 mod rev;
+mod scan;
 mod security;
 pub mod server;
 pub mod static_export;

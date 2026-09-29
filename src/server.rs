@@ -52,6 +52,8 @@ pub(crate) enum WsEvent {
     /// Ready-to-send JSON (e.g. `theme_update` messages).
     Raw(Arc<str>),
     Scroll(u32),
+    /// A doc at this lexical path was deleted or moved away.
+    Gone(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,15 +90,14 @@ pub(crate) struct AppState {
     #[cfg_attr(not(test), expect(dead_code, reason = "not read by any handler yet"))]
     pub(crate) port: u16,
     pub(crate) mode: Mode,
-    pub(crate) base_dir: PathBuf,
     pub(crate) source_file: Option<PathBuf>,
     pub(crate) filename: String,
-    /// Relative path of the initial file from base_dir (e.g. "README.md").
+    /// Relative path of the initial file from the served root (e.g. "README.md").
     pub(crate) initial_relpath: Option<String>,
     pub(crate) custom_css: Option<String>,
     /// The entry doc's latest render, behind one lock so a resend never mixes versions.
     pub(crate) current: RwLock<Rendered>,
-    pub(crate) roots: Roots,
+    pub(crate) roots: Arc<Roots>,
     pub(crate) hub: broadcast::Sender<WsEvent>,
     pub(crate) connections: AtomicUsize,
     pub(crate) all_disconnected: Notify,
@@ -227,8 +228,7 @@ impl AppState {
         Arc::new(Self {
             port: init.port,
             mode: init.mode,
-            roots: Roots::new(init.base_dir.clone(), dirs::home_dir()),
-            base_dir: init.base_dir,
+            roots: Arc::new(Roots::new(init.base_dir, dirs::home_dir())),
             source_file: init.source_file,
             filename: init.filename,
             initial_relpath: init.initial_relpath,
@@ -324,7 +324,7 @@ pub async fn start(
 ) -> anyhow::Result<()> {
     let state = AppState::new(AppInit::serve(&file, &listener, opts)?);
 
-    let _debouncer = watcher::watch_dir(state.base_dir.clone(), Arc::clone(&state))?;
+    let _watch = watcher::watch(Arc::clone(&state))?;
 
     let app = router(state.clone());
     axum::serve(listener, app)
@@ -847,6 +847,9 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
                 Ok(WsEvent::Raw(json)) => json.to_string(),
                 Ok(WsEvent::Scroll(line)) => {
                     serde_json::json!({"type": "scroll", "line": line}).to_string()
+                }
+                Ok(WsEvent::Gone(path)) => {
+                    serde_json::json!({"type": "gone", "path": path}).to_string()
                 }
                 // Dropped events may include content, so resync this connection from the cache.
                 Err(broadcast::error::RecvError::Lagged(_)) => cached_content_frame(&state).await,
@@ -2438,6 +2441,32 @@ mod tests {
         assert_eq!(site.read("doc.md"), TASK);
         let mode = std::fs::metadata(&doc).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o444);
+        assert!(is_nack(&reply, "read_only"), "{reply:?}");
+    }
+
+    #[tokio::test]
+    async fn walked_file_link_out_of_root_is_served_but_read_only() {
+        let site = Site::new(&[("root/doc.md", TASK), ("outside/doc.md", TASK)]);
+        site.link("root/ext.md", site.base.join("outside/doc.md"));
+        let state = site.state();
+        let app = router(state.clone());
+        crate::scan::walk(&site.root, &state.roots, crate::scan::ScanBudget::default());
+        let bad = status_mismatches(&app, &[("/view/ext.md", 200), ("/render/ext.md", 200)]).await;
+        assert!(bad.is_empty(), "{bad:#?}");
+        let port = serve(&state).await;
+
+        let mut ws = connect(port).await;
+        let reply = send_checkbox(
+            &mut ws,
+            "c1",
+            checkbox_frame("c1", "ext.md", 1, true, Some(&git_rev(TASK))),
+        )
+        .await;
+
+        assert_eq!(
+            std::fs::read(site.base.join("outside/doc.md")).unwrap(),
+            TASK
+        );
         assert!(is_nack(&reply, "read_only"), "{reply:?}");
     }
 

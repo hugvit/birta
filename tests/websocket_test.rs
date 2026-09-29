@@ -52,7 +52,12 @@ async fn start_server(tmpfile: &NamedTempFile) -> u16 {
 
 #[tokio::test]
 async fn ws_sends_initial_html_on_connect() {
-    let mut tmpfile = TempBuilder::new().suffix(".md").tempfile().unwrap();
+    // Its own folder, since the whole folder is served and watched.
+    let dir = tempfile::tempdir().unwrap();
+    let mut tmpfile = TempBuilder::new()
+        .suffix(".md")
+        .tempfile_in(dir.path())
+        .unwrap();
     write!(tmpfile, "# Initial").unwrap();
     tmpfile.flush().unwrap();
 
@@ -82,7 +87,11 @@ async fn ws_sends_initial_html_on_connect() {
 
 #[tokio::test]
 async fn ws_sends_update_on_file_change() {
-    let mut tmpfile = TempBuilder::new().suffix(".md").tempfile().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut tmpfile = TempBuilder::new()
+        .suffix(".md")
+        .tempfile_in(dir.path())
+        .unwrap();
     write!(tmpfile, "# Before").unwrap();
     tmpfile.flush().unwrap();
 
@@ -120,7 +129,11 @@ async fn ws_sends_update_on_file_change() {
 
 #[tokio::test]
 async fn ws_reconnect_sees_latest_content() {
-    let mut tmpfile = TempBuilder::new().suffix(".md").tempfile().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut tmpfile = TempBuilder::new()
+        .suffix(".md")
+        .tempfile_in(dir.path())
+        .unwrap();
     write!(tmpfile, "# Before").unwrap();
     tmpfile.flush().unwrap();
 

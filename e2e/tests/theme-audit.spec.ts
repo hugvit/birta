@@ -339,3 +339,32 @@ test.describe.serial("css audit: catppuccin dark", () => {
     await expect(toggle).not.toHaveClass(/disabled/);
   });
 });
+
+// --- Single-variant theme ---
+
+test.describe.serial("single-variant theme", () => {
+  let server: ChildProcess;
+  const BASE = "http://127.0.0.1:3459";
+
+  test.beforeAll(async () => {
+    server = await startBirta(3459, "fixtures/theme-test.md", [
+      "--theme",
+      "dracula",
+    ]);
+  });
+
+  test.afterAll(() => {
+    stopBirta(server);
+  });
+
+  test("theme toggle is disabled and inert", async ({ page }) => {
+    await page.goto(BASE);
+    const html = page.locator("html");
+    const toggle = page.locator("#theme-toggle");
+    await expect(toggle).toHaveClass(/disabled/);
+    const before = await html.getAttribute("data-theme");
+    await toggle.click({ force: true });
+    await page.waitForTimeout(500);
+    await expect(html).toHaveAttribute("data-theme", before!);
+  });
+});

@@ -68,6 +68,9 @@ async function switchTheme(
   await page
     .locator(`.theme-dropdown-item[data-theme="${themeName}"]`)
     .click();
+  await expect(
+    page.locator(`.theme-dropdown-item.active[data-theme="${themeName}"]`)
+  ).toHaveCount(1);
   await waitForThemeUpdate(page);
 }
 

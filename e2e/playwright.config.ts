@@ -4,6 +4,8 @@ export default defineConfig({
   testDir: "./tests",
   timeout: 30_000,
   retries: 0,
+  // Specs share the webServer and live-reload rewrites its fixture
+  workers: process.env.CI ? 1 : undefined,
   use: {
     baseURL: "http://127.0.0.1:3456",
   },

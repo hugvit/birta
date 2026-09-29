@@ -53,10 +53,14 @@ test("theme toggle switches between light and dark", async ({ page }) => {
   const initial = await html.getAttribute("data-theme");
   expect(initial === "light" || initial === "dark").toBeTruthy();
   const other = initial === "light" ? "dark" : "light";
+  const bgOf = () =>
+    page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+  const initialBg = await bgOf();
 
   // The variant flips only after the server's theme_update round trip
   await toggleBtn.click();
   await expect(html).toHaveAttribute("data-theme", other);
+  await expect.poll(bgOf).not.toBe(initialBg);
 
   await toggleBtn.click();
   await expect(html).toHaveAttribute("data-theme", initial!);

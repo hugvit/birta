@@ -8,11 +8,13 @@ use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
+use axum::middleware::{from_fn, from_fn_with_state};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, RwLock, broadcast};
 
+use crate::security::{HostGuard, base_headers, guard};
 use crate::theme::{ResolvedTheme, ThemeRegistry, Variant};
 use crate::{render, template, watcher};
 
@@ -378,6 +380,9 @@ fn router(state: Arc<AppState>) -> Router {
         .merge(live)
         .merge(assets)
         .with_state(state)
+        // The guard wraps every group; base headers sit outside it so rejections carry them too.
+        .layer(from_fn_with_state(HostGuard::new(), guard))
+        .layer(from_fn(base_headers))
 }
 
 /// Reserved for embedded assets; nothing is served yet.
@@ -879,15 +884,7 @@ mod tests {
     async fn index_returns_200_with_markdown_body() {
         let app = test_router();
 
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app.oneshot(get("/")).await.unwrap();
 
         assert_eq!(response.status(), 200);
 
@@ -903,43 +900,459 @@ mod tests {
         );
     }
 
+    /// Every registered path with the method it is routed for.
+    const ROUTES: [(&str, &str); 11] = [
+        ("GET", "/"),
+        ("GET", "/view/x.md"),
+        ("GET", "/render/x.md"),
+        ("GET", "/local/a.png"),
+        ("GET", "/_birta/x"),
+        ("GET", "/_birta/nested/review.css"),
+        ("GET", "/health"),
+        ("GET", "/favicon.png"),
+        ("GET", "/favicon.ico"),
+        ("POST", "/scroll/1"),
+        ("GET", "/ws"),
+    ];
+
+    fn wrong_method(method: &str) -> &'static str {
+        if method == "GET" { "POST" } else { "GET" }
+    }
+
+    const LOCAL_HOST: &str = "127.0.0.1:1";
+
+    fn raw_request(method: &str, uri: &str, headers: &[(&str, &str)]) -> axum::http::Request<Body> {
+        let mut builder = axum::http::Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    /// A request as a local client sends it; the guard refuses requests without Host.
+    fn request(method: &str, uri: &str) -> axum::http::Request<Body> {
+        raw_request(method, uri, &[("host", LOCAL_HOST)])
+    }
+
+    fn get(uri: &str) -> axum::http::Request<Body> {
+        request("GET", uri)
+    }
+
     #[tokio::test]
     async fn router_builds_with_all_groups() {
         // A wrong method gets 405 only when the path is routed, so it proves registration.
-        let cases = [
+        let mut cases = vec![
             ("GET", "/", 200),
             ("GET", "/health", 200),
             ("GET", "/favicon.png", 200),
             ("GET", "/favicon.ico", 200),
             ("GET", "/_birta/review.js", 404),
-            ("POST", "/", 405),
-            ("POST", "/view/a.md", 405),
-            ("POST", "/render/a.md", 405),
-            ("POST", "/local/a.png", 405),
-            ("POST", "/favicon.png", 405),
-            ("POST", "/favicon.ico", 405),
-            ("POST", "/health", 405),
-            ("POST", "/ws", 405),
-            ("GET", "/scroll/1", 405),
-            ("POST", "/_birta/review.js", 405),
-            ("POST", "/_birta/nested/review.css", 405),
             ("POST", "/not-a-route", 404),
         ];
+        cases.extend(ROUTES.map(|(method, uri)| (wrong_method(method), uri, 405)));
         let app = test_router();
         for (method, uri, expected) in cases {
-            let response = app
-                .clone()
-                .oneshot(
-                    axum::http::Request::builder()
-                        .method(method)
-                        .uri(uri)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
+            let response = app.clone().oneshot(request(method, uri)).await.unwrap();
             assert_eq!(response.status(), expected, "{method} {uri}");
         }
+    }
+
+    type Rows<'a> = [(&'a [(&'a str, &'a str)], u16)];
+    type RouteRows<'a> = [(&'a str, &'a str, &'a [(&'a str, &'a str)], u16)];
+
+    /// Sends each row with exactly its headers; returns every status mismatch.
+    async fn route_mismatches(rows: &RouteRows<'_>) -> Vec<String> {
+        let app = test_router();
+        let mut mismatches = Vec::new();
+        for (method, uri, headers, want) in rows {
+            let got = app
+                .clone()
+                .oneshot(raw_request(method, uri, headers))
+                .await
+                .unwrap()
+                .status();
+            if got != *want {
+                mismatches.push(format!(
+                    "{method} {uri} {headers:?}: got {got}, want {want}"
+                ));
+            }
+        }
+        mismatches
+    }
+
+    async fn health_mismatches(rows: &Rows<'_>) -> Vec<String> {
+        let rows: Vec<_> = rows
+            .iter()
+            .map(|(headers, want)| ("GET", "/health", *headers, *want))
+            .collect();
+        route_mismatches(&rows).await
+    }
+
+    #[tokio::test]
+    async fn guard_rejects_foreign_host() {
+        let rows: &Rows = &[
+            (&[("host", "evil.com")], 421),
+            (&[("host", "evil.com:1")], 421),
+            (&[("host", "127.0.0.1.evil.com")], 421),
+            (&[("host", "127.0.0.1.evil.com:1")], 421),
+            (&[("host", "localhost.")], 421),
+            (&[("host", "localhost.:1")], 421),
+            (&[("host", "127.0.0.1:99999")], 421),
+            (&[("host", "127.0.0.1:abc")], 421),
+            (&[("host", "127.0.0.2:1")], 421),
+            (&[("host", "0.0.0.0:1")], 421),
+            (&[("host", "[::2]:1")], 421),
+        ];
+        let mismatches = health_mismatches(rows).await;
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[tokio::test]
+    async fn guard_rejects_missing_host() {
+        let rows: &Rows = &[(&[], 421), (&[("host", "")], 421)];
+        let mismatches = health_mismatches(rows).await;
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[tokio::test]
+    async fn guard_allows_loopback_hosts() {
+        let rows: &Rows = &[
+            (&[("host", "127.0.0.1")], 200),
+            (&[("host", "127.0.0.1:1")], 200),
+            (&[("host", "localhost")], 200),
+            (&[("host", "localhost:3456")], 200),
+            (&[("host", "LOCALHOST:5")], 200),
+            (&[("host", "[::1]")], 200),
+            (&[("host", "[::1]:9")], 200),
+        ];
+        let mismatches = health_mismatches(rows).await;
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[tokio::test]
+    async fn guard_rejects_foreign_origin() {
+        let rows: &Rows = &[
+            (
+                &[("host", LOCAL_HOST), ("origin", "http://127.0.0.1:2")],
+                403,
+            ),
+            (&[("host", LOCAL_HOST), ("origin", "http://127.0.0.1")], 403),
+            (&[("host", LOCAL_HOST), ("origin", "null")], 403),
+            (
+                &[("host", LOCAL_HOST), ("origin", "https://127.0.0.1:1")],
+                403,
+            ),
+            (
+                &[("host", LOCAL_HOST), ("origin", "http://localhost:1")],
+                403,
+            ),
+            (&[("host", LOCAL_HOST), ("origin", "http://evil.com")], 403),
+            (&[("host", LOCAL_HOST), ("origin", "")], 403),
+        ];
+        let mismatches = health_mismatches(rows).await;
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[tokio::test]
+    async fn guard_allows_same_origin() {
+        let rows: &Rows = &[
+            (&[("host", LOCAL_HOST)], 200),
+            (
+                &[("host", LOCAL_HOST), ("origin", "http://127.0.0.1:1")],
+                200,
+            ),
+            (
+                &[("host", "localhost:5"), ("origin", "http://localhost:5")],
+                200,
+            ),
+            (&[("host", "[::1]:9"), ("origin", "http://[::1]:9")], 200),
+        ];
+        let mismatches = health_mismatches(rows).await;
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[tokio::test]
+    async fn guard_rejects_cross_site_fetch() {
+        let fetch = |site, mode| {
+            [
+                ("host", LOCAL_HOST),
+                ("sec-fetch-site", site),
+                ("sec-fetch-mode", mode),
+            ]
+        };
+        let rows: &Rows = &[
+            (
+                &[("host", LOCAL_HOST), ("sec-fetch-site", "cross-site")],
+                403,
+            ),
+            (&fetch("cross-site", "navigate"), 403),
+            (&fetch("cross-site", "cors"), 403),
+            (&fetch("cross-site", "no-cors"), 403),
+            (&fetch("same-site", "cors"), 403),
+            (&fetch("same-site", "no-cors"), 403),
+            (&fetch("same-site", "websocket"), 403),
+        ];
+        let mismatches = health_mismatches(rows).await;
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[tokio::test]
+    async fn guard_allows_same_site_navigation_and_same_origin() {
+        let fetch = |site, mode| {
+            [
+                ("host", LOCAL_HOST),
+                ("sec-fetch-site", site),
+                ("sec-fetch-mode", mode),
+            ]
+        };
+        let rows: &Rows = &[
+            (&fetch("same-site", "navigate"), 200),
+            (&fetch("same-origin", "cors"), 200),
+            (&fetch("same-origin", "websocket"), 200),
+            (&fetch("none", "navigate"), 200),
+        ];
+        let mismatches = health_mismatches(rows).await;
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[tokio::test]
+    async fn guard_rejects_rebinding_shape() {
+        // A rebinding page sends a Host and Origin that agree; Host must fail first.
+        let rebound: &[(&str, &str)] = &[("host", "evil.com:1"), ("origin", "http://evil.com:1")];
+        let rows: &RouteRows = &[
+            ("GET", "/health", rebound, 421),
+            ("GET", "/ws", rebound, 421),
+            ("POST", "/scroll/1", rebound, 421),
+        ];
+        let mismatches = route_mismatches(rows).await;
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[tokio::test]
+    async fn guard_sec_fetch_does_not_bypass_origin_or_host() {
+        let rows: &RouteRows = &[
+            (
+                "GET",
+                "/health",
+                &[
+                    ("host", LOCAL_HOST),
+                    ("sec-fetch-site", "same-origin"),
+                    ("sec-fetch-mode", "cors"),
+                    ("origin", "http://evil.com"),
+                ],
+                403,
+            ),
+            (
+                "GET",
+                "/health",
+                &[
+                    ("host", LOCAL_HOST),
+                    ("sec-fetch-site", "none"),
+                    ("sec-fetch-mode", "navigate"),
+                    ("origin", "null"),
+                ],
+                403,
+            ),
+            (
+                "POST",
+                "/scroll/1",
+                &[
+                    ("host", "localhost:1"),
+                    ("origin", "http://localhost:3000"),
+                    ("sec-fetch-site", "same-site"),
+                    ("sec-fetch-mode", "navigate"),
+                ],
+                403,
+            ),
+            (
+                "GET",
+                "/health",
+                &[("host", "evil.com"), ("sec-fetch-site", "same-origin")],
+                421,
+            ),
+        ];
+        let mismatches = route_mismatches(rows).await;
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[tokio::test]
+    async fn guard_rejects_origin_prefix_tricks() {
+        let rows: &Rows = &[
+            (
+                &[("host", LOCAL_HOST), ("origin", "http://127.0.0.1:10")],
+                403,
+            ),
+            (
+                &[
+                    ("host", LOCAL_HOST),
+                    ("origin", "http://127.0.0.1:1.evil.com"),
+                ],
+                403,
+            ),
+            (
+                &[("host", LOCAL_HOST), ("origin", "http://127.0.0.1:1/")],
+                403,
+            ),
+            (
+                &[("host", LOCAL_HOST), ("origin", "http://127.0.0.1:1:1")],
+                403,
+            ),
+        ];
+        let mismatches = health_mismatches(rows).await;
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[tokio::test]
+    async fn guard_rejects_host_lookalikes() {
+        let rows: &Rows = &[
+            (&[("host", "evil.localhost:1")], 421),
+            (&[("host", "localhost.evil.com:1")], 421),
+            (&[("host", "localhostevil.com")], 421),
+            (&[("host", "127.0.0.1.:1")], 421),
+            (&[("host", "[0:0:0:0:0:0:0:1]:1")], 421),
+            (&[("host", "[::ffff:127.0.0.1]:1")], 421),
+            (&[("host", "::1")], 421),
+            (&[("host", "::1:9")], 421),
+            (&[("host", "[::1")], 421),
+            (&[("host", "[::1]x")], 421),
+            (&[("host", "evil.com@127.0.0.1:1")], 421),
+            (&[("host", "127.0.0.1:+1")], 421),
+            (&[("host", "127.0.0.1:")], 421),
+            (&[("host", "127.0.0.1:1:2")], 421),
+        ];
+        let mismatches = health_mismatches(rows).await;
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[tokio::test]
+    async fn guard_rejects_duplicate_host() {
+        let rows: &Rows = &[
+            (&[("host", LOCAL_HOST), ("host", "evil.com")], 421),
+            (&[("host", "evil.com"), ("host", LOCAL_HOST)], 421),
+            (&[("host", LOCAL_HOST), ("host", LOCAL_HOST)], 421),
+        ];
+        let mismatches = health_mismatches(rows).await;
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[tokio::test]
+    async fn guard_ignores_forwarded_headers() {
+        let rows: &Rows = &[
+            (
+                &[("host", "evil.com"), ("x-forwarded-host", LOCAL_HOST)],
+                421,
+            ),
+            (
+                &[("host", "evil.com"), ("forwarded", "host=127.0.0.1:1")],
+                421,
+            ),
+        ];
+        let mismatches = health_mismatches(rows).await;
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[tokio::test]
+    async fn guard_absolute_form() {
+        let rows: &RouteRows = &[
+            (
+                "GET",
+                "http://evil.com/health",
+                &[("host", LOCAL_HOST)],
+                421,
+            ),
+            ("GET", "http://127.0.0.1:1/health", &[], 421),
+            (
+                "GET",
+                "http://127.0.0.1:1/health",
+                &[("host", LOCAL_HOST)],
+                200,
+            ),
+        ];
+        let mismatches = route_mismatches(rows).await;
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[tokio::test]
+    async fn guard_same_site_without_mode() {
+        let rows: &Rows = &[
+            (
+                &[("host", LOCAL_HOST), ("sec-fetch-site", "same-site")],
+                403,
+            ),
+            (
+                &[("host", LOCAL_HOST), ("sec-fetch-site", "same-origin")],
+                200,
+            ),
+            (&[("host", LOCAL_HOST), ("sec-fetch-site", "none")], 200),
+        ];
+        let mismatches = health_mismatches(rows).await;
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[tokio::test]
+    async fn guard_allows_node_fetch_shape() {
+        // Node's fetch (the e2e /health poll) sends a mode but no site and no Origin.
+        let rows: &Rows = &[(&[("host", LOCAL_HOST), ("sec-fetch-mode", "cors")], 200)];
+        let mismatches = health_mismatches(rows).await;
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[tokio::test]
+    async fn guard_covers_every_route() {
+        // Includes wrong-method (405), OPTIONS/HEAD and unrouted (fallback 404) responses.
+        let mut targets: Vec<(&str, &str)> = Vec::new();
+        for (method, uri) in ROUTES {
+            targets.extend([(method, uri), (wrong_method(method), uri)]);
+            targets.extend([("OPTIONS", uri), ("HEAD", uri)]);
+        }
+        targets.extend([("GET", "/not-a-route"), ("POST", "/not-a-route")]);
+        let rejections: [(&[(&str, &str)], u16); 4] = [
+            (&[("host", "evil.com")], 421),
+            (&[], 421),
+            (&[("host", LOCAL_HOST), ("origin", "http://evil.com")], 403),
+            (
+                &[("host", LOCAL_HOST), ("sec-fetch-site", "cross-site")],
+                403,
+            ),
+        ];
+        let rows: Vec<_> = targets
+            .iter()
+            .flat_map(|(method, uri)| {
+                rejections.map(|(headers, want)| (*method, *uri, headers, want))
+            })
+            .collect();
+        let mismatches = route_mismatches(&rows).await;
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[tokio::test]
+    async fn base_headers_on_every_route() {
+        let expected = [
+            ("x-content-type-options", "nosniff"),
+            ("referrer-policy", "no-referrer"),
+            ("x-frame-options", "DENY"),
+        ];
+        let mut requests: Vec<_> = ROUTES.map(|(method, uri)| request(method, uri)).into();
+        // Guard rejections carry them too.
+        requests.push(raw_request("GET", "/health", &[("host", "evil.com")]));
+        requests.push(raw_request(
+            "GET",
+            "/health",
+            &[("host", LOCAL_HOST), ("origin", "http://evil.com")],
+        ));
+
+        let app = test_router();
+        let mut missing = Vec::new();
+        for req in requests {
+            let label = format!("{} {} {:?}", req.method(), req.uri(), req.headers());
+            let response = app.clone().oneshot(req).await.unwrap();
+            for (name, value) in expected {
+                if response.headers().get(name).is_none_or(|v| v != value) {
+                    missing.push(format!("{label} ({}): {name}", response.status()));
+                }
+            }
+        }
+        assert!(missing.is_empty(), "{missing:#?}");
     }
 
     type Client = tokio_tungstenite::WebSocketStream<
@@ -1149,13 +1562,7 @@ mod tests {
         let state = test_state(|_| {});
         let mut rx = state.hub.subscribe();
         let response = router(state.clone())
-            .oneshot(
-                axum::http::Request::builder()
-                    .method("POST")
-                    .uri("/scroll/42")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(request("POST", "/scroll/42"))
             .await
             .unwrap();
         assert_eq!(response.status(), 204);
@@ -1184,15 +1591,7 @@ mod tests {
     async fn health_returns_200() {
         let app = test_router();
 
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/health")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app.oneshot(get("/health")).await.unwrap();
 
         assert_eq!(response.status(), 200);
     }
@@ -1208,15 +1607,7 @@ mod tests {
 
         let app = test_router_with_base_dir(dir.path().canonicalize().unwrap());
 
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/local/photo.png")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app.oneshot(get("/local/photo.png")).await.unwrap();
 
         assert_eq!(response.status(), 200);
         assert_eq!(response.headers()["content-type"], "image/png");
@@ -1228,12 +1619,7 @@ mod tests {
         let app = test_router_with_base_dir(dir.path().canonicalize().unwrap());
 
         let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/local/../../../etc/passwd")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(get("/local/../../../etc/passwd"))
             .await
             .unwrap();
 
@@ -1250,15 +1636,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let app = test_router_with_base_dir(dir.path().canonicalize().unwrap());
 
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/local/nonexistent.png")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app.oneshot(get("/local/nonexistent.png")).await.unwrap();
 
         assert_eq!(response.status(), 404);
     }
@@ -1271,15 +1649,7 @@ mod tests {
 
         let app = test_router_with_base_dir(dir_path);
 
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/view/test.md")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app.oneshot(get("/view/test.md")).await.unwrap();
 
         assert_eq!(response.status(), 200);
         let body = response.into_body().collect().await.unwrap().to_bytes();
@@ -1295,15 +1665,7 @@ mod tests {
 
         let app = test_router_with_base_dir(dir_path);
 
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/view/photo.png")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app.oneshot(get("/view/photo.png")).await.unwrap();
 
         assert_eq!(response.status(), 400);
     }
@@ -1314,15 +1676,7 @@ mod tests {
         let dir_path = dir.path().canonicalize().unwrap();
         let app = test_router_with_base_dir(dir_path);
 
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/view/nonexistent.md")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app.oneshot(get("/view/nonexistent.md")).await.unwrap();
 
         assert_eq!(response.status(), 404);
     }
@@ -1332,15 +1686,7 @@ mod tests {
         let state = test_state(|init| init.initial_relpath = Some("test.md".to_string()));
         let app = router(state);
 
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri("/")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = app.oneshot(get("/")).await.unwrap();
 
         assert_eq!(response.status(), 307);
         assert_eq!(response.headers()["location"], "/view/test.md");

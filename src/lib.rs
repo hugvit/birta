@@ -2,6 +2,7 @@ pub mod config;
 pub mod highlight;
 pub mod options;
 pub mod render;
+mod security;
 pub mod server;
 pub mod static_export;
 pub mod template;

@@ -39,10 +39,12 @@ pub fn highlight_source(source: &str, syntax_theme: Option<&SyntaxTheme>) -> Str
         .find_syntax_by_extension("md")
         .unwrap_or_else(|| ss.find_syntax_plain_text());
 
-    match syntax_theme {
+    let html = match syntax_theme {
         None => highlight_classed(source, syntax, &ss),
         Some(st) => highlight_styled(source, syntax, &ss, st),
-    }
+    };
+    // The HTML parser normalizes raw CRs to LF, which breaks CRLF line alignment and copying
+    html.replace('\r', "&#13;")
 }
 
 /// CSS-class mode: produces `<span class="keyword">` etc. matching `syntax.css`.
@@ -81,6 +83,35 @@ fn highlight_styled(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn default_syntax_theme() -> SyntaxTheme {
+        SyntaxTheme {
+            theme: ThemeSet::load_defaults().themes["InspiredGitHub"].clone(),
+            theme_name: "InspiredGitHub".to_string(),
+        }
+    }
+
+    const CRLF_SOURCE: &str = "# H1\r\n## H2 text\r\n\r\nbody\rlone cr\r\n";
+
+    #[test]
+    fn highlight_source_escapes_carriage_returns_css_class_mode() {
+        let html = highlight_source(CRLF_SOURCE, None);
+        assert!(
+            !html.contains('\r'),
+            "raw CR would be normalized by the HTML parser: {html:?}"
+        );
+        assert_eq!(html.matches("&#13;").count(), 5);
+    }
+
+    #[test]
+    fn highlight_source_escapes_carriage_returns_styled_mode() {
+        let html = highlight_source(CRLF_SOURCE, Some(&default_syntax_theme()));
+        assert!(
+            !html.contains('\r'),
+            "raw CR would be normalized by the HTML parser: {html:?}"
+        );
+        assert_eq!(html.matches("&#13;").count(), 5);
+    }
 
     #[test]
     fn highlight_source_css_class_mode() {

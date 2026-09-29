@@ -27,6 +27,8 @@ pub struct PageOptions<'a> {
     pub static_mode: bool,
     pub keybindings_json: &'a str,
     pub current_path: Option<&'a str>,
+    /// Git blob hash of the bytes rendered into `content_html`; checkbox writes send it back.
+    pub rev: Option<&'a str>,
     pub nonce: &'a str,
     pub extra_boot: Option<&'a serde_json::Value>,
 }
@@ -108,6 +110,7 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
         "variants": theme.variant_names(),
         "keybindings": keybindings,
         "currentPath": opts.current_path.unwrap_or(""),
+        "rev": opts.rev,
         "initialView": if opts.raw_mode { "raw" } else { "preview" },
         "extra": opts.extra_boot,
     }));
@@ -215,6 +218,7 @@ mod tests {
             current_path: None,
             nonce: "",
             extra_boot: None,
+            rev: None,
         })
     }
 
@@ -281,6 +285,7 @@ mod tests {
             current_path: None,
             nonce: "",
             extra_boot: None,
+            rev: None,
         })
     }
 
@@ -412,6 +417,7 @@ mod tests {
             current_path: None,
             nonce: "",
             extra_boot: None,
+            rev: None,
         })
     }
 
@@ -495,6 +501,7 @@ mod tests {
             current_path: None,
             nonce: "",
             extra_boot: None,
+            rev: None,
         })
     }
 
@@ -587,6 +594,7 @@ mod tests {
             current_path: Some("test.md"),
             nonce: "",
             extra_boot: None,
+            rev: None,
         }
     }
 
@@ -691,6 +699,7 @@ mod tests {
             raw_mode: true,
             variant_explicit: true,
             current_path: Some("dir/a.md"),
+            rev: Some("ce013625030ba8dba906f756967f9e9ca394464a"),
             keybindings_json: r#"{"toggle_dark":"d"}"#,
             ..base_opts(&theme)
         });
@@ -704,6 +713,7 @@ mod tests {
                 "variants": ["light", "dark"],
                 "keybindings": {"toggle_dark": "d"},
                 "currentPath": "dir/a.md",
+                "rev": "ce013625030ba8dba906f756967f9e9ca394464a",
                 "initialView": "raw",
                 "extra": null,
             })
@@ -764,6 +774,7 @@ mod tests {
         let extra = serde_json::json!({"review": {"note": "</script><b>&'\u{2028}"}});
         let page = render_page(&PageOptions {
             extra_boot: Some(&extra),
+            rev: None,
             ..base_opts(&theme)
         });
         assert_eq!(boot(&page)["extra"], extra);
@@ -795,6 +806,7 @@ mod tests {
             current_path: Some("sub/x';y\".md"),
             nonce: "abc123",
             extra_boot: Some(&extra),
+            rev: None,
             ..base_opts(&github)
         });
         let inline_a = executable_inline(&a);
@@ -967,6 +979,7 @@ mod tests {
             current_path: Some("dir/</script>&'\u{2028}.md"),
             keybindings_json: r#"{"toggle_dark":"<!--"}"#,
             extra_boot: Some(&extra),
+            rev: None,
             ..base_opts(&theme)
         });
         insta::assert_snapshot!(boot_raw(&page));

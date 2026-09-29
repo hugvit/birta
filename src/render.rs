@@ -260,6 +260,11 @@ fn plugins(adapter: &SyntectAdapter) -> options::Plugins<'_> {
     plugins
 }
 
+/// The options `render` parses with, for callers that only need the AST.
+pub(crate) fn parse_options() -> Options<'static> {
+    options(&RewriteMode::Server)
+}
+
 fn options(mode: &RewriteMode) -> Options<'static> {
     let mut options = Options::default();
 

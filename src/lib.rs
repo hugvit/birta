@@ -1,7 +1,11 @@
+mod atomic_write;
 pub mod config;
+mod doc_write;
 pub mod highlight;
 pub mod options;
+mod paths;
 pub mod render;
+mod rev;
 mod security;
 pub mod server;
 pub mod static_export;

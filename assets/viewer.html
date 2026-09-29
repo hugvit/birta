@@ -110,6 +110,8 @@
     var KEYBINDINGS = BOOT.keybindings;
     var CURRENT_PATH = BOOT.currentPath;
     var INITIAL_VIEW = BOOT.initialView;
+    // Rev of the rendered bytes; a checkbox write is refused unless it still matches disk.
+    var docRev = BOOT.rev;
 
     var html = document.documentElement;
     var mdBody = document.getElementById('content');
@@ -455,6 +457,8 @@
     }
 
     // --- Checkbox write-back ---
+    var pendingChecks = {};
+    var nextCheckId = 0;
     function enableCheckboxes() {
       mdBody.querySelectorAll('input[type="checkbox"][disabled]').forEach(function(cb) {
         cb.disabled = false;
@@ -462,8 +466,11 @@
           var li = e.target.closest('li[data-sourcepos]');
           if (!li || !currentWs || currentWs.readyState !== WebSocket.OPEN) return;
           var line = parseInt(li.getAttribute('data-sourcepos'), 10);
+          var cid = 'cb' + (++nextCheckId);
+          pendingChecks[cid] = e.target;
           currentWs.send(JSON.stringify({
-            type: 'checkbox', line: line, checked: e.target.checked, path: CURRENT_PATH
+            type: 'checkbox', cid: cid, line: line, checked: e.target.checked,
+            path: CURRENT_PATH, rev: docRev
           }));
         });
       });
@@ -472,6 +479,7 @@
     // --- WebSocket ---
     if (!STATIC_MODE) (function() {
       var status = document.getElementById('status');
+      var CHANGED_SINCE = 'changed since \u00b7 try again';
       var reconnectDelay = 1000;
       var maxDelay = 10000;
 
@@ -508,6 +516,7 @@
           switch (msg.type) {
             case 'content':
               if (msg.path && CURRENT_PATH && msg.path !== CURRENT_PATH) break;
+              if (msg.rev) docRev = msg.rev;
               mdBody.innerHTML = msg.html;
               if (msg.source) sourceView.innerHTML = msg.source;
               if (msg.file_stats) {
@@ -556,6 +565,7 @@
                   if (freshSource) sourceView.innerHTML = freshSource;
                 });
               } else {
+                if (msg.rev) docRev = msg.rev;
                 mdBody.innerHTML = msg.html;
                 if (msg.source) sourceView.innerHTML = msg.source;
                 renderMath();
@@ -567,6 +577,21 @@
 
             case 'scroll':
               scrollToLine(msg.line);
+              break;
+
+            case 'ack':
+              delete pendingChecks[msg.cid];
+              break;
+
+            case 'nack':
+              var refused = pendingChecks[msg.cid];
+              delete pendingChecks[msg.cid];
+              // The write was refused, so undo the click; a detached box is already replaced by fresh content.
+              if (refused && refused.isConnected) refused.checked = !refused.checked;
+              showStatus(CHANGED_SINCE);
+              setTimeout(function() {
+                if (status.textContent === CHANGED_SINCE) hideStatus();
+              }, 4000);
               break;
           }
         };

@@ -117,6 +117,24 @@ pub(crate) async fn base_headers(req: Request, next: Next) -> Response {
     response
 }
 
+/// For responses that are only ever embedded or fetched: opened directly, they get no
+/// script and no same-origin access.
+pub(crate) const SANDBOX_CSP: &str = "sandbox; default-src 'none'; style-src 'unsafe-inline'";
+
+pub(crate) async fn sandbox_headers(req: Request, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(SANDBOX_CSP),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    response
+}
+
 /// Escapes text for an HTML attribute value or element content.
 pub(crate) fn html_escape_attr(s: &str) -> String {
     let mut out = String::with_capacity(s.len());

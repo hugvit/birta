@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
 
-use crate::render;
+use crate::rev::Rev;
 use crate::server::{AppState, ContentUpdate};
+use crate::{paths, render};
 
 /// Watch a directory recursively and broadcast rendered HTML for changed `.md` files.
 pub(crate) fn watch_dir(
@@ -38,11 +39,8 @@ pub(crate) fn watch_dir(
                 if !path.starts_with(&canonical_base) {
                     continue;
                 }
-                match path.extension().and_then(|e| e.to_str()) {
-                    Some("md" | "markdown") => {
-                        changed.insert(path);
-                    }
-                    _ => continue,
+                if paths::is_md(&path) {
+                    changed.insert(path);
                 }
             }
 
@@ -62,7 +60,16 @@ pub(crate) fn watch_dir(
                     .to_string_lossy()
                     .into_owned();
 
-                let markdown = match std::fs::read_to_string(&path) {
+                let bytes = match std::fs::read(&path) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        eprintln!("birta: could not read {relpath}: {e}");
+                        continue;
+                    }
+                };
+                // The rev must name exactly the bytes rendered below.
+                let rev = Rev::of(&bytes);
+                let markdown = match String::from_utf8(bytes) {
                     Ok(s) => s,
                     Err(e) => {
                         eprintln!("birta: could not read {relpath}: {e}");
@@ -82,6 +89,7 @@ pub(crate) fn watch_dir(
                     rendered_html: html,
                     source_html: source,
                     file_stats,
+                    rev,
                 }));
             }
         },

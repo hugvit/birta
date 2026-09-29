@@ -14,7 +14,10 @@ use axum::routing::{get, post};
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, RwLock, broadcast};
 
-use crate::security::{HostGuard, base_headers, guard};
+use crate::doc_write::{self, Expect, Via, WriteErr, WriteTarget};
+use crate::paths::{Access, FileKind, Roots};
+use crate::rev::Rev;
+use crate::security::{HostGuard, base_headers, guard, sandbox_headers};
 use crate::theme::{ResolvedTheme, ThemeRegistry, Variant};
 use crate::{render, template, watcher};
 
@@ -25,6 +28,8 @@ pub(crate) struct ContentUpdate {
     pub(crate) rendered_html: String,
     pub(crate) source_html: String,
     pub(crate) file_stats: String,
+    /// Rev of the bytes that were rendered.
+    pub(crate) rev: Rev,
 }
 
 /// An outbound event fanned out to every WebSocket connection.
@@ -45,6 +50,8 @@ pub(crate) enum Mode {
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
 const HUB_CAPACITY: usize = 64;
 const FAVICON: &[u8] = include_bytes!("../assets/favicon.png");
+/// Inbound WebSocket cap, per message and per frame.
+const WS_MAX_INBOUND: usize = 256 * 1024;
 
 /// Options for starting the server.
 pub struct ServerOptions {
@@ -67,7 +74,6 @@ pub(crate) struct AppState {
     /// Bound port, from the listener rather than the requested (possibly 0) port.
     #[cfg_attr(not(test), expect(dead_code, reason = "not read by any handler yet"))]
     pub(crate) port: u16,
-    #[cfg_attr(not(test), expect(dead_code, reason = "not read by any handler yet"))]
     pub(crate) mode: Mode,
     pub(crate) base_dir: PathBuf,
     pub(crate) source_file: Option<PathBuf>,
@@ -81,6 +87,9 @@ pub(crate) struct AppState {
     pub(crate) current_source_html: RwLock<String>,
     /// Formatted file stats string (e.g. "215 lines (154 loc) · 5.25 KB") for the raw-mode header.
     pub(crate) current_file_stats: RwLock<String>,
+    /// Rev of the bytes behind `current_html`; `None` when it did not come from a file.
+    pub(crate) current_rev: RwLock<Option<Rev>>,
+    pub(crate) roots: Roots,
     pub(crate) hub: broadcast::Sender<WsEvent>,
     pub(crate) connections: AtomicUsize,
     pub(crate) all_disconnected: Notify,
@@ -108,6 +117,7 @@ pub(crate) struct AppInit {
     pub(crate) html: String,
     pub(crate) source_html: String,
     pub(crate) file_stats: String,
+    pub(crate) rev: Option<Rev>,
     pub(crate) registry: ThemeRegistry,
     pub(crate) custom_css: Option<String>,
     pub(crate) font_css: Option<String>,
@@ -135,6 +145,7 @@ impl AppInit {
             html: String::new(),
             source_html: String::new(),
             file_stats: String::new(),
+            rev: None,
             registry,
             custom_css: opts.custom_css,
             font_css: opts.font_css,
@@ -157,6 +168,7 @@ impl AppInit {
         init.html = render::render(markdown, syntax);
         init.source_html = render::render_source(markdown, syntax);
         init.file_stats = render::format_file_stats(markdown);
+        init.rev = Some(Rev::of(markdown.as_bytes()));
         init.base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         init.filename = "stdin".to_string();
         Ok(init)
@@ -167,7 +179,9 @@ impl AppInit {
         listener: &TcpListener,
         opts: ServerOptions,
     ) -> anyhow::Result<Self> {
-        let markdown = std::fs::read_to_string(file)?;
+        let bytes = std::fs::read(file)?;
+        let rev = Rev::of(&bytes);
+        let markdown = String::from_utf8(bytes)?;
 
         let canonical_file = file.canonicalize()?;
         let base_dir = canonical_file
@@ -188,6 +202,7 @@ impl AppInit {
         };
         init.source_html = render::render_source(&markdown, syntax);
         init.file_stats = render::format_file_stats(&markdown);
+        init.rev = Some(rev);
         init.filename = file
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -205,6 +220,7 @@ impl AppState {
         Arc::new(Self {
             port: init.port,
             mode: init.mode,
+            roots: Roots::new(init.base_dir.clone(), dirs::home_dir()),
             base_dir: init.base_dir,
             source_file: init.source_file,
             filename: init.filename,
@@ -213,6 +229,7 @@ impl AppState {
             current_html: RwLock::new(init.html),
             current_source_html: RwLock::new(init.source_html),
             current_file_stats: RwLock::new(init.file_stats),
+            current_rev: RwLock::new(init.rev),
             hub,
             connections: AtomicUsize::new(0),
             all_disconnected: Notify::new(),
@@ -235,6 +252,7 @@ impl AppState {
             *self.current_html.write().await = update.rendered_html.clone();
             *self.current_source_html.write().await = update.source_html.clone();
             *self.current_file_stats.write().await = update.file_stats.clone();
+            *self.current_rev.write().await = Some(update.rev.clone());
         }
         let _ = self.hub.send(WsEvent::Content(update));
     }
@@ -368,7 +386,9 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/render/{*path}", get(render_handler))
         .route("/local/{*path}", get(local_file_handler))
         .route("/favicon.png", get(favicon_handler))
-        .route("/favicon.ico", get(favicon_handler));
+        .route("/favicon.ico", get(favicon_handler))
+        // Doc HTML and SVG here are shown by the page, never run as documents themselves.
+        .layer(from_fn(sandbox_headers));
     let live = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/ws", get(ws_handler))
@@ -424,6 +444,7 @@ async fn index_handler(State(state): State<Arc<AppState>>) -> Response {
         current_path: None,
         nonce: "",
         extra_boot: None,
+        rev: None,
     });
     Html(page).into_response()
 }
@@ -433,18 +454,6 @@ async fn scroll_handler(Path(line): Path<u32>, State(state): State<Arc<AppState>
     StatusCode::NO_CONTENT
 }
 
-/// Canonicalize a relative path and verify it stays within `base_dir`.
-async fn resolve_safe_path(base_dir: &StdPath, relative: &str) -> Result<PathBuf, StatusCode> {
-    let joined = base_dir.join(relative);
-    let canonical = tokio::fs::canonicalize(&joined)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-    if !canonical.starts_with(base_dir) {
-        return Err(StatusCode::FORBIDDEN);
-    }
-    Ok(canonical)
-}
-
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -452,23 +461,32 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+/// Resolves and reads a markdown file for `/view` and `/render`; stdin mode serves none.
+async fn read_doc(state: &AppState, rel: &str) -> Result<(PathBuf, Vec<u8>), Response> {
+    if state.mode == Mode::Stdin {
+        return Err(StatusCode::NOT_FOUND.into_response());
+    }
+    let canonical = state
+        .roots
+        .resolve_file(rel, FileKind::Markdown)
+        .map_err(|e| e.status().into_response())?;
+    match tokio::fs::read(&canonical).await {
+        Ok(bytes) => Ok((canonical, bytes)),
+        Err(_) => Err((StatusCode::NOT_FOUND, "could not read file").into_response()),
+    }
+}
+
 /// Render and serve a markdown file from the served directory.
 async fn view_handler(Path(path): Path<String>, State(state): State<Arc<AppState>>) -> Response {
     state.last_request.store(now_secs(), Ordering::Relaxed);
 
-    let canonical = match resolve_safe_path(&state.base_dir, &path).await {
-        Ok(p) => p,
-        Err(status) => return status.into_response(),
+    let (canonical, bytes) = match read_doc(&state, &path).await {
+        Ok(doc) => doc,
+        Err(response) => return response,
     };
-
-    match canonical.extension().and_then(|e| e.to_str()) {
-        Some("md" | "markdown") => {}
-        _ => return (StatusCode::BAD_REQUEST, "not a markdown file").into_response(),
-    }
-
-    let markdown = match tokio::fs::read_to_string(&canonical).await {
-        Ok(s) => s,
-        Err(_) => return (StatusCode::NOT_FOUND, "could not read file").into_response(),
+    let rev = Rev::of(&bytes);
+    let Ok(markdown) = String::from_utf8(bytes) else {
+        return (StatusCode::NOT_FOUND, "could not read file").into_response();
     };
 
     let syntax_theme = {
@@ -506,6 +524,7 @@ async fn view_handler(Path(path): Path<String>, State(state): State<Arc<AppState
         current_path: Some(&path),
         nonce: "",
         extra_boot: None,
+        rev: Some(rev.as_str()),
     });
     Html(page).into_response()
 }
@@ -518,19 +537,12 @@ async fn render_handler(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    let canonical = match resolve_safe_path(&state.base_dir, &path).await {
-        Ok(p) => p,
-        Err(status) => return status.into_response(),
-    };
-
-    match canonical.extension().and_then(|e| e.to_str()) {
-        Some("md" | "markdown") => {}
-        _ => return (StatusCode::BAD_REQUEST, "not a markdown file").into_response(),
-    }
-
-    let markdown = match tokio::fs::read_to_string(&canonical).await {
-        Ok(s) => s,
-        Err(_) => return (StatusCode::NOT_FOUND, "could not read file").into_response(),
+    let markdown = match read_doc(&state, &path).await {
+        Ok((_, bytes)) => match String::from_utf8(bytes) {
+            Ok(markdown) => markdown,
+            Err(_) => return (StatusCode::NOT_FOUND, "could not read file").into_response(),
+        },
+        Err(response) => return response,
     };
 
     let syntax_theme = {
@@ -548,23 +560,18 @@ async fn render_handler(
 }
 
 /// Handle incoming WebSocket JSON messages from the browser.
-async fn handle_ws_message(text: &str, state: &AppState) {
-    let msg: serde_json::Value = match serde_json::from_str(text) {
-        Ok(v) => v,
-        Err(_) => return,
-    };
+/// Returns the reply for this connection only, if the message has one.
+async fn handle_ws_message(text: &str, state: &AppState) -> Option<String> {
+    let msg: serde_json::Value = serde_json::from_str(text).ok()?;
 
     match msg.get("type").and_then(|t| t.as_str()) {
         Some("checkbox") => {
-            let line = msg.get("line").and_then(|l| l.as_u64()).unwrap_or(0) as usize;
-            let checked = msg
-                .get("checked")
-                .and_then(|c| c.as_bool())
-                .unwrap_or(false);
-            let relpath = msg.get("path").and_then(|p| p.as_str()).unwrap_or("");
-            if let Err(e) = toggle_checkbox(state, line, checked, relpath) {
-                eprintln!("birta: checkbox toggle failed: {e}");
-            }
+            let cid = msg.get("cid").cloned().unwrap_or_default();
+            let reply = match toggle_checkbox(state, &msg).await {
+                Ok(()) => serde_json::json!({"type": "ack", "cid": cid}),
+                Err(reason) => serde_json::json!({"type": "nack", "cid": cid, "reason": reason}),
+            };
+            return Some(reply.to_string());
         }
         Some("theme_change") => {
             if let Some(theme_name) = msg.get("theme").and_then(|t| t.as_str()) {
@@ -580,6 +587,7 @@ async fn handle_ws_message(text: &str, state: &AppState) {
         }
         _ => {}
     }
+    None
 }
 
 /// Re-render and broadcast a theme update to all clients.
@@ -589,16 +597,18 @@ async fn broadcast_theme_update(state: &AppState) {
     let active = theme.active_data();
 
     // Re-render markdown with new syntax theme
-    let (html, source) = if let Some(source_file) = &state.source_file {
-        match std::fs::read_to_string(source_file) {
-            Ok(markdown) => {
+    let (html, source, rev) = if let Some(source_file) = &state.source_file {
+        match std::fs::read(source_file) {
+            Ok(bytes) => {
+                let rev = Rev::of(&bytes);
+                let markdown = String::from_utf8_lossy(&bytes);
                 let rendered = if let Some(relpath) = &state.initial_relpath {
                     render::render_dir(&markdown, active.syntax.as_ref(), StdPath::new(relpath))
                 } else {
                     render::render(&markdown, active.syntax.as_ref())
                 };
                 let source = render::render_source(&markdown, active.syntax.as_ref());
-                (rendered, source)
+                (rendered, source, Some(rev))
             }
             Err(e) => {
                 eprintln!("birta: failed to re-read file for theme change: {e}");
@@ -609,7 +619,8 @@ async fn broadcast_theme_update(state: &AppState) {
         // stdin mode — use current HTML since we can't re-render
         let html = state.current_html.read().await.clone();
         let source = state.current_source_html.read().await.clone();
-        (html, source)
+        let rev = state.current_rev.read().await.clone();
+        (html, source, rev)
     };
 
     let (css_vars, theme_attr) = if theme.is_github() {
@@ -631,11 +642,13 @@ async fn broadcast_theme_update(state: &AppState) {
         "variants": theme.variant_names(),
         "active_variant": theme.active_variant.as_str(),
         "has_toggle": has_toggle,
+        "rev": rev.as_ref().map(Rev::as_str),
     });
 
     // Update stored content
     *state.current_html.write().await = html;
     *state.current_source_html.write().await = source;
+    *state.current_rev.write().await = rev;
 
     let _ = state.hub.send(WsEvent::Raw(msg.to_string().into()));
 }
@@ -660,66 +673,76 @@ async fn handle_variant_change(state: &AppState, variant: Variant) {
     }
 }
 
-/// Toggle a checkbox in a source file at the given line.
-fn toggle_checkbox(
-    state: &AppState,
-    line: usize,
-    checked: bool,
-    relpath: &str,
-) -> anyhow::Result<()> {
-    let path = if !relpath.is_empty() {
-        let joined = state.base_dir.join(relpath);
-        let canonical = joined
-            .canonicalize()
-            .map_err(|e| anyhow::anyhow!("invalid path: {e}"))?;
-        if !canonical.starts_with(&state.base_dir) {
-            anyhow::bail!("path traversal not allowed");
+/// Toggles the task on `line` of `path` (the entry doc when empty) through the strict
+/// write. The error is the nack reason.
+async fn toggle_checkbox(state: &AppState, msg: &serde_json::Value) -> Result<(), &'static str> {
+    if state.mode == Mode::Stdin {
+        return Err("read_only");
+    }
+    let rel = match msg.get("path").and_then(|p| p.as_str()).unwrap_or("") {
+        "" => state.initial_relpath.as_deref().ok_or("read_only")?,
+        rel => rel,
+    };
+    let doc = state
+        .roots
+        .resolve_doc(rel, Access::Write)
+        .map_err(|_| "read_only")?;
+    if !doc.writable {
+        return Err("read_only");
+    }
+    let line = msg
+        .get("line")
+        .and_then(|l| l.as_u64())
+        .and_then(|l| u32::try_from(l).ok())
+        .ok_or("not_editable")?;
+    let checked = msg
+        .get("checked")
+        .and_then(|c| c.as_bool())
+        .ok_or("not_editable")?;
+    let rev = msg
+        .get("rev")
+        .and_then(|r| r.as_str())
+        .and_then(Rev::parse)
+        .ok_or("changed_since")?;
+
+    let target = WriteTarget {
+        canonical: doc.canonical,
+        rel: doc.rel,
+    };
+    let written = tokio::task::spawn_blocking(move || {
+        doc_write::write_doc(
+            &target,
+            None,
+            Expect::Rev(rev),
+            Via::Checkbox { line },
+            |bytes| {
+                doc_write::toggle_task_line(bytes, line as usize, checked)
+                    .ok_or(WriteErr::NotApplicable)
+            },
+        )
+    })
+    .await
+    .map_err(|_| "read_only")?;
+    match written {
+        Ok(_) => Ok(()),
+        Err(WriteErr::ChangedSince) => Err("changed_since"),
+        Err(WriteErr::NotApplicable) => Err("not_editable"),
+        Err(WriteErr::ReadOnly) => Err("read_only"),
+        Err(WriteErr::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Err("gone"),
+        Err(WriteErr::Io(e)) => {
+            eprintln!("birta: checkbox write failed: {e}");
+            Err("read_only")
         }
-        canonical
-    } else {
-        state
-            .source_file
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("no source file (stdin mode)"))?
-    };
-    let path = &path;
-
-    let content = std::fs::read_to_string(path)?;
-    let mut lines: Vec<&str> = content.lines().collect();
-
-    if line == 0 || line > lines.len() {
-        anyhow::bail!("line {line} out of range");
     }
-
-    let target = lines[line - 1];
-    let new_line = if checked {
-        target.replacen("[ ]", "[x]", 1)
-    } else {
-        target.replacen("[x]", "[ ]", 1)
-    };
-
-    if new_line == target {
-        return Ok(());
-    }
-
-    lines[line - 1] = &new_line;
-
-    let mut output = lines.join("\n");
-    if content.ends_with('\n') {
-        output.push('\n');
-    }
-
-    std::fs::write(path, output)?;
-    Ok(())
 }
 
 async fn local_file_handler(
     Path(path): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    let file_path = match resolve_safe_path(&state.base_dir, &path).await {
+    let file_path = match state.roots.resolve_file(&path, FileKind::Image) {
         Ok(p) => p,
-        Err(status) => return status.into_response(),
+        Err(e) => return e.status().into_response(),
     };
 
     let content = match tokio::fs::read(&file_path).await {
@@ -727,30 +750,46 @@ async fn local_file_handler(
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
     };
 
-    let content_type = match file_path.extension().and_then(|e| e.to_str()) {
-        Some("png") => "image/png",
-        Some("jpg" | "jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("svg") => "image/svg+xml",
-        Some("webp") => "image/webp",
-        Some("ico") => "image/x-icon",
-        _ => "application/octet-stream",
+    let ext = file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let content_type = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "avif" => "image/avif",
+        "bmp" => "image/bmp",
+        _ => return StatusCode::NOT_FOUND.into_response(),
     };
 
     ([(header::CONTENT_TYPE, content_type)], content).into_response()
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    ws.on_upgrade(|socket| handle_ws(socket, state))
+    ws.max_message_size(WS_MAX_INBOUND)
+        .max_frame_size(WS_MAX_INBOUND)
+        .on_upgrade(|socket| handle_ws(socket, state))
 }
 
-fn content_frame(path: &str, html: &str, source: &str, file_stats: &str) -> String {
+fn content_frame(
+    path: &str,
+    html: &str,
+    source: &str,
+    file_stats: &str,
+    rev: Option<&Rev>,
+) -> String {
     serde_json::json!({
         "type": "content",
         "html": html,
         "source": source,
         "file_stats": file_stats,
         "path": path,
+        "rev": rev.map(Rev::as_str),
     })
     .to_string()
 }
@@ -759,8 +798,9 @@ async fn cached_content_frame(state: &AppState) -> String {
     let html = state.current_html.read().await.clone();
     let source = state.current_source_html.read().await.clone();
     let file_stats = state.current_file_stats.read().await.clone();
+    let rev = state.current_rev.read().await.clone();
     let path = state.initial_relpath.as_deref().unwrap_or("");
-    content_frame(path, &html, &source, &file_stats)
+    content_frame(path, &html, &source, &file_stats, rev.as_ref())
 }
 
 async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
@@ -783,6 +823,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
                     &update.rendered_html,
                     &update.source_html,
                     &update.file_stats,
+                    Some(&update.rev),
                 ),
                 Ok(WsEvent::Raw(json)) => json.to_string(),
                 Ok(WsEvent::Scroll(line)) => {
@@ -792,16 +833,14 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
                 Err(broadcast::error::RecvError::Lagged(_)) => cached_content_frame(&state).await,
                 Err(broadcast::error::RecvError::Closed) => break,
             },
-            msg = socket.recv() => {
-                match msg {
-                    Some(Ok(Message::Text(text))) => {
-                        handle_ws_message(&text, &state).await;
-                    }
-                    Some(Ok(_)) => {}
-                    _ => break,
-                }
-                continue;
-            }
+            msg = socket.recv() => match msg {
+                Some(Ok(Message::Text(text))) => match handle_ws_message(&text, &state).await {
+                    Some(reply) => reply,
+                    None => continue,
+                },
+                Some(Ok(_)) => continue,
+                _ => break,
+            },
         };
         if socket.send(Message::Text(frame.into())).await.is_err() {
             break;
@@ -866,6 +905,7 @@ mod tests {
             html: "<p>hello</p>".to_string(),
             source_html: String::new(),
             file_stats: String::new(),
+            rev: None,
             registry: ThemeRegistry::new(github_theme()),
             custom_css: None,
             font_css: None,
@@ -1532,6 +1572,7 @@ mod tests {
                 rendered_html: "<p>new</p>".to_string(),
                 source_html: "<pre>new</pre>".to_string(),
                 file_stats: "1 line".to_string(),
+                rev: Rev::of(b"new"),
             })
             .await;
         assert!(matches!(spy.try_recv(), Ok(WsEvent::Content(_))));
@@ -1556,6 +1597,7 @@ mod tests {
                 rendered_html: "<p>other</p>".to_string(),
                 source_html: String::new(),
                 file_stats: String::new(),
+                rev: Rev::of(b"other"),
             })
             .await;
         assert_eq!(*state.current_html.read().await, "<p>hello</p>");
@@ -1601,7 +1643,10 @@ mod tests {
     }
 
     fn test_router_with_base_dir(base_dir: PathBuf) -> Router {
-        router(test_state(|init| init.base_dir = base_dir))
+        router(test_state(|init| {
+            init.mode = Mode::Serve;
+            init.base_dir = base_dir;
+        }))
     }
 
     #[tokio::test]
@@ -1694,5 +1739,770 @@ mod tests {
 
         assert_eq!(response.status(), 307);
         assert_eq!(response.headers()["location"], "/view/test.md");
+    }
+
+    /// `<tmp>/root` is served; `<tmp>/outside` and `<tmp>/secret.*` are not.
+    struct Site {
+        _tmp: tempfile::TempDir,
+        base: PathBuf,
+        root: PathBuf,
+    }
+
+    impl Site {
+        fn new(files: &[(&str, &[u8])]) -> Self {
+            let tmp = tempfile::tempdir().unwrap();
+            let base = tmp.path().canonicalize().unwrap();
+            let root = base.join("root");
+            std::fs::create_dir(&root).unwrap();
+            for (rel, bytes) in files {
+                let path = base.join(rel);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, bytes).unwrap();
+            }
+            Self {
+                _tmp: tmp,
+                base,
+                root,
+            }
+        }
+
+        fn link(&self, link: &str, target: impl AsRef<StdPath>) {
+            std::os::unix::fs::symlink(target, self.base.join(link)).unwrap();
+        }
+
+        fn read(&self, rel: &str) -> Vec<u8> {
+            std::fs::read(self.root.join(rel)).unwrap()
+        }
+
+        /// Names (relative to `<tmp>`) of `files` no longer equal to `original`, each restored
+        /// so the next row starts clean.
+        fn rewritten(&self, files: &[&str], original: &[u8]) -> Vec<String> {
+            let mut changed = Vec::new();
+            for rel in files {
+                let path = self.base.join(rel);
+                let now = std::fs::read(&path).unwrap();
+                if now != original {
+                    changed.push(format!("{rel} -> {:?}", String::from_utf8_lossy(&now)));
+                    std::fs::write(&path, original).unwrap();
+                }
+            }
+            changed
+        }
+
+        /// Serve mode with `root/doc.md` as the entry doc.
+        fn state(&self) -> Arc<AppState> {
+            let root = self.root.clone();
+            test_state(|init| {
+                init.mode = Mode::Serve;
+                init.source_file = Some(root.join("doc.md"));
+                init.initial_relpath = Some("doc.md".to_string());
+                init.base_dir = root;
+            })
+        }
+
+        fn stdin_state(&self) -> Arc<AppState> {
+            let root = self.root.clone();
+            test_state(|init| init.base_dir = root)
+        }
+    }
+
+    /// GETs each uri; returns every status mismatch.
+    async fn status_mismatches(app: &Router, rows: &[(&str, u16)]) -> Vec<String> {
+        let mut bad = Vec::new();
+        for (uri, want) in rows {
+            let got = app.clone().oneshot(get(uri)).await.unwrap().status();
+            if got != *want {
+                bad.push(format!("{uri}: got {got}, want {want}"));
+            }
+        }
+        bad
+    }
+
+    const TASK: &[u8] = b"- [ ] a\n";
+
+    fn local_site() -> Site {
+        Site::new(&[
+            ("root/doc.md", b"# Doc\n"),
+            ("root/upper.MD", b"# Upper\n"),
+            ("root/a.png", b"png"),
+            ("root/b.PNG", b"png"),
+            ("root/pic.svg", b"<svg/>"),
+            ("root/c.avif", b"avif"),
+            ("root/d.bmp", b"bmp"),
+            ("root/notes.txt", b"notes"),
+            ("root/.env", b"SECRET=1"),
+            ("root/x.birta.jsonl", b"{}"),
+            ("root/y.BIRTA.JSONL", b"{}"),
+            ("root/.birta.jsonl", b"{}"),
+            ("root/dir/.git/config", b"[core]"),
+            ("root/dir/.git/a.png", b"png"),
+            ("root/dir2/.GIT/a.png", b"png"),
+            ("root/.git/x.md", b"# Git\n"),
+            ("root/.context/x.md", b"# Context\n"),
+            ("root/.context/img/a.png", b"png"),
+            ("root/.context/.env", b"SECRET=1"),
+            ("root/x/.secret.png", b"png"),
+            ("outside/a.png", b"png"),
+            ("outside/doc.md", b"# Outside\n"),
+            ("secret.png", b"png"),
+        ])
+    }
+
+    #[tokio::test]
+    async fn local_refuses_traversal_dotfiles_and_review_files() {
+        let site = local_site();
+        let app = router(site.state());
+        let rows = [
+            ("/local/%2e%2e/etc/passwd", 403),
+            ("/local/%2e%2e/secret.png", 403),
+            ("/local//etc/passwd", 403),
+            ("/local/x/%2e%2e/a.png", 403),
+            ("/local/x%2F%2E%2E%2Fsecret.png", 403),
+            ("/local/a.png%00.txt", 403),
+            // Decodes once, to a literal `%2e%2e` folder that doesn't exist.
+            ("/local/%252e%252e/secret.png", 404),
+            ("/local/.env", 403),
+            ("/local/dir/.git/config", 403),
+            ("/local/dir/.git/a.png", 403),
+            ("/local/dir2/.GIT/a.png", 403),
+            ("/local/x.birta.jsonl", 403),
+            ("/local/y.BIRTA.JSONL", 403),
+            ("/local/.birta.jsonl", 403),
+            ("/local/.context/.env", 403),
+            ("/local/x/.secret.png", 403),
+            ("/local/notes.txt", 404),
+            ("/local/doc.md", 404),
+            ("/local/missing.png", 404),
+            ("/local/a.png", 200),
+            ("/local/b.PNG", 200),
+            ("/local/.context/img/a.png", 200),
+        ];
+        let bad = status_mismatches(&app, &rows).await;
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    #[tokio::test]
+    async fn local_sends_image_types_only() {
+        let site = local_site();
+        let app = router(site.state());
+        let rows = [
+            ("/local/a.png", "image/png"),
+            ("/local/b.PNG", "image/png"),
+            ("/local/pic.svg", "image/svg+xml"),
+            ("/local/c.avif", "image/avif"),
+            ("/local/d.bmp", "image/bmp"),
+        ];
+        let mut bad = Vec::new();
+        for (uri, want) in rows {
+            let response = app.clone().oneshot(get(uri)).await.unwrap();
+            let got = response.headers().get("content-type").cloned();
+            if response.status() != 200 || got.as_ref().is_none_or(|v| v != want) {
+                bad.push(format!("{uri}: {} {got:?}, want {want}", response.status()));
+            }
+        }
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    #[tokio::test]
+    async fn fragment_routes_carry_sandbox_headers() {
+        let site = local_site();
+        let app = router(site.state());
+        let sandbox = "sandbox; default-src 'none'; style-src 'unsafe-inline'";
+        let mut bad = Vec::new();
+        for uri in [
+            "/local/pic.svg",
+            "/render/doc.md",
+            "/favicon.png",
+            "/favicon.ico",
+        ] {
+            let response = app.clone().oneshot(get(uri)).await.unwrap();
+            let headers = response.headers();
+            if response.status() != 200
+                || headers
+                    .get("content-security-policy")
+                    .is_none_or(|v| v != sandbox)
+                || headers
+                    .get("x-content-type-options")
+                    .is_none_or(|v| v != "nosniff")
+            {
+                bad.push(format!("{uri}: {} {headers:?}", response.status()));
+            }
+        }
+        assert!(bad.is_empty(), "{bad:#?}");
+
+        let page = app.clone().oneshot(get("/view/doc.md")).await.unwrap();
+        let csp = page.headers().get("content-security-policy");
+        assert!(
+            csp.is_none_or(|v| !v.to_str().unwrap().contains("sandbox")),
+            "pages must not be sandboxed: {csp:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn view_and_render_path_rules() {
+        let site = local_site();
+        let app = router(site.state());
+        let rows = [
+            ("/view/.git/x.md", 403),
+            ("/render/.git/x.md", 403),
+            ("/view/x.birta.jsonl", 403),
+            ("/view/%2e%2e/outside/doc.md", 403),
+            ("/view/.context/x.md", 200),
+            ("/render/.context/x.md", 200),
+            ("/view/upper.MD", 200),
+            ("/view/missing.txt", 400),
+            ("/view/a.png", 400),
+            ("/view/missing.md", 404),
+        ];
+        let bad = status_mismatches(&app, &rows).await;
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    #[tokio::test]
+    async fn stdin_mode_serves_images_but_no_docs() {
+        let site = local_site();
+        let app = router(site.stdin_state());
+        let rows = [
+            ("/view/doc.md", 404),
+            ("/render/doc.md", 404),
+            ("/local/a.png", 200),
+        ];
+        let bad = status_mismatches(&app, &rows).await;
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    #[tokio::test]
+    async fn symlinked_dir_created_after_start_is_served() {
+        let site = local_site();
+        let app = router(site.state());
+        site.link("root/linked", site.base.join("outside"));
+
+        let rows = [
+            ("/view/linked/doc.md", 200),
+            ("/render/linked/doc.md", 200),
+            ("/local/linked/a.png", 200),
+        ];
+        let bad = status_mismatches(&app, &rows).await;
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    #[tokio::test]
+    async fn link_targets_obey_dot_and_deny_rules() {
+        let site = local_site();
+        let app = router(site.state());
+        site.link("root/pic.png", ".env");
+        site.link("root/git.png", "dir/.git/a.png");
+        site.link("root/jsonl.png", "x.birta.jsonl");
+        site.link("root/ok.png", ".context/img/a.png");
+        site.link("root/g.md", ".git/x.md");
+
+        let rows = [
+            ("/local/pic.png", 403),
+            ("/local/git.png", 403),
+            ("/local/jsonl.png", 403),
+            ("/view/g.md", 403),
+            ("/render/g.md", 403),
+            ("/local/ok.png", 200),
+        ];
+        let bad = status_mismatches(&app, &rows).await;
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    #[tokio::test]
+    async fn symlinks_to_root_or_loops_are_refused() {
+        let site = local_site();
+        let app = router(site.state());
+        site.link("root/slash", "/");
+        site.link("root/self", "self");
+        site.link("root/pic.png", site.base.join("secret.png"));
+        // Through `/` and back down to an image outside the root.
+        let via_slash = format!("/local/slash{}", site.base.join("secret.png").display());
+
+        let rows = [
+            (via_slash.as_str(), 403),
+            ("/local/pic.png", 403),
+            ("/local/self/a.png", 404),
+        ];
+        let bad = tokio::time::timeout(Duration::from_secs(5), status_mismatches(&app, &rows))
+            .await
+            .expect("symlink resolution did not terminate");
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    /// `git hash-object --no-filters`, as an oracle independent of the server's hashing.
+    fn git_rev(bytes: &[u8]) -> String {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("git")
+            .args(["hash-object", "--stdin", "--no-filters"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(bytes).unwrap();
+        let out = child.wait_with_output().unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn checkbox_frame(
+        cid: &str,
+        path: &str,
+        line: u64,
+        checked: bool,
+        rev: Option<&str>,
+    ) -> String {
+        let mut frame = serde_json::json!({
+            "type": "checkbox", "cid": cid, "path": path, "line": line, "checked": checked,
+        });
+        if let Some(rev) = rev {
+            frame["rev"] = rev.into();
+        }
+        frame.to_string()
+    }
+
+    /// Sends `frame` and waits briefly for the ack or nack naming `cid`.
+    async fn send_checkbox(ws: &mut Client, cid: &str, frame: String) -> Option<serde_json::Value> {
+        use futures_util::SinkExt;
+        ws.send(tokio_tungstenite::tungstenite::Message::Text(frame.into()))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let msg = next_json(ws).await;
+                if matches!(msg["type"].as_str(), Some("ack" | "nack")) && msg["cid"] == cid {
+                    return msg;
+                }
+            }
+        })
+        .await
+        .ok()
+    }
+
+    fn is_nack(reply: &Option<serde_json::Value>, reason: &str) -> bool {
+        reply
+            .as_ref()
+            .is_some_and(|r| r["type"] == "nack" && r["reason"] == reason)
+    }
+
+    fn is_ack(reply: &Option<serde_json::Value>) -> bool {
+        reply.as_ref().is_some_and(|r| r["type"] == "ack")
+    }
+
+    #[tokio::test]
+    async fn checkbox_refuses_non_markdown_denied_and_links_out_of_root() {
+        let site = Site::new(&[
+            ("root/doc.md", TASK),
+            ("root/a.txt", TASK),
+            ("root/b.birta.jsonl", TASK),
+            ("root/.git/x.md", TASK),
+            ("secret.md", TASK),
+        ]);
+        site.link("root/evil.md", "../secret.md");
+        site.link("root/fake.md", "a.txt");
+        site.link("root/gitlink.md", ".git/x.md");
+        let port = serve(&site.state()).await;
+        let rev = git_rev(TASK);
+        let targets = [
+            "root/doc.md",
+            "root/a.txt",
+            "root/b.birta.jsonl",
+            "root/.git/x.md",
+            "secret.md",
+        ];
+
+        let mut ws = connect(port).await;
+        let mut bad = Vec::new();
+        for (i, path) in [
+            "a.txt",
+            "b.birta.jsonl",
+            "evil.md",
+            "fake.md",
+            "gitlink.md",
+            ".git/x.md",
+            "../secret.md",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let cid = format!("c{i}");
+            let reply = send_checkbox(
+                &mut ws,
+                &cid,
+                checkbox_frame(&cid, path, 1, true, Some(&rev)),
+            )
+            .await;
+            let changed = site.rewritten(&targets, TASK);
+            if !changed.is_empty() {
+                bad.push(format!("{path}: rewrote {changed:?}"));
+            }
+            if !is_nack(&reply, "read_only") {
+                bad.push(format!("{path}: reply {reply:?}, want nack read_only"));
+            }
+        }
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    #[tokio::test]
+    async fn checkbox_refused_in_stdin_mode() {
+        let site = Site::new(&[("root/doc.md", TASK)]);
+        let port = serve(&site.stdin_state()).await;
+        let rev = git_rev(TASK);
+
+        let mut ws = connect(port).await;
+        let mut bad = Vec::new();
+        for (cid, path) in [("c1", "doc.md"), ("c2", "")] {
+            let reply =
+                send_checkbox(&mut ws, cid, checkbox_frame(cid, path, 1, true, Some(&rev))).await;
+            let changed = site.rewritten(&["root/doc.md"], TASK);
+            if !changed.is_empty() {
+                bad.push(format!("{path:?}: rewrote {changed:?}"));
+            }
+            if !is_nack(&reply, "read_only") {
+                bad.push(format!("{path:?}: reply {reply:?}, want nack read_only"));
+            }
+        }
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    #[tokio::test]
+    async fn checkbox_through_link_writes_target_and_keeps_link() {
+        let site = Site::new(&[("root/doc.md", TASK), ("root/inside.md", TASK)]);
+        site.link("root/alias.md", "inside.md");
+        let port = serve(&site.state()).await;
+
+        let mut ws = connect(port).await;
+        let frame = checkbox_frame("c1", "alias.md", 1, true, Some(&git_rev(TASK)));
+        let reply = send_checkbox(&mut ws, "c1", frame).await;
+
+        assert_eq!(site.read("inside.md"), b"- [x] a\n");
+        let link = std::fs::symlink_metadata(site.root.join("alias.md")).unwrap();
+        assert!(link.file_type().is_symlink(), "the link was replaced");
+        assert!(is_ack(&reply), "{reply:?}");
+    }
+
+    #[tokio::test]
+    async fn checkbox_empty_path_is_the_entry_doc() {
+        let site = Site::new(&[("root/doc.md", TASK)]);
+        let port = serve(&site.state()).await;
+
+        let mut ws = connect(port).await;
+        let reply = send_checkbox(
+            &mut ws,
+            "c1",
+            checkbox_frame("c1", "", 1, true, Some(&git_rev(TASK))),
+        )
+        .await;
+
+        assert_eq!(site.read("doc.md"), b"- [x] a\n");
+        assert!(is_ack(&reply), "{reply:?}");
+    }
+
+    #[tokio::test]
+    async fn checkbox_needs_the_current_rev() {
+        let site = Site::new(&[("root/doc.md", TASK)]);
+        let port = serve(&site.state()).await;
+        let stale = git_rev(b"- [ ] older\n");
+
+        let mut ws = connect(port).await;
+        let mut bad = Vec::new();
+        for (cid, rev) in [
+            ("c1", None),
+            ("c2", Some(stale.as_str())),
+            ("c3", Some("zzz")),
+        ] {
+            let reply =
+                send_checkbox(&mut ws, cid, checkbox_frame(cid, "doc.md", 1, true, rev)).await;
+            let changed = site.rewritten(&["root/doc.md"], TASK);
+            if !changed.is_empty() {
+                bad.push(format!("rev {rev:?}: rewrote {changed:?}"));
+            }
+            if !is_nack(&reply, "changed_since") {
+                bad.push(format!(
+                    "rev {rev:?}: reply {reply:?}, want nack changed_since"
+                ));
+            }
+        }
+        assert!(bad.is_empty(), "{bad:#?}");
+
+        let rev0 = git_rev(TASK);
+        let reply = send_checkbox(
+            &mut ws,
+            "c4",
+            checkbox_frame("c4", "doc.md", 1, true, Some(&rev0)),
+        )
+        .await;
+        assert_eq!(site.read("doc.md"), b"- [x] a\n");
+        assert!(is_ack(&reply), "{reply:?}");
+
+        // The page still holds rev0 until new content arrives.
+        let reply = send_checkbox(
+            &mut ws,
+            "c5",
+            checkbox_frame("c5", "doc.md", 1, false, Some(&rev0)),
+        )
+        .await;
+        assert_eq!(site.read("doc.md"), b"- [x] a\n");
+        assert!(is_nack(&reply, "changed_since"), "{reply:?}");
+    }
+
+    #[tokio::test]
+    async fn checkbox_on_a_line_that_is_not_a_task_is_refused() {
+        let text: &[u8] = b"# T [ ]\n- [ ] a\n- [x] b\n";
+        let site = Site::new(&[("root/doc.md", text)]);
+        let port = serve(&site.state()).await;
+        let rev = git_rev(text);
+
+        let mut ws = connect(port).await;
+        let mut bad = Vec::new();
+        let rows = [
+            (1, true),
+            (0, true),
+            (4, true),
+            (99, true),
+            (u64::from(u32::MAX) + 2, true),
+            // Tasks, but already in the requested state.
+            (2, false),
+            (3, true),
+        ];
+        for (i, (line, checked)) in rows.into_iter().enumerate() {
+            let cid = format!("c{i}");
+            let reply = send_checkbox(
+                &mut ws,
+                &cid,
+                checkbox_frame(&cid, "doc.md", line, checked, Some(&rev)),
+            )
+            .await;
+            let changed = site.rewritten(&["root/doc.md"], text);
+            if !changed.is_empty() {
+                bad.push(format!("line {line} -> {checked}: rewrote {changed:?}"));
+            }
+            if !is_nack(&reply, "not_editable") {
+                bad.push(format!(
+                    "line {line} -> {checked}: reply {reply:?}, want nack not_editable"
+                ));
+            }
+        }
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    #[tokio::test]
+    async fn checkbox_keeps_crlf_bom_and_missing_final_newline() {
+        let cases: [(&str, &[u8], u64, &[u8]); 3] = [
+            (
+                "crlf.md",
+                b"- [ ] a\r\n- [ ] b\r\n",
+                2,
+                b"- [ ] a\r\n- [x] b\r\n",
+            ),
+            (
+                "bom.md",
+                b"\xef\xbb\xbf- [ ] a\r\n",
+                1,
+                b"\xef\xbb\xbf- [x] a\r\n",
+            ),
+            ("noeol.md", b"- [ ] a\n- [ ] b", 2, b"- [ ] a\n- [x] b"),
+        ];
+        let mut files: Vec<(&str, &[u8])> = vec![("root/doc.md", TASK)];
+        let names: Vec<String> = cases
+            .iter()
+            .map(|(name, ..)| format!("root/{name}"))
+            .collect();
+        for ((_, before, ..), name) in cases.iter().zip(&names) {
+            files.push((name, before));
+        }
+        let site = Site::new(&files);
+        let port = serve(&site.state()).await;
+
+        let mut ws = connect(port).await;
+        let mut bad = Vec::new();
+        for (name, before, line, want) in cases {
+            let frame = checkbox_frame(name, name, line, true, Some(&git_rev(before)));
+            let reply = send_checkbox(&mut ws, name, frame).await;
+            let got = site.read(name);
+            if got != want {
+                bad.push(format!("{name}: got {:?}", String::from_utf8_lossy(&got)));
+            }
+            if !is_ack(&reply) {
+                bad.push(format!("{name}: reply {reply:?}, want ack"));
+            }
+        }
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    #[tokio::test]
+    async fn checkbox_on_read_only_doc_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let site = Site::new(&[("root/doc.md", TASK)]);
+        let doc = site.root.join("doc.md");
+        std::fs::set_permissions(&doc, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let port = serve(&site.state()).await;
+
+        let mut ws = connect(port).await;
+        let reply = send_checkbox(
+            &mut ws,
+            "c1",
+            checkbox_frame("c1", "doc.md", 1, true, Some(&git_rev(TASK))),
+        )
+        .await;
+
+        assert_eq!(site.read("doc.md"), TASK);
+        let mode = std::fs::metadata(&doc).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o444);
+        assert!(is_nack(&reply, "read_only"), "{reply:?}");
+    }
+
+    /// The JSON in the page's `birta-boot` block.
+    fn boot_of(page: &str) -> serde_json::Value {
+        let start = page.find("id=\"birta-boot\"").expect("no birta-boot block");
+        let body = &page[start..];
+        let open = body.find('>').unwrap() + 1;
+        let close = body.find("</script>").unwrap();
+        serde_json::from_str(&body[open..close]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn view_boot_carries_rev_of_rendered_bytes() {
+        let text: &[u8] = b"# Rev\n\n- [ ] a\n";
+        let site = Site::new(&[("root/doc.md", text)]);
+        let app = router(site.state());
+
+        let response = app.oneshot(get("/view/doc.md")).await.unwrap();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let boot = boot_of(std::str::from_utf8(&body).unwrap());
+
+        assert_eq!(boot["rev"], git_rev(text), "{boot}");
+    }
+
+    #[tokio::test]
+    async fn content_frames_carry_rev_including_lag_resend() {
+        let text: &[u8] = b"# Rev\n\n- [ ] a\n";
+        let site = Site::new(&[("root/doc.md", text)]);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let init = AppInit::serve(&site.root.join("doc.md"), &listener, test_opts()).unwrap();
+        let state = AppState::new(init);
+        let port = serve(&state).await;
+        let rev = git_rev(text);
+
+        within(async {
+            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws"))
+                .await
+                .unwrap();
+            let initial = next_json(&mut ws).await;
+            assert_eq!(initial["rev"], rev, "initial content frame");
+
+            sync(&state, &mut ws, BARRIER).await;
+            flood(&state, 256);
+            let resent = sync(&state, &mut ws, SENTINEL).await;
+            assert_eq!(resent.len(), 1, "{resent:?}");
+            assert_eq!(resent[0]["rev"], rev, "lag resend");
+        })
+        .await;
+    }
+
+    /// True when the server closes the socket within a second.
+    async fn closes_soon(ws: &mut Client) -> bool {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message as TMessage;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match ws.next().await {
+                    None | Some(Err(_)) | Some(Ok(TMessage::Close(_))) => return,
+                    Some(Ok(_)) => {}
+                }
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    #[tokio::test]
+    async fn ws_closes_on_oversized_message() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message as TMessage;
+        let state = doc_state();
+        let port = serve(&state).await;
+
+        let mut ws = connect(port).await;
+        let _ = ws.send(TMessage::Text("x".repeat(300 * 1024).into())).await;
+
+        assert!(
+            closes_soon(&mut ws).await,
+            "a 300 KiB message must close the socket"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_closes_on_oversized_fragmented_message() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message as TMessage;
+        use tokio_tungstenite::tungstenite::protocol::frame::Frame;
+        use tokio_tungstenite::tungstenite::protocol::frame::coding::{Data, OpCode};
+        let state = doc_state();
+        let port = serve(&state).await;
+
+        let mut ws = connect(port).await;
+        let half = "x".repeat(150 * 1024);
+        let first = Frame::message(half.clone(), OpCode::Data(Data::Text), false);
+        let last = Frame::message(half, OpCode::Data(Data::Continue), true);
+        let _ = ws.send(TMessage::Frame(first)).await;
+        let _ = ws.send(TMessage::Frame(last)).await;
+
+        assert!(
+            closes_soon(&mut ws).await,
+            "2 x 150 KiB fragments must close the socket"
+        );
+    }
+
+    #[tokio::test]
+    async fn checkbox_replies_go_only_to_the_sender() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::Message as TMessage;
+        let site = Site::new(&[("root/doc.md", TASK)]);
+        let state = site.state();
+        let port = serve(&state).await;
+        let mut a = connect(port).await;
+        let mut b = connect(port).await;
+
+        let nack = send_checkbox(&mut a, "c1", checkbox_frame("c1", "doc.md", 1, true, None)).await;
+        let frame = checkbox_frame("c2", "doc.md", 1, true, Some(&git_rev(TASK)));
+        let ack = send_checkbox(&mut a, "c2", frame).await;
+        assert!(is_nack(&nack, "changed_since"), "{nack:?}");
+        assert!(is_ack(&ack), "{ack:?}");
+
+        state.hub.send(WsEvent::Scroll(SENTINEL)).unwrap();
+        within(async {
+            loop {
+                let TMessage::Text(text) = b.next().await.unwrap().unwrap() else {
+                    continue;
+                };
+                let msg: serde_json::Value = serde_json::from_str(&text).unwrap();
+                assert!(
+                    !matches!(msg["type"].as_str(), Some("ack" | "nack")),
+                    "second client got {msg}"
+                );
+                if msg["type"] == "scroll" && msg["line"] == SENTINEL {
+                    break;
+                }
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn ws_accepts_message_under_cap() {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message as TMessage;
+        let state = doc_state();
+        let port = serve(&state).await;
+
+        let mut ws = connect(port).await;
+        ws.send(TMessage::Text("x".repeat(200 * 1024).into()))
+            .await
+            .unwrap();
+
+        within(async {
+            assert_eq!(sync(&state, &mut ws, SENTINEL).await.len(), 0);
+        })
+        .await;
     }
 }

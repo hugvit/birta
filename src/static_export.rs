@@ -159,6 +159,7 @@ pub fn export_bundle(
             current_path: None,
             nonce: "",
             extra_boot: None,
+            rev: None,
         });
 
         // Write (output stays inside out_dir since safe_rel is `..`-free).

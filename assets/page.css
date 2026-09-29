@@ -211,6 +211,51 @@ html, body {
   align-items: center;
   column-gap: 8px;
   height: 26px;
+  min-width: 0;
+}
+
+.file-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.copy-btn {
+  display: flex;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+  background: none;
+  border: 1px solid var(--birta-border);
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--birta-fg);
+  opacity: 0.6;
+  transition: background-color 0.15s, opacity 0.15s;
+  line-height: 1;
+}
+
+.copy-btn:hover {
+  opacity: 0.9;
+  background-color: var(--birta-bg);
+}
+
+.copy-btn .icon-check {
+  display: none;
+}
+
+.copy-btn.copied {
+  opacity: 1;
+}
+
+.copy-btn.copied .icon-copy {
+  display: none;
+}
+
+.copy-btn.copied .icon-check {
+  display: block;
 }
 
 /* View toggle (Preview / Raw) — segmented control in file header */

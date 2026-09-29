@@ -458,21 +458,35 @@
     }
 
     // --- Checkbox write-back ---
-    var pendingChecks = {};
+    // One tick in flight at a time, since each needs the rev its predecessor's ack returns.
+    var checkInFlight = null;
+    var checkQueue = [];
     var nextCheckId = 0;
+    function sendCheck(tick) {
+      checkInFlight = tick;
+      currentWs.send(JSON.stringify({
+        type: 'checkbox', cid: tick.cid, line: tick.line, checked: tick.checked,
+        path: CURRENT_PATH, rev: docRev
+      }));
+    }
+    // A detached box has already been replaced by fresh content.
+    function revertCheck(tick) {
+      if (tick.box.isConnected) tick.box.checked = !tick.checked;
+    }
     function enableCheckboxes() {
       mdBody.querySelectorAll('input[type="checkbox"][disabled]').forEach(function(cb) {
         cb.disabled = false;
         cb.addEventListener('change', function(e) {
           var li = e.target.closest('li[data-sourcepos]');
           if (!li || !currentWs || currentWs.readyState !== WebSocket.OPEN) return;
-          var line = parseInt(li.getAttribute('data-sourcepos'), 10);
-          var cid = 'cb' + (++nextCheckId);
-          pendingChecks[cid] = e.target;
-          currentWs.send(JSON.stringify({
-            type: 'checkbox', cid: cid, line: line, checked: e.target.checked,
-            path: CURRENT_PATH, rev: docRev
-          }));
+          var tick = {
+            cid: 'cb' + (++nextCheckId),
+            box: e.target,
+            line: parseInt(li.getAttribute('data-sourcepos'), 10),
+            checked: e.target.checked
+          };
+          if (checkInFlight) checkQueue.push(tick);
+          else sendCheck(tick);
         });
       });
     }
@@ -581,14 +595,19 @@
               break;
 
             case 'ack':
-              delete pendingChecks[msg.cid];
+              if (!checkInFlight || msg.cid !== checkInFlight.cid) break;
+              if (msg.rev) docRev = msg.rev;
+              checkInFlight = null;
+              if (checkQueue.length) sendCheck(checkQueue.shift());
               break;
 
             case 'nack':
-              var refused = pendingChecks[msg.cid];
-              delete pendingChecks[msg.cid];
-              // The write was refused, so undo the click; a detached box is already replaced by fresh content.
-              if (refused && refused.isConnected) refused.checked = !refused.checked;
+              if (!checkInFlight || msg.cid !== checkInFlight.cid) break;
+              // Queued ticks were made against the refused state, so they are undone too.
+              revertCheck(checkInFlight);
+              checkQueue.forEach(revertCheck);
+              checkInFlight = null;
+              checkQueue = [];
               showStatus(CHANGED_SINCE);
               setTimeout(function() {
                 if (status.textContent === CHANGED_SINCE) hideStatus();
@@ -599,6 +618,10 @@
 
         ws.onclose = function() {
           currentWs = null;
+          // Unsent ticks never reach disk; the one in flight may have, so it is left as is.
+          checkQueue.forEach(revertCheck);
+          checkInFlight = null;
+          checkQueue = [];
           showStatus('Disconnected \u2014 reconnecting\u2026');
           setTimeout(function() {
             reconnectDelay = Math.min(reconnectDelay * 2, maxDelay);

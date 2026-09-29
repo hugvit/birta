@@ -32,6 +32,19 @@ pub(crate) struct ContentUpdate {
     pub(crate) rev: Rev,
 }
 
+/// One render of the entry doc, cached for new and lagging connections.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Rendered {
+    /// Raw rendered HTML (not JSON-wrapped).
+    pub(crate) html: String,
+    /// Syntax-highlighted source HTML for the code view.
+    pub(crate) source_html: String,
+    /// Formatted file stats string (e.g. "215 lines (154 loc) · 5.25 KB") for the raw-mode header.
+    pub(crate) file_stats: String,
+    /// Rev of the bytes behind `html`; `None` when it did not come from a file.
+    pub(crate) rev: Option<Rev>,
+}
+
 /// An outbound event fanned out to every WebSocket connection.
 #[derive(Clone, Debug)]
 pub(crate) enum WsEvent {
@@ -81,14 +94,8 @@ pub(crate) struct AppState {
     /// Relative path of the initial file from base_dir (e.g. "README.md").
     pub(crate) initial_relpath: Option<String>,
     pub(crate) custom_css: Option<String>,
-    /// Raw rendered HTML (not JSON-wrapped).
-    pub(crate) current_html: RwLock<String>,
-    /// Syntax-highlighted source HTML for the code view.
-    pub(crate) current_source_html: RwLock<String>,
-    /// Formatted file stats string (e.g. "215 lines (154 loc) · 5.25 KB") for the raw-mode header.
-    pub(crate) current_file_stats: RwLock<String>,
-    /// Rev of the bytes behind `current_html`; `None` when it did not come from a file.
-    pub(crate) current_rev: RwLock<Option<Rev>>,
+    /// The entry doc's latest render, behind one lock so a resend never mixes versions.
+    pub(crate) current: RwLock<Rendered>,
     pub(crate) roots: Roots,
     pub(crate) hub: broadcast::Sender<WsEvent>,
     pub(crate) connections: AtomicUsize,
@@ -226,10 +233,12 @@ impl AppState {
             filename: init.filename,
             initial_relpath: init.initial_relpath,
             custom_css: init.custom_css,
-            current_html: RwLock::new(init.html),
-            current_source_html: RwLock::new(init.source_html),
-            current_file_stats: RwLock::new(init.file_stats),
-            current_rev: RwLock::new(init.rev),
+            current: RwLock::new(Rendered {
+                html: init.html,
+                source_html: init.source_html,
+                file_stats: init.file_stats,
+                rev: init.rev,
+            }),
             hub,
             connections: AtomicUsize::new(0),
             all_disconnected: Notify::new(),
@@ -249,10 +258,12 @@ impl AppState {
     /// The cache is written here because a lagging hub subscriber would lose the update.
     pub(crate) async fn publish_content(&self, update: ContentUpdate) {
         if self.initial_relpath.as_deref() == Some(&update.relpath) {
-            *self.current_html.write().await = update.rendered_html.clone();
-            *self.current_source_html.write().await = update.source_html.clone();
-            *self.current_file_stats.write().await = update.file_stats.clone();
-            *self.current_rev.write().await = Some(update.rev.clone());
+            *self.current.write().await = Rendered {
+                html: update.rendered_html.clone(),
+                source_html: update.source_html.clone(),
+                file_stats: update.file_stats.clone(),
+                rev: Some(update.rev.clone()),
+            };
         }
         let _ = self.hub.send(WsEvent::Content(update));
     }
@@ -427,14 +438,12 @@ async fn index_handler(
     let registry = state.registry.read().await;
     let theme = registry.active();
     let theme_names: Vec<&str> = registry.theme_names();
-    let content_html = state.current_html.read().await;
-    let source_html = state.current_source_html.read().await;
-    let file_stats = state.current_file_stats.read().await;
+    let current = state.current.read().await;
     let page = template::render_page(&template::PageOptions {
         filename: &state.filename,
-        file_stats: &file_stats,
-        content_html: &content_html,
-        source_html: Some(&source_html),
+        file_stats: &current.file_stats,
+        content_html: &current.html,
+        source_html: Some(&current.source_html),
         custom_css: state.custom_css.as_deref(),
         font_css: state.font_css.as_deref(),
         show_header: state.show_header,
@@ -576,7 +585,8 @@ async fn handle_ws_message(text: &str, state: &AppState) -> Option<String> {
         Some("checkbox") => {
             let cid = msg.get("cid").cloned().unwrap_or_default();
             let reply = match toggle_checkbox(state, &msg).await {
-                Ok(()) => serde_json::json!({"type": "ack", "cid": cid}),
+                // The new rev lets the page send its next tick before the refresh arrives.
+                Ok(rev) => serde_json::json!({"type": "ack", "cid": cid, "rev": rev.as_str()}),
                 Err(reason) => serde_json::json!({"type": "nack", "cid": cid, "reason": reason}),
             };
             return Some(reply.to_string());
@@ -605,7 +615,7 @@ async fn broadcast_theme_update(state: &AppState) {
     let active = theme.active_data();
 
     // Re-render markdown with new syntax theme
-    let (html, source, rev) = if let Some(source_file) = &state.source_file {
+    let rendered = if let Some(source_file) = &state.source_file {
         match std::fs::read(source_file) {
             Ok(bytes) => {
                 let rev = Rev::of(&bytes);
@@ -615,8 +625,12 @@ async fn broadcast_theme_update(state: &AppState) {
                 } else {
                     render::render(&markdown, active.syntax.as_ref())
                 };
-                let source = render::render_source(&markdown, active.syntax.as_ref());
-                (rendered, source, Some(rev))
+                Rendered {
+                    html: rendered,
+                    source_html: render::render_source(&markdown, active.syntax.as_ref()),
+                    file_stats: render::format_file_stats(&markdown),
+                    rev: Some(rev),
+                }
             }
             Err(e) => {
                 eprintln!("birta: failed to re-read file for theme change: {e}");
@@ -625,10 +639,7 @@ async fn broadcast_theme_update(state: &AppState) {
         }
     } else {
         // stdin mode — use current HTML since we can't re-render
-        let html = state.current_html.read().await.clone();
-        let source = state.current_source_html.read().await.clone();
-        let rev = state.current_rev.read().await.clone();
-        (html, source, rev)
+        state.current.read().await.clone()
     };
 
     let (css_vars, theme_attr) = if theme.is_github() {
@@ -642,21 +653,18 @@ async fn broadcast_theme_update(state: &AppState) {
     let msg = serde_json::json!({
         "type": "theme_update",
         "css_vars": css_vars,
-        "html": html,
-        "source": source,
+        "html": rendered.html,
+        "source": rendered.source_html,
         "path": state.initial_relpath.as_deref().unwrap_or(""),
         "theme_name": theme.name,
         "theme_attr": theme_attr,
         "variants": theme.variant_names(),
         "active_variant": theme.active_variant.as_str(),
         "has_toggle": has_toggle,
-        "rev": rev.as_ref().map(Rev::as_str),
+        "rev": rendered.rev.as_ref().map(Rev::as_str),
     });
 
-    // Update stored content
-    *state.current_html.write().await = html;
-    *state.current_source_html.write().await = source;
-    *state.current_rev.write().await = rev;
+    *state.current.write().await = rendered;
 
     let _ = state.hub.send(WsEvent::Raw(msg.to_string().into()));
 }
@@ -682,8 +690,8 @@ async fn handle_variant_change(state: &AppState, variant: Variant) {
 }
 
 /// Toggles the task on `line` of `path` (the entry doc when empty) through the strict
-/// write. The error is the nack reason.
-async fn toggle_checkbox(state: &AppState, msg: &serde_json::Value) -> Result<(), &'static str> {
+/// write, returning the rev written. The error is the nack reason.
+async fn toggle_checkbox(state: &AppState, msg: &serde_json::Value) -> Result<Rev, &'static str> {
     if state.mode == Mode::Stdin {
         return Err("read_only");
     }
@@ -732,7 +740,7 @@ async fn toggle_checkbox(state: &AppState, msg: &serde_json::Value) -> Result<()
     .await
     .map_err(|_| "read_only")?;
     match written {
-        Ok(_) => Ok(()),
+        Ok(written) => Ok(written.rev),
         Err(WriteErr::ChangedSince) => Err("changed_since"),
         Err(WriteErr::NotApplicable) => Err("not_editable"),
         Err(WriteErr::ReadOnly) => Err("read_only"),
@@ -803,25 +811,28 @@ fn content_frame(
 }
 
 async fn cached_content_frame(state: &AppState) -> String {
-    let html = state.current_html.read().await.clone();
-    let source = state.current_source_html.read().await.clone();
-    let file_stats = state.current_file_stats.read().await.clone();
-    let rev = state.current_rev.read().await.clone();
+    let current = state.current.read().await;
     let path = state.initial_relpath.as_deref().unwrap_or("");
-    content_frame(path, &html, &source, &file_stats, rev.as_ref())
+    content_frame(
+        path,
+        &current.html,
+        &current.source_html,
+        &current.file_stats,
+        current.rev.as_ref(),
+    )
 }
 
 async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
     state.connections.fetch_add(1, Ordering::Relaxed);
 
+    // Subscribe first: an update landing between the two is then sent after the snapshot.
+    let mut rx = state.hub.subscribe();
     let init_msg = cached_content_frame(&state).await;
     if socket.send(Message::Text(init_msg.into())).await.is_err() {
         state.connections.fetch_sub(1, Ordering::Relaxed);
         state.all_disconnected.notify_one();
         return;
     }
-
-    let mut rx = state.hub.subscribe();
 
     loop {
         let frame = tokio::select! {
@@ -1486,7 +1497,7 @@ mod tests {
             let mut ws = connect(port).await;
             sync(&state, &mut ws, BARRIER).await;
 
-            *state.current_html.write().await = "<p>after lag</p>".to_string();
+            state.current.write().await.html = "<p>after lag</p>".to_string();
             flood(&state, 256);
 
             let resent = sync(&state, &mut ws, SENTINEL).await;
@@ -1507,9 +1518,12 @@ mod tests {
             let mut ws = connect(port).await;
             sync(&state, &mut ws, BARRIER).await;
 
-            *state.current_html.write().await = "<p>html</p>".to_string();
-            *state.current_source_html.write().await = "<pre>source</pre>".to_string();
-            *state.current_file_stats.write().await = "3 lines".to_string();
+            *state.current.write().await = Rendered {
+                html: "<p>html</p>".to_string(),
+                source_html: "<pre>source</pre>".to_string(),
+                file_stats: "3 lines".to_string(),
+                rev: None,
+            };
             flood(&state, 256);
 
             let resent = sync(&state, &mut ws, SENTINEL).await;
@@ -1531,7 +1545,7 @@ mod tests {
 
             for round in 0..3 {
                 let html = format!("<p>round {round}</p>");
-                *state.current_html.write().await = html.clone();
+                state.current.write().await.html = html.clone();
                 flood(&state, 256);
                 let resent = sync(&state, &mut ws, SENTINEL).await;
                 assert_eq!(resent.len(), 1, "round {round}: {resent:?}");
@@ -1587,13 +1601,60 @@ mod tests {
         flood(&state, 100);
 
         within(async {
-            while *state.current_html.read().await != "<p>new</p>" {
+            while state.current.read().await.html != "<p>new</p>" {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await;
-        assert_eq!(*state.current_source_html.read().await, "<pre>new</pre>");
-        assert_eq!(*state.current_file_stats.read().await, "1 line");
+        let current = state.current.read().await;
+        assert_eq!(current.source_html, "<pre>new</pre>");
+        assert_eq!(current.file_stats, "1 line");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cached_frame_is_never_torn() {
+        let state = doc_state();
+        let writer = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                for i in 0..20_000u32 {
+                    let n = i.to_string();
+                    state
+                        .publish_content(ContentUpdate {
+                            relpath: "doc.md".to_string(),
+                            rendered_html: n.clone(),
+                            source_html: n.clone(),
+                            file_stats: n.clone(),
+                            rev: Rev::of(n.as_bytes()),
+                        })
+                        .await;
+                }
+            })
+        };
+
+        let mut torn = Vec::new();
+        while !writer.is_finished() {
+            let frame: serde_json::Value =
+                serde_json::from_str(&cached_content_frame(&state).await).unwrap();
+            let n = frame["html"].as_str().unwrap().to_string();
+            if n == "<p>hello</p>" {
+                continue;
+            }
+            let rev = Rev::of(n.as_bytes());
+            if frame["source"] != n.as_str()
+                || frame["file_stats"] != n.as_str()
+                || frame["rev"] != rev.as_str()
+            {
+                torn.push(frame);
+            }
+        }
+        writer.await.unwrap();
+        assert!(
+            torn.is_empty(),
+            "{} torn frames, first {}",
+            torn.len(),
+            torn[0]
+        );
     }
 
     #[tokio::test]
@@ -1608,7 +1669,7 @@ mod tests {
                 rev: Rev::of(b"other"),
             })
             .await;
-        assert_eq!(*state.current_html.read().await, "<p>hello</p>");
+        assert_eq!(state.current.read().await.html, "<p>hello</p>");
     }
 
     #[tokio::test]
@@ -2186,6 +2247,27 @@ mod tests {
         let link = std::fs::symlink_metadata(site.root.join("alias.md")).unwrap();
         assert!(link.file_type().is_symlink(), "the link was replaced");
         assert!(is_ack(&reply), "{reply:?}");
+    }
+
+    #[tokio::test]
+    async fn back_to_back_ticks_both_land() {
+        let before: &[u8] = b"- [ ] a\n- [ ] b\n";
+        let middle: &[u8] = b"- [x] a\n- [ ] b\n";
+        let site = Site::new(&[("root/doc.md", before)]);
+        // No watcher here, so no `content` frame ever brings a newer rev.
+        let port = serve(&site.state()).await;
+
+        let mut ws = connect(port).await;
+        let frame = checkbox_frame("c1", "doc.md", 1, true, Some(&git_rev(before)));
+        let first = send_checkbox(&mut ws, "c1", frame).await;
+        assert!(is_ack(&first), "{first:?}");
+        let rev = first.as_ref().unwrap()["rev"].clone();
+        assert_eq!(rev, git_rev(middle), "the ack names the rev it wrote");
+
+        let frame = checkbox_frame("c2", "doc.md", 2, true, rev.as_str());
+        let second = send_checkbox(&mut ws, "c2", frame).await;
+        assert!(is_ack(&second), "{second:?}");
+        assert_eq!(site.read("doc.md"), b"- [x] a\n- [x] b\n");
     }
 
     #[tokio::test]

@@ -40,10 +40,6 @@ pub(crate) enum WriteErr {
 
 #[derive(Debug)]
 pub(crate) struct Written {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "no caller needs the new rev yet")
-    )]
     pub(crate) rev: Rev,
 }
 

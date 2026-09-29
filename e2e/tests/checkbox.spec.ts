@@ -32,7 +32,7 @@ function box(page: Page, n: number) {
 test.beforeEach(() => fs.writeFileSync(FIXTURE, ORIGINAL));
 test.afterEach(() => fs.writeFileSync(FIXTURE, ORIGINAL));
 
-test("a second tick uses the rev from the refreshed content", async ({ page }) => {
+test("back-to-back ticks both land", async ({ page }) => {
   const revs: string[] = [];
   page.on("websocket", (ws) =>
     ws.on("framereceived", ({ payload }) => {
@@ -48,18 +48,18 @@ test("a second tick uses the rev from the refreshed content", async ({ page }) =
     els.forEach((el) => el.setAttribute("data-stale", "")),
   );
 
+  // The second tick goes out before any refreshed content can arrive.
   await box(page, 0).check();
-  const afterFirst = "# Checkbox\n\n- [x] first\n- [ ] second\n";
-  await expect.poll(readFixture).toBe(afterFirst);
+  await box(page, 1).check();
+  const after = "# Checkbox\n\n- [x] first\n- [x] second\n";
+  await expect.poll(readFixture).toBe(after);
+  await expect(page.locator("#status")).not.toHaveText("changed since · try again");
 
-  // The watcher's content for the new bytes carries their rev, and the page applied it.
-  await expect.poll(() => revs.includes(gitRev(afterFirst))).toBe(true);
+  // The watcher's content carries the rev of the bytes it rendered.
+  await expect.poll(() => revs.includes(gitRev(after))).toBe(true);
   await expect(stale).toHaveCount(0);
   await expect(box(page, 0)).toBeChecked();
-
-  await box(page, 1).check();
-  await expect.poll(readFixture).toBe("# Checkbox\n\n- [x] first\n- [x] second\n");
-  await expect(page.locator("#status")).not.toHaveText("changed since · try again");
+  await expect(box(page, 1)).toBeChecked();
 });
 
 test("a nack reverts the checkbox and shows the pill", async ({ page }) => {

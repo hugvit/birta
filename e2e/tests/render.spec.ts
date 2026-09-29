@@ -43,24 +43,23 @@ test("renders blockquote", async ({ page }) => {
 
 test("shows filename in header", async ({ page }) => {
   await page.goto("/");
-  await expect(page.locator("#filename")).toHaveText("test.md");
+  await expect(page.locator(".file-header-name")).toHaveText("test.md");
 });
 
 test("theme toggle switches between light and dark", async ({ page }) => {
   await page.goto("/");
   const html = page.locator("html");
   const toggleBtn = page.locator("#theme-toggle");
+  const initial = await html.getAttribute("data-theme");
+  expect(initial === "light" || initial === "dark").toBeTruthy();
+  const other = initial === "light" ? "dark" : "light";
 
-  // Click to set an explicit theme
+  // The variant flips only after the server's theme_update round trip
   await toggleBtn.click();
-  const firstTheme = await html.getAttribute("data-theme");
-  expect(firstTheme).toBeTruthy();
+  await expect(html).toHaveAttribute("data-theme", other);
 
-  // Click again to switch
   await toggleBtn.click();
-  const secondTheme = await html.getAttribute("data-theme");
-  expect(secondTheme).toBeTruthy();
-  expect(secondTheme).not.toBe(firstTheme);
+  await expect(html).toHaveAttribute("data-theme", initial!);
 });
 
 test("health endpoint returns ok", async ({ request }) => {

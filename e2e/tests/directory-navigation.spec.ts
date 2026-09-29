@@ -64,7 +64,10 @@ async function switchTheme(
   page: import("@playwright/test").Page,
   themeName: string
 ): Promise<void> {
-  await page.locator("#theme-select").selectOption(themeName);
+  await page.locator("#theme-dropdown-btn").click();
+  await page
+    .locator(`.theme-dropdown-item[data-theme="${themeName}"]`)
+    .click();
   await waitForThemeUpdate(page);
 }
 

@@ -11,8 +11,6 @@ function hexToRgb(hex: string): string {
   return `rgb(${r}, ${g}, ${b})`;
 }
 
-const TRANSPARENT = "rgba(0, 0, 0, 0)";
-
 async function getStyle(
   page: import("@playwright/test").Page,
   selector: string,
@@ -59,8 +57,8 @@ async function startBirta(
   throw new Error(`Birta did not start on port ${port} within 120s`);
 }
 
-function stopBirta(proc: ChildProcess): void {
-  proc.kill("SIGTERM");
+function stopBirta(proc: ChildProcess | undefined): void {
+  proc?.kill("SIGTERM");
 }
 
 // --- GitHub Dark Mode ---
@@ -199,16 +197,17 @@ test.describe.serial("css audit: github dark", () => {
   });
 });
 
-// --- Catppuccin Mocha ---
+// --- Catppuccin (dark variant) ---
 
-test.describe.serial("css audit: catppuccin-mocha", () => {
+test.describe.serial("css audit: catppuccin dark", () => {
   let server: ChildProcess;
   const BASE = "http://127.0.0.1:3458";
 
   test.beforeAll(async () => {
     server = await startBirta(3458, "fixtures/theme-test.md", [
       "--theme",
-      "../assets/themes/catppuccin-mocha",
+      "catppuccin",
+      "--dark",
     ]);
   });
 
@@ -228,16 +227,16 @@ test.describe.serial("css audit: catppuccin-mocha", () => {
     expect(bg).toBe(hexToRgb("#181825"));
   });
 
-  test("header border is transparent", async ({ page }) => {
+  test("header border uses border_birta", async ({ page }) => {
     await page.goto(BASE);
     const border = await getStyle(page, ".header", "border-bottom-color");
-    expect(border).toBe(TRANSPARENT);
+    expect(border).toBe(hexToRgb("#45475a"));
   });
 
-  test("container border is transparent", async ({ page }) => {
+  test("container border uses border_birta", async ({ page }) => {
     await page.goto(BASE);
     const border = await getStyle(page, ".container", "border-top-color");
-    expect(border).toBe(TRANSPARENT);
+    expect(border).toBe(hexToRgb("#45475a"));
   });
 
   test("body text color", async ({ page }) => {
@@ -315,14 +314,14 @@ test.describe.serial("css audit: catppuccin-mocha", () => {
     expect(border).toBe(hexToRgb("#f38ba8"));
   });
 
-  test("alert border radius is 0px", async ({ page }) => {
+  test("alert border radius keeps the default", async ({ page }) => {
     await page.goto(BASE);
     const radius = await getStyle(
       page,
       ".markdown-alert-note",
       "border-radius"
     );
-    expect(radius).toBe("0px");
+    expect(radius).toBe("6px");
   });
 
   test("data-birta-theme attribute is set", async ({ page }) => {
@@ -330,12 +329,13 @@ test.describe.serial("css audit: catppuccin-mocha", () => {
     const attr = await page
       .locator("html")
       .getAttribute("data-birta-theme");
-    expect(attr).toBe("catppuccin-mocha");
+    expect(attr).toBe("catppuccin");
   });
 
-  test("theme toggle is hidden", async ({ page }) => {
+  test("theme toggle is enabled for a dual-variant theme", async ({ page }) => {
     await page.goto(BASE);
     const toggle = page.locator("#theme-toggle");
-    await expect(toggle).toBeHidden();
+    await expect(toggle).toBeVisible();
+    await expect(toggle).not.toHaveClass(/disabled/);
   });
 });

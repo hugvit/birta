@@ -20,5 +20,14 @@ export default defineConfig({
       name: "chromium",
       use: { browserName: "chromium" },
     },
+    // Selection and review behaviour diverges in WebKit, so those specs run there too
+    {
+      name: "webkit",
+      use: { browserName: "webkit" },
+      testMatch: /(selection|patch|review\/).*\.spec\.ts/,
+    },
+    ...(process.env.BIRTA_FF === "1"
+      ? [{ name: "firefox", use: { browserName: "firefox" as const } }]
+      : []),
   ],
 });

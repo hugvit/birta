@@ -109,44 +109,77 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
     let variants_json =
         serde_json::to_string(&theme.variant_names()).unwrap_or_else(|_| "[]".to_string());
 
-    VIEWER_HTML
-        .replace("{{GITHUB_CSS}}", GITHUB_CSS)
-        .replace("{{THEME_OVERRIDES}}", THEME_OVERRIDES)
-        .replace("{{PAGE_CSS}}", PAGE_CSS)
-        .replace("{{SYNTAX_CSS}}", syntax_css)
-        .replace("{{ALERTS_CSS}}", ALERTS_CSS)
-        .replace("{{THEME_VARS_CSS}}", &theme_vars_css)
-        .replace("{{FONT_CSS}}", font_css.unwrap_or(""))
-        .replace("{{CUSTOM_CSS}}", &custom_style)
-        .replace(
-            "{{HEADER_CLASS}}",
-            if *show_header { "" } else { " header-hidden" },
-        )
-        .replace(
-            "{{BODY_CLASS}}",
-            if *reading_mode { " reading-mode" } else { "" },
-        )
-        .replace("{{THEME_MODE}}", theme_mode)
-        .replace("{{THEME_ATTR}}", &theme_attr)
-        .replace("{{ACTIVE_VARIANT}}", active_variant)
-        .replace("{{VARIANT_EXPLICIT}}", variant_explicit)
-        .replace("{{ACTIVE_THEME}}", &theme.name)
-        .replace("{{THEME_OPTIONS}}", &theme_options)
-        .replace("{{VARIANTS_JSON}}", &variants_json)
-        .replace("{{FILENAME}}", filename)
-        .replace("{{FILE_STATS}}", opts.file_stats)
-        .replace(
-            "{{STATIC_MODE}}",
-            if opts.static_mode { "true" } else { "false" },
-        )
-        .replace("{{KEYBINDINGS_JSON}}", opts.keybindings_json)
-        .replace(
-            "{{INITIAL_VIEW}}",
-            if opts.raw_mode { "raw" } else { "preview" },
-        )
-        .replace("{{CURRENT_PATH}}", opts.current_path.unwrap_or(""))
-        .replace("{{SOURCE_HTML}}", opts.source_html.unwrap_or(""))
-        .replace("{{CONTENT}}", content_html)
+    fill_template(
+        VIEWER_HTML,
+        &[
+            ("GITHUB_CSS", GITHUB_CSS),
+            ("THEME_OVERRIDES", THEME_OVERRIDES),
+            ("PAGE_CSS", PAGE_CSS),
+            ("SYNTAX_CSS", syntax_css),
+            ("ALERTS_CSS", ALERTS_CSS),
+            ("THEME_VARS_CSS", &theme_vars_css),
+            ("FONT_CSS", font_css.unwrap_or("")),
+            ("CUSTOM_CSS", &custom_style),
+            (
+                "HEADER_CLASS",
+                if *show_header { "" } else { " header-hidden" },
+            ),
+            (
+                "BODY_CLASS",
+                if *reading_mode { " reading-mode" } else { "" },
+            ),
+            ("THEME_MODE", theme_mode),
+            ("THEME_ATTR", &theme_attr),
+            ("ACTIVE_VARIANT", active_variant),
+            ("VARIANT_EXPLICIT", variant_explicit),
+            ("ACTIVE_THEME", &theme.name),
+            ("THEME_OPTIONS", &theme_options),
+            ("VARIANTS_JSON", &variants_json),
+            ("FILENAME", filename),
+            ("FILE_STATS", opts.file_stats),
+            (
+                "STATIC_MODE",
+                if opts.static_mode { "true" } else { "false" },
+            ),
+            ("KEYBINDINGS_JSON", opts.keybindings_json),
+            (
+                "INITIAL_VIEW",
+                if opts.raw_mode { "raw" } else { "preview" },
+            ),
+            ("CURRENT_PATH", opts.current_path.unwrap_or("")),
+            ("SOURCE_HTML", opts.source_html.unwrap_or("")),
+            ("CONTENT", content_html),
+        ],
+    )
+}
+
+/// Fills `{{KEY}}` placeholders in a single pass, so substituted values are
+/// never rescanned — user content containing `{{CONTENT}}` etc. stays literal.
+fn fill_template(template: &str, vars: &[(&str, &str)]) -> String {
+    let mut out =
+        String::with_capacity(template.len() + vars.iter().map(|(_, v)| v.len()).sum::<usize>());
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        let after = &rest[start + 2..];
+        let value = after.find("}}").and_then(|end| {
+            vars.iter()
+                .find(|(k, _)| *k == &after[..end])
+                .map(|(_, v)| (end, *v))
+        });
+        match value {
+            Some((end, v)) => {
+                out.push_str(&rest[..start]);
+                out.push_str(v);
+                rest = &after[end + 2..];
+            }
+            None => {
+                out.push_str(&rest[..start + 2]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -443,6 +476,86 @@ mod tests {
             page.contains("data-birta-theme=\"dracula\""),
             "non-github theme should set data-birta-theme attribute"
         );
+    }
+
+    fn render_user_values(filename: &str, content: &str, source: &str) -> String {
+        let theme = github_theme();
+        render_page(&PageOptions {
+            filename,
+            file_stats: "1 lines (1 loc) · 5 B",
+            content_html: content,
+            source_html: Some(source),
+            custom_css: None,
+            font_css: None,
+            show_header: true,
+            reading_mode: false,
+            raw_mode: false,
+            theme: &theme,
+            theme_names: &["github"],
+            variant_explicit: false,
+            static_mode: false,
+            keybindings_json: "{}",
+            current_path: None,
+        })
+    }
+
+    #[test]
+    fn render_page_fills_every_placeholder() {
+        let page = render_user_values("test.md", "<p>hi</p>", "hi");
+        assert!(!page.contains("{{"), "unfilled placeholder left in page");
+    }
+
+    #[test]
+    fn render_page_does_not_expand_placeholders_in_source() {
+        let source = "<code>{{CONTENT}} {{FILENAME}} {{SOURCE_HTML}}</code>";
+        let page = render_user_values("test.md", "<p>RENDERED</p>", source);
+        assert!(
+            page.contains(source),
+            "source placeholders must stay literal"
+        );
+        assert_eq!(page.matches("RENDERED").count(), 1);
+    }
+
+    #[test]
+    fn render_page_does_not_expand_placeholders_in_content() {
+        let content = "<p>{{SOURCE_HTML}} {{FILENAME}} {{PAGE_CSS}}</p>";
+        let page = render_user_values("test.md", content, "SRC_MARKER");
+        assert!(
+            page.contains(content),
+            "content placeholders must stay literal"
+        );
+        assert_eq!(page.matches("SRC_MARKER").count(), 1);
+    }
+
+    #[test]
+    fn render_page_does_not_expand_placeholders_in_filename() {
+        let page = render_user_values("{{CONTENT}}.md", "<p>RENDERED</p>", "");
+        assert!(page.contains("{{CONTENT}}.md"));
+        assert_eq!(page.matches("RENDERED").count(), 1);
+    }
+
+    #[test]
+    fn fill_template_replaces_known_keys() {
+        let out = fill_template("a{{X}}b{{Y}}{{X}}", &[("X", "1"), ("Y", "2")]);
+        assert_eq!(out, "a1b21");
+    }
+
+    #[test]
+    fn fill_template_keeps_unknown_and_unclosed_braces() {
+        let out = fill_template("{{NOPE}} {{X}} {{ open", &[("X", "1")]);
+        assert_eq!(out, "{{NOPE}} 1 {{ open");
+    }
+
+    #[test]
+    fn fill_template_does_not_rescan_values() {
+        let out = fill_template("{{A}}|{{B}}", &[("A", "{{B}}"), ("B", "{{A}}")]);
+        assert_eq!(out, "{{B}}|{{A}}");
+    }
+
+    #[test]
+    fn fill_template_handles_multibyte_text() {
+        let out = fill_template("þ{{X}}ð🦀{{", &[("X", "日本")]);
+        assert_eq!(out, "þ日本ð🦀{{");
     }
 
     #[test]

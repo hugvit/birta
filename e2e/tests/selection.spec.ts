@@ -64,7 +64,7 @@ interface Quote {
 interface Gesture {
   id: string;
   act: (page: Page) => Promise<void>;
-  /** Expected quote, from the fixture text; omitted where the plan leaves it open. */
+  /** Expected quote, from the fixture text. Omit it where engines may pick different text. */
   quote?: string;
   /** Expected `crossBlock`, per engine where the engines' selections end differently. */
   crossBlock: boolean | Record<string, boolean>;

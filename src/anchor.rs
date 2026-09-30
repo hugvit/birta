@@ -316,18 +316,36 @@ impl<'t> LineMap<'t> {
     }
 
     fn bytes(&self, sp: Sourcepos) -> Range<usize> {
+        let raw = self.raw_bytes(sp);
+        // comrak's sp can end mid-character (a `dt` is always `L:1-L:1`)
+        self.snap_down(raw.start)..self.snap_up(raw.end)
+    }
+
+    /// `sp` as byte offsets, which may fall inside a character.
+    fn raw_bytes(&self, sp: Sourcepos) -> Range<usize> {
         let start = self.offset(sp.start);
         let end = match sp.end.column {
             0 => self.offset(sp.end),
             // The end column is the node's last byte, so the range ends one past it
             _ => (self.offset(sp.end) + 1).min(self.len),
         };
-        // comrak's sp can end mid-character (a `dt` is always `L:1-L:1`)
-        let mut end = end.max(start);
-        while !self.text.is_char_boundary(end) {
-            end += 1;
+        start..end.max(start)
+    }
+
+    fn snap_down(&self, mut at: usize) -> usize {
+        at = at.min(self.len);
+        while !self.text.is_char_boundary(at) {
+            at -= 1;
         }
-        start..end
+        at
+    }
+
+    fn snap_up(&self, mut at: usize) -> usize {
+        at = at.min(self.len);
+        while !self.text.is_char_boundary(at) {
+            at += 1;
+        }
+        at
     }
 }
 
@@ -399,6 +417,8 @@ pub struct Loc {
 }
 
 const MAX_CANDIDATES: usize = 5;
+/// Code points of context the page sends on each side of a quote.
+const CONTEXT: usize = 32;
 
 /// Places a selection's rendered text in `markdown`.
 pub fn resolve(markdown: &str, req: &ResolveReq) -> Resolved {
@@ -437,16 +457,27 @@ pub fn resolve(markdown: &str, req: &ResolveReq) -> Resolved {
     let a = match at_off {
         Some(a) => a,
         None => {
-            let hits = occurrences(&t, &q);
-            let (pre, suf) = (norm(&req.pre), norm(&req.suf));
-            let score = |a: usize| {
-                let before = t[..a].iter().rev().zip(pre.iter().rev());
-                let after = t[a + q.len()..].iter().zip(suf.iter());
-                before.take_while(|(x, y)| x == y).count()
-                    + after.take_while(|(x, y)| x == y).count()
-            };
-            let best = hits.iter().map(|&a| score(a)).max().unwrap_or(0);
-            let top: Vec<usize> = hits.into_iter().filter(|&a| score(a) == best).collect();
+            // The page sends at most this much context; more would only cost time
+            let pre = norm(&req.pre);
+            let pre = &pre[pre.len().saturating_sub(CONTEXT)..];
+            let suf = norm(&req.suf);
+            let suf = &suf[..suf.len().min(CONTEXT)];
+            let scored: Vec<(usize, usize)> = occurrences(&t, &q)
+                .into_iter()
+                .map(|a| {
+                    let before = t[..a].iter().rev().zip(pre.iter().rev());
+                    let after = t[a + q.len()..].iter().zip(suf.iter());
+                    let score = before.take_while(|(x, y)| x == y).count()
+                        + after.take_while(|(x, y)| x == y).count();
+                    (a, score)
+                })
+                .collect();
+            let best = scored.iter().map(|&(_, score)| score).max().unwrap_or(0);
+            let top: Vec<usize> = scored
+                .into_iter()
+                .filter(|&(_, score)| score == best)
+                .map(|(a, _)| a)
+                .collect();
             match top[..] {
                 [] => return block(Reason::NoMatch, t.len()),
                 [a] => a,
@@ -465,10 +496,13 @@ pub fn resolve(markdown: &str, req: &ResolveReq) -> Resolved {
         }
     };
     let (bytes, widened) = text.span(a, a + q.len());
+    let Some(source) = markdown.get(bytes.clone()) else {
+        return block(Reason::NoMatch, t.len());
+    };
     let last = bytes.end.max(bytes.start + 1) - 1;
     Resolved::Exact {
         lines: (lines.line_of(bytes.start), lines.line_of(last)),
-        source: markdown[bytes.clone()].to_string(),
+        source: source.to_string(),
         bytes,
         shown: req.quote.clone(),
         widened,
@@ -628,6 +662,8 @@ impl Unit {
 struct Wrap {
     link: bool,
     bytes: Range<usize>,
+    /// Bytes from its first to its last unit.
+    text: Option<(usize, usize)>,
 }
 
 /// An owner's text as units, whitespace collapsed like the page's.
@@ -637,8 +673,10 @@ struct OwnerText<'m> {
     code: bool,
     /// Mermaid or math: drawn as a picture, so nothing in it is selectable.
     diagram: bool,
-    /// False when a code line didn't match its source line, so bytes are unknown.
+    /// False when some node's bytes can't be trusted, so no range in this owner can be.
     mapped: bool,
+    /// Where each `\|` in a table cell starts, for comrak's shifted inline sourcepos.
+    escapes: Vec<usize>,
     lines: &'m LineMap<'m>,
 }
 
@@ -650,6 +688,7 @@ impl<'m> OwnerText<'m> {
             code: false,
             diagram: false,
             mapped: true,
+            escapes: Vec::new(),
             lines,
         };
         match kind {
@@ -682,10 +721,28 @@ impl<'m> OwnerText<'m> {
                 text.units = collapse(units);
             }
             _ => {
+                if kind == OwnerKind::Cell {
+                    let cell = lines.bytes(node.data.borrow().sourcepos);
+                    let src = lines.text.get(cell.clone()).unwrap_or("");
+                    text.escapes = src
+                        .match_indices("\\|")
+                        .map(|(i, _)| cell.start + i)
+                        .collect();
+                }
                 let mut units = Vec::new();
                 text.collect(node, &mut units);
                 text.units = collapse(units);
             }
+        }
+        text.mapped &= text.ordered();
+        if text.mapped {
+            text.wraps = std::mem::take(&mut text.wraps)
+                .into_iter()
+                .map(|wrap| Wrap {
+                    text: text.text_span(&wrap.bytes),
+                    ..wrap
+                })
+                .collect();
         }
         text
     }
@@ -694,13 +751,56 @@ impl<'m> OwnerText<'m> {
         self.units.iter().map(|u| u.ch).collect()
     }
 
+    /// Units run forward through the source on character boundaries.
+    fn ordered(&self) -> bool {
+        let src = self.lines.text;
+        let fits = |u: &Unit| u.s <= u.e && src.is_char_boundary(u.s) && src.is_char_boundary(u.e);
+        self.units.iter().all(fits) && self.units.windows(2).all(|w| w[0].s <= w[1].s)
+    }
+
+    /// An inline node's source bytes.
+    fn bytes(&self, sp: Sourcepos) -> Range<usize> {
+        if self.escapes.is_empty() {
+            return self.lines.bytes(sp);
+        }
+        let raw = self.lines.raw_bytes(sp);
+        if raw.is_empty() {
+            return self.lines.bytes(sp);
+        }
+        // comrak places a cell's inlines as if each `\|` before them were one byte
+        let shift = |at: usize, on_pipe: bool| {
+            self.escapes.iter().fold(at, |at, &e| {
+                if e < at || (on_pipe && e == at) {
+                    at + 1
+                } else {
+                    at
+                }
+            })
+        };
+        let start = shift(raw.start, false);
+        let end = shift(raw.end - 1, true) + 1;
+        self.lines.snap_down(start)..self.lines.snap_up(end.max(start))
+    }
+
     fn collect<'a>(&mut self, node: &'a AstNode<'a>, out: &mut Vec<Unit>) {
         for child in node.children() {
             let ast = child.data.borrow();
-            let bytes = self.lines.bytes(ast.sourcepos);
+            let bytes = self.bytes(ast.sourcepos);
+            let src = self.lines.text.get(bytes.clone()).unwrap_or("");
+            if !plausible(&ast.value, src) {
+                self.mapped = false;
+            }
             match &ast.value {
                 NodeValue::Text(literal) => self.text_units(child, literal, bytes, out),
-                NodeValue::Code(code) => code_span_units(code, bytes, self.lines.text, out),
+                NodeValue::Code(code) => {
+                    match code_span_units(code, bytes.start, self.lines.text) {
+                        Some(units) => out.extend(units),
+                        None => {
+                            self.mapped = false;
+                            out.extend(code.literal.chars().map(|c| Unit::new(c, 0, 0)));
+                        }
+                    }
+                }
                 NodeValue::ShortCode(short) => out.extend(
                     short
                         .emoji
@@ -725,7 +825,11 @@ impl<'m> OwnerText<'m> {
                 | NodeValue::Strong
                 | NodeValue::Strikethrough => {
                     let link = matches!(ast.value, NodeValue::Link(_));
-                    self.wraps.push(Wrap { link, bytes });
+                    self.wraps.push(Wrap {
+                        link,
+                        bytes,
+                        text: None,
+                    });
                     self.collect(child, out);
                 }
                 _ => self.collect(child, out),
@@ -734,35 +838,53 @@ impl<'m> OwnerText<'m> {
     }
 
     fn text_units<'a>(
-        &self,
+        &mut self,
         node: &'a AstNode<'a>,
         literal: &str,
         bytes: Range<usize>,
         out: &mut Vec<Unit>,
     ) {
         let src = self.lines.text;
-        if let Some(units) = align_text(literal, &src[bytes.clone()], bytes.start, true) {
+        // comrak starts a text that opens with an escape after its backslash
+        let escaped = bytes.start.checked_sub(1).filter(|&back| {
+            src.as_bytes()[back] == b'\\'
+                && literal.starts_with(|c: char| c.is_ascii_punctuation())
+                && node
+                    .previous_sibling()
+                    .is_none_or(|prev| self.bytes(prev.data.borrow().sourcepos).end <= back)
+        });
+        let bytes = match escaped {
+            Some(back) => back..bytes.end,
+            None => bytes,
+        };
+        let strict = src
+            .get(bytes.clone())
+            .and_then(|slice| align_text(literal, slice, bytes.start, true));
+        if let Some(units) = strict {
             out.extend(units);
             return;
         }
-        // comrak can end a text's sourcepos early (one byte per `\|` in a cell)
+        // comrak can end a text's sourcepos early
         let limit = match node.next_sibling() {
-            Some(next) => self.lines.bytes(next.data.borrow().sourcepos).start,
+            Some(next) => self.bytes(next.data.borrow().sourcepos).start,
             None => node.parent().map_or(bytes.end, |p| {
-                self.lines.bytes(p.data.borrow().sourcepos).end
+                let parent = p.data.borrow();
+                match parent.value {
+                    NodeValue::TableCell => self.lines.bytes(parent.sourcepos).end,
+                    _ => self.bytes(parent.sourcepos).end,
+                }
             }),
         };
-        if limit > bytes.end
-            && let Some(units) = align_text(literal, &src[bytes.start..limit], bytes.start, false)
-        {
-            out.extend(units);
-            return;
+        let loose = src
+            .get(bytes.start..limit.max(bytes.end))
+            .and_then(|slice| align_text(literal, slice, bytes.start, false));
+        match loose {
+            Some(units) => out.extend(units),
+            None => {
+                self.mapped = false;
+                out.extend(literal.chars().map(|c| Unit::new(c, 0, 0)));
+            }
         }
-        out.extend(
-            literal
-                .chars()
-                .map(|c| Unit::atomic(c, bytes.start, bytes.end)),
-        );
     }
 
     /// Source bytes of units `a..b`, grown to whole tokens and balanced markup.
@@ -771,10 +893,11 @@ impl<'m> OwnerText<'m> {
         let mut start = picked.iter().map(|u| u.s).min().unwrap_or(0);
         let mut end = picked.iter().map(|u| u.e).max().unwrap_or(start);
         let mut widened = picked.iter().any(|u| u.atomic);
+        // Containers nest, so each pass can only reach one level further out
         loop {
             let mut grew = false;
             for wrap in &self.wraps {
-                let Some((first, last)) = self.text_span(&wrap.bytes) else {
+                let Some((first, last)) = wrap.text else {
                     continue;
                 };
                 if start >= last || end <= first {
@@ -796,14 +919,14 @@ impl<'m> OwnerText<'m> {
         }
     }
 
-    /// Bytes from the first to the last unit inside `bytes`.
+    /// Bytes from the first to the last unit inside `bytes`; units are in source order.
     fn text_span(&self, bytes: &Range<usize>) -> Option<(usize, usize)> {
-        let mut inside = self
-            .units
-            .iter()
-            .filter(|u| u.s < u.e && u.s >= bytes.start && u.e <= bytes.end);
-        let first = inside.next()?;
-        let last = inside.next_back().unwrap_or(first);
+        let from = self.units.partition_point(|u| u.s < bytes.start);
+        let to = self.units.partition_point(|u| u.s < bytes.end);
+        let inside = self.units.get(from..to)?;
+        let mut real = inside.iter().filter(|u| u.s < u.e && u.e <= bytes.end);
+        let first = real.next()?;
+        let last = real.next_back().unwrap_or(first);
         Some((first.s, last.e))
     }
 
@@ -818,7 +941,9 @@ impl<'m> OwnerText<'m> {
     ) -> Cand {
         let (bytes, _) = self.span(a, a + len);
         let preview = if kind == OwnerKind::Heading {
-            let heading = &markdown[self.lines.bytes(node.data.borrow().sourcepos)];
+            let heading = markdown
+                .get(self.lines.bytes(node.data.borrow().sourcepos))
+                .unwrap_or("");
             format!("→ {}", heading.lines().next().unwrap_or("").trim())
         } else {
             format!("→ \"{}\"", self.excerpt(a, a + len))
@@ -826,7 +951,7 @@ impl<'m> OwnerText<'m> {
         Cand {
             sp: Some(sp.to_string()),
             off: Some(a),
-            source: markdown[bytes.clone()].to_string(),
+            source: markdown.get(bytes.clone()).unwrap_or("").to_string(),
             bytes,
             preview,
         }
@@ -849,14 +974,38 @@ impl<'m> OwnerText<'m> {
     }
 }
 
-/// Every start of `q` in `t`, overlapping ones included.
+/// Every start of `q` in `t`, overlapping ones included, in linear time (Knuth–Morris–Pratt).
 fn occurrences(t: &[char], q: &[char]) -> Vec<usize> {
     if q.is_empty() || q.len() > t.len() {
         return Vec::new();
     }
-    (0..=t.len() - q.len())
-        .filter(|&a| t[a..a + q.len()] == *q)
-        .collect()
+    // border[i]: length of the longest proper prefix of q[..=i] that is also its suffix
+    let mut border = vec![0; q.len()];
+    let mut k = 0;
+    for i in 1..q.len() {
+        while k > 0 && q[i] != q[k] {
+            k = border[k - 1];
+        }
+        if q[i] == q[k] {
+            k += 1;
+        }
+        border[i] = k;
+    }
+    let mut hits = Vec::new();
+    k = 0;
+    for (i, c) in t.iter().enumerate() {
+        while k > 0 && *c != q[k] {
+            k = border[k - 1];
+        }
+        if *c == q[k] {
+            k += 1;
+        }
+        if k == q.len() {
+            hits.push(i + 1 - k);
+            k = border[k - 1];
+        }
+    }
+    hits
 }
 
 /// Whitespace as JavaScript's `\s` sees it, which the page uses: no U+0085, plus U+FEFF.
@@ -1003,33 +1152,87 @@ fn raw_tag_name(tag: &str) -> Option<String> {
         .then(|| name.to_ascii_lowercase())
 }
 
-/// A code span maps char for char when its literal is its source, less one padding space.
-fn code_span_units(code: &NodeCode, bytes: Range<usize>, src: &str, out: &mut Vec<Unit>) {
+/// Units of a code span that starts at `start`. comrak can misplace a multi-line span's end,
+/// so the closing run of backticks is found in the source instead.
+fn code_span_units(code: &NodeCode, start: usize, src: &str) -> Option<Vec<Unit>> {
     let ticks = code.num_backticks;
-    let inner = (bytes.len() >= 2 * ticks).then(|| {
-        (
-            bytes.start + ticks,
-            &src[bytes.start + ticks..bytes.end - ticks],
-        )
-    });
-    let exact = inner.and_then(|(at, inner)| {
-        if inner == code.literal {
-            return Some(at);
+    let rest = src.get(start..)?;
+    let body = rest.get(ticks..)?;
+    if !rest[..ticks].bytes().all(|b| b == b'`') || body.starts_with('`') {
+        return None;
+    }
+    let mut at = 0;
+    let close = loop {
+        let i = at + body[at..].find('`')?;
+        let run = body[i..].len() - body[i..].trim_start_matches('`').len();
+        if run == ticks {
+            break i;
         }
-        let padded = inner.len() >= 2 && inner.starts_with(' ') && inner.ends_with(' ');
-        (padded && inner[1..inner.len() - 1] == code.literal).then_some(at + 1)
-    });
-    match exact {
-        Some(at) => out.extend(
-            code.literal
-                .char_indices()
-                .map(|(k, c)| Unit::new(c, at + k, at + k + c.len_utf8())),
-        ),
-        None => out.extend(
-            code.literal
-                .chars()
-                .map(|c| Unit::atomic(c, bytes.start, bytes.end)),
-        ),
+        at = i + run;
+    };
+    let base = start + ticks;
+    let sc: Vec<(usize, char)> = body[..close].char_indices().collect();
+    let lc: Vec<char> = code.literal.chars().collect();
+    let at = |k: usize| base + sc.get(k).map_or(close, |&(b, _)| b);
+    let mut out = Vec::with_capacity(lc.len());
+    let (mut i, mut j) = (0, 0);
+    while j < lc.len() {
+        let (c, l) = (sc.get(i)?.1, lc[j]);
+        let next = sc.get(i + 1).map(|&(_, n)| n);
+        if c == l {
+            out.push(Unit::new(l, at(i), at(i + 1)));
+            i += 1;
+            j += 1;
+        } else if c == '\\' && next == Some('|') && l == '|' {
+            // A table cell unescapes pipes even inside code
+            out.push(Unit::new(l, at(i), at(i + 2)));
+            i += 2;
+            j += 1;
+        } else if matches!(c, '\n' | '\r') && l == ' ' {
+            // A line ending shows as a space, and the next line's indent is not in the literal
+            let width = if c == '\r' && next == Some('\n') {
+                2
+            } else {
+                1
+            };
+            out.push(Unit::new(l, at(i), at(i + width)));
+            i += width;
+            j += 1;
+        } else if c.is_whitespace() {
+            i += 1;
+        } else {
+            return None;
+        }
+    }
+    sc[i..]
+        .iter()
+        .all(|&(_, c)| c.is_whitespace())
+        .then_some(out)
+}
+
+/// Whether `src` could be the source of an inline `value`. comrak misplaces some inline
+/// sourcepos, and a range built on a wrong one would quote the wrong text.
+fn plausible(value: &NodeValue, src: &str) -> bool {
+    let wrapped = |open: &[char], close: &[char]| src.starts_with(open) && src.ends_with(close);
+    match value {
+        NodeValue::Emph | NodeValue::Strong => wrapped(&['*', '_'], &['*', '_']),
+        NodeValue::Strikethrough => wrapped(&['~'], &['~']),
+        // Bare autolinks (`www.x.org`, `a@b.c`) are their own text
+        NodeValue::Link(_) => {
+            wrapped(&['['], &[')', ']'])
+                || wrapped(&['<'], &['>'])
+                || src.starts_with(char::is_alphanumeric)
+        }
+        NodeValue::Image(_) => src.starts_with("![") && src.ends_with([')', ']']),
+        NodeValue::FootnoteReference(_) => src.starts_with("[^") && src.ends_with(']'),
+        NodeValue::Math(_) => wrapped(&['$'], &['$']),
+        NodeValue::ShortCode(_) => wrapped(&[':'], &[':']),
+        NodeValue::HtmlInline(_) => wrapped(&['<'], &['>']),
+        NodeValue::SoftBreak | NodeValue::LineBreak => src
+            .trim_matches(char::is_whitespace)
+            .trim_start_matches('\\')
+            .is_empty(),
+        _ => true,
     }
 }
 

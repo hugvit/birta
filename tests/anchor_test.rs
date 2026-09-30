@@ -2054,3 +2054,250 @@ fn raw_inline_breaks_and_images_resolve_to_their_tags() {
     }
     assert!(bad.is_empty(), "{}", bad.join("\n"));
 }
+
+// comrak misplaces some inline sourcepos; the resolver must neither panic nor quote wrong text.
+
+/// Resolves, searches and locates everything in `md`, returning the Exact results as
+/// `(quote, source, widened)`. Any panic fails the caller.
+fn exercise(md: &str) -> Vec<(String, String, bool)> {
+    let mut exacts = Vec::new();
+    for o in index_of(md).owners {
+        let t = anchor::owner_text(md, &o.sp).unwrap();
+        let n = cp_len(&t);
+        for (a, b) in [(0, n), (0, n / 2), (n / 2, n), (n / 3, n - n / 3)] {
+            if a >= b {
+                continue;
+            }
+            let sel = select(&t, a, b - a);
+            for r in [
+                anchor::resolve(md, &sel.with_off(&o.sp)),
+                anchor::resolve(md, &sel.by_context(&o.sp)),
+            ] {
+                if let Resolved::Exact {
+                    source, widened, ..
+                } = r
+                {
+                    exacts.push((sel.quote.clone(), source, widened));
+                }
+            }
+            anchor::search(md, &sel.quote);
+        }
+    }
+    for a in 0..=md.len() + 1 {
+        anchor::locate(md, a..md.len() + 1);
+        anchor::locate(md, 0..a);
+    }
+    exacts
+}
+
+/// Letters and digits in order, so markup, URLs and shortcode names drop out.
+fn alnum(s: &str) -> String {
+    s.chars().filter(|c| c.is_ascii_alphanumeric()).collect()
+}
+
+/// An Exact source says what the quote says: the same letters, or more of them when widened.
+fn reads_as_quote(quote: &str, source: &str, widened: bool) -> bool {
+    // Entities and raw HTML carry letters the page doesn't show
+    if source.contains('&') || source.contains('<') {
+        return true;
+    }
+    let (q, s) = (alnum(quote), alnum(source));
+    let mut rest = s.chars();
+    q.chars().all(|c| rest.any(|d| d == c)) && (widened || q == s)
+}
+
+#[test]
+fn misplaced_sourcepos_never_panics() {
+    let docs = [
+        "\\|文http://.||\n-|-",
+        "See\n  the `flag\nvalue`— here",
+        " a||\n-|-\n$z$\u{feff}",
+    ];
+    for md in docs {
+        for (quote, source, widened) in exercise(md) {
+            assert!(
+                reads_as_quote(&quote, &source, widened),
+                "{md:?}: {quote:?} gave {source:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_multi_line_code_span_maps_past_its_misplaced_end() {
+    // comrak ends this span two bytes late, inside the em dash
+    let md = "See\n  the `flag\nvalue`— here\n";
+    let sp = sole_owner(md, OwnerKind::Paragraph);
+    let t = "See the flag value— here";
+    assert_eq!(anchor::owner_text(md, &sp).as_deref(), Some(t));
+    #[rustfmt::skip]
+    let cases: &[Case] = &[
+        (&sp, t, "flag value", "flag value", "flag\nvalue", "flag\nvalue", Some(false)),
+        (&sp, t, "value— here", "value— here", "value`— here", "value`— here", Some(false)),
+        (&sp, t, "the flag", "the flag", "the `flag", "the `flag", Some(false)),
+    ];
+    let bad = check_cases(md, cases);
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+#[test]
+fn inlines_after_an_escaped_pipe_map_to_their_source() {
+    // comrak places a cell's inlines one byte early for each `\|` before them
+    let md = "| a | b |\n|---|---|\n| x \\| see [docs](u) | y |\n| p \\| q \\| **é** r | <https://a.b> \\| `c\\|d` z |\n";
+    let cells: Vec<String> = index_of(md)
+        .owners
+        .into_iter()
+        .filter(|o| o.lines.0 >= 3 && o.kind == OwnerKind::Cell)
+        .map(|o| o.sp)
+        .collect();
+    let (link, emph, auto) = (&cells[0], &cells[2], &cells[3]);
+    let (t_link, t_emph, t_auto) = ("x | see docs", "p | q | é r", "https://a.b | c|d z");
+    for (sp, t) in [(link, t_link), (emph, t_emph), (auto, t_auto)] {
+        assert_eq!(anchor::owner_text(md, sp).as_deref(), Some(t));
+    }
+    #[rustfmt::skip]
+    let cases: &[Case] = &[
+        (link, t_link, "docs", "docs", "[docs](u)", "[docs](u)", Some(true)),
+        (link, t_link, "x | see", "x | see", "x \\| see", "x \\| see", Some(false)),
+        (emph, t_emph, "é", "é", "**é**", "**é**", Some(true)),
+        (emph, t_emph, "q | é r", "q | é r", "q \\| **é** r", "q \\| **é** r", Some(true)),
+        (auto, t_auto, "a.b", "a.b", "<https://a.b>", "<https://a.b>", Some(true)),
+        (auto, t_auto, "c|d", "c|d", "c\\|d", "`c\\|d`", Some(false)),
+        (auto, t_auto, "d z", "d z", "d` z", "d` z", Some(false)),
+    ];
+    let bad = check_cases(md, cases);
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+#[test]
+fn a_text_that_opens_with_an_escape_keeps_its_backslash() {
+    let md = "\\*x y\n";
+    let sp = sole_owner(md, OwnerKind::Paragraph);
+    let hit = exact(anchor::resolve(md, &req(&sp, "*x", "", "", None, None))).unwrap();
+    assert_eq!(hit.source, "\\*x");
+}
+
+#[test]
+fn rows_under_an_indented_header_stay_block_level() {
+    // comrak shifts these rows by the header's indent; the checks catch text and tokens alike
+    for (md, quote) in [
+        (" a|b\n-|-\nxy|z\n", "xy"),
+        (" a|b\n-|-\n$x$|z\n", "\u{fffc}"),
+        (" a|b\n-|-\n:tada:|z\n", "🎉"),
+    ] {
+        let sp = index_of(md)
+            .owners
+            .into_iter()
+            .find(|o| o.lines.0 == 3)
+            .unwrap()
+            .sp;
+        let r = anchor::resolve(md, &req(&sp, quote, "", "", None, None));
+        assert_eq!(block(r).0, Reason::NoMatch, "{md:?}");
+    }
+}
+
+/// A small xorshift generator, so the fuzz loop is the same on every run.
+struct Rng(u64);
+
+impl Rng {
+    fn below(&mut self, n: usize) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        if n == 0 {
+            0
+        } else {
+            (self.0 % n as u64) as usize
+        }
+    }
+}
+
+#[rustfmt::skip]
+const FRAGMENTS: &[&str] = &[
+    "é", "🎉", "Été", "中文", "\t", "  ", "\n", "\r\n", "\r", "\n\n", "\\|", "|", "\\", "`", "``",
+    "*", "_", "**", "~~", "&amp;", "&#35;", "&#x1F389;", "&nbsp;", "&copy", "--", "---", "...",
+    "\"", "'", ":tada:", "$x$", "$$y$$", "$`z`$", "[l](u)", "[^1]", "[^1]: note ", "<br>",
+    "<span hidden>h</span>", "<img src=x>", "<b>", "</b>", "# ", "Title\n===\n", "- ", "1. ",
+    "- [ ] ", "> ", ">\t", "    ", "```\n", "```mermaid\n", "~~~\n", "| a | b |\n|---|---|\n",
+    "| é\\|x | `c\\|d` |\n", "Term\n: detail\n", "<details>\n<summary>More</summary>\n", "word",
+    "text ", "x", "https://example.com", "<https://a.b>", "\u{feff}", "\u{85}", "\u{a0}",
+    "a\u{301}", " see [docs](u) ", " **é** ",
+];
+
+#[test]
+fn generated_docs_never_panic_or_quote_the_wrong_text() {
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    let mut bad = Vec::new();
+    for _ in 0..600 {
+        let md: String = (0..1 + rng.below(30))
+            .map(|_| FRAGMENTS[rng.below(FRAGMENTS.len())])
+            .collect();
+        for (quote, source, widened) in exercise(&md) {
+            if !reads_as_quote(&quote, &source, widened) {
+                bad.push(format!("{md:?}: {quote:?} gave {source:?}"));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+/// How long one parse of `md` takes, the part of every call the resolver doesn't add.
+fn parse_time(md: &str) -> std::time::Duration {
+    let start = std::time::Instant::now();
+    let arena = Arena::new();
+    parse_document(&arena, md, &anchor::parse_options());
+    start.elapsed()
+}
+
+fn timed<R>(f: impl FnOnce() -> R) -> (std::time::Duration, R) {
+    let start = std::time::Instant::now();
+    let out = f();
+    (start.elapsed(), out)
+}
+
+#[test]
+fn long_context_costs_no_more_than_the_page_sends() {
+    let md = "ab ".repeat(70_000);
+    let sp = sole_owner(&md, OwnerKind::Paragraph);
+    let huge = "ab ".repeat(70_000);
+    let r = req(&sp, "ab", &huge, &huge, None, None);
+    let (took, r) = timed(|| anchor::resolve(&md, &r));
+    assert_eq!(candidates(r).0.len(), 5);
+    let beyond = took.saturating_sub(parse_time(&md));
+    assert!(beyond < std::time::Duration::from_secs(1), "{beyond:?}");
+}
+
+#[test]
+fn balancing_stays_linear_in_the_emphasis_count() {
+    // 1 MB of emphasis; debug comrak alone takes about a second to parse it
+    let md = "*a* ".repeat(250_000);
+    let sp = sole_owner(&md, OwnerKind::Paragraph);
+    let t = vec!["a"; 250_000].join(" ");
+    let tl = cp_len(&t);
+    let parse = parse_time(&md);
+    let within = |what: &str, took: std::time::Duration| {
+        let beyond = took.saturating_sub(parse);
+        assert!(
+            beyond < std::time::Duration::from_secs(1),
+            "{what}: {beyond:?}"
+        );
+    };
+
+    let (took, r) = timed(|| anchor::resolve(&md, &req(&sp, &t, "", "", Some(0), Some(tl))));
+    assert_eq!(exact(r).unwrap().bytes, 0..md.len() - 1);
+    within("whole", took);
+
+    // Even offsets hold an `a`, odd ones a space
+    let middle = req(&sp, "a a", "", "", Some((tl / 2) & !1), Some(tl));
+    let (took, r) = timed(|| anchor::resolve(&md, &middle));
+    assert_eq!(exact(r).unwrap().source, "*a* *a*");
+    within("middle", took);
+
+    let (took, found) = timed(|| anchor::search(&md, "a a"));
+    assert_eq!(found.len(), 5);
+    within("search", took);
+
+    let (took, loc) = timed(|| anchor::locate(&md, 4..7));
+    assert_eq!(loc.map(|l| l.off), Some((2, 3)));
+    within("locate", took);
+}

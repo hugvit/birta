@@ -8,7 +8,7 @@ use std::time::Duration;
 use notify::RecursiveMode;
 use notify_debouncer_mini::{Config, DebouncedEvent, DebouncedEventKind, Debouncer};
 
-use crate::paths::{self, Roots};
+use crate::paths::{self, FileKind, Roots};
 use crate::render;
 use crate::rev::Rev;
 use crate::scan::{self, ScanBudget};
@@ -106,7 +106,6 @@ pub(crate) fn classify(event_path: &Path, map: &PathMap) -> Vec<FsEvent> {
     let canonical = canonical_of(event_path);
     map.lexical(event_path)
         .into_iter()
-        .filter(|rel| !in_skipped_dir(rel))
         .map(|rel| FsEvent {
             rel,
             canonical: canonical.clone(),
@@ -115,6 +114,7 @@ pub(crate) fn classify(event_path: &Path, map: &PathMap) -> Vec<FsEvent> {
         .collect()
 }
 
+/// Whether `rel` sits in a folder the walk skips; the watcher drops those unless viewed.
 fn in_skipped_dir(rel: &str) -> bool {
     Path::new(rel)
         .parent()
@@ -564,6 +564,10 @@ fn publish(state: &AppState, rt: &tokio::runtime::Handle, events: Vec<FsEvent>) 
     // Each file is read once, however many aliases it has.
     let mut docs: HashMap<PathBuf, Option<(String, Rev)>> = HashMap::new();
     for event in events {
+        // Skipped folders churn (node_modules, Library), so only a page asking for the doc counts.
+        if in_skipped_dir(&event.rel) && state.viewers.count(&event.rel) == 0 {
+            continue;
+        }
         if event.kind == FsKind::Removed {
             let _ = state.hub.send(WsEvent::Gone(event.rel));
             continue;
@@ -574,9 +578,14 @@ fn publish(state: &AppState, rt: &tokio::runtime::Handle, events: Vec<FsEvent>) 
         {
             continue;
         }
+        // Read only what the server would serve: a link to a refused target stays unread.
+        state.roots.register_path(Path::new(&event.rel));
+        let Ok(canonical) = state.roots.resolve_file(&event.rel, FileKind::Markdown) else {
+            continue;
+        };
         let doc = docs
-            .entry(event.canonical.clone())
-            .or_insert_with(|| read_doc(&event.canonical, &event.rel));
+            .entry(canonical.clone())
+            .or_insert_with(|| read_doc(&canonical, &event.rel));
         let Some((markdown, rev)) = doc else {
             continue;
         };
@@ -842,8 +851,23 @@ mod tests {
             ("root/doc.md___jb_tmp___", vec![]),
             ("root/.#doc.md", vec![]),
             ("root/folder.md", vec![]),
-            ("root/node_modules/x.md", vec![]),
-            ("root/sub/.git/x.md", vec![]),
+            // Skipped folders are classified too; publishing decides who wants them.
+            (
+                "root/node_modules/x.md",
+                vec![event(
+                    "node_modules/x.md",
+                    tree.at("root/node_modules/x.md"),
+                    Changed,
+                )],
+            ),
+            (
+                "root/sub/.git/x.md",
+                vec![event(
+                    "sub/.git/x.md",
+                    tree.at("root/sub/.git/x.md"),
+                    Changed,
+                )],
+            ),
             ("elsewhere/x.md", vec![]),
         ];
         let mut bad = Vec::new();

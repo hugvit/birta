@@ -131,6 +131,7 @@
     var themeDropdownLabel = document.getElementById('theme-dropdown-label');
     var themeVarsEl = document.getElementById('theme-vars');
     var sourceView = document.getElementById('source-view');
+    var laneFrame = document.getElementById('lane-frame');
     var currentWs = null;
 
     // Keyed before math, diagrams or checkboxes touch the server-rendered blocks.
@@ -170,7 +171,8 @@
     function setViewMode(mode) {
       viewMode = mode;
       var isRaw = mode === 'raw';
-      mdBody.style.display = isRaw ? 'none' : '';
+      // The frame, not just the doc, so its padding leaves no band above the source.
+      laneFrame.style.display = isRaw ? 'none' : '';
       sourceView.style.display = isRaw ? '' : 'none';
       var statsEl = document.getElementById('file-stats');
       if (statsEl) statsEl.style.display = isRaw ? '' : 'none';

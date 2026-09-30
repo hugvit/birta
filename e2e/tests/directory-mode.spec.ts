@@ -330,3 +330,39 @@ test.describe("per-viewer content", () => {
     await expect(status).not.toHaveText("file removed");
   });
 });
+
+const MOVED_PORT = 3473;
+const MOVED_BASE = `http://127.0.0.1:${MOVED_PORT}`;
+
+// The entry doc is renamed away after start; theme changes must still reach other pages.
+test.describe("entry doc moved away", () => {
+  let server: ChildProcess;
+  let dir: string;
+
+  test.beforeAll(async () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "birta-e2e-moved-"));
+    fs.writeFileSync(path.join(dir, "index.md"), "# Index\n");
+    fs.writeFileSync(path.join(dir, "other.md"), "# Other\n\n```rust\nfn main() {}\n```\n");
+    server = await startBirta(MOVED_PORT, dir);
+  });
+
+  test.afterAll(() => {
+    server?.kill("SIGTERM");
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a variant change still re-themes another page", async ({ page }) => {
+    const html = page.locator("html");
+    await page.goto(`${MOVED_BASE}/view/other.md`);
+    await expect(page.locator("h1")).toHaveText("Other");
+    const before = await html.getAttribute("data-theme");
+
+    fs.renameSync(path.join(dir, "index.md"), path.join(dir, "home.md"));
+    await page.locator("#theme-toggle").click();
+
+    await expect(html).toHaveAttribute("data-theme", before === "dark" ? "light" : "dark", {
+      timeout: 10_000,
+    });
+    await expect(page.locator("h1")).toHaveText("Other");
+  });
+});

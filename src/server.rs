@@ -787,10 +787,8 @@ async fn broadcast_theme_update(state: &AppState) {
                     rev: Some(rev),
                 }
             }
-            Err(e) => {
-                eprintln!("birta: failed to re-read file for theme change: {e}");
-                return;
-            }
+            // In a folder the entry can move away; other pages still need the new theme.
+            Err(_) => state.current.read().await.clone(),
         }
     } else {
         // stdin mode — use current HTML since we can't re-render
@@ -4104,5 +4102,35 @@ mod tests {
             frame["html"],
             render::render_dir(text, None, StdPath::new("alias.md")).as_str()
         );
+    }
+
+    #[tokio::test]
+    async fn theme_change_survives_a_missing_entry_doc() {
+        let site = Site::new(&[("root/doc.md", b"# Doc\n"), ("root/b.md", b"# B\n")]);
+        let state = site.state();
+        state.current.write().await.html = "<p>cached entry</p>".to_string();
+        let port = serve(&state).await;
+
+        within(async {
+            let mut ws = connect(port).await;
+            hello_frames(&mut ws, "b.md").await;
+            std::fs::rename(site.root.join("doc.md"), site.root.join("home.md")).unwrap();
+            send_json(
+                &mut ws,
+                serde_json::json!({"type": "variant_change", "variant": "light"}),
+            )
+            .await;
+
+            let update = loop {
+                let frame = next_json(&mut ws).await;
+                if frame["type"] == "theme_update" {
+                    break frame;
+                }
+            };
+            assert_eq!(update["active_variant"], "light", "{update}");
+            assert_eq!(update["path"], "doc.md", "{update}");
+            assert_eq!(update["html"], "<p>cached entry</p>", "{update}");
+        })
+        .await;
     }
 }

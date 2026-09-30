@@ -628,3 +628,84 @@ async fn a_viewer_gets_only_its_own_doc() {
     assert!(!has(&seen, "content", "b.md"), "{:?}", summary(&seen));
     assert!(!has(&seen, "content", "index.md"), "{:?}", summary(&seen));
 }
+
+#[tokio::test]
+async fn links_to_refused_targets_created_after_start_send_nothing() {
+    let site = Site::new(&[
+        ("outside/.ssh/key.md", "# Private key notes\n"),
+        ("outside/secret.txt", "# Secret text\n"),
+    ]);
+    let (port, mut ws) = site.serve().await;
+
+    site.link("r/key.md", "../outside/.ssh/key.md");
+    site.link("r/leak.md", "../outside/secret.txt");
+    let seen = after_sentinel(&site, &mut ws).await;
+    let mut seen = seen;
+    while let Some(frame) = next_frame(&mut ws, Duration::from_millis(500)).await {
+        seen.push(frame);
+    }
+
+    let host = format!("127.0.0.1:{port}");
+    for rel in ["key.md", "leak.md"] {
+        assert_eq!(
+            http_get(port, &format!("/view/{rel}"), &[("host", &host)]).await,
+            403,
+            "{rel} is refused over HTTP"
+        );
+        let leaked: Vec<_> = seen.iter().filter(|f| f["path"] == rel).collect();
+        assert!(leaked.is_empty(), "{rel}: {leaked:?}");
+    }
+    let secret = seen.iter().filter(|f| {
+        f["html"]
+            .as_str()
+            .is_some_and(|h| h.contains("Secret") || h.contains("Private"))
+    });
+    assert_eq!(secret.count(), 0, "{:?}", summary(&seen));
+}
+
+#[tokio::test]
+async fn a_viewed_doc_in_a_skipped_folder_live_reloads() {
+    let site = Site::new(&[("r/Library/x.md", "# X\n"), ("r/Library/y.md", "# Y\n")]);
+    let (_, mut ws) = site.serve().await;
+    hello(&mut ws, "Library/x.md").await;
+    let seen = frames_until(&mut ws, |seen| has(seen, "content", "Library/x.md")).await;
+    assert!(
+        has(&seen, "content", "Library/x.md"),
+        "{:?}",
+        summary(&seen)
+    );
+
+    // Nobody views y.md, so its edit stays dropped; x.md is the sentinel.
+    site.write("r/Library/y.md", "# Y edited\n");
+    site.write("r/Library/x.md", "# X edited\n");
+    let seen = frames_until(&mut ws, |seen| {
+        seen.iter().any(|f| {
+            is(f, "content", "Library/x.md") && f["html"].as_str().unwrap().contains("edited")
+        })
+    })
+    .await;
+
+    let frame = seen
+        .iter()
+        .find(|f| is(f, "content", "Library/x.md"))
+        .unwrap_or_else(|| panic!("no live reload: {:?}", summary(&seen)));
+    assert!(
+        frame["html"].as_str().unwrap().contains("X edited"),
+        "{frame}"
+    );
+}
+
+#[tokio::test]
+async fn an_unviewed_doc_in_a_skipped_folder_stays_silent_for_a_socket_without_hello() {
+    let site = Site::new(&[("r/Library/y.md", "# Y\n")]);
+    let (_, mut ws) = site.serve().await;
+
+    site.write("r/Library/y.md", "# Y edited\n");
+    let seen = after_sentinel(&site, &mut ws).await;
+
+    assert!(
+        !has(&seen, "content", "Library/y.md"),
+        "{:?}",
+        summary(&seen)
+    );
+}

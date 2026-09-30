@@ -1,0 +1,123 @@
+/* Important declarations inside a shadow tree outrank the page's, so doc CSS can't hide the lane */
+:host {
+  position: absolute !important;
+  inset: 0 !important;
+  width: auto !important;
+  height: auto !important;
+  display: block !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  overflow: visible !important;
+  clip-path: none !important;
+  filter: none !important;
+  mask-image: none !important;
+  -webkit-mask-image: none !important;
+  content-visibility: visible !important;
+  transform: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  pointer-events: none !important;
+}
+
+.layer {
+  position: absolute;
+  inset: 0;
+}
+
+.layer.off {
+  display: none;
+}
+
+.group {
+  position: absolute;
+  inset: 0;
+}
+
+.group > div,
+.layer > div:not(.group) {
+  position: absolute;
+  box-sizing: border-box;
+}
+
+.bar {
+  border-radius: 1px;
+  transition: background-color 0.2s, border-color 0.2s;
+}
+
+.bar.solid {
+  background-color: var(--review-agent);
+}
+
+.bar.solid.you {
+  background-color: var(--review-you);
+}
+
+.bar.dotted {
+  border-left: 2px dotted var(--review-agent);
+}
+
+/* The agent changed your edit: your colour, a gap, then the agent's */
+.bar.double {
+  border-radius: 0;
+  background: linear-gradient(to right, var(--review-you) 0 2px, transparent 2px 4px, var(--review-agent) 4px 6px);
+}
+
+/* The knockout keeps the bar from showing through around the glyph */
+.glyph {
+  color: var(--review-agent);
+  background-color: var(--bgColor-default, var(--birta-bg));
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--bgColor-default, var(--birta-bg));
+  transition: color 0.2s;
+}
+
+.glyph.you {
+  color: var(--review-you);
+}
+
+.glyph svg,
+.anchor svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  fill: currentColor;
+}
+
+.wash {
+  background-color: var(--review-new);
+  border-radius: 6px;
+  transition: opacity 0.3s;
+}
+
+.tick {
+  background-color: var(--review-agent);
+  border-radius: 1px;
+}
+
+.anchor {
+  color: var(--birta-fg);
+  opacity: 0;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: opacity 0.15s;
+}
+
+.anchor.on {
+  opacity: 0.5;
+}
+
+.anchor.on:hover {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0s !important;
+  }
+}
+
+@media print {
+  .layer {
+    display: none;
+  }
+}

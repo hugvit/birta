@@ -116,8 +116,10 @@
     var KEYBINDINGS = BOOT.keybindings;
     var CURRENT_PATH = BOOT.currentPath;
     var INITIAL_VIEW = BOOT.initialView;
-    // Rev of the rendered bytes; a checkbox write is refused unless it still matches disk.
+    // Rev of the text on screen; only a content frame or a fetched render moves it.
     var docRev = BOOT.rev;
+    // Rev a checkbox write names; its ack moves this ahead of the content that follows.
+    var checkRev = BOOT.rev;
     // Rev of the content on screen, or null once a theme change has made it stale.
     var shownRev = BOOT.rev;
 
@@ -146,13 +148,76 @@
       }
     });
 
+    // Counts content applied, so a slow fetch can tell a newer frame has landed.
+    var contentSeq = 0;
+
     function applyContent(html, source, stats) {
+      contentSeq++;
       birtaPatch.apply(html, {
         source: source,
         stats: stats,
         redraw: diagramsStale() ? 'pre.mermaid' : null
       });
     }
+
+    function renderUrl(query) {
+      return '/render/' + CURRENT_PATH.split('/').map(encodeURIComponent).join('/') + (query || '');
+    }
+
+    // Fetches this doc's render and source; content that lands while it runs wins.
+    function refetchContent() {
+      var seq = contentSeq;
+      function get(query) {
+        return fetch(renderUrl(query)).then(function(r) {
+          if (!r.ok) return null;
+          return r.text().then(function(text) {
+            return { text: text, rev: r.headers.get('x-birta-rev') };
+          });
+        });
+      }
+      return Promise.all([get(''), get('?mode=source')]).then(function(got) {
+        var page = got[0];
+        var source = got[1];
+        if (!page || seq !== contentSeq) return null;
+        if (page.rev) {
+          docRev = page.rev;
+          checkRev = page.rev;
+        }
+        shownRev = page.rev;
+        applyContent(page.text, source && source.rev === page.rev ? source.text : undefined);
+        return page.rev;
+      }, function() { return null; });
+    }
+
+    // The review script shares this socket. Frames that come before it subscribes wait here,
+    // only when review is on and only the newest 256.
+    var REVIEW_ON = !!(BOOT.review && BOOT.review.enabled);
+    var birtaBus = {
+      subs: [],
+      early: [],
+      on: function(fn) {
+        this.subs.push(fn);
+        if (currentWs && currentWs.readyState === WebSocket.OPEN) fn({ type: 'open' });
+        var early = this.early;
+        this.early = [];
+        early.forEach(fn);
+      },
+      emit: function(msg) {
+        if (this.subs.length) {
+          this.subs.forEach(function(fn) { fn(msg); });
+        } else if (REVIEW_ON && msg.type !== 'open') {
+          this.early.push(msg);
+          if (this.early.length > 256) this.early.shift();
+        }
+      },
+      send: function(frame) {
+        if (!currentWs || currentWs.readyState !== WebSocket.OPEN) return false;
+        currentWs.send(JSON.stringify(frame));
+        return true;
+      },
+      rev: function() { return docRev; },
+      refetch: refetchContent
+    };
 
     // The file header sticks just below the page header, which is hidden by --no-header.
     function syncHeaderHeight() {
@@ -511,7 +576,7 @@
       checkInFlight = tick;
       currentWs.send(JSON.stringify({
         type: 'checkbox', cid: tick.cid, line: tick.line, checked: tick.checked,
-        path: CURRENT_PATH, rev: docRev
+        path: CURRENT_PATH, rev: checkRev
       }));
     }
     // A detached box has already been replaced by fresh content.
@@ -584,6 +649,7 @@
           }
           // After the variant sync, so the reply is rendered in the page's variant.
           ws.send(JSON.stringify({ type: 'hello', path: CURRENT_PATH, tab: tabId }));
+          birtaBus.emit({ type: 'open' });
         };
 
         ws.onmessage = function(event) {
@@ -593,13 +659,21 @@
             return;
           }
 
+          handleFrame(msg);
+          birtaBus.emit(msg);
+        };
+
+        function handleFrame(msg) {
           switch (msg.type) {
             case 'content':
               if (msg.path && CURRENT_PATH && msg.path !== CURRENT_PATH) break;
               if (status.textContent === FILE_REMOVED) hideStatus();
               // A hello reply usually repeats what is shown; re-applying it would swap boxes mid-click.
               if (msg.rev && msg.rev === shownRev) break;
-              if (msg.rev) docRev = msg.rev;
+              if (msg.rev) {
+                docRev = msg.rev;
+                checkRev = msg.rev;
+              }
               shownRev = msg.rev || null;
               applyContent(msg.html, msg.source, msg.file_stats);
               break;
@@ -628,22 +702,12 @@
               // Re-render content with new syntax theme
               if (CURRENT_PATH && msg.path !== CURRENT_PATH) {
                 // Viewing a different file — fetch fresh render for both views
-                fetch('/render/' + CURRENT_PATH).then(function(r) {
-                  if (!r.ok) return;
-                  return r.text();
-                }).then(function(freshHtml) {
-                  if (!freshHtml) return;
-                  shownRev = null;
-                  applyContent(freshHtml);
-                });
-                fetch('/render/' + CURRENT_PATH + '?mode=source').then(function(r) {
-                  if (!r.ok) return;
-                  return r.text();
-                }).then(function(freshSource) {
-                  if (freshSource) sourceView.innerHTML = freshSource;
-                });
+                refetchContent();
               } else {
-                if (msg.rev) docRev = msg.rev;
+                if (msg.rev) {
+                  docRev = msg.rev;
+                  checkRev = msg.rev;
+                }
                 shownRev = msg.rev || null;
                 applyContent(msg.html, msg.source);
               }
@@ -659,7 +723,7 @@
 
             case 'ack':
               if (!checkInFlight || msg.cid !== checkInFlight.cid) break;
-              if (msg.rev) docRev = msg.rev;
+              if (msg.rev) checkRev = msg.rev;
               checkInFlight = null;
               if (checkQueue.length) sendCheck(checkQueue.shift());
               break;
@@ -677,7 +741,7 @@
               }, 4000);
               break;
           }
-        };
+        }
 
         ws.onclose = function() {
           currentWs = null;

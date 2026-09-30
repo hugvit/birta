@@ -779,6 +779,7 @@ async fn view_handler(
 /// Return just the rendered HTML fragment for a markdown file (no page chrome).
 /// Used by the client to re-render content after theme changes.
 /// Accepts `?mode=source` to return highlighted source instead of rendered HTML.
+/// `X-Birta-Rev` names the bytes rendered, so the page knows which text it now shows.
 async fn render_handler(
     Path(path): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -797,13 +798,17 @@ async fn render_handler(
         reg.active().active_data().syntax.clone()
     };
 
+    let rev = [(
+        "x-birta-rev",
+        Rev::of(markdown.as_bytes()).as_str().to_string(),
+    )];
     if params.get("mode").map(|m| m.as_str()) == Some("source") {
         let source = render::render_source(&markdown, syntax_theme.as_ref());
-        return Html(source).into_response();
+        return (rev, Html(source)).into_response();
     }
 
     let html = render::render_dir(&markdown, syntax_theme.as_ref(), StdPath::new(&path));
-    Html(html).into_response()
+    (rev, Html(html)).into_response()
 }
 
 /// Handle incoming WebSocket JSON messages from the browser.
@@ -2465,6 +2470,39 @@ mod tests {
             }
         }
         assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    #[tokio::test]
+    async fn render_names_the_rev_of_the_bytes_it_rendered() {
+        let site = local_site();
+        let app = router(site.state());
+        let rev_of = |uri: &str| {
+            let app = app.clone();
+            let uri = uri.to_string();
+            async move {
+                let response = app.oneshot(get(&uri)).await.unwrap();
+                assert_eq!(response.status(), 200, "{uri}");
+                response
+                    .headers()
+                    .get("x-birta-rev")
+                    .map(|v| v.to_str().unwrap().to_string())
+            }
+        };
+        let first = crate::rev::Rev::of(b"# Doc\n");
+        assert_eq!(
+            rev_of("/render/doc.md").await.as_deref(),
+            Some(first.as_str())
+        );
+        assert_eq!(
+            rev_of("/render/doc.md?mode=source").await.as_deref(),
+            Some(first.as_str())
+        );
+        std::fs::write(site.root.join("doc.md"), "# Doc, edited\n").unwrap();
+        let second = crate::rev::Rev::of(b"# Doc, edited\n");
+        assert_eq!(
+            rev_of("/render/doc.md").await.as_deref(),
+            Some(second.as_str())
+        );
     }
 
     #[tokio::test]

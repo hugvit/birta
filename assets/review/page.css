@@ -1,0 +1,43 @@
+/* Review colour roles, mirrored on :root for chrome outside .markdown-body */
+:root {
+  --review-you: #0969da;
+  --review-agent: var(--birta-fg-muted);
+  --review-new: #fff8c5;
+  --review-wash: #818b981f;
+  --review-quiet: color-mix(in srgb, var(--review-you) 40%, transparent);
+}
+
+[data-theme="dark"] {
+  --review-you: #4493f8;
+  --review-new: #bb800926;
+  --review-wash: #656c7633;
+  --review-quiet: color-mix(in srgb, var(--review-you) 40%, transparent);
+}
+
+/* Custom themes already ship alert slots, so review borrows them */
+html[data-birta-theme] {
+  --review-you: var(--alert-note);
+  --review-new: var(--bgColor-attention-muted);
+  --review-quiet: color-mix(in srgb, var(--review-you) 40%, transparent);
+}
+
+/* The doc's own heading links sit in the clipped padding; the overlay draws them, and they stay tabbable */
+html[data-review] #content .anchor {
+  opacity: 0;
+}
+
+html[data-review] #content .anchor:focus-visible {
+  opacity: 1;
+}
+
+/* The target ring reaches into the padding, which the doc's paint clip would cut */
+html[data-review] .markdown-body .footnotes li:target::before {
+  left: -14px;
+  right: 0;
+}
+
+/* Wide display math scrolls inside the doc instead of being clipped at its edge */
+html[data-review] #content .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+}

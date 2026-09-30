@@ -1,5 +1,8 @@
 //! The review layer: the `<doc>.birta.jsonl` log, its fold, and the gate that hides it.
 
+pub mod chain;
+pub mod doc;
+pub mod hunk;
 pub mod ops;
 pub mod state;
 

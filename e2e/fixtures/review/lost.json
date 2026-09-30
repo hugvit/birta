@@ -67,7 +67,6 @@
       "op": "comment",
       "by": {
         "type": "human",
-        "name": "andres",
         "via": "browser"
       },
       "cid": "c-4",
@@ -102,7 +101,6 @@
       "op": "comment",
       "by": {
         "type": "human",
-        "name": "andres",
         "via": "browser"
       },
       "cid": "c-5",
@@ -143,7 +141,6 @@
       "op": "comment",
       "by": {
         "type": "human",
-        "name": "andres",
         "via": "browser"
       },
       "cid": "c-6",
@@ -302,7 +299,7 @@
     {
       "submit": 7,
       "ts": 1790000007000,
-      "by": "andres",
+      "by": "",
       "to": "*",
       "items": [
         4,

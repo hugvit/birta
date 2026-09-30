@@ -739,12 +739,7 @@ fn block(entry: &Entry, pick: Pick, opts: &Opts, now: u64, inputs: &Inputs) -> B
         Pick::Mine { claim, round } => (round, Some(claim), Stance::Mine),
         Pick::Peek { round } => (round, None, Stance::Peek { tty: !opts.peek }),
         Pick::ReadOnly { claim, round } => {
-            let by = index
-                .rounds
-                .iter()
-                .find(|r| r.n == round)
-                .and_then(|r| r.claimed_by.clone())
-                .unwrap_or_else(|| "someone".to_string());
+            let by = render::who(&line(claim).map(|l| l.by.clone()).unwrap_or_default());
             let at = line(claim).and_then(|l| l.ts).unwrap_or(0);
             (round, Some(claim), Stance::ReadOnly { by, at })
         }
@@ -772,7 +767,7 @@ fn block(entry: &Entry, pick: Pick, opts: &Opts, now: u64, inputs: &Inputs) -> B
         name: entry.name.clone(),
         path: entry.path.clone(),
         handed_at: handed.and_then(|l| l.ts).unwrap_or(0),
-        handed_by: handed.and_then(|l| l.by.name.clone()),
+        handed_by: handed.map(|l| l.by.clone()).unwrap_or_default(),
         drafted_by: drafted_by.clone(),
         stance,
         items: shown.iter().map(item_line).collect(),
@@ -785,7 +780,7 @@ fn block(entry: &Entry, pick: Pick, opts: &Opts, now: u64, inputs: &Inputs) -> B
         "round": round,
         "claim": claim,
         "read_only": read_only,
-        "handed_back": {"ts": view.handed_at, "by": view.handed_by},
+        "handed_back": {"ts": view.handed_at, "by": view.handed_by.name},
         "drafted_by": drafted_by,
         "items": shown,
         "you": you,
@@ -815,7 +810,7 @@ fn approved(
         name: entry.name.clone(),
         path: entry.path.clone(),
         at: line.and_then(|l| l.ts).unwrap_or(approve.ts),
-        by: line.and_then(|l| l.by.name.clone()),
+        by: line.map(|l| l.by.clone()).unwrap_or_default(),
         drafted_by,
         rev: approve.rev.clone(),
         changed_to: changed.then(|| state.rev.clone()),

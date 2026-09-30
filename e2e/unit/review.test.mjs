@@ -161,7 +161,7 @@ const CRAFTED = [
     "your own change is a solid bar in your colour",
     bent((s) => {
       s.changes[0].attr = "human";
-      s.changes[0].by = { type: "human", name: "andres" };
+      s.changes[0].by = { type: "human", via: "browser" };
     }),
     replace(UNSEEN, "bar 5:1-6:68", bar("5:1-6:68", "solid", "you")),
   ],

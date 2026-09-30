@@ -129,6 +129,9 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     }
   }
 
+  /** The snapshot drawn for the page's rev, or null. */
+  BR.currentState = function () { return state; };
+
   BR.boot = function () {
     if (BR.booted || typeof BOOT === 'undefined' || !BOOT.review || !BOOT.review.enabled) return;
     BR.booted = true;
@@ -136,6 +139,8 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     shown[birtaBus.rev()] = true;
     BR.lane.init();
     birtaBus.on(onFrame);
+    BR.keys.init();
+    BR.pointing.init();
   };
 
   // After the whole bundle has run, so the shadow CSS appended to it is in place

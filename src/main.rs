@@ -216,8 +216,13 @@ async fn serve(cli: Cli, config: birta::config::Config, review_on: bool) -> anyh
     };
     let font_css = font_config.to_css();
 
-    let mut keybindings = config.keybindings.clone();
-    keybindings.apply_overrides(&cli.bind);
+    let keybindings = config
+        .keybindings
+        .with_binds(&cli.bind)
+        .unwrap_or_else(|e| {
+            eprintln!("birta: {e}");
+            std::process::exit(2);
+        });
     let keybindings_json = keybindings.to_json();
 
     if file.as_os_str() == "-" {

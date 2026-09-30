@@ -1092,6 +1092,20 @@ fn a_note_settled_in_round_one_is_not_part_of_round_two() {
     );
 }
 
+#[test]
+fn a_round_a_nameless_agent_holds_is_refused_naming_an_agent() {
+    let mut s = round(false).s;
+    let round = s.next() - 1;
+    s.push(
+        json!({"type": "agent", "via": "cli"}),
+        json!({"op": "claim", "round": round}),
+    );
+    let tmp = Tmp::new(&s);
+    let (code, stderr) = refused(&tmp, "#5 done\n");
+    assert_eq!(code, 4, "{stderr}");
+    assert!(stderr.contains("an agent holds this round"), "{stderr}");
+}
+
 // --- hostile input and broken pipes ---
 
 #[test]

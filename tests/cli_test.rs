@@ -398,3 +398,180 @@ fn static_directory_with_an_entry_in_a_linked_folder() {
     let entry = std::fs::read_to_string(out.join("docs/doc.html")).expect("entry page");
     assert!(entry.contains("Linked folder"), "{entry}");
 }
+
+// --- keybindings: config and --bind, and what happens when two actions want one key ---
+
+/// Runs `birta --static` on a doc with `config` as the user's config file and `binds` as
+/// `--bind` flags. Returns the exit code, the page's keybindings (null on failure) and stderr.
+fn run_bound(config: &str, binds: &[&str]) -> (i32, serde_json::Value, String) {
+    let tmp = Tmp::new(&["doc.md"]);
+    tmp.write("home/.config/birta/config.toml", config);
+    let out = tmp.base.join("out");
+    let mut cmd = tmp.birta();
+    for bind in binds {
+        cmd.args(["--bind", bind]);
+    }
+    let run = cmd
+        .args(["--static", "--out"])
+        .arg(&out)
+        .arg(tmp.base.join("doc.md"))
+        .timeout(Duration::from_secs(20))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr).into_owned();
+    let code = run.status.code().unwrap_or(-1);
+    let Ok(page) = std::fs::read_to_string(out.join("doc.html")) else {
+        return (code, serde_json::Value::Null, stderr);
+    };
+    let id = page.find("id=\"birta-boot\"").expect("no boot block");
+    let body = &page[id + page[id..].find('>').unwrap() + 1..];
+    let boot: serde_json::Value =
+        serde_json::from_str(&body[..body.find("</script>").unwrap()]).expect("boot JSON");
+    (code, boot["keybindings"].clone(), stderr)
+}
+
+/// The keybindings of a run that must succeed, and its stderr.
+fn bound(config: &str, binds: &[&str]) -> (serde_json::Value, String) {
+    let (code, keys, stderr) = run_bound(config, binds);
+    assert_eq!(code, 0, "{stderr}");
+    (keys, stderr)
+}
+
+/// The stderr of a run that must refuse to start with exit 2 and write no page.
+fn refused(config: &str, binds: &[&str]) -> String {
+    let (code, keys, stderr) = run_bound(config, binds);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(keys.is_null(), "a page was written: {keys}");
+    stderr
+}
+
+fn warnings(stderr: &str) -> Vec<&str> {
+    stderr.lines().filter(|l| l.contains("warning")).collect()
+}
+
+fn names_both(stderr: &str, a: &str, b: &str) -> bool {
+    stderr.lines().any(|l| l.contains(a) && l.contains(b))
+}
+
+#[test]
+fn a_config_key_taken_by_another_action_is_an_error() {
+    let stderr = refused("[keybindings]\nyes = \"j\"\n", &[]);
+    assert!(names_both(&stderr, "yes", "focus_next"), "{stderr}");
+}
+
+#[test]
+fn a_viewer_key_rebound_onto_a_review_key_is_an_error() {
+    let stderr = refused("[keybindings]\ntoggle_reading = \"j\"\n", &[]);
+    assert!(
+        names_both(&stderr, "toggle_reading", "focus_next"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn two_config_keys_on_one_free_key_are_an_error() {
+    let stderr = refused("[keybindings]\nyes = \"g\"\nlater = \"g\"\n", &[]);
+    assert!(names_both(&stderr, "yes", "later"), "{stderr}");
+}
+
+#[test]
+fn keys_that_match_as_another_collide() {
+    // Letters match case-blind, and Mod is Meta or Ctrl
+    let stderr = refused("[keybindings]\nyes = \"J\"\n", &[]);
+    assert!(names_both(&stderr, "yes", "focus_next"), "{stderr}");
+    let stderr = refused("[keybindings]\nopen = \"Ctrl+Enter\"\n", &[]);
+    assert!(names_both(&stderr, "open", "turn"), "{stderr}");
+}
+
+#[test]
+fn two_bind_flags_on_one_key_are_an_error() {
+    let stderr = refused("", &["yes=g", "later=g"]);
+    assert!(names_both(&stderr, "yes", "later"), "{stderr}");
+}
+
+#[test]
+fn a_bind_flag_takes_its_key_from_the_config_and_says_so() {
+    let (keys, stderr) = bound("", &["yes=r"]);
+    assert_eq!(keys["yes"], "r", "{keys}");
+    // Reading mode's own default is r, so it is left unbound
+    assert_eq!(keys["toggle_reading"], "", "{keys}");
+    let warned = warnings(&stderr);
+    assert!(
+        warned.len() == 1 && warned[0].contains("yes") && warned[0].contains("toggle_reading"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_config_key_a_bind_flag_takes_falls_back_to_its_default() {
+    let (keys, stderr) = bound("[keybindings]\nyes = \"g\"\n", &["later=g"]);
+    assert_eq!(
+        (&keys["later"], &keys["yes"]),
+        (&"g".into(), &"y".into()),
+        "{keys}"
+    );
+    assert!(names_both(&stderr, "later", "yes"), "{stderr}");
+}
+
+#[test]
+fn swapped_keys_are_not_a_collision() {
+    let (keys, stderr) = bound("[keybindings]\nyes = \"x\"\nno = \"y\"\n", &[]);
+    assert_eq!(
+        (&keys["yes"], &keys["no"]),
+        (&"x".into(), &"y".into()),
+        "{keys}"
+    );
+    assert!(warnings(&stderr).is_empty(), "{stderr}");
+}
+
+#[test]
+fn a_swap_made_with_two_bind_flags_is_not_a_collision() {
+    let (keys, stderr) = bound("", &["yes=x", "no=y"]);
+    assert_eq!(
+        (&keys["yes"], &keys["no"]),
+        (&"x".into(), &"y".into()),
+        "{keys}"
+    );
+    assert!(warnings(&stderr).is_empty(), "{stderr}");
+}
+
+#[test]
+fn a_key_freed_by_another_rebind_can_be_taken() {
+    let (keys, stderr) = bound("[keybindings]\ntoggle_reading = \"g\"\n", &["yes=r"]);
+    assert_eq!(
+        (&keys["toggle_reading"], &keys["yes"]),
+        (&"g".into(), &"r".into()),
+        "{keys}"
+    );
+    assert!(warnings(&stderr).is_empty(), "{stderr}");
+}
+
+#[test]
+fn disabled_keys_never_collide() {
+    let (keys, stderr) = bound(
+        "[keybindings]\nyes = \"\"\nno = \"\"\n",
+        &["later=none", "undo=none"],
+    );
+    assert_eq!(
+        (&keys["yes"], &keys["no"]),
+        (&"".into(), &"".into()),
+        "{keys}"
+    );
+    assert_eq!(
+        (&keys["later"], &keys["undo"]),
+        (&"".into(), &"".into()),
+        "{keys}"
+    );
+    assert!(warnings(&stderr).is_empty(), "{stderr}");
+}
+
+#[test]
+fn a_review_key_bound_to_a_free_key_takes_it() {
+    let (keys, stderr) = bound("[keybindings]\nhide_marks = \"g\"\n", &["yes=f"]);
+    assert_eq!(
+        (&keys["hide_marks"], &keys["yes"]),
+        (&"g".into(), &"f".into()),
+        "{keys}"
+    );
+    assert!(warnings(&stderr).is_empty(), "{stderr}");
+}

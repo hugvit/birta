@@ -1,6 +1,6 @@
 //! The text `birta review` prints. Plain text on any output, since agents copy from it.
 
-use crate::review::ops::Verdict;
+use crate::review::ops::{By, ByKind, Verdict};
 
 /// Characters of a body or quote a view line keeps.
 const CLIP_CHARS: usize = 160;
@@ -48,7 +48,8 @@ pub struct RoundView {
     /// The doc's path, shell-quoted.
     pub path: String,
     pub handed_at: u64,
-    pub handed_by: Option<String>,
+    /// Whoever wrote the hand-back; a line with no `by` has the default, `Unknown`.
+    pub handed_by: By,
     pub drafted_by: Option<String>,
     pub stance: Stance,
     pub items: Vec<ItemLine>,
@@ -62,7 +63,7 @@ pub struct ApprovedView {
     pub name: String,
     pub path: String,
     pub at: u64,
-    pub by: Option<String>,
+    pub by: By,
     pub drafted_by: Option<String>,
     pub rev: String,
     /// The doc's rev now, when it isn't the approved one.
@@ -79,6 +80,18 @@ pub fn shell_quote(path: &str) -> String {
         path.to_string()
     } else {
         format!("'{}'", path.replace('\'', r"'\''"))
+    }
+}
+
+/// How a view names whoever wrote a line: their name, else what they are. The page writes
+/// no name, so a nameless human is the person reviewing.
+pub fn who(by: &By) -> String {
+    match (by.name.as_deref().filter(|n| !n.is_empty()), by.kind) {
+        (Some(name), _) => one_line(name),
+        (None, ByKind::Human) => "your reviewer".to_string(),
+        (None, ByKind::Agent) => "an agent".to_string(),
+        (None, ByKind::Birta) => "birta".to_string(),
+        (None, ByKind::Unknown) => "someone".to_string(),
     }
 }
 
@@ -253,7 +266,7 @@ pub fn round(v: &RoundView) -> String {
         "{} · handed back {} by {} · {}",
         one_line(&v.name),
         hhmm(v.handed_at),
-        one_line(v.handed_by.as_deref().unwrap_or("someone")),
+        who(&v.handed_by),
         count(levels.len() + notes.len())
     );
     if let Some(drafter) = &v.drafted_by {
@@ -290,11 +303,16 @@ pub fn round(v: &RoundView) -> String {
         };
         out.push(level_line(label, level));
     }
+    // Wide enough for the widest verdict shown, so every item's text starts in one column
+    let width = notes[..shown]
+        .iter()
+        .map(|i| verdict_word(i.verdict).len())
+        .fold(COLUMN - 1, usize::max);
     for item in &notes[..shown] {
         out.push(format!(
-            "{}{}{}",
+            "{}{:<width$} {}",
             column(&format!("#{}", item.n)),
-            column(verdict_word(item.verdict)),
+            verdict_word(item.verdict),
             item_text(item)
         ));
     }
@@ -337,7 +355,7 @@ pub fn approved(v: &ApprovedView) -> String {
         "{} · approved {} by {}",
         one_line(&v.name),
         hhmm(v.at),
-        one_line(v.by.as_deref().unwrap_or("someone"))
+        who(&v.by)
     );
     if let Some(drafter) = &v.drafted_by {
         header.push_str(&format!(" · drafted by {}", one_line(drafter)));
@@ -378,4 +396,120 @@ fn lines(lines: Vec<String>) -> String {
     let mut out = lines.join("\n");
     out.push('\n');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn view(verdicts: &[Option<Verdict>]) -> RoundView {
+        RoundView {
+            name: "pr.md".to_string(),
+            path: "pr.md".to_string(),
+            handed_at: 0,
+            handed_by: By {
+                kind: ByKind::Human,
+                name: Some("andres".to_string()),
+                via: None,
+            },
+            drafted_by: None,
+            stance: Stance::Mine,
+            items: verdicts
+                .iter()
+                .enumerate()
+                .map(|(i, v)| ItemLine {
+                    n: 6 + i as u32,
+                    verdict: *v,
+                    body: None,
+                    target: Target::Quote(format!("item {i}")),
+                })
+                .collect(),
+            you: vec![],
+            all: false,
+        }
+    }
+
+    /// The item lines of a view: those that start with a note label.
+    fn item_lines(out: &str) -> Vec<&str> {
+        out.lines().filter(|l| l.starts_with('#')).collect()
+    }
+
+    #[test]
+    fn the_verdict_column_fits_the_widest_verdict() {
+        let out = round(&view(&[
+            Some(Verdict::No),
+            Some(Verdict::Rewrite),
+            None,
+            Some(Verdict::YourCall),
+        ]));
+        let lines = item_lines(&out);
+        assert_eq!(lines.len(), 4, "{out}");
+        let starts: Vec<usize> = lines
+            .iter()
+            .map(|l| l.chars().position(|c| c == '"').unwrap())
+            .collect();
+        assert!(starts.iter().all(|s| *s == starts[0]), "{out}");
+        for (line, word) in lines.iter().zip(["no", "rewrite", "note", "your_call"]) {
+            assert!(line.contains(&format!(" {word} ")), "{line}");
+        }
+    }
+
+    #[test]
+    fn short_verdicts_keep_the_five_wide_column() {
+        let out = round(&view(&[None, Some(Verdict::No), Some(Verdict::Ask)]));
+        assert_eq!(
+            item_lines(&out),
+            [
+                "#6    note  \"item 0\"",
+                "#7    no    \"item 1\"",
+                "#8    ask   \"item 2\"   (answer only; don't edit)",
+            ],
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_hand_back_or_approve_names_its_author_by_what_they_are() {
+        let by = |kind, name: Option<&str>| By {
+            kind,
+            name: name.map(str::to_string),
+            via: None,
+        };
+        let cases = [
+            (by(ByKind::Human, Some("andres")), "andres"),
+            (by(ByKind::Human, None), "your reviewer"),
+            (by(ByKind::Human, Some("")), "your reviewer"),
+            (by(ByKind::Agent, None), "an agent"),
+            (By::default(), "someone"),
+        ];
+        for (author, want) in cases {
+            let mut v = view(&[None]);
+            v.handed_by = author.clone();
+            let out = round(&v);
+            assert!(
+                out.lines()
+                    .next()
+                    .unwrap()
+                    .contains(&format!(" by {want} · ")),
+                "{out}"
+            );
+            let a = ApprovedView {
+                name: "pr.md".into(),
+                path: "pr.md".into(),
+                at: 0,
+                by: author,
+                drafted_by: None,
+                rev: "0123456789abcdef".into(),
+                changed_to: None,
+            };
+            let out = approved(&a);
+            assert!(
+                out.lines()
+                    .next()
+                    .unwrap()
+                    .ends_with(&format!(" by {want}")),
+                "{out}"
+            );
+        }
+    }
 }

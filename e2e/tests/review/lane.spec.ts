@@ -381,7 +381,7 @@ test.describe("lane overlay", () => {
   test("your own change is the accent and a change to your edit is a double rule", async ({ page, birta }) => {
     const state = fixtureState("unseen");
     state.changes[0].attr = "human";
-    state.changes[0].by = { type: "human", name: "andres" };
+    state.changes[0].by = { type: "human", via: "browser" };
     state.changes[1].changes_your_edit = "3.0";
     await open(page, birta, fixtureDoc("unseen"), { state });
     await expect.poll(() => markKeys(page)).toContain("bar 11:1-11:44 double");
@@ -775,6 +775,55 @@ test.describe("lane edges", () => {
     expect(first.verdict).toBe("no");
     expect(second.top).toBeGreaterThanOrEqual(first.bottom);
   });
+
+  for (const [status, viewport, double] of [
+    ["draft", WIDE, false],
+    ["sent", WIDE, false],
+    ["sent", { width: 500, height: 900 }, false],
+    ["sent", WIDE, true],
+    ["sent", { width: 500, height: 900 }, true],
+  ] as const) {
+    const bar = double ? "double rule" : "change bar";
+    test(`a ${status} verdict glyph and a ${bar} on one line sit side by side at ${viewport.width}px`, async ({
+      page,
+      birta,
+    }) => {
+      const doc = fixtureDoc("fresh");
+      const sp = spAt(doc, "- retries on 503");
+      const state = laneState(doc, {
+        bars: [{ sp, seen: true, yourEdit: double }],
+        glyphs: [{ sp, verdict: "rewrite", status }],
+      });
+      await open(page, birta, doc, { state, viewport });
+      await expect.poll(() => markKeys(page)).toEqual([`bar ${sp} ${double ? "double" : "solid"}`, `glyph ${sp} rewrite`]);
+      const ms = await marks(page);
+      const bar = only(ms, "bar", sp);
+      const glyph = only(ms, "glyph", sp);
+      // Two marks with daylight between them, never one merged shape
+      const gap = Math.max(bar.left - glyph.right, glyph.left - bar.right);
+      expect(gap, `bar ${JSON.stringify(bar)} glyph ${JSON.stringify(glyph)}`).toBeGreaterThanOrEqual(2);
+      const b = (await blockBox(page, sp))!;
+      expect(Math.abs(bar.top - b.top) <= 1 && Math.abs(bar.bottom - b.bottom) <= 1, `${JSON.stringify(bar)}`).toBe(true);
+      expect(await misaligned(page)).toEqual([]);
+      const glyphInk = (await inkIn(page, glyph, WHITE))!;
+      expect(near(glyphInk, status === "draft" ? YOU : AGENT, 10), `${glyphInk}`).toBe(true);
+      const grey = async (x: number) => {
+        const px = await column(page, x, bar.top + 1, bar.bottom - 1);
+        expect(px.length).toBeGreaterThan(8);
+        return px.filter((p) => !near(p, AGENT, 12));
+      };
+      if (double && viewport.width >= 768) {
+        // The whole rule: your colour, a gap, then the agent's
+        const yours = await column(page, bar.left + 1, bar.top + 1, bar.bottom - 1);
+        expect(yours.filter((p) => !near(p, YOU, 12)), "every pixel is the accent").toEqual([]);
+        expect(await grey(bar.right - 1), "every pixel is the agent grey").toEqual([]);
+      } else {
+        // One rule the whole block long; a double rule squeezed beside a glyph keeps the agent's half
+        expect(bar.width).toBeLessThanOrEqual(2);
+        expect(await grey((bar.left + bar.right) / 2), "every pixel is the agent grey").toEqual([]);
+      }
+    });
+  }
 
   test("each verdict draws its own icon", async ({ page, birta }) => {
     const verdicts = ["yes", "no", "ask", "later", "your_call"];

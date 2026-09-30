@@ -738,7 +738,7 @@ fn served(mut state: ReviewState, server_now: u64) -> ReviewState {
 
 /// Three drafts: a quote note, a verdict on a list item, a note on the whole doc.
 fn drafted() -> (Scenario, [u32; 3]) {
-    let mut s = Scenario::drafted_by(PR, CLAUDE);
+    let mut s = Scenario::drafted_by(PR, CLAUDE).nameless();
     let quote = s.quote("we just fail");
     let q = s.comment(quote, Some("no"), Some("say why"));
     let item = s.block("- retries on 503");
@@ -775,7 +775,7 @@ fn replied(more: impl FnOnce(&mut Scenario)) -> (Scenario, [u32; 3], [String; 2]
 
 /// Each fixture's state, and the doc text it is about (none for the folder).
 fn contract_fixtures() -> Vec<(&'static str, ReviewState, Option<String>)> {
-    let fresh = Scenario::drafted_by(PR, CLAUDE);
+    let fresh = Scenario::drafted_by(PR, CLAUDE).nameless();
 
     let (drafts, _) = drafted();
 
@@ -816,7 +816,7 @@ fn contract_fixtures() -> Vec<(&'static str, ReviewState, Option<String>)> {
         "When the upload hits a 503 the user has to start again.",
     );
 
-    let mut dir = Scenario::folder("dirmode");
+    let mut dir = Scenario::folder("dirmode").nameless();
     dir.comment(json!("dir"), None, Some("the sub/ docs repeat the index"));
     dir.comment(
         json!("dir"),

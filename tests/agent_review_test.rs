@@ -442,6 +442,72 @@ fn times_are_shown_in_local_time() {
 }
 
 #[test]
+fn a_hand_back_from_the_page_is_by_your_reviewer() {
+    // The page writes no name, and the CLI must not guess one
+    let mut s = Scenario::drafted_by(DOC, "claude").nameless();
+    s.note("first");
+    let submit = s.submit();
+    let tmp = Tmp::new();
+    tmp.put(&s);
+    let (code, out) = tmp.run(&["review", "pr.md", "--as", "claude"], &[]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.starts_with(&format!(
+            "pr.md · handed back {} by your reviewer · 1 item",
+            hhmm(ts(submit))
+        )),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_hand_back_with_no_author_is_by_someone() {
+    // A hand-written submit with no `by` at all; a nameless human would be "your reviewer"
+    let mut s = Scenario::drafted_by(DOC, "claude");
+    let note = s.note("first");
+    let at = ts(s.next());
+    let submit = s.raw(
+        json!({"op": "submit", "upto": note, "not_before": at, "hold_ms": 0, "to": "*", "ts": at}),
+    );
+    let tmp = Tmp::new();
+    tmp.put(&s);
+    let (code, out) = tmp.run(&["review", "pr.md", "--as", "claude"], &[]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.starts_with(&format!(
+            "pr.md · handed back {} by someone · 1 item",
+            hhmm(ts(submit))
+        )),
+        "{out}"
+    );
+}
+
+#[test]
+fn an_approve_from_the_page_is_by_your_reviewer() {
+    let mut s = Scenario::drafted_by(DOC, "claude").nameless();
+    s.note("first");
+    s.submit();
+    let turn = s.claim("claude");
+    s.yield_turn("claude", turn);
+    let approve = s.approve();
+    let tmp = Tmp::new();
+    tmp.put(&s);
+    let (code, out) = tmp.run(&["review", "pr.md", "--as", "claude"], &[]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(
+        out.lines().next(),
+        Some(
+            format!(
+                "pr.md · approved {} by your reviewer · drafted by claude",
+                hhmm(ts(approve))
+            )
+            .as_str()
+        ),
+        "{out}"
+    );
+}
+
+#[test]
 fn with_no_doc_note_the_heredoc_has_no_covers_line() {
     let mut s = Scenario::new(DOC);
     let note = s.comment(s.quote("second item"), None, Some("say why"));
@@ -646,6 +712,29 @@ fn a_round_claimed_by_another_agent_is_read_only() {
     assert!(!out.contains("birta respond"), "{out}");
     assert_eq!(tmp.read(LOG), before);
     insta::assert_snapshot!("claimed_by_other", out);
+}
+
+#[test]
+fn a_round_a_nameless_agent_claimed_is_picked_up_by_an_agent() {
+    let mut s = Scenario::new(DOC);
+    s.comment(s.quote("second item"), None, Some("say why"));
+    let sub = s.submit();
+    let claim = s.push(
+        json!({"type": "agent", "via": "cli"}),
+        json!({"op": "claim", "round": sub}),
+    );
+    let tmp = Tmp::new();
+    tmp.put(&s);
+    let (code, out) = tmp.run(&["review", "pr.md", "--as", "claude"], &[]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.starts_with(&format!(
+            "pr.md · handed back {} by andres · 1 item · picked up by an agent {} · read only",
+            hhmm(ts(sub)),
+            hhmm(ts(claim))
+        )),
+        "{out}"
+    );
 }
 
 #[test]
@@ -2157,7 +2246,7 @@ fn a_directory_wait_sees_a_folder_made_after_it_started() {
 }
 
 #[test]
-fn a_submit_with_no_name_is_handed_back_by_someone() {
+fn a_human_submit_with_no_name_is_handed_back_by_your_reviewer() {
     let mut s = Scenario::new(DOC);
     let note = s.note("NAMELESS");
     let sub = s.push(
@@ -2170,7 +2259,7 @@ fn a_submit_with_no_name_is_handed_back_by_someone() {
     assert_eq!(code, 0, "{out}");
     assert!(
         out.starts_with(&format!(
-            "pr.md · handed back {} by someone · 1 item",
+            "pr.md · handed back {} by your reviewer · 1 item",
             hhmm(ts(sub))
         )),
         "{out}"

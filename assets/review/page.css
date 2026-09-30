@@ -41,3 +41,17 @@ html[data-review] #content .katex-display {
   overflow-x: auto;
   overflow-y: hidden;
 }
+
+/* The doc stop: a wash on the filename while focus is on the whole doc */
+html[data-review] .file-header-name[data-review-focus] {
+  background-color: var(--review-wash);
+  border-radius: 6px;
+  padding: 0 8px;
+  margin: 0 -8px;
+}
+
+/* A quote note's words, painted from the server's offsets */
+html[data-review] ::highlight(birta-quote) {
+  text-decoration: underline 2px var(--review-you);
+  text-underline-offset: 3px;
+}

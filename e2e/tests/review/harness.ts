@@ -52,6 +52,78 @@ export function spAt(doc: string, text: string): string {
   return `${i + 1}:1-${i + 1}:${Buffer.byteLength(lines[i], "utf-8")}`;
 }
 
+/** Every kind of stop, a nested list, a raw HTML block and a subsection, for walking focus. */
+export const STOPS_DOC = [
+  "# Upload retries",
+  "",
+  "## Why",
+  "",
+  "When the upload hits a 503 we just fail and the user has to start again.",
+  "Retrying three times with backoff fixes most of these.",
+  "",
+  "## What changes",
+  "",
+  "- retries on 503",
+  "- backoff of 1, 2 and 4 seconds",
+  "  - capped at 8 seconds",
+  "  - with jitter",
+  "- metrics dashboard",
+  "",
+  "| code | retry |",
+  "|------|-------|",
+  "| 503  | yes   |",
+  "| 404  | no    |",
+  "",
+  "<div>raw html block</div>",
+  "",
+  "```js",
+  "retry(upload, 3);",
+  "```",
+  "",
+  "### Limits",
+  "",
+  "Detail words.",
+  "",
+  "## Stacked on",
+  "",
+  "Nothing yet.",
+  "",
+].join("\n");
+
+/** `STOPS_DOC` with `n` filler paragraphs after it, so the page scrolls. */
+export function longDoc(n = 40): string {
+  return STOPS_DOC + Array.from({ length: n }, (_, i) => `\nFiller paragraph ${i + 1}.\n`).join("");
+}
+
+/** The page's focus stops, in order, from the boot data. */
+export function stops(page: Page): Promise<{ sp: string; kind: string }[]> {
+  return page.evaluate(() =>
+    ((window as unknown as { BOOT: { stops?: { sp: string; kind: string }[] } }).BOOT.stops ?? []).map((s) => ({
+      sp: s.sp,
+      kind: s.kind,
+    })),
+  );
+}
+
+/** The sp of the last stop whose element's text holds `text`, so a nested item beats its parent. */
+export async function stopSp(page: Page, text: string): Promise<string> {
+  const all = await stops(page);
+  const sp = await page.evaluate(
+    ({ sps, text }) => {
+      let hit: string | null = null;
+      for (const sp of sps) {
+        const els = document.querySelectorAll(`#content [data-sourcepos="${sp}"]`);
+        const el = els[els.length - 1];
+        if (el && (el.textContent ?? "").includes(text)) hit = sp;
+      }
+      return hit;
+    },
+    { sps: all.map((s) => s.sp), text },
+  );
+  if (!sp) throw new Error(`no stop holds ${JSON.stringify(text)}`);
+  return sp;
+}
+
 export interface Lane {
   bars?: { sp: string; asked?: "location" | "cited" | "unasked"; attr?: "agent" | "human" | "outside"; yourEdit?: boolean; seen?: boolean }[];
   glyphs?: { sp: string; verdict: string; status?: string }[];
@@ -73,7 +145,7 @@ export function laneState(doc: string, lane: Lane): State {
     id: `${20 + i}.0`,
     op: 20 + i,
     attr: b.attr ?? "agent",
-    by: b.attr === "human" ? { type: "human", name: "andres" } : change.by,
+    by: b.attr === "human" ? { type: "human", via: "browser" } : change.by,
     asked: { kind: b.asked ?? "location", notes: [] },
     range: { ...change.range, sp: b.sp },
     seen: b.seen ?? false,
@@ -331,6 +403,8 @@ export interface Mark extends Box {
   verdict: string | null;
   n: number | null;
   count: number | null;
+  /** What a focus mark stands on when it is not a stop, e.g. `summary`. */
+  target: string | null;
 }
 
 /** Every `[data-mark]` element in the lane's shadow roots (forced open by the harness). */
@@ -352,6 +426,7 @@ export function marks(page: Page): Promise<Mark[]> {
           verdict: a("data-verdict"),
           n: a("data-n") === null ? null : Number(a("data-n")),
           count: a("data-count") === null ? null : Number(a("data-count")),
+          target: a("data-target"),
           left: r.left,
           top: r.top,
           right: r.right,
@@ -459,6 +534,11 @@ export async function laneGeometry(page: Page): Promise<{ x: number; glyph: numb
   return w < 768 ? { x: 8, glyph: 12 } : { x: 20, glyph: 16 };
 }
 
+/** Whether two boxes share any area; touching edges don't count. */
+export function overlaps(a: Box, b: Box): boolean {
+  return a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5;
+}
+
 /**
  * What is out of place in the lane: bars and washes must span their block (±1px), glyphs sit
  * on its first line, ticks sit in the gap after their block, all centred on the lane.
@@ -483,13 +563,26 @@ export async function misaligned(page: Page): Promise<string[]> {
         continue;
       }
       if (m.mark === "bar") {
+        const glyphs = all.filter((g) => g.mark === "glyph" && g.sp === m.sp);
         if (!near(m.top, b.top) || !near(m.bottom, b.bottom))
           out.push(`${what}: ${m.top}-${m.bottom} vs block ${b.top}-${b.bottom}`);
-        if (!near((m.left + m.right) / 2, laneX)) out.push(`${what}: centre ${(m.left + m.right) / 2} vs lane ${laneX}`);
+        // Glyphs on the same block sit beside the bar. The wide lane has room to keep the bar
+        // on its centre line; the narrow one may shift it to fit both.
+        for (const g of glyphs)
+          if (Math.max(m.left - g.right, g.left - m.right) < 2) out.push(`${what}: not beside glyph ${g.verdict}`);
+        if (glyphs.length && lane.x !== 20) {
+          if (m.left < frame.left - 1 || m.right > content.left + 1) out.push(`${what}: ${m.left}-${m.right} outside the lane`);
+        } else if (!near((m.left + m.right) / 2, laneX)) {
+          out.push(`${what}: centre ${(m.left + m.right) / 2} vs lane ${laneX}`);
+        }
       } else if (m.mark === "glyph") {
         const cy = (m.top + m.bottom) / 2 - stack(m);
         if (cy < b.line.top || cy > b.line.bottom) out.push(`${what}: centre ${cy} outside line ${b.line.top}-${b.line.bottom}`);
-        if (!near((m.left + m.right) / 2, laneX)) out.push(`${what}: centre x ${(m.left + m.right) / 2} vs lane ${laneX}`);
+        if (all.some((o) => o.mark === "bar" && o.sp === m.sp)) {
+          if (m.left < frame.left - 1 || m.right > content.left + 1) out.push(`${what}: ${m.left}-${m.right} outside the lane`);
+        } else if (!near((m.left + m.right) / 2, laneX)) {
+          out.push(`${what}: centre x ${(m.left + m.right) / 2} vs lane ${laneX}`);
+        }
       } else {
         // A wash reaches over an item's marker, and stops at the doc's edge
         const left = Math.max((b.list ?? b).left, content.left) - 8;
@@ -509,6 +602,104 @@ export async function misaligned(page: Page): Promise<string[]> {
     }
   }
   return out;
+}
+
+// --- Keys, focus and the review file ------------------------------------------------------
+
+/**
+ * The sp of the focused stop, `summary` on a closed details' summary, or null while focus is
+ * on the doc. Read from the `focus` mark, which stays in the lane's root while it is hidden.
+ */
+export async function focused(page: Page): Promise<string | null> {
+  const found = (await marks(page)).filter((m) => m.mark === "focus");
+  if (found.length > 1) throw new Error(`${found.length} focus marks`);
+  return found[0]?.sp ?? found[0]?.target ?? null;
+}
+
+export async function focusMark(page: Page): Promise<Mark | null> {
+  return (await marks(page)).find((m) => m.mark === "focus") ?? null;
+}
+
+export interface KeyInit {
+  key: string;
+  code?: string;
+  shiftKey?: boolean;
+  altKey?: boolean;
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  repeat?: boolean;
+  isComposing?: boolean;
+  /** Set on the event itself, since no engine takes it from the init dictionary. */
+  keyCode?: number;
+}
+
+/**
+ * Dispatches a keydown (and keyup) the keyboard can't produce: Caps Lock letters, IME
+ * composition, key repeat. `target` is a selector, or the focused element.
+ */
+export async function dispatchKey(page: Page, init: KeyInit, target?: string): Promise<boolean> {
+  return page.evaluate(
+    ({ init, target }) => {
+      const el = (target ? document.querySelector(target) : document.activeElement) ?? document.body;
+      const fire = (type: string) => {
+        const { keyCode, ...rest } = init;
+        const e = new KeyboardEvent(type, { bubbles: true, cancelable: true, composed: true, ...rest });
+        if (keyCode !== undefined) Object.defineProperty(e, "keyCode", { value: keyCode });
+        el.dispatchEvent(e);
+        return e.defaultPrevented;
+      };
+      const prevented = fire("keydown");
+      fire("keyup");
+      return prevented;
+    },
+    { init, target },
+  );
+}
+
+/** Every frame the page sends, for pages whose socket is not mocked. Call before `goto`. */
+export function watchSent(page: Page): State[] {
+  const sent: State[] = [];
+  page.on("websocket", (ws) => {
+    ws.on("framesent", (f) => {
+      try {
+        sent.push(JSON.parse(typeof f.payload === "string" ? f.payload : f.payload.toString()));
+      } catch {
+        // not a JSON frame
+      }
+    });
+  });
+  return sent;
+}
+
+/** The parsed lines of `rel`'s review file under `root`, or null while there is none. */
+export function reviewLog(root: string, rel = "pr.md"): State[] | null {
+  const file = path.join(root, `${rel}.birta.jsonl`);
+  if (!fs.existsSync(file)) return null;
+  return fs
+    .readFileSync(file, "utf-8")
+    .split("\n")
+    .filter((l) => l.trim())
+    .map((l) => JSON.parse(l));
+}
+
+/** Files under the served folder's drafts state dir (half-typed notes). */
+export function draftFiles(root: string): string[] {
+  const dir = path.join(root, "..", "state", "birta", "drafts");
+  if (!fs.existsSync(dir)) return [];
+  return (fs.readdirSync(dir, { recursive: true }) as string[]).filter((f) =>
+    fs.statSync(path.join(dir, f)).isFile(),
+  );
+}
+
+/** The text of every range in every CSS highlight on the page, whatever its name. */
+export function highlighted(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const out: string[] = [];
+    const registry = (CSS as unknown as { highlights?: Map<string, Set<AbstractRange>> }).highlights;
+    if (!registry) return out;
+    for (const [, hl] of registry) for (const r of hl) out.push((r as Range).toString());
+    return out.sort();
+  });
 }
 
 // --- Pixels -------------------------------------------------------------------------------

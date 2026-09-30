@@ -206,6 +206,37 @@ fn op_fixtures() -> Vec<(&'static str, Value)> {
             "ack",
         ),
     ));
+    // A verdict key's frames: no body, and a selection carries the extractor's offsets
+    out.push((
+        "comment-doc-verdict",
+        fixture(
+            DOC,
+            None,
+            vec![],
+            op(
+                "c1",
+                &r,
+                "comment",
+                json!({"at": {"k": "doc"}, "verdict": "no"}),
+            ),
+            "ack",
+        ),
+    ));
+    out.push((
+        "comment-quote-offsets",
+        fixture(
+            DOC,
+            None,
+            vec![],
+            op(
+                "c1",
+                &r,
+                "comment",
+                json!({"at": {"k": "quote", "sp": para, "q": "second line", "pre": "Intro paragraph here, with a ", "suf": ".", "off": 29, "tl": 41}, "verdict": "no"}),
+            ),
+            "ack",
+        ),
+    ));
     out.push((
         "comment-quote-without-sp",
         fixture(

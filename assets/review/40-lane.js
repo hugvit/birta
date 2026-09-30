@@ -82,6 +82,10 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   var frame = null;
   var content = null;
   var under = null;
+  // The focus wash has its own layer: m hides the marks but not where the keys will act
+  var focusLayer = null;
+  var focused = null;
+  var hidden = false;
   var over = null;
   var overMarks = null;
   var overAnchors = null;
@@ -177,6 +181,9 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   function render() {
     queued = false;
     var marks = current ? BR.pure.laneMarks(current) : [];
+    // A glyph shares its block's lane with the bar, so it moves to the slot beside it
+    var barred = {};
+    marks.forEach(function (m) { if (m.mark === 'bar') barred[m.sp] = m; });
     var bySp = {};
     content.querySelectorAll('[data-sourcepos]').forEach(function (el) {
       // Document order puts a list item after a list that shares its sp
@@ -187,6 +194,15 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     var narrow = window.innerWidth < 768;
     var laneX = narrow ? 8 : 20;
     var size = narrow ? 12 : 16;
+    var glyphs = {};
+    marks.forEach(function (m) { if (m.mark === 'glyph') glyphs[m.sp] = true; });
+    // The narrow lane is only as wide as a glyph, a gap and a bar, so a shared bar moves to its
+    // edge, and a double rule there narrows to the agent's single rule to leave the glyph room
+    function squeezed(m) { return narrow && glyphs[m.sp] && m.style === 'double'; }
+    function barWidth(m) { return m.style === 'double' && !squeezed(m) ? 6 : 2; }
+    function barX(sp, w) {
+      return narrow && glyphs[sp] ? laneX + 8 - w : laneX - w / 2;
+    }
     var stacked = {};
     var underOut = document.createDocumentFragment();
     var overOut = document.createDocumentFragment();
@@ -207,9 +223,9 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       if (!rendered(el)) return;
       var r = el.getBoundingClientRect();
       if (m.mark === 'bar') {
-        var w = m.style === 'double' ? 6 : 2;
+        var w = barWidth(m);
         overOut.appendChild(box({ 'data-mark': 'bar', 'data-sp': m.sp, 'data-style': m.style, 'data-role': m.role },
-          'bar ' + m.style + ' ' + m.role, laneX - w / 2, r.top - F.top, w, r.height));
+          'bar ' + m.style + ' ' + m.role + (squeezed(m) ? ' squeezed' : ''), barX(m.sp, w), r.top - F.top, w, r.height));
       } else if (m.mark === 'wash') {
         // An item's wash reaches over its marker, and a wide table's stops at the doc's edge
         var left = Math.max(el.localName === 'li' ? el.parentElement.getBoundingClientRect().left : r.left, C.left) - 8;
@@ -220,7 +236,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
         var k = stacked[m.sp] = (stacked[m.sp] || 0) + 1;
         var line = firstLine(el);
         var g = box({ 'data-mark': 'glyph', 'data-sp': m.sp, 'data-verdict': m.verdict, 'data-role': m.role, 'data-n': m.n },
-          'glyph ' + m.role, laneX - size / 2, (line.top + line.bottom) / 2 - size / 2 + (k - 1) * (size + 2) - F.top, size, size);
+          'glyph ' + m.role, barred[m.sp] ? barX(m.sp, barWidth(barred[m.sp])) - 2 - size : laneX - size / 2, (line.top + line.bottom) / 2 - size / 2 + (k - 1) * (size + 2) - F.top, size, size);
         g.appendChild(svg(ICONS[m.verdict] || ICONS.no));
         overOut.appendChild(g);
       }
@@ -236,6 +252,17 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       places.push({ h: h, link: link, left: left - F.left, top: (line.top + line.bottom) / 2 - 8 - F.top });
     });
 
+    var focusOut = document.createDocumentFragment();
+    if (focused && focused.isConnected && rendered(focused)) {
+      var fr = sectionRect(focused, C);
+      var fl = Math.max(focused.localName === 'li' ? focused.parentElement.getBoundingClientRect().left : fr.left, C.left) - 8;
+      var fright = Math.min(fr.right, C.right) + 8;
+      focusOut.appendChild(box({ 'data-mark': 'focus', 'data-sp': focused.getAttribute('data-sourcepos'),
+        'data-target': focused.localName === 'summary' ? 'summary' : null }, 'focus',
+        fl - F.left, fr.top - F.top, fright - fl, fr.bottom - fr.top));
+    }
+    focusLayer.replaceChildren(focusOut);
+    highlight();
     under.replaceChildren(underOut);
     overMarks.replaceChildren(overOut);
     placeAnchors(places);
@@ -280,6 +307,46 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     if (lit && anchors.get(lit)) anchors.get(lit).classList.add('on');
   }
 
+  // A heading's box grows to the end of its section: the last block before a heading as high
+  function sectionRect(el, C) {
+    var r = el.getBoundingClientRect();
+    var level = /^h([1-6])$/.exec(el.localName);
+    var bottom = r.bottom;
+    if (level && el.parentElement === content) {
+      for (var next = el.nextElementSibling; next; next = next.nextElementSibling) {
+        var h = /^h([1-6])$/.exec(next.localName);
+        if (h && Number(h[1]) <= Number(level[1])) break;
+        if (!BR.isHost(next) && rendered(next)) bottom = Math.max(bottom, next.getBoundingClientRect().bottom);
+      }
+    }
+    return { top: r.top, bottom: bottom, left: r.left, right: Math.min(r.right, C.right) };
+  }
+
+  function reading() {
+    return document.body.classList.contains('reading-mode');
+  }
+
+  // Underlines from the server's offsets; a browser without the Highlight API keeps the bars
+  function highlight() {
+    if (typeof CSS === 'undefined' || !CSS.highlights || typeof Highlight === 'undefined') return;
+    var ranges = [];
+    if (current && !hidden && !reading()) {
+      (current.items || []).forEach(function (i) {
+        var loc = i.at && i.at.loc;
+        if (!loc || !loc.off || i.status === 'retracted') return;
+        var r = BR.quote.paint(loc.sp, loc.off);
+        if (r) ranges.push(r);
+      });
+    }
+    if (!ranges.length) {
+      CSS.highlights.delete('birta-quote');
+      return;
+    }
+    var hl = new Highlight();
+    ranges.forEach(function (r) { hl.add(r); });
+    CSS.highlights.set('birta-quote', hl);
+  }
+
   function schedule() {
     if (queued) return;
     queued = true;
@@ -304,6 +371,9 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       window.addEventListener('beforeprint', function () { contain(true); });
       window.addEventListener('afterprint', function () { contain(print.matches); });
       under = makeHost('birta-under', 0);
+      focusLayer = document.createElement('div');
+      focusLayer.className = 'layer';
+      under.parentNode.insertBefore(focusLayer, under);
       over = makeHost('birta-over', 2);
       overMarks = document.createElement('div');
       overAnchors = document.createElement('div');
@@ -332,15 +402,22 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       content.addEventListener('focusout', function (e) {
         if (e.target.matches && e.target.matches('a.anchor')) light(null);
       });
-      document.addEventListener('keydown', function (e) {
-        if (e.key !== 'm' || e.altKey || e.ctrlKey || e.metaKey || e.repeat) return;
-        var t = e.target;
-        if (t && (t.localName === 'input' || t.localName === 'textarea' || t.localName === 'select' || t.isContentEditable)) return;
-        var off = !under.classList.contains('off');
-        under.classList.toggle('off', off);
-        over.classList.toggle('off', off);
-      });
+      new MutationObserver(function () {
+        var on = reading();
+        [under, focusLayer, over].forEach(function (layer) { layer.classList.toggle('reading', on); });
+        schedule();
+      }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
       render();
+    },
+    focus: function (el) {
+      focused = el;
+      render();
+    },
+    toggle: function () {
+      hidden = !hidden;
+      under.classList.toggle('off', hidden);
+      over.classList.toggle('off', hidden);
+      highlight();
     },
     draw: function (state) {
       current = state;

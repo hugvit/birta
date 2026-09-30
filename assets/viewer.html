@@ -369,7 +369,10 @@
       var hasModifiers = needAlt || needCtrl || needMeta;
       var keyMatches;
       if (!hasModifiers) {
-        keyMatches = e.key === key;
+        // Caps Lock types a letter upper case without Shift
+        keyMatches = key.length === 1 && e.key.length === 1
+          ? e.key.toLowerCase() === key.toLowerCase()
+          : e.key === key;
       } else if (key.length === 1 && key >= 'a' && key <= 'z') {
         keyMatches = e.code === 'Key' + key.toUpperCase();
       } else if (key.length === 1 && key >= '0' && key <= '9') {
@@ -388,6 +391,8 @@
 
     document.addEventListener('keydown', function(e) {
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+      // Review may have used the key, e.g. an Esc that dropped its focus; an IME owns keys mid-word
+      if (e.defaultPrevented || e.isComposing || e.keyCode === 229 || e.target.isContentEditable) return;
       if (matchesBinding(e, KEYBINDINGS.toggle_reading)) {
         e.preventDefault();
         toggleReadingMode();
@@ -484,6 +489,7 @@
       document.addEventListener('keydown', function(e) {
         if (e.key === 'Escape' && themeDropdown.classList.contains('open')) {
           themeDropdown.classList.remove('open');
+          e.preventDefault();
           e.stopPropagation();
         }
       }, true);

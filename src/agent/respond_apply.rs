@@ -287,7 +287,8 @@ fn pick(
         return Ok(late(c));
     }
     if let Some(other) = claims.iter().rev().find(|c| c.end.is_none()) {
-        let name = one_line(other.name.as_deref().unwrap_or("someone"));
+        let claim = lines.iter().find(|l| l.n == other.n);
+        let name = render::who(&claim.map(|l| l.by.clone()).unwrap_or_default());
         return refuse(ExitCode::Stale, format!("{name} holds this round"));
     }
     let msg = if index.rounds.is_empty() {

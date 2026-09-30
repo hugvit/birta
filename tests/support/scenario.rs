@@ -81,6 +81,8 @@ pub struct Scenario {
     hand_written: bool,
     /// Writes made by [`Scenario::external_diffed`].
     diffed: usize,
+    /// The `by` of the kit's human ops.
+    human: Value,
 }
 
 impl Scenario {
@@ -119,6 +121,7 @@ impl Scenario {
             last_round: 0,
             hand_written: false,
             diffed: 0,
+            human: human(),
         };
         s.push(
             birta_by(),
@@ -128,6 +131,12 @@ impl Scenario {
             s.push(birta_by(), json!({"op": "owner", "drafted_by": drafted_by}));
         }
         s
+    }
+
+    /// Human ops as the page writes them, which carry no name.
+    pub fn nameless(mut self) -> Self {
+        self.human = json!({"type": "human", "via": "browser"});
+        self
     }
 
     /// Line number the next op lands on.
@@ -237,7 +246,7 @@ impl Scenario {
         if let Some(b) = body {
             op["body"] = json!(b);
         }
-        self.push(human(), op)
+        self.push(self.human.clone(), op)
     }
 
     /// A plain note on the whole doc.
@@ -259,11 +268,11 @@ impl Scenario {
         if let Some(v) = verdict {
             op["verdict"] = json!(v);
         }
-        self.push(human(), op)
+        self.push(self.human.clone(), op)
     }
 
     pub fn retract(&mut self, to: u32) -> u32 {
-        self.push(human(), json!({"op": "retract", "to": to}))
+        self.push(self.human.clone(), json!({"op": "retract", "to": to}))
     }
 
     pub fn human_reply(&mut self, to: u32, verdict: Option<&str>, body: Option<&str>) -> u32 {
@@ -274,7 +283,7 @@ impl Scenario {
         if let Some(b) = body {
             op["body"] = json!(b);
         }
-        self.push(human(), op)
+        self.push(self.human.clone(), op)
     }
 
     /// A hand-back of every human line so far, due at once.
@@ -291,7 +300,7 @@ impl Scenario {
         let upto = self.last_human;
         let hold_ms = not_before.saturating_sub(ts(self.next()));
         let n = self.push(
-            human(),
+            self.human.clone(),
             json!({"op": "submit", "upto": upto, "not_before": not_before, "hold_ms": hold_ms, "to": "*"}),
         );
         self.last_round = n;
@@ -311,7 +320,7 @@ impl Scenario {
         let hold_ms = not_before.saturating_sub(ts(self.next()));
         let rev = Rev::of(self.text.as_bytes());
         let n = self.push(
-            human(),
+            self.human.clone(),
             json!({"op": "approve", "rev": rev, "not_before": not_before, "hold_ms": hold_ms}),
         );
         self.last_round = n;
@@ -319,19 +328,19 @@ impl Scenario {
     }
 
     pub fn withdraw(&mut self, to: u32) -> u32 {
-        self.push(human(), json!({"op": "withdraw", "to": to}))
+        self.push(self.human.clone(), json!({"op": "withdraw", "to": to}))
     }
 
     /// The human takes a stalled round back from the claim on line `turn`.
     pub fn release(&mut self, turn: u32) -> u32 {
         self.push(
-            human(),
+            self.human.clone(),
             json!({"op": "yield", "turn": turn, "release": true}),
         )
     }
 
     pub fn seen(&mut self, ids: &[&str]) -> u32 {
-        self.push(human(), json!({"op": "seen", "ids": ids}))
+        self.push(self.human.clone(), json!({"op": "seen", "ids": ids}))
     }
 
     pub fn owner(&mut self, by: Value, drafted_by: Option<&str>) -> u32 {
@@ -414,7 +423,7 @@ impl Scenario {
 
     /// birta's own write for the human.
     pub fn edit(&mut self, new: &str) -> u32 {
-        self.write("edit", human(), new)
+        self.write("edit", self.human.clone(), new)
     }
 
     /// An `external` that replaces the one line equal to `old` with `new`.
@@ -452,7 +461,7 @@ impl Scenario {
         let chain = Chain::build(&self.parsed());
         let rec = chain.record(new).expect("the undo must change the doc");
         let line = json!({"op": "edit", "rev": rec.rev, "to_rev": rec.to_rev, "patch": rec.patch, "act": "undo", "of": of});
-        self.land(human(), line, rec.checkpoint, new)
+        self.land(self.human.clone(), line, rec.checkpoint, new)
     }
 
     /// A bare snap of a new text, standing in for a write nobody recorded.

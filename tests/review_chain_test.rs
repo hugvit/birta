@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use birta::rev::Rev;
-use birta::review::chain::{self, Chain, Mapped, Recorded, Step};
+use birta::review::chain::{self, Cause, Chain, Mapped, Recorded, Step};
 use birta::review::hunk;
 use birta::review::ops::{self, Hunk, Parsed};
 use serde_json::{Value, json};
@@ -376,6 +376,7 @@ fn step(hunks: Vec<Hunk>) -> Step {
         from: rev("from\n"),
         to: rev("to\n"),
         hunks: Some(hunks),
+        cause: Cause::Edit,
     }
 }
 

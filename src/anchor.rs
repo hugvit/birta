@@ -616,6 +616,45 @@ pub fn owner_text(markdown: &str, sp: &str) -> Option<String> {
     )
 }
 
+/// The rendered text of every heading, by sourcepos, from one parse.
+pub(crate) fn heading_texts(markdown: &str) -> HashMap<String, String> {
+    let arena = Arena::new();
+    let root = parse_document(&arena, markdown, &parse_options());
+    let lines = LineMap::new(markdown);
+    owners(root)
+        .filter(|(_, kind)| *kind == OwnerKind::Heading)
+        .map(|(node, kind)| {
+            let text = OwnerText::new(node, kind, &lines).chars().into_iter();
+            (sp_of(node), text.collect())
+        })
+        .collect()
+}
+
+/// Source bytes of each `data-sourcepos`, counted as [`Owner::bytes`] counts them.
+pub(crate) fn sp_bytes<'s>(
+    markdown: &str,
+    sps: impl IntoIterator<Item = &'s str>,
+) -> Vec<Option<Range<usize>>> {
+    let lines = LineMap::new(markdown);
+    let point = |s: &str| {
+        let (line, column) = s.split_once(':')?;
+        Some(LineColumn {
+            line: line.parse().ok()?,
+            column: column.parse().ok()?,
+        })
+    };
+    sps.into_iter()
+        .map(|sp| {
+            let (start, end) = sp.split_once('-')?;
+            let sp = Sourcepos {
+                start: point(start)?,
+                end: point(end)?,
+            };
+            Some(lines.bytes(sp))
+        })
+        .collect()
+}
+
 fn owners<'a>(root: &'a AstNode<'a>) -> impl Iterator<Item = (&'a AstNode<'a>, OwnerKind)> {
     root.descendants().filter_map(|node| {
         roles(node)
@@ -1009,7 +1048,7 @@ fn occurrences(t: &[char], q: &[char]) -> Vec<usize> {
 }
 
 /// Whitespace as JavaScript's `\s` sees it, which the page uses: no U+0085, plus U+FEFF.
-fn is_js_space(c: char) -> bool {
+pub(crate) fn is_js_space(c: char) -> bool {
     (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}'
 }
 
@@ -1030,7 +1069,7 @@ fn collapse(units: Vec<Unit>) -> Vec<Unit> {
 }
 
 /// Typed or quoted text with whitespace runs as single spaces, ends kept.
-fn collapse_str(s: &str) -> Vec<char> {
+pub(crate) fn collapse_str(s: &str) -> Vec<char> {
     let mut out: Vec<char> = Vec::with_capacity(s.len());
     for c in s.chars() {
         if !is_js_space(c) {

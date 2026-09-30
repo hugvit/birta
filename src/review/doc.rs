@@ -1,11 +1,12 @@
 //! A doc's text as the review fold sees it: its rev, its lines and its blocks.
 
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use comrak::{Arena, parse_document};
 
 use super::hunk;
+use super::ladder::Search;
 use crate::anchor::{self, BlockIndex};
 use crate::rev::Rev;
 
@@ -15,6 +16,8 @@ pub struct Doc {
     pub rev: Rev,
     pub lines: LineIndex,
     pub blocks: BlockIndex,
+    /// Built the first time an anchor is re-located on this text.
+    search: OnceLock<Search>,
 }
 
 impl Doc {
@@ -27,7 +30,12 @@ impl Doc {
             rev: Rev::of(text.as_bytes()),
             lines: LineIndex::new(text),
             blocks: anchor::index(root, text),
+            search: OnceLock::new(),
         }
+    }
+
+    pub(crate) fn search(&self) -> &Search {
+        self.search.get_or_init(|| Search::new(self))
     }
 }
 
@@ -62,6 +70,11 @@ impl LineIndex {
 
     pub fn count(&self) -> u32 {
         self.ranges.len() as u32
+    }
+
+    /// The 1-based line holding `byte`; a terminator belongs to the line it ends.
+    pub fn line_of(&self, byte: usize) -> u32 {
+        (self.ranges.partition_point(|r| r.start <= byte) as u32).max(1)
     }
 
     /// Bytes of 1-based `line`, without its terminator.

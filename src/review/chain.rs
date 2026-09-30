@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::hunk;
-use super::ops::{Hunk, Op, Parsed};
+use super::ops::{ByKind, Hunk, Op, Parsed};
 use crate::rev::Rev;
 
 /// A write whose patch serializes to more bytes than this is stored as a snap.
@@ -23,6 +23,18 @@ pub struct Step {
     pub to: Rev,
     /// `None` when the log has no patch and no text to derive one from.
     pub hunks: Option<Vec<Hunk>>,
+    pub cause: Cause,
+}
+
+/// Who made a step, as far as the log alone can tell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cause {
+    /// birta's own write: an `edit`.
+    Edit,
+    /// An `external` while exactly one agent held a claim.
+    Agent,
+    /// Any other write, including a snap standing in for one.
+    Outside { git: bool },
 }
 
 /// Where a line of an older text is after some steps.
@@ -58,6 +70,7 @@ enum Link {
         from: Rev,
         to: Rev,
         hunks: Option<Vec<Hunk>>,
+        cause: Cause,
     },
 }
 
@@ -71,27 +84,62 @@ pub struct Chain {
 impl Chain {
     /// Never fails: a patch that doesn't apply or verify breaks the chain until a snap.
     pub fn build(parsed: &Parsed) -> Self {
+        let mut claims = Claims::default();
         let links: Vec<Link> = parsed
             .lines
             .iter()
-            .filter_map(|line| match &line.op {
-                Op::Snap { rev, text, .. } => Some(Link::Snap {
-                    n: line.n,
-                    rev: rev.clone(),
-                    text: Arc::from(text.as_str()),
-                }),
-                Op::Edit {
-                    rev, to_rev, patch, ..
+            .filter_map(|line| {
+                let patch = |rev: &Rev, to: &Rev, hunks: &Option<Vec<Hunk>>, cause| {
+                    Some(Link::Patch {
+                        n: line.n,
+                        from: rev.clone(),
+                        to: to.clone(),
+                        hunks: hunks.clone(),
+                        cause,
+                    })
+                };
+                match &line.op {
+                    Op::Snap { rev, text, .. } => Some(Link::Snap {
+                        n: line.n,
+                        rev: rev.clone(),
+                        text: Arc::from(text.as_str()),
+                    }),
+                    Op::Edit {
+                        rev,
+                        to_rev,
+                        patch: hunks,
+                        ..
+                    } => patch(rev, to_rev, hunks, Cause::Edit),
+                    Op::External {
+                        rev,
+                        to_rev,
+                        patch: hunks,
+                        cause,
+                        ..
+                    } => {
+                        let cause = if claims.open.len() == 1 {
+                            Cause::Agent
+                        } else {
+                            Cause::Outside {
+                                git: cause.as_deref() == Some("git"),
+                            }
+                        };
+                        patch(rev, to_rev, hunks, cause)
+                    }
+                    Op::Claim { round } => {
+                        claims.claim(*round, line.by.name.clone());
+                        None
+                    }
+                    Op::Yield { release, .. } => {
+                        if *release && line.by.kind == ByKind::Human {
+                            claims.open.clear();
+                        } else {
+                            claims.open.retain(|name| *name != line.by.name);
+                        }
+                        None
+                    }
+                    _ => None,
                 }
-                | Op::External {
-                    rev, to_rev, patch, ..
-                } => Some(Link::Patch {
-                    n: line.n,
-                    from: rev.clone(),
-                    to: to_rev.clone(),
-                    hunks: patch.clone(),
-                }),
-                _ => None,
             })
             .collect();
         let mut known = HashSet::new();
@@ -213,6 +261,23 @@ impl Chain {
     }
 }
 
+/// Agents holding a turn, for telling their writes from outside ones.
+#[derive(Default)]
+struct Claims {
+    /// Rounds claimed so far; a later claim of one lost the race.
+    rounds: HashSet<u32>,
+    /// The name on each open claim.
+    open: Vec<Option<String>>,
+}
+
+impl Claims {
+    fn claim(&mut self, round: u32, name: Option<String>) {
+        if self.rounds.insert(round) {
+            self.open.push(name);
+        }
+    }
+}
+
 impl Link {
     fn n(&self) -> u32 {
         match self {
@@ -291,10 +356,16 @@ impl Walk {
             let pending = walk.pending.take();
             let stop = match link {
                 Link::Snap { n, rev, text } => walk.snap(*n, rev, text, pending, derive, on_text),
-                Link::Patch { n, from, to, hunks } => {
+                Link::Patch {
+                    n,
+                    from,
+                    to,
+                    hunks,
+                    cause,
+                } => {
                     // The rev-only step before this one never got its text
                     walk.unrecovered |= pending.is_some();
-                    walk.patch(*n, from, to, hunks.as_deref(), derive, on_text)
+                    walk.patch(*n, (from, to), hunks.as_deref(), *cause, derive, on_text)
                 }
             };
             if stop {
@@ -341,7 +412,8 @@ impl Walk {
             _ => None,
         };
         self.unrecovered |= pending.is_some() || good.is_none();
-        self.push_step(n, head, rev.clone(), hunks, false);
+        let cause = Cause::Outside { git: false };
+        self.push_step(n, (head, rev.clone()), hunks, cause, false);
         self.text = None;
         self.reach(n, good, on_text)
     }
@@ -349,9 +421,9 @@ impl Walk {
     fn patch(
         &mut self,
         n: u32,
-        from: &Rev,
-        to: &Rev,
+        (from, to): (&Rev, &Rev),
         hunks: Option<&[Hunk]>,
+        cause: Cause,
         derive: bool,
         on_text: &mut OnText,
     ) -> bool {
@@ -375,7 +447,7 @@ impl Walk {
                 _ => {}
             }
         }
-        self.push_step(n, from.clone(), to.clone(), hunks, broken);
+        self.push_step(n, (from.clone(), to.clone()), hunks, cause, broken);
         self.text = None;
         self.reach(n, next, on_text)
     }
@@ -384,9 +456,22 @@ impl Walk {
         self.revs.last().map(|(_, rev)| rev)
     }
 
-    fn push_step(&mut self, n: u32, from: Rev, to: Rev, hunks: Option<Vec<Hunk>>, broken: bool) {
+    fn push_step(
+        &mut self,
+        n: u32,
+        (from, to): (Rev, Rev),
+        hunks: Option<Vec<Hunk>>,
+        cause: Cause,
+        broken: bool,
+    ) {
         self.revs.push((n, to.clone()));
-        self.steps.push(Step { n, from, to, hunks });
+        self.steps.push(Step {
+            n,
+            from,
+            to,
+            hunks,
+            cause,
+        });
         self.broken.push(broken);
     }
 

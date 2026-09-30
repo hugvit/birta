@@ -733,6 +733,7 @@ fn index_time(md: &str) -> std::time::Duration {
 }
 
 #[test]
+#[ignore = "timing ratio; noisy under load, run in CI with --ignored"]
 fn index_scales_linearly() {
     let chunk = |copies: usize| {
         let mut md = String::new();
@@ -1988,6 +1989,7 @@ fn check_window(md: &str, o: &Owner, lines: &Range<usize>, sel: &Sel) -> Result<
 }
 
 #[test]
+#[ignore = "sweeps every owner; slow in a debug build, run in CI with --ignored"]
 fn every_window_resolves_back_to_itself() {
     sweep(&WINDOW_LENS);
 }

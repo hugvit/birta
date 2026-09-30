@@ -1,0 +1,15 @@
+{
+  "before": [],
+  "doc": "# Plan\n\nIntro paragraph here,\nwith a second line.\n\n- first item\n- second item\n  - nested item\n- third item\n\n## Details\n\n- detail one\n- detail two\n\n| key | value |\n|-----|-------|\n| a | 1 |\n| b | 2 |\n\n## More\n\n- more item\n\n# Appendix\n\n- appendix item\n",
+  "frame": {
+    "body": "Tighten this, a lot.",
+    "cid": "c1",
+    "op": "amend",
+    "path": "pr.md",
+    "rev": "21e4c7251bbee8cd8d40ac78988ff326db67ae96",
+    "to": 4,
+    "type": "op"
+  },
+  "log": "{\"about\":\"ops after the last hand-back are drafts; don't act on them\",\"birta\":\"review/1\",\"doc\":\"pr.md\"}\n{\"by\":{\"type\":\"birta\"},\"op\":\"snap\",\"rev\":\"21e4c7251bbee8cd8d40ac78988ff326db67ae96\",\"text\":\"# Plan\\n\\nIntro paragraph here,\\nwith a second line.\\n\\n- first item\\n- second item\\n  - nested item\\n- third item\\n\\n## Details\\n\\n- detail one\\n- detail two\\n\\n| key | value |\\n|-----|-------|\\n| a | 1 |\\n| b | 2 |\\n\\n## More\\n\\n- more item\\n\\n# Appendix\\n\\n- appendix item\\n\",\"ts\":1790000002000}\n{\"by\":{\"type\":\"birta\"},\"drafted_by\":null,\"op\":\"owner\",\"ts\":1790000003000}\n{\"at\":\"doc\",\"body\":\"Tighten this.\",\"by\":{\"name\":\"andres\",\"type\":\"human\",\"via\":\"browser\"},\"cid\":\"c-4\",\"op\":\"comment\",\"ts\":1790000004000}\n",
+  "reply": "ack"
+}

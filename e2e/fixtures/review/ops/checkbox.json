@@ -1,0 +1,14 @@
+{
+  "before": [],
+  "doc": "# Tasks\n\n- [ ] ship it\n",
+  "frame": {
+    "checked": true,
+    "cid": "c1",
+    "line": 3,
+    "path": "pr.md",
+    "rev": "f74f5e864f1edfe0c09f6078e3232f80e1aa6490",
+    "type": "checkbox"
+  },
+  "log": "{\"about\":\"ops after the last hand-back are drafts; don't act on them\",\"birta\":\"review/1\",\"doc\":\"pr.md\"}\n{\"by\":{\"type\":\"birta\"},\"op\":\"snap\",\"rev\":\"f74f5e864f1edfe0c09f6078e3232f80e1aa6490\",\"text\":\"# Tasks\\n\\n- [ ] ship it\\n\",\"ts\":1790000002000}\n{\"by\":{\"type\":\"birta\"},\"drafted_by\":null,\"op\":\"owner\",\"ts\":1790000003000}\n",
+  "reply": "ack"
+}

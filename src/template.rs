@@ -74,6 +74,8 @@ pub struct PageOptions<'a> {
     pub rev: Option<&'a str>,
     pub nonce: &'a str,
     pub extra_boot: Option<&'a serde_json::Value>,
+    /// The beacon token when review is on; `None` leaves every review surface out.
+    pub review_token: Option<&'a str>,
     /// Focus stops of `content_html`, left out of BOOT when `None`.
     pub stops: Option<&'a [Stop]>,
 }
@@ -158,11 +160,24 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
         "rev": opts.rev,
         "initialView": if opts.raw_mode { "raw" } else { "preview" },
         "extra": opts.extra_boot,
+        "review": match opts.review_token {
+            Some(token) => serde_json::json!({"enabled": true, "token": token}),
+            None => serde_json::json!({"enabled": false}),
+        },
     });
     if let Some(stops) = opts.stops {
         boot["stops"] = serde_json::json!(stops);
     }
     let boot_json = json_for_script(&boot);
+
+    let review_tags = match opts.review_token {
+        Some(_) => format!(
+            "<link rel=\"stylesheet\" href=\"/_birta/review.css\">\n  \
+             <script defer src=\"/_birta/review.js\" nonce=\"{}\"></script>",
+            opts.nonce
+        ),
+        None => String::new(),
+    };
 
     let csp_meta = if opts.static_mode {
         format!(
@@ -200,6 +215,7 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
             ("FILE_STATS", &html_escape_attr(opts.file_stats)),
             ("BOOT_JSON", &boot_json),
             ("NONCE", opts.nonce),
+            ("REVIEW_TAGS", &review_tags),
             ("PATCH_JS", PATCH_JS),
             ("SOURCE_HTML", opts.source_html.unwrap_or("")),
             ("CONTENT", content_html),
@@ -278,6 +294,7 @@ mod tests {
             current_path: None,
             nonce: "",
             extra_boot: None,
+            review_token: None,
             stops: None,
             rev: None,
         })
@@ -346,6 +363,7 @@ mod tests {
             current_path: None,
             nonce: "",
             extra_boot: None,
+            review_token: None,
             stops: None,
             rev: None,
         })
@@ -479,6 +497,7 @@ mod tests {
             current_path: None,
             nonce: "",
             extra_boot: None,
+            review_token: None,
             stops: None,
             rev: None,
         })
@@ -564,6 +583,7 @@ mod tests {
             current_path: None,
             nonce: "",
             extra_boot: None,
+            review_token: None,
             stops: None,
             rev: None,
         })
@@ -658,6 +678,7 @@ mod tests {
             current_path: Some("test.md"),
             nonce: "",
             extra_boot: None,
+            review_token: None,
             stops: None,
             rev: None,
         }
@@ -781,8 +802,27 @@ mod tests {
                 "rev": "ce013625030ba8dba906f756967f9e9ca394464a",
                 "initialView": "raw",
                 "extra": null,
+                "review": {"enabled": false},
             })
         );
+    }
+
+    #[test]
+    fn review_tags_and_boot_follow_the_token() {
+        let theme = github_theme();
+        let off = render_page(&base_opts(&theme));
+        assert!(!off.contains("/_birta/review"));
+        let on = render_page(&PageOptions {
+            nonce: "N0nce",
+            review_token: Some("t0ken"),
+            ..base_opts(&theme)
+        });
+        assert_eq!(
+            boot(&on)["review"],
+            serde_json::json!({"enabled": true, "token": "t0ken"})
+        );
+        assert!(on.contains("<script defer src=\"/_birta/review.js\" nonce=\"N0nce\"></script>"));
+        assert!(on.contains("<link rel=\"stylesheet\" href=\"/_birta/review.css\">"));
     }
 
     #[test]
@@ -839,6 +879,7 @@ mod tests {
         let extra = serde_json::json!({"review": {"note": "</script><b>&'\u{2028}"}});
         let page = render_page(&PageOptions {
             extra_boot: Some(&extra),
+            review_token: None,
             stops: None,
             rev: None,
             ..base_opts(&theme)
@@ -872,6 +913,7 @@ mod tests {
             current_path: Some("sub/x';y\".md"),
             nonce: "abc123",
             extra_boot: Some(&extra),
+            review_token: None,
             stops: None,
             rev: None,
             ..base_opts(&github)
@@ -1046,6 +1088,7 @@ mod tests {
             current_path: Some("dir/</script>&'\u{2028}.md"),
             keybindings_json: r#"{"toggle_dark":"<!--"}"#,
             extra_boot: Some(&extra),
+            review_token: None,
             stops: None,
             rev: None,
             ..base_opts(&theme)

@@ -1,0 +1,15 @@
+{
+  "before": [],
+  "doc": "# Plan\n\nIntro paragraph here,\nwith a second line.\n\n- first item, reworded\n- second item\n  - nested item\n- third item\n\n## Details\n\n- detail one\n- detail two\n\n| key | value |\n|-----|-------|\n| a | 1 |\n| b | 2 |\n\n## More\n\n- more item, reworded\n\n# Appendix\n\n- appendix item\n",
+  "frame": {
+    "change": "7.0",
+    "cid": "c1",
+    "confirm": true,
+    "op": "undo_change",
+    "path": "pr.md",
+    "rev": "4ebc265b3482766eebd9cfd7e8781fcfb25bb22a",
+    "type": "op"
+  },
+  "log": "{\"about\":\"ops after the last hand-back are drafts; don't act on them\",\"birta\":\"review/1\",\"doc\":\"pr.md\"}\n{\"by\":{\"type\":\"birta\"},\"op\":\"snap\",\"rev\":\"21e4c7251bbee8cd8d40ac78988ff326db67ae96\",\"text\":\"# Plan\\n\\nIntro paragraph here,\\nwith a second line.\\n\\n- first item\\n- second item\\n  - nested item\\n- third item\\n\\n## Details\\n\\n- detail one\\n- detail two\\n\\n| key | value |\\n|-----|-------|\\n| a | 1 |\\n| b | 2 |\\n\\n## More\\n\\n- more item\\n\\n# Appendix\\n\\n- appendix item\\n\",\"ts\":1790000002000}\n{\"by\":{\"type\":\"birta\"},\"drafted_by\":null,\"op\":\"owner\",\"ts\":1790000003000}\n{\"at\":\"doc\",\"body\":\"Tighten the details.\",\"by\":{\"name\":\"andres\",\"type\":\"human\",\"via\":\"browser\"},\"cid\":\"c-4\",\"op\":\"comment\",\"ts\":1790000004000}\n{\"by\":{\"name\":\"andres\",\"type\":\"human\",\"via\":\"browser\"},\"hold_ms\":0,\"not_before\":1790000005000,\"op\":\"submit\",\"to\":\"*\",\"ts\":1790000005000,\"upto\":4}\n{\"by\":{\"name\":\"claude\",\"type\":\"agent\",\"via\":\"cli\"},\"op\":\"claim\",\"round\":5,\"ts\":1790000006000}\n{\"by\":{\"type\":\"birta\"},\"op\":\"external\",\"patch\":[{\"a\":5,\"d\":[\"- first item\\n\"],\"i\":[\"- first item, reworded\\n\"]},{\"a\":22,\"d\":[\"- more item\\n\"],\"i\":[\"- more item, reworded\\n\"]}],\"rev\":\"21e4c7251bbee8cd8d40ac78988ff326db67ae96\",\"to_rev\":\"4ebc265b3482766eebd9cfd7e8781fcfb25bb22a\",\"ts\":1790000007000}\n{\"by\":{\"name\":\"claude\",\"type\":\"agent\",\"via\":\"cli\"},\"op\":\"yield\",\"ts\":1790000008000,\"turn\":6}\n",
+  "reply": "ack"
+}

@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Extension, Path, State};
+use axum::extract::{DefaultBodyLimit, Extension, Path, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::response::{Html, IntoResponse, Redirect, Response};
@@ -18,6 +18,7 @@ use crate::anchor::Stop;
 use crate::doc_write::{self, Expect, Via, WriteErr, WriteTarget};
 use crate::paths::{Access, FileKind, Roots};
 use crate::rev::Rev;
+use crate::review_ws::{self, ReviewHub, ReviewPush};
 use crate::scan::{self, NoEntry};
 use crate::security::{HostGuard, Nonce, base_headers, guard, page_headers, sandbox_headers};
 use crate::theme::{ResolvedTheme, ThemeRegistry, Variant};
@@ -59,6 +60,10 @@ pub(crate) enum WsEvent {
     Scroll(u32),
     /// A doc at this lexical path was deleted or moved away.
     Gone(String),
+    /// A doc's new review state, for the pages viewing it.
+    Review(Arc<ReviewPush>),
+    /// Ready-to-send `dir_state`, for every page that said hello.
+    DirState(Arc<str>),
 }
 
 /// How many connections view each doc, by lexical path.
@@ -161,6 +166,10 @@ pub struct ServerOptions {
     pub variant_explicit: bool,
     /// The doc's drafter from `--drafted-by`, for a review file this server creates.
     pub drafted_by: Option<String>,
+    /// The review gate; stdin mode never reviews.
+    pub review: bool,
+    /// Whether creating a review file in a git worktree adds it to `info/exclude`.
+    pub git_exclude: bool,
 }
 
 pub(crate) struct AppState {
@@ -191,6 +200,8 @@ pub(crate) struct AppState {
     pub(crate) variant_explicit: bool,
     /// Epoch seconds of the last HTTP request (prevents premature auto-shutdown).
     pub(crate) last_request: AtomicU64,
+    /// Review, when the gate is on and a file or folder is served.
+    pub(crate) review: Option<ReviewHub>,
 }
 
 /// Everything [`AppState::new`] needs; shared channels and counters are created there.
@@ -215,6 +226,11 @@ pub(crate) struct AppInit {
     pub(crate) raw_mode: bool,
     pub(crate) keybindings_json: String,
     pub(crate) variant_explicit: bool,
+    pub(crate) review: bool,
+    pub(crate) drafted_by: Option<String>,
+    pub(crate) git_exclude: bool,
+    /// A folder was named, so a hand-back of "all" covers every doc under it.
+    pub(crate) dir_mode: bool,
 }
 
 impl AppInit {
@@ -244,6 +260,10 @@ impl AppInit {
             raw_mode: opts.raw_mode,
             keybindings_json: opts.keybindings_json,
             variant_explicit: opts.variant_explicit,
+            review: opts.review,
+            drafted_by: opts.drafted_by,
+            git_exclude: opts.git_exclude,
+            dir_mode: false,
         })
     }
 
@@ -296,6 +316,7 @@ impl AppInit {
         init.base_dir = target.root.clone();
         init.source_file = Some(canonical_file);
         init.initial_relpath = Some(target.entry.clone());
+        init.dir_mode = target.dir;
         Ok(init)
     }
 }
@@ -308,6 +329,8 @@ pub struct Target {
     pub entry: String,
     /// The header's file name.
     filename: String,
+    /// A folder was named rather than a file.
+    dir: bool,
 }
 
 impl Target {
@@ -335,6 +358,7 @@ impl Target {
                 root,
                 entry,
                 filename,
+                dir: true,
             });
         }
         let canonical = path.canonicalize()?;
@@ -354,6 +378,7 @@ impl Target {
             root,
             entry,
             filename,
+            dir: false,
         })
     }
 }
@@ -362,6 +387,14 @@ impl AppState {
     pub(crate) fn new(init: AppInit) -> Arc<Self> {
         let (hub, _) = broadcast::channel(HUB_CAPACITY);
         let roots = Roots::new(init.base_dir, dirs::home_dir());
+        let review = (init.review && init.mode == Mode::Serve).then(|| {
+            ReviewHub::new(
+                roots.root(),
+                init.drafted_by,
+                init.git_exclude,
+                init.dir_mode,
+            )
+        });
         // The entry may sit behind a link the budgeted walk never reaches.
         if let Some(entry) = &init.initial_relpath {
             roots.register_path(StdPath::new(entry));
@@ -394,6 +427,7 @@ impl AppState {
             keybindings_json: init.keybindings_json,
             variant_explicit: init.variant_explicit,
             last_request: AtomicU64::new(now_secs()),
+            review,
         })
     }
 
@@ -558,7 +592,11 @@ fn router(state: Arc<AppState>) -> Router {
     let live = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/ws", get(ws_handler))
-        .route("/scroll/{line}", post(scroll_handler));
+        .route("/scroll/{line}", post(scroll_handler))
+        .route(
+            "/review/flush",
+            post(flush_handler).layer(DefaultBodyLimit::max(WS_MAX_INBOUND)),
+        );
     let assets = Router::new().route("/_birta/{*asset}", get(asset_handler));
 
     pages
@@ -571,9 +609,29 @@ fn router(state: Arc<AppState>) -> Router {
         .layer(from_fn(base_headers))
 }
 
-/// Reserved for embedded assets; nothing is served yet.
-async fn asset_handler() -> StatusCode {
-    StatusCode::NOT_FOUND
+/// The review script and stylesheet, embedded, and only while review is on.
+async fn asset_handler(Path(asset): Path<String>, State(state): State<Arc<AppState>>) -> Response {
+    if state.review.is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match asset.as_str() {
+        "review.js" => (
+            [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+            review_ws::review_js(),
+        )
+            .into_response(),
+        "review.css" => (
+            [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+            review_ws::REVIEW_CSS,
+        )
+            .into_response(),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// `POST /review/flush`: what a closing page's socket could not send.
+async fn flush_handler(State(state): State<Arc<AppState>>, body: axum::body::Bytes) -> StatusCode {
+    review_ws::flush(&state, &body).await
 }
 
 async fn favicon_handler() -> Response {
@@ -624,6 +682,7 @@ async fn index_handler(
         current_path: None,
         nonce: nonce.as_str(),
         extra_boot: None,
+        review_token: None,
         stops: Some(&current.stops),
         rev: None,
     });
@@ -710,6 +769,7 @@ async fn view_handler(
         current_path: Some(&path),
         nonce: nonce.as_str(),
         extra_boot: None,
+        review_token: state.review.as_ref().map(|r| r.token.as_str()),
         stops: Some(&index.stops),
         rev: Some(rev.as_str()),
     });
@@ -747,12 +807,24 @@ async fn render_handler(
 }
 
 /// Handle incoming WebSocket JSON messages from the browser.
-/// Returns the reply for this connection only, if the message has one.
-async fn handle_ws_message(text: &str, state: &AppState, ctx: &mut ConnCtx) -> Option<String> {
-    let msg: serde_json::Value = serde_json::from_str(text).ok()?;
+/// Returns the replies for this connection only.
+async fn handle_ws_message(text: &str, state: &Arc<AppState>, ctx: &mut ConnCtx) -> Vec<String> {
+    let Ok(msg) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Vec::new();
+    };
+    handle_ws_value(msg, state, ctx).await.into_iter().collect()
+}
 
+async fn handle_ws_value(
+    msg: serde_json::Value,
+    state: &Arc<AppState>,
+    ctx: &mut ConnCtx,
+) -> Vec<String> {
     match msg.get("type").and_then(|t| t.as_str()) {
         Some("hello") => return hello(state, ctx, &msg).await,
+        Some("op") => return review_ws::op(state, msg).await.into_iter().collect(),
+        Some("resolve") => return vec![review_ws::resolve(state, &msg).await],
+        Some("compose") => review_ws::compose(state, &msg).await,
         Some("checkbox") => {
             let cid = msg.get("cid").cloned().unwrap_or_default();
             let reply = match toggle_checkbox(state, &msg).await {
@@ -760,7 +832,7 @@ async fn handle_ws_message(text: &str, state: &AppState, ctx: &mut ConnCtx) -> O
                 Ok(rev) => serde_json::json!({"type": "ack", "cid": cid, "rev": rev.as_str()}),
                 Err(reason) => serde_json::json!({"type": "nack", "cid": cid, "reason": reason}),
             };
-            return Some(reply.to_string());
+            return vec![reply.to_string()];
         }
         Some("theme_change") => {
             if let Some(theme_name) = msg.get("theme").and_then(|t| t.as_str()) {
@@ -776,7 +848,7 @@ async fn handle_ws_message(text: &str, state: &AppState, ctx: &mut ConnCtx) -> O
         }
         _ => {}
     }
-    None
+    Vec::new()
 }
 
 /// Re-render and broadcast a theme update to all clients.
@@ -865,7 +937,10 @@ async fn handle_variant_change(state: &AppState, variant: Variant) {
 
 /// Toggles the task on `line` of `path` (the entry doc when empty) through the strict
 /// write, returning the rev written. The error is the nack reason.
-async fn toggle_checkbox(state: &AppState, msg: &serde_json::Value) -> Result<Rev, &'static str> {
+async fn toggle_checkbox(
+    state: &Arc<AppState>,
+    msg: &serde_json::Value,
+) -> Result<Rev, &'static str> {
     if state.mode == Mode::Stdin {
         return Err("read_only");
     }
@@ -895,14 +970,20 @@ async fn toggle_checkbox(state: &AppState, msg: &serde_json::Value) -> Result<Re
         .and_then(Rev::parse)
         .ok_or("changed_since")?;
 
+    let canonical = doc.canonical.clone();
     let target = WriteTarget {
         canonical: doc.canonical,
         rel: doc.rel,
     };
+    // With review off, a review file beside the doc is never touched
+    let log = state
+        .review
+        .is_some()
+        .then(|| crate::review::log::Log::open(&doc.review_path));
     let written = tokio::task::spawn_blocking(move || {
         doc_write::write_doc(
             &target,
-            None,
+            log.as_ref().map(|l| l as &dyn doc_write::EditRecorder),
             Expect::Rev(rev),
             Via::Checkbox { line },
             |bytes| {
@@ -914,7 +995,13 @@ async fn toggle_checkbox(state: &AppState, msg: &serde_json::Value) -> Result<Re
     .await
     .map_err(|_| "read_only")?;
     match written {
-        Ok(written) => Ok(written.rev),
+        Ok(written) => {
+            if state.review.is_some() {
+                let state = Arc::clone(state);
+                tokio::task::spawn_blocking(move || review_ws::push_state(&state, &canonical));
+            }
+            Ok(written.rev)
+        }
         Err(WriteErr::ChangedSince) => Err("changed_since"),
         Err(WriteErr::NotApplicable) => Err("not_editable"),
         Err(WriteErr::ReadOnly) => Err("read_only"),
@@ -1008,6 +1095,10 @@ struct ConnCtx {
     /// `None` once a hello names a doc the page can't view.
     viewing: Option<ViewGuard>,
     tab: Option<String>,
+    /// Whether the page said hello, so it takes review pushes.
+    said_hello: bool,
+    /// The canonical doc whose review state the page is sent.
+    review_doc: Option<PathBuf>,
 }
 
 /// A hello's tab id, when it fits `[A-Za-z0-9_-]{1,64}`.
@@ -1057,22 +1148,50 @@ async fn doc_frame(state: &AppState, rel: &str) -> Option<String> {
 
 /// Points the connection at the doc it names and replies with that doc, or with `gone`
 /// when the page can't view it, missing or refused alike.
-async fn hello(state: &AppState, ctx: &mut ConnCtx, msg: &serde_json::Value) -> Option<String> {
-    let rel = msg.get("path")?.as_str()?;
+/// With review on, the doc's review state, the folder listing and any half-typed notes
+/// follow; a page that views nothing still gets the listing.
+async fn hello(state: &Arc<AppState>, ctx: &mut ConnCtx, msg: &serde_json::Value) -> Vec<String> {
+    let Some(rel) = msg.get("path").and_then(|p| p.as_str()) else {
+        return Vec::new();
+    };
     ctx.tab = tab_id(msg);
+    ctx.said_hello = true;
+    ctx.review_doc = None;
     // Counted before the read, so a write landing in between is rendered for this page.
     ctx.viewing = viewable(state, rel).then(|| state.viewers.view(rel));
-    if ctx.viewing.is_some()
-        && let Some(frame) = doc_frame(state, rel).await
+    let content = match ctx.viewing {
+        Some(_) => doc_frame(state, rel).await,
+        None => None,
+    };
+    let Some(content) = content else {
+        ctx.viewing = None;
+        let mut frames = vec![gone_frame(rel)];
+        if let Some(review) = &state.review {
+            frames.push(review.dir.frame().to_string());
+        }
+        return frames;
+    };
+    let mut frames = vec![content];
+    if state.review.is_some()
+        && let Ok(doc) = state.roots.resolve_doc(rel, Access::Read)
     {
-        return Some(frame);
+        ctx.review_doc = Some(doc.canonical.clone());
+        let app = Arc::clone(state);
+        let review = tokio::task::spawn_blocking(move || {
+            app.review
+                .as_ref()
+                .map(|hub| review_ws::hello_frames(&app, hub, &doc))
+                .unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default();
+        frames.extend(review);
     }
-    ctx.viewing = None;
-    Some(gone_frame(rel))
+    frames
 }
 
 /// Frames that bring a connection that missed hub events back up to date.
-async fn resync_frames(state: &AppState, ctx: &ConnCtx) -> Vec<String> {
+async fn resync_frames(state: &Arc<AppState>, ctx: &ConnCtx) -> Vec<String> {
     let theme = {
         let registry = state.registry.read().await;
         theme_update(registry.active(), state.enable_toggle).to_string()
@@ -1085,7 +1204,23 @@ async fn resync_frames(state: &AppState, ctx: &ConnCtx) -> Vec<String> {
             None => gone_frame(rel),
         },
     };
-    vec![theme, content]
+    let mut frames = vec![theme, content];
+    // Review pushes may have been among the dropped events too
+    if let (
+        Some(doc),
+        Some(ViewGuard {
+            path: Some(rel), ..
+        }),
+    ) = (&ctx.review_doc, &ctx.viewing)
+    {
+        let (app, doc, rel) = (Arc::clone(state), doc.clone(), rel.clone());
+        let review =
+            tokio::task::spawn_blocking(move || review_ws::resync_frames(&app, &doc, &rel))
+                .await
+                .unwrap_or_default();
+        frames.extend(review);
+    }
+    frames
 }
 
 async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
@@ -1093,6 +1228,8 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
     let mut ctx = ConnCtx {
         viewing: Some(state.viewers.view_all()),
         tab: None,
+        said_hello: false,
+        review_doc: None,
     };
 
     // Subscribe first: an update landing between the two is then sent after the snapshot.
@@ -1120,7 +1257,14 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
                     &update.stops,
                 )],
                 Ok(WsEvent::Gone(path)) if sees(&path) => vec![gone_frame(&path)],
-                Ok(WsEvent::Content(_) | WsEvent::Gone(_)) => continue,
+                Ok(WsEvent::Review(push)) => match (&ctx.review_doc, &ctx.viewing) {
+                    (Some(doc), Some(ViewGuard { path: Some(rel), .. })) if *doc == push.canonical => {
+                        vec![review_ws::push_frame(&push, rel)]
+                    }
+                    _ => continue,
+                },
+                Ok(WsEvent::DirState(json)) if ctx.said_hello => vec![json.to_string()],
+                Ok(WsEvent::Content(_) | WsEvent::Gone(_) | WsEvent::DirState(_)) => continue,
                 Ok(WsEvent::Raw(json)) => vec![json.to_string()],
                 Ok(WsEvent::Scroll(line)) => {
                     vec![serde_json::json!({"type": "scroll", "line": line}).to_string()]
@@ -1131,10 +1275,11 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
             },
             msg = socket.recv() => match msg {
                 Some(Ok(Message::Text(text))) => {
-                    match handle_ws_message(&text, &state, &mut ctx).await {
-                        Some(reply) => vec![reply],
-                        None => continue,
+                    let replies = handle_ws_message(&text, &state, &mut ctx).await;
+                    if replies.is_empty() {
+                        continue;
                     }
+                    replies
                 }
                 Some(Ok(_)) => continue,
                 _ => break,
@@ -1195,6 +1340,8 @@ mod tests {
             keybindings_json: "{}".to_string(),
             variant_explicit: false,
             drafted_by: None,
+            review: false,
+            git_exclude: true,
         }
     }
 
@@ -1220,6 +1367,10 @@ mod tests {
             raw_mode: false,
             keybindings_json: "{}".to_string(),
             variant_explicit: false,
+            review: false,
+            drafted_by: None,
+            git_exclude: true,
+            dir_mode: false,
         };
         customize(&mut init);
         AppState::new(init)
@@ -3611,6 +3762,48 @@ mod tests {
                 render::render_dir(md, None, StdPath::new("b.md")).as_str()
             );
             assert_eq!(resent[0]["rev"], git_rev(text));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn lag_resend_carries_the_review_state_and_listing() {
+        let site = Site::new(&[("root/doc.md", b"# Doc\n")]);
+        let root = site.root.clone();
+        let state = test_state(|init| {
+            init.mode = Mode::Serve;
+            init.source_file = Some(root.join("doc.md"));
+            init.initial_relpath = Some("doc.md".to_string());
+            init.base_dir = root;
+            init.review = true;
+        });
+        let port = serve(&state).await;
+
+        within(async {
+            let mut ws = connect(port).await;
+            let hello = hello_frames(&mut ws, "doc.md").await;
+            assert!(
+                hello.iter().any(|f| f["type"] == "review_state"),
+                "{hello:?}"
+            );
+            state.hub.send(WsEvent::Scroll(BARRIER)).unwrap();
+            frames_until(&mut ws, BARRIER).await;
+
+            flood(&state, 256);
+            state.hub.send(WsEvent::Scroll(SENTINEL)).unwrap();
+            let resent = frames_until(&mut ws, SENTINEL).await;
+            // The flood's tail that still fit in the hub follows the resend
+            let types: Vec<&str> = resent
+                .iter()
+                .map(|f| f["type"].as_str().unwrap_or("?"))
+                .filter(|&t| t != "scroll")
+                .collect();
+            assert_eq!(
+                types,
+                ["theme_update", "content", "review_state", "dir_state"],
+                "{resent:?}"
+            );
+            assert_eq!(resent[2]["path"], "doc.md");
         })
         .await;
     }

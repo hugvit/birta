@@ -1,0 +1,96 @@
+---
+source: src/dirindex.rs
+expression: "serde_json::to_string_pretty(&state).unwrap()"
+---
+{
+  "files": [
+    {
+      "news": true,
+      "paths": [
+        "b.md"
+      ],
+      "summary": null
+    },
+    {
+      "news": true,
+      "paths": [
+        "c.md"
+      ],
+      "summary": {
+        "counts": {
+          "attention": 1,
+          "decided": 2,
+          "drafts": 0,
+          "items": 2,
+          "later": 0,
+          "lost": 0,
+          "not_handled": 0,
+          "open_asks": 0,
+          "sent_unclaimed": 0,
+          "unasked": 0,
+          "unseen": 1
+        },
+        "phrase": {
+          "stage": "replied"
+        },
+        "stage": "replied"
+      }
+    },
+    {
+      "news": false,
+      "paths": [
+        "notes/plan.md",
+        "plan.md"
+      ],
+      "summary": {
+        "counts": {
+          "attention": 0,
+          "decided": 1,
+          "drafts": 2,
+          "items": 4,
+          "later": 0,
+          "lost": 0,
+          "not_handled": 0,
+          "open_asks": 0,
+          "sent_unclaimed": 0,
+          "unasked": 0,
+          "unseen": 0
+        },
+        "phrase": {
+          "stage": "drafts"
+        },
+        "stage": "drafts"
+      }
+    }
+  ],
+  "folder": {
+    "summary": {
+      "counts": {
+        "attention": 0,
+        "decided": 0,
+        "drafts": 0,
+        "items": 0,
+        "later": 0,
+        "lost": 0,
+        "not_handled": 0,
+        "open_asks": 0,
+        "sent_unclaimed": 0,
+        "unasked": 0,
+        "unseen": 0
+      },
+      "phrase": {
+        "stage": "idle"
+      },
+      "stage": "idle"
+    }
+  },
+  "root": "",
+  "totals": {
+    "decided": 3,
+    "drafts": 2,
+    "items": 6,
+    "unseen_files": 2
+  },
+  "truncated": false,
+  "type": "dir_state"
+}

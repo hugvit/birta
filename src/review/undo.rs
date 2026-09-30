@@ -14,7 +14,6 @@ use crate::paths::DocRef;
 use crate::rev::Rev;
 
 #[derive(Debug)]
-#[expect(dead_code, reason = "undo is not served yet")]
 pub(crate) enum UndoErr {
     /// The doc isn't the rev the page folded.
     ChangedSince,
@@ -37,7 +36,6 @@ impl From<WriteErr> for UndoErr {
 
 /// Reverts the write `change` belongs to, when the doc's bytes are still `client_rev`.
 /// A write of more than one hunk is reverted whole, and only with `confirm`.
-#[cfg_attr(not(test), expect(dead_code, reason = "undo is not served yet"))]
 pub(crate) fn reverse_change(
     doc: &DocRef,
     change: &str,

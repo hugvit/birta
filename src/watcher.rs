@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::Duration;
 
 use notify::RecursiveMode;
@@ -11,6 +11,7 @@ use notify_debouncer_mini::{Config, DebouncedEvent, DebouncedEventKind, Debounce
 use crate::paths::{self, FileKind, Roots};
 use crate::render;
 use crate::rev::Rev;
+use crate::review_ws;
 use crate::scan::{self, ScanBudget};
 use crate::server::{AppState, ContentUpdate, WsEvent};
 
@@ -190,6 +191,8 @@ impl FileSig {
     }
 }
 
+type ReviewObserver = Box<dyn Fn(Vec<PathBuf>) + Send + Sync>;
+
 /// State the event handler reads, apart from the debouncer it runs under.
 struct Shared {
     roots: Arc<Roots>,
@@ -198,6 +201,8 @@ struct Shared {
     known: Mutex<HashSet<String>>,
     /// Last signature per canonical doc; an event that leaves it unchanged is dropped.
     sigs: Mutex<HashMap<PathBuf, FileSig>>,
+    /// Told the canonical path of each review file an event touched.
+    on_review: OnceLock<ReviewObserver>,
 }
 
 struct Watches {
@@ -280,6 +285,7 @@ impl WatchSet {
             map: RwLock::new(PathMap::new(&root)),
             known: Mutex::new(HashSet::new()),
             sigs: Mutex::new(HashMap::new()),
+            on_review: OnceLock::new(),
             roots,
         });
         let (link_tx, link_rx) = mpsc::channel();
@@ -335,6 +341,11 @@ impl WatchSet {
     pub(crate) fn watched(&self) -> Vec<PathBuf> {
         let watches = self.watches.lock().unwrap_or_else(|e| e.into_inner());
         watches.watches.iter().map(|w| w.path.clone()).collect()
+    }
+
+    /// Calls `observer` with the review files each batch touched, by canonical path.
+    pub(crate) fn on_review_files(&self, observer: impl Fn(Vec<PathBuf>) + Send + Sync + 'static) {
+        let _ = self.shared.on_review.set(Box::new(observer));
     }
 
     /// Records the docs a walk found, under every alias, so a vanished folder reports them.
@@ -450,6 +461,21 @@ fn handle_batch(
         .filter(|e| e.kind == DebouncedEventKind::Any)
         .map(|e| e.path.as_path())
         .collect();
+    if let Some(observer) = shared.on_review.get() {
+        let mut reviews: Vec<PathBuf> = paths
+            .iter()
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(paths::is_review_file)
+            })
+            .map(|p| canonical_of(p))
+            .collect();
+        reviews.dedup();
+        if !reviews.is_empty() {
+            observer(reviews);
+        }
+    }
     let mut found = Vec::new();
     // Folders (or links) that vanished, with the canonical path they had.
     let mut vanished = Vec::new();
@@ -546,9 +572,18 @@ pub(crate) fn watch(state: Arc<AppState>) -> anyhow::Result<WatchSet> {
         eprintln!("birta: scan limited; some files under the served folder were skipped");
     }
     let rt = tokio::runtime::Handle::current();
+    let reviews = Arc::clone(&state);
+    review_ws::seed(&state, found.md_files.clone(), found.truncated);
     let mut set = WatchSet::new(Arc::clone(&roots), move |events| {
         publish(&state, &rt, events)
     })?;
+    if reviews.review.is_some() {
+        set.on_review_files(move |files| {
+            for file in files {
+                review_ws::review_file_event(&reviews, &file);
+            }
+        });
+    }
     for link in roots.links() {
         set.add_root(&link.target, &link.lexical);
     }
@@ -556,7 +591,7 @@ pub(crate) fn watch(state: Arc<AppState>) -> anyhow::Result<WatchSet> {
     Ok(set)
 }
 
-fn publish(state: &AppState, rt: &tokio::runtime::Handle, events: Vec<FsEvent>) {
+fn publish(state: &Arc<AppState>, rt: &tokio::runtime::Handle, events: Vec<FsEvent>) {
     let syntax_theme = rt.block_on(async {
         let reg = state.registry.read().await;
         reg.active().active_data().syntax.clone()
@@ -568,6 +603,12 @@ fn publish(state: &AppState, rt: &tokio::runtime::Handle, events: Vec<FsEvent>) 
         if in_skipped_dir(&event.rel) && state.viewers.count(&event.rel) == 0 {
             continue;
         }
+        review_ws::doc_event(
+            state,
+            &event.rel,
+            &event.canonical,
+            event.kind == FsKind::Removed,
+        );
         if event.kind == FsKind::Removed {
             let _ = state.hub.send(WsEvent::Gone(event.rel));
             continue;

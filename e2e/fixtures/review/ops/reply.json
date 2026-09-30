@@ -1,0 +1,15 @@
+{
+  "before": [],
+  "doc": "# Plan\n\nIntro paragraph here,\nwith a second line.\n\n- first item\n- second item\n  - nested item\n- third item\n\n## Details\n\n- detail one\n- detail two\n\n| key | value |\n|-----|-------|\n| a | 1 |\n| b | 2 |\n\n## More\n\n- more item\n\n# Appendix\n\n- appendix item\n",
+  "frame": {
+    "body": "Yes, 1.",
+    "cid": "c1",
+    "op": "reply",
+    "path": "pr.md",
+    "rev": "21e4c7251bbee8cd8d40ac78988ff326db67ae96",
+    "to": 7,
+    "type": "op"
+  },
+  "log": "{\"about\":\"ops after the last hand-back are drafts; don't act on them\",\"birta\":\"review/1\",\"doc\":\"pr.md\"}\n{\"by\":{\"type\":\"birta\"},\"op\":\"snap\",\"rev\":\"21e4c7251bbee8cd8d40ac78988ff326db67ae96\",\"text\":\"# Plan\\n\\nIntro paragraph here,\\nwith a second line.\\n\\n- first item\\n- second item\\n  - nested item\\n- third item\\n\\n## Details\\n\\n- detail one\\n- detail two\\n\\n| key | value |\\n|-----|-------|\\n| a | 1 |\\n| b | 2 |\\n\\n## More\\n\\n- more item\\n\\n# Appendix\\n\\n- appendix item\\n\",\"ts\":1790000002000}\n{\"by\":{\"type\":\"birta\"},\"drafted_by\":null,\"op\":\"owner\",\"ts\":1790000003000}\n{\"at\":\"doc\",\"body\":\"Is the table right?\",\"by\":{\"name\":\"andres\",\"type\":\"human\",\"via\":\"browser\"},\"cid\":\"c-4\",\"op\":\"comment\",\"ts\":1790000004000}\n{\"by\":{\"name\":\"andres\",\"type\":\"human\",\"via\":\"browser\"},\"hold_ms\":0,\"not_before\":1790000005000,\"op\":\"submit\",\"to\":\"*\",\"ts\":1790000005000,\"upto\":4}\n{\"by\":{\"name\":\"claude\",\"type\":\"agent\",\"via\":\"cli\"},\"op\":\"claim\",\"round\":5,\"ts\":1790000006000}\n{\"at\":{\"lines\":[18,18],\"pre\":\"\",\"quote\":\"| a | 1 |\",\"rev\":\"21e4c7251bbee8cd8d40ac78988ff326db67ae96\",\"scope\":\"block\",\"suf\":\"\"},\"body\":\"Should a be 1?\",\"by\":{\"name\":\"claude\",\"type\":\"agent\",\"via\":\"cli\"},\"op\":\"comment\",\"ts\":1790000007000,\"turn\":6,\"verdict\":\"ask\"}\n{\"by\":{\"name\":\"claude\",\"type\":\"agent\",\"via\":\"cli\"},\"op\":\"yield\",\"ts\":1790000008000,\"turn\":6}\n",
+  "reply": "ack"
+}

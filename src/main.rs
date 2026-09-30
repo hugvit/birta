@@ -237,6 +237,8 @@ async fn serve(cli: Cli, config: birta::config::Config, review_on: bool) -> anyh
             keybindings_json,
             variant_explicit,
             drafted_by: None,
+            review: false,
+            git_exclude: true,
         };
         return birta::server::run_stdin(&markdown, opts).await;
     }
@@ -288,6 +290,8 @@ async fn serve(cli: Cli, config: birta::config::Config, review_on: bool) -> anyh
         keybindings_json,
         variant_explicit,
         drafted_by: cli.drafted_by.filter(|_| review_on),
+        review: review_on,
+        git_exclude: config.review.git_exclude,
     };
     birta::server::run(file, opts).await
 }

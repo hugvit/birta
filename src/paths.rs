@@ -18,10 +18,6 @@ const REVIEW_SUFFIX: &str = ".birta.jsonl";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Access {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "reviews resolve docs for reading")
-    )]
     Read,
     Write,
 }
@@ -62,7 +58,6 @@ pub(crate) struct DocRef {
     pub(crate) review_path: PathBuf,
     pub(crate) writable: bool,
     /// Whether a review file may be created beside the canonical doc.
-    #[cfg_attr(not(test), expect(dead_code, reason = "read once reviews exist"))]
     pub(crate) log_writable: bool,
 }
 
@@ -160,6 +155,11 @@ impl Roots {
             review_path: review_path.into(),
             canonical,
         })
+    }
+
+    /// Whether `canonical` sits in a folder root, where its review file may live.
+    pub(crate) fn folder_root(&self, canonical: &Path) -> bool {
+        self.base_of(canonical).is_some_and(|b| b.folder_root)
     }
 
     #[cfg_attr(

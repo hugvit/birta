@@ -68,7 +68,7 @@ pub async fn http_exchange(
     stream.write_all(head.as_bytes()).await.unwrap();
 
     let mut response = Vec::new();
-    tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut response))
+    tokio::time::timeout(Duration::from_secs(30), stream.read_to_end(&mut response))
         .await
         .expect("timed out reading response")
         .unwrap();

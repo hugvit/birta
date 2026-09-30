@@ -208,6 +208,7 @@ fn render_with_mode(
     // Collect referenced relative URLs only for bundle export.
     let collect = matches!(mode, RewriteMode::StaticBundle);
     let mut refs = References::default();
+    let (mut raw_nodes, mut raw_literals) = (Vec::new(), Vec::new());
 
     for node in root.descendants() {
         let mut data = node.data.borrow_mut();
@@ -227,16 +228,32 @@ fn render_with_mode(
             }
             // Rewrite relative image src= in raw HTML (not handled by image_url_rewriter)
             NodeValue::HtmlBlock(block) => {
-                let html = rewrite_html_img_srcs(&block.literal, &mode, collect, &mut refs);
-                block.literal = neutralize_reserved(&html);
+                raw_nodes.push(node);
+                raw_literals.push(rewrite_html_img_srcs(
+                    &block.literal,
+                    &mode,
+                    collect,
+                    &mut refs,
+                ));
             }
             NodeValue::HtmlInline(raw) => {
-                let html = rewrite_html_img_srcs(raw, &mode, collect, &mut refs);
-                *raw = neutralize_reserved(&html);
+                raw_nodes.push(node);
+                raw_literals.push(rewrite_html_img_srcs(raw, &mode, collect, &mut refs));
             }
             // Collect markdown link/image targets for the bundle crawler.
             NodeValue::Link(link) if collect => collect_link(&link.url, &mut refs),
             NodeValue::Image(link) if collect => collect_asset(&link.url, &mut refs),
+            _ => {}
+        }
+    }
+
+    for (node, html) in raw_nodes
+        .into_iter()
+        .zip(neutralize_raw_nodes(raw_literals))
+    {
+        match &mut node.data.borrow_mut().value {
+            NodeValue::HtmlBlock(block) => block.literal = html,
+            NodeValue::HtmlInline(raw) => *raw = html,
             _ => {}
         }
     }
@@ -352,23 +369,133 @@ fn rewrite_html_img_srcs(
     result
 }
 
+/// Elements whose content the tokenizer reads as text up to their end tag; `plaintext` has none.
+const RAW_TEXT: [&str; 10] = [
+    "iframe",
+    "noembed",
+    "noframes",
+    "noscript",
+    "plaintext",
+    "script",
+    "style",
+    "textarea",
+    "title",
+    "xmp",
+];
+
+/// Neutralizes raw nodes' literals in document order. Raw text left open at the end would
+/// swallow the rest of the page, so its start tag is escaped and the pass rerun.
+fn neutralize_raw_nodes(mut literals: Vec<String>) -> Vec<String> {
+    loop {
+        let mut raw_text = None;
+        let mut open = None;
+        let out: Vec<_> = literals
+            .iter()
+            .enumerate()
+            .map(|(i, literal)| {
+                let (html, opened) = neutralize_reserved(literal, &mut raw_text);
+                open = raw_text.and(opened.map(|at| (i, at)).or(open));
+                html
+            })
+            .collect();
+        match open {
+            // Each rerun escapes a later `<`, so this ends
+            Some((i, at)) => literals[i].replace_range(at..at + 1, "&lt;"),
+            None => return out,
+        }
+    }
+}
+
 /// Keeps raw HTML from forging the viewer's own markup: `birta-*` tags render as text
 /// and `data-sourcepos` / `data-br-*` attributes become `data-x-*`. `http-equiv` becomes
 /// `data-x-http-equiv`, since a meta refresh or policy is beyond the page CSP's reach.
-fn neutralize_reserved(literal: &str) -> String {
+/// `raw_text` carries an element whose raw text is still open into the next raw node; the
+/// offset of its start tag is returned if it is in `literal`.
+fn neutralize_reserved(
+    literal: &str,
+    raw_text: &mut Option<&'static str>,
+) -> (String, Option<usize>) {
     let mut out = String::with_capacity(literal.len());
-    let mut rest = literal;
-    // A tag left open would absorb whatever the renderer emits next, so its `<` becomes text.
-    while let Some(open) = neutralize_tags(rest, &mut out) {
-        out.push_str("&lt;");
-        rest = &rest[open + 1..];
-    }
-    out
+    let opened = neutralize_into(literal, &mut out, raw_text, false);
+    (out, opened)
 }
 
-/// Appends `s` to `out`, rewritten. If `s` ends inside a tag, `out` is cut back to
-/// that tag and its offset in `s` is returned.
-fn neutralize_tags(s: &str, out: &mut String) -> Option<usize> {
+/// Appends `s` to `out`, rewritten. `raw_text` names the element whose raw text is open at
+/// the start of `s`, and on return at its end, unless `closed` has its start tag escaped.
+/// Returns the offset of that start tag if it is in `s`.
+fn neutralize_into(
+    s: &str,
+    out: &mut String,
+    raw_text: &mut Option<&'static str>,
+    closed: bool,
+) -> Option<usize> {
+    let mut from = 0;
+    // The open raw text element's start tag, as offsets into `s` and `out`
+    let mut start = None;
+    loop {
+        let mut exited = None;
+        if let Some(name) = *raw_text {
+            let end = raw_text_end(&s[from..], name).map(|end| from + end);
+            // Inside svg, math or a scriptless noscript this text is markup, so it is scanned
+            // as such, and anything it leaves open is escaped to end both readings together
+            neutralize_into(&s[from..end.unwrap_or(s.len())], out, &mut None, true);
+            match (end, start) {
+                (Some(end), _) => {
+                    from = end;
+                    exited = raw_text.take();
+                }
+                (None, Some((lt, mark))) if closed => {
+                    out.truncate(mark);
+                    out.push_str("&lt;");
+                    *raw_text = None;
+                    start = None;
+                    from = lt + 1;
+                    continue;
+                }
+                (None, _) => return start.map(|(lt, _)| lt),
+            }
+        }
+        match neutralize_tags(&s[from..], out) {
+            Scan::Done => return None,
+            // Markup left open would absorb whatever the renderer emits next, so its `<` becomes text
+            Scan::Open(lt) => {
+                out.push_str("&lt;");
+                // Escaping the end tag of raw text leaves that raw text open
+                if lt == 0 {
+                    *raw_text = exited;
+                }
+                from += lt + 1;
+            }
+            Scan::RawText {
+                name,
+                lt,
+                mark,
+                end,
+            } => {
+                *raw_text = Some(name);
+                start = Some((from + lt, mark));
+                from += end;
+            }
+        }
+    }
+}
+
+/// Where [`neutralize_tags`] stopped in its input.
+enum Scan {
+    Done,
+    /// Markup at this offset is still open at the end; `out` stops before it.
+    Open(usize),
+    /// A raw text element's start tag spans `lt..end`, and `out` was `mark` long before it.
+    RawText {
+        name: &'static str,
+        lt: usize,
+        mark: usize,
+        end: usize,
+    },
+}
+
+/// Appends `s` to `out`, rewritten, until it ends, is left inside markup, or enters raw text.
+fn neutralize_tags(s: &str, out: &mut String) -> Scan {
     let b = s.as_bytes();
     let mut copied = 0;
     let mut i = 0;
@@ -381,29 +508,76 @@ fn neutralize_tags(s: &str, out: &mut String) -> Option<usize> {
             i = lt + 1;
             continue;
         }
+        if let Some(body) = after.strip_prefix("![CDATA[") {
+            let (Some(gt), Some(close)) = (body.find('>'), body.find("]]>")) else {
+                out.push_str(&s[copied..lt]);
+                return Scan::Open(lt);
+            };
+            // Outside svg and math this is a bogus comment ending at the first `>`, so what
+            // follows up to `]]>` is scanned as markup too
+            let (data, end) = (lt + 10 + gt, lt + 12 + close);
+            out.push_str(&s[copied..data]);
+            neutralize_into(&s[data..end], out, &mut None, true);
+            copied = end;
+            i = end;
+            continue;
+        }
         let end_tag = after.starts_with('/');
         let name_start = lt + 1 + usize::from(end_tag);
         if !b.get(name_start).is_some_and(u8::is_ascii_alphabetic) {
-            i = match skip_markup(s, lt) {
-                Some(end) => end,
-                // Unterminated comments swallow what follows, which can't forge an attribute
-                None => break,
+            let Some(end) = skip_markup(s, lt) else {
+                out.push_str(&s[copied..lt]);
+                return Scan::Open(lt);
             };
+            i = end;
             continue;
         }
         out.push_str(&s[copied..lt]);
         copied = lt;
         let mark = out.len();
-        match scan_tag(s, name_start, out, &mut copied) {
-            Some(end) => i = end,
-            None => {
-                out.truncate(mark);
-                return Some(lt);
-            }
+        let Some(end) = scan_tag(s, name_start, out, &mut copied) else {
+            out.truncate(mark);
+            return Scan::Open(lt);
+        };
+        i = end;
+        if let Some(name) = raw_text_name(&s[name_start..]).filter(|_| !end_tag) {
+            out.push_str(&s[copied..end]);
+            return Scan::RawText {
+                name,
+                lt,
+                mark,
+                end,
+            };
         }
     }
     out.push_str(&s[copied..]);
-    None
+    Scan::Done
+}
+
+/// The raw text element a tag name at the start of `s` opens, if any.
+fn raw_text_name(s: &str) -> Option<&'static str> {
+    let len = s
+        .find(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>')
+        .unwrap_or(s.len());
+    RAW_TEXT
+        .into_iter()
+        .find(|name| name.eq_ignore_ascii_case(&s[..len]))
+}
+
+/// Offset of the `</name` ending `name`'s raw text, which the tokenizer only matches when
+/// whitespace, `/` or `>` follows.
+fn raw_text_end(s: &str, name: &str) -> Option<usize> {
+    if name == "plaintext" {
+        return None;
+    }
+    let b = s.as_bytes();
+    s.match_indices("</").map(|(i, _)| i).find(|&i| {
+        let after = i + 2 + name.len();
+        b.get(i + 2..after)
+            .is_some_and(|n| n.eq_ignore_ascii_case(name.as_bytes()))
+            && b.get(after)
+                .is_some_and(|c| matches!(c, b'\t' | b'\n' | b'\x0c' | b'\r' | b' ' | b'/' | b'>'))
+    })
 }
 
 /// End of a comment, `<!…>`, `<?…>` or `</…>` starting at `lt`, or `lt + 1` for a literal `<`.
@@ -1200,5 +1374,396 @@ mod tests {
                 assert!(html.contains(want), "{name} lost {want:?}:\n{html}");
             }
         }
+    }
+
+    const RAW_TEXT_TAGS: [&str; 10] = [
+        "style",
+        "textarea",
+        "title",
+        "script",
+        "xmp",
+        "iframe",
+        "noembed",
+        "noframes",
+        "noscript",
+        "plaintext",
+    ];
+
+    /// Start and end tags a browser tokenizes from `html`, as (name, [(attr, value)]), with
+    /// end tag names prefixed by `/`. Each raw text start tag or `<![CDATA[` takes the next
+    /// bit of `mask`: set means raw text, or CDATA running to `]]>` as in svg and math.
+    fn live_tags(html: &str, mask: u64) -> Vec<(String, Vec<(String, String)>)> {
+        let b = html.as_bytes();
+        let ws = |c: u8| matches!(c, b'\t' | b'\n' | b'\x0c' | b'\r' | b' ');
+        let at = |i: usize, p: &str| b.get(i..).is_some_and(|r| r.starts_with(p.as_bytes()));
+        let find = |i: usize, p: &str| {
+            (i..b.len())
+                .find(|&j| at(j, p))
+                .map_or(b.len(), |j| j + p.len())
+        };
+        let mut bits = (0..).map(|n: u32| mask >> (n % 64) & 1 == 1);
+        let mut tags = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] != b'<' {
+                i += 1;
+                continue;
+            }
+            i += 1;
+            if at(i, "!--") {
+                i += 3;
+                if at(i, ">") || at(i, "->") {
+                    i = find(i, ">");
+                    continue;
+                }
+                let mut dashes = 0;
+                while i < b.len() {
+                    match b[i] {
+                        b'-' => dashes += 1,
+                        b'>' if dashes >= 2 => break,
+                        b'!' if dashes >= 2 && at(i + 1, ">") => {}
+                        _ => dashes = 0,
+                    }
+                    i += 1;
+                }
+                i += 1;
+                continue;
+            }
+            if at(i, "![CDATA[") && bits.next().unwrap() {
+                i = find(i, "]]>");
+                continue;
+            }
+            let end_tag = at(i, "/") && b.get(i + 1).is_some_and(u8::is_ascii_alphabetic);
+            if at(i, "!") || at(i, "?") || (at(i, "/") && !end_tag) {
+                if i + 1 < b.len() {
+                    i = find(i, ">");
+                }
+                continue;
+            }
+            if !end_tag && !b[i].is_ascii_alphabetic() {
+                continue;
+            }
+            let start = i;
+            i += usize::from(end_tag);
+            while i < b.len() && !ws(b[i]) && b[i] != b'/' && b[i] != b'>' {
+                i += 1;
+            }
+            let name = html[start..i].to_ascii_lowercase();
+            let mut attrs = Vec::new();
+            let closed = loop {
+                while i < b.len() && (ws(b[i]) || b[i] == b'/') {
+                    i += 1;
+                }
+                match b.get(i) {
+                    None => break false,
+                    Some(b'>') => break true,
+                    _ => {}
+                }
+                let a = i;
+                i += 1;
+                while i < b.len() && !ws(b[i]) && !matches!(b[i], b'/' | b'>' | b'=') {
+                    i += 1;
+                }
+                let attr = html[a..i].to_ascii_lowercase();
+                while i < b.len() && ws(b[i]) {
+                    i += 1;
+                }
+                let mut value = "";
+                if at(i, "=") {
+                    i += 1;
+                    while i < b.len() && ws(b[i]) {
+                        i += 1;
+                    }
+                    let v = i;
+                    match b.get(i) {
+                        Some(&q @ (b'"' | b'\'')) => {
+                            let Some(close) = (i + 1..b.len()).find(|&j| b[j] == q) else {
+                                break false;
+                            };
+                            value = &html[v + 1..close];
+                            i = close + 1;
+                        }
+                        _ => {
+                            while i < b.len() && !ws(b[i]) && b[i] != b'>' {
+                                i += 1;
+                            }
+                            value = &html[v..i];
+                        }
+                    }
+                }
+                attrs.push((attr, value.to_string()));
+            };
+            // A tag cut off by the end of input is dropped
+            if !closed {
+                break;
+            }
+            i += 1;
+            if !end_tag && RAW_TEXT_TAGS.contains(&name.as_str()) && bits.next().unwrap() {
+                // Nothing ends plaintext
+                let close = format!("</{name}");
+                i = (i..b.len())
+                    .find(|&j| {
+                        name != "plaintext"
+                            && html
+                                .get(j..j + close.len())
+                                .is_some_and(|t| t.eq_ignore_ascii_case(&close))
+                            && b.get(j + close.len())
+                                .is_some_and(|&c| ws(c) || c == b'/' || c == b'>')
+                    })
+                    .unwrap_or(b.len());
+            }
+            tags.push((name, attrs));
+        }
+        tags
+    }
+
+    /// Live reserved markup the doc planted, under every raw text/CDATA reading of `html`
+    /// the mask can pick, or the page after `html` swallowed. Forged `data-*` values
+    /// contain `forged`, unlike rendered ones.
+    fn forgeries(html: &str, masks: impl IntoIterator<Item = u64>) -> Vec<String> {
+        let page = format!("{html}<p id=\"page-end\">");
+        let mut found = Vec::new();
+        for mask in masks {
+            let tags = live_tags(&page, mask);
+            let end = (
+                "p".to_string(),
+                vec![("id".to_string(), "page-end".to_string())],
+            );
+            if tags.last() != Some(&end) {
+                found.push(format!("page end swallowed (mask {mask:#x})"));
+            }
+            for (name, attrs) in tags {
+                if name.trim_start_matches('/').starts_with("birta-") {
+                    found.push(format!("<{name}> (mask {mask:#x})"));
+                }
+                for (attr, value) in attrs {
+                    let data = attr == "data-sourcepos" || attr.starts_with("data-br-");
+                    if attr == "http-equiv" || (data && value.contains("forged")) {
+                        found.push(format!("<{name} {attr}={value:?}> (mask {mask:#x})"));
+                    }
+                }
+            }
+        }
+        found.dedup();
+        found
+    }
+
+    /// Markdown placing `inner` where a tokenizer that honors comments or quotes in the
+    /// wrong state would skip it.
+    fn desync_payloads(inner: &str) -> Vec<String> {
+        let mut docs = Vec::new();
+        for t in RAW_TEXT_TAGS {
+            docs.push(format!("<{t}><!--</{t}>{inner}-->"));
+            docs.push(format!("<{t}><!--</{t}>{inner}"));
+            docs.push(format!("x <{t}> <!--</{t}>{inner}-->"));
+            docs.push(format!("<{t}>\n\n<!--</{t}>{inner}-->"));
+            docs.push(format!("<{t}>a</{t}x><!--</{t}>{inner}-->"));
+            docs.push(format!("<svg><{t}>{inner}</{t}></svg>"));
+        }
+        docs.extend([
+            format!("<STYLE><!--</Style\t>{inner}-->"),
+            format!("<style><!--</style/>{inner}-->"),
+            format!("> <!--\n\n<a title='-->{inner}'>x</a>"),
+            format!("- <!--\n\ny <a title='-->{inner}'>x</a>"),
+            format!("<svg>\n\n<![CDATA[><!--]]>{inner}-->"),
+            format!("<noscript><textarea></noscript><!--</textarea>{inner}-->"),
+            format!("<title><!--></title>{inner}"),
+            format!("<!-->{inner}"),
+            format!("<!--->{inner}"),
+            format!("<!-- --!>{inner}-->"),
+            format!("<!---->{inner}"),
+        ]);
+        docs
+    }
+
+    fn assert_no_forgeries(docs: &[String]) {
+        let mut bad = Vec::new();
+        for md in docs {
+            for (name, html) in all_renders(md) {
+                let found = forgeries(&html, 0..256);
+                if !found.is_empty() {
+                    bad.push(format!("{name}({md:?}): {found:?}\n  {html}"));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{} forged:\n{}", bad.len(), bad.join("\n"));
+    }
+
+    #[test]
+    fn raw_html_http_equiv_survives_tokenizer_desync() {
+        assert_no_forgeries(&desync_payloads(
+            "<meta http-equiv=\"refresh\" content=\"0;url=about:blank\">",
+        ));
+    }
+
+    #[test]
+    fn raw_html_reserved_attrs_survive_tokenizer_desync() {
+        assert_no_forgeries(&desync_payloads(
+            "<div data-sourcepos=\"forged\" data-br-id=\"forged\">x</div>",
+        ));
+    }
+
+    #[test]
+    fn raw_html_reserved_tags_survive_tokenizer_desync() {
+        assert_no_forgeries(&desync_payloads("<birta-x>y</birta-x>"));
+    }
+
+    #[test]
+    fn raw_html_open_tag_survives_tokenizer_desync() {
+        // The open `title` absorbs rendered markup up to the paragraph's decoded `'`
+        let docs = desync_payloads("<div title='")
+            .into_iter()
+            .map(|md| {
+                format!("{md}\n\n&#39; data-sourcepos=forged data-br-x=forged x=&#39;\n\n&#39;")
+            })
+            .collect::<Vec<_>>();
+        assert_no_forgeries(&docs);
+    }
+
+    #[test]
+    fn raw_html_unclosed_raw_text_leaves_later_markdown_live() {
+        let mut docs = Vec::new();
+        for t in RAW_TEXT_TAGS {
+            docs.push(format!("# Visible\n\nx <{t}> y\n\n# Gone\n\n**vanished**"));
+            // A markdown HTML block opened by these runs to the end of the doc
+            if !["style", "script", "textarea"].contains(&t) {
+                docs.push(format!("# Visible\n\n<{t}>\n\n# Gone\n\n**vanished**"));
+                docs.push(format!(
+                    "# Visible\n\n<{t}>\n\n<b>z</b>\n\n# Gone\n\n**vanished**"
+                ));
+            }
+        }
+        // Escaping the outer start tag exposes the one in its attribute
+        docs.push("# Visible\n\n<xmp a='<plaintext>'>\n\n# Gone\n\n**vanished**".into());
+        for md in &docs {
+            for (name, html) in all_renders(md) {
+                let tags = live_tags(&html, !0);
+                let live = |tag: &str| tags.iter().filter(|(n, _)| n == tag).count();
+                assert!(
+                    live("h1") == 2 && live("strong") == 1,
+                    "{name}({md:?}): {html}"
+                );
+            }
+        }
+        assert_no_forgeries(&docs);
+    }
+
+    #[test]
+    fn raw_html_unterminated_markup_is_escaped() {
+        for (md, want) in [
+            ("> <!--\n\nx", "&lt;!--"),
+            ("> <!x\n\nx", "&lt;!x"),
+            ("> <?x\n\nx", "&lt;?x"),
+            ("> <![CDATA[ x\n\nx", "&lt;![CDATA["),
+        ] {
+            for (name, html) in all_renders(md) {
+                assert!(html.contains(want), "{name}({md:?}): {html}");
+            }
+        }
+    }
+
+    #[test]
+    fn raw_html_raw_text_elements_render_intact() {
+        let cases = [
+            (
+                "<style>\np > a { color: red } /* <b data-sourcepos=\"1\"> */\n</style>",
+                "<style>\np > a { color: red } /* <b data-x-sourcepos=\"1\"> */\n</style>",
+            ),
+            (
+                "<textarea><!-- a -->b</textarea>",
+                "<textarea><!-- a -->b</textarea>",
+            ),
+            (
+                "x <iframe src=\"https://example.com/\"></iframe> y",
+                "x <iframe src=\"https://example.com/\"></iframe> y",
+            ),
+            (
+                "<iframe src=\"https://example.com/\">\n\n</iframe>",
+                "</iframe>",
+            ),
+            ("<svg><title>t</title></svg>", "<svg><title>t</title></svg>"),
+        ];
+        for (md, want) in cases {
+            for (name, html) in all_renders(md) {
+                assert!(html.contains(want), "{name}({md:?}): {html}");
+                assert!(!html.contains("&lt;"), "{name}({md:?}): {html}");
+            }
+        }
+    }
+
+    /// Random mixes of the constructs the scanner and a browser could read differently.
+    #[test]
+    fn neutralizer_holds_under_random_markup() {
+        const OPEN: [&str; 12] = [
+            "<style>",
+            "<title>",
+            "<textarea>",
+            "<noscript>",
+            "<xmp>",
+            "<svg>",
+            "<!--",
+            "<![CDATA[",
+            "<a title='",
+            "<b x=\"",
+            "<plaintext>",
+            "<!x",
+        ];
+        const CLOSE: [&str; 14] = [
+            "</style>",
+            "</title>",
+            "</TEXTAREA\t>",
+            "</noscript>",
+            "</xmp/>",
+            "</svg>",
+            "-->",
+            "--!>",
+            "<!-->",
+            "]]>",
+            "'>",
+            "\">",
+            "&#39;",
+            "</style x='",
+        ];
+        const PAYLOAD: [&str; 4] = [
+            "<meta http-equiv=refresh>",
+            "<div data-sourcepos=forged>",
+            "<i data-br-x=forged>",
+            "<birta-x>",
+        ];
+        const PLAIN: [&str; 4] = ["# h", "**b**", "text", "| a |\n|---|\n| b |"];
+        const SEPARATORS: [&str; 8] = ["", "", "", " ", "\n", "\n\n", "\n\n> ", "\n\n- "];
+        const DOCS: usize = 400;
+        let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        let mut bad = Vec::new();
+        for _ in 0..DOCS {
+            let mut md = String::new();
+            for _ in 0..8 + next(24) {
+                md.push_str(SEPARATORS[next(SEPARATORS.len())]);
+                md.push_str(match next(10) {
+                    0..4 => OPEN[next(OPEN.len())],
+                    4..7 => CLOSE[next(CLOSE.len())],
+                    7..9 => PAYLOAD[next(PAYLOAD.len())],
+                    _ => PLAIN[next(PLAIN.len())],
+                });
+            }
+            let html = render(&md, None);
+            let masks = [0, !0, next(usize::MAX) as u64, next(usize::MAX) as u64];
+            let found = forgeries(&html, masks);
+            if !found.is_empty() {
+                bad.push(format!("{md:?}\n  {found:?}"));
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "{} of {DOCS} docs forged markup, first 3:\n{}",
+            bad.len(),
+            bad[..bad.len().min(3)].join("\n")
+        );
     }
 }

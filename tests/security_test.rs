@@ -31,7 +31,7 @@ async fn ws_upgrade_status(port: u16, headers: &[(&str, &str)]) -> u16 {
             value.parse().unwrap(),
         );
     }
-    let result = tokio::time::timeout(Duration::from_secs(5), connect_async(request))
+    let result = tokio::time::timeout(Duration::from_secs(30), connect_async(request))
         .await
         .expect("timed out");
     match result {

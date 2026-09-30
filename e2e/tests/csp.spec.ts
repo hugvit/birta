@@ -26,10 +26,22 @@ const HOSTILE = `# Hostile
 `;
 
 // CSP can't stop a meta refresh, so the renderer defuses the attribute
-const REFRESH = `# Refresh
+const REFRESH_TAG = `<meta http-equiv="refresh" content="0;url=about:blank">`;
+const REFRESH = `# Refresh\n\n${REFRESH_TAG}\n`;
 
-<meta http-equiv="refresh" content="0;url=about:blank">
-`;
+// Each hides the refresh from a renderer that misreads comments, raw text or CDATA
+const HIDDEN_REFRESH = [
+  `<style><!--</style>${REFRESH_TAG}-->`,
+  `<title><!--</title>${REFRESH_TAG}`,
+  `<script><!--</script>${REFRESH_TAG}-->`,
+  `<noscript><!--</noscript>${REFRESH_TAG}-->`,
+  `x <xmp> <!--</xmp>${REFRESH_TAG}-->`,
+  `<iframe>\n\n<!--</iframe>${REFRESH_TAG}-->`,
+  `> <!--\n\n<a title='-->${REFRESH_TAG}'>x</a>`,
+  `<svg>\n\n<![CDATA[><!--]]>${REFRESH_TAG}-->`,
+  `<svg><title>${REFRESH_TAG}</title></svg>`,
+  `<!-- --!>${REFRESH_TAG}-->`,
+].map((md) => `# Refresh\n\n${md}\n`);
 
 // Inserted by live reload or a /render refetch, where innerHTML still runs handlers and srcdoc
 const INJECTED = `# Reloaded
@@ -173,6 +185,7 @@ test.describe("page CSP", () => {
     fs.writeFileSync(path.join(dir, "features.md"), FEATURES);
     fs.writeFileSync(path.join(dir, "reload.md"), "# Reload\n");
     fs.writeFileSync(path.join(dir, "refresh.md"), REFRESH);
+    HIDDEN_REFRESH.forEach((md, i) => fs.writeFileSync(path.join(dir, `refresh-${i}.md`), md));
     server = await startBirta(port, path.join(dir, "index.md"));
   });
 
@@ -198,6 +211,14 @@ test.describe("page CSP", () => {
 
   test("a doc meta refresh does not navigate", async ({ page }) => {
     await expectNoRefresh(page, `${BASE}/view/refresh.md`);
+  });
+
+  HIDDEN_REFRESH.forEach((md, i) => {
+    test(`a meta refresh hidden from the renderer does not navigate: ${JSON.stringify(md)}`, async ({
+      page,
+    }) => {
+      await expectNoRefresh(page, `${BASE}/view/refresh-${i}.md`);
+    });
   });
 
   test("script delivered by live reload or a /render refetch does not run", async ({ page }) => {
@@ -276,10 +297,15 @@ test.describe("static export CSP", () => {
     out = path.join(dir, "out");
     fs.writeFileSync(
       path.join(dir, "index.md"),
-      FEATURES.replace("# Features", "# Static\n\n[hostile](hostile.md) [refresh](refresh.md)"),
+      FEATURES.replace(
+        "# Features",
+        "# Static\n\n[hostile](hostile.md) [refresh](refresh.md) " +
+          HIDDEN_REFRESH.map((_, i) => `[r${i}](refresh-${i}.md)`).join(" "),
+      ),
     );
     fs.writeFileSync(path.join(dir, "hostile.md"), HOSTILE);
     fs.writeFileSync(path.join(dir, "refresh.md"), REFRESH);
+    HIDDEN_REFRESH.forEach((md, i) => fs.writeFileSync(path.join(dir, `refresh-${i}.md`), md));
     execFileSync(
       "cargo",
       ["run", "--", "--static", "--no-open", "--out", out, path.join(dir, "index.md")],
@@ -297,6 +323,14 @@ test.describe("static export CSP", () => {
 
   test("a static doc meta refresh does not navigate", async ({ page }) => {
     await expectNoRefresh(page, pathToFileURL(path.join(out, "refresh.html")).href);
+  });
+
+  HIDDEN_REFRESH.forEach((md, i) => {
+    test(`a static meta refresh hidden from the renderer does not navigate: ${JSON.stringify(md)}`, async ({
+      page,
+    }) => {
+      await expectNoRefresh(page, pathToFileURL(path.join(out, `refresh-${i}.html`)).href);
+    });
   });
 
   test("static pages render mermaid and KaTeX without violations", async ({ page }) => {

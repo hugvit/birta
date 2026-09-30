@@ -24,6 +24,32 @@ const DOC = `# Reserved
 <div data-sourcepos="40:1-90:1" data-br-note="n">raw</div>
 <birta-flow>flow</birta-flow>
 </section>
+
+<style><!--</style><div data-sourcepos="forged-1" data-br-id="forged">a</div>-->
+
+x <xmp> <!--</xmp><birta-hidden>b</birta-hidden>-->
+
+> <!--
+
+<a title='--><div data-sourcepos="forged-2">c</div>'>d</a>
+
+<title><!--</title><img alt="" data-a='
+
+&#39; data-sourcepos=forged-3 data-br-x=forged x=&#39;
+
+&#39;
+
+<svg>
+
+<![CDATA[><!--]]><i data-sourcepos="forged-4" data-br-y="forged">e</i>-->
+
+</svg>
+
+## End
+
+x <xmp> left open
+
+## After
 `;
 
 async function startBirta(port: number, file: string): Promise<ChildProcess> {
@@ -68,8 +94,8 @@ test.describe("reserved markup", () => {
     await expect(page.locator("h1").first()).toHaveText("Reserved");
 
     const found = await page.evaluate(() => ({
-      forged: ["50:1-60:1", "9:9-9:9", "40:1-90:1"].filter((v) =>
-        document.querySelector(`[data-sourcepos="${v}"]`)
+      forged: ["50:1-60:1", "9:9-9:9", "40:1-90:1", "forged-1", "forged-2", "forged-3", "forged-4"].filter(
+        (v) => document.querySelector(`[data-sourcepos="${v}"]`)
       ),
       dataBr: Array.from(document.querySelectorAll("#content *")).flatMap(
         (el) => el.getAttributeNames().filter((n) => n.startsWith("data-br-"))
@@ -81,5 +107,6 @@ test.describe("reserved markup", () => {
     }));
     expect(found).toEqual({ forged: [], dataBr: [], birta: [], renamed: true });
     await expect(page.locator("#content")).toContainText("<birta-flow>flow");
+    await expect(page.locator("h2")).toHaveText(["End", "After"]);
   });
 });

@@ -1,0 +1,271 @@
+---
+source: tests/review_fold_test.rs
+expression: json
+---
+{
+  "schema": "review-state/1",
+  "doc": "pr.md",
+  "rev": "21e4c7251bbee8cd8d40ac78988ff326db67ae96",
+  "server_now": 0,
+  "writable": true,
+  "log_writable": true,
+  "hand_off": "",
+  "log": {
+    "lines": 16,
+    "bad": 0,
+    "unknown_ops": 0,
+    "read_only": false,
+    "baseline_available": true
+  },
+  "owner": {
+    "drafted_by": null
+  },
+  "phrase": {
+    "stage": "replied",
+    "sent": {
+      "n": 10,
+      "ts": 1790000010000,
+      "items": 6,
+      "can_withdraw": false
+    },
+    "picked_up": {
+      "n": 11,
+      "ts": 1790000011000,
+      "by": "claude",
+      "silence": {
+        "since_ts": 1790000011000,
+        "threshold_ms": 900000
+      }
+    },
+    "replied": {
+      "turn": 11,
+      "ts": 1790000016000,
+      "by": "claude",
+      "done": 1,
+      "answered": 1,
+      "didnt": 1,
+      "asked": 0,
+      "unasked": 0,
+      "not_handled": 0,
+      "note": "Cut the first item.\nAnswered the question."
+    }
+  },
+  "phrase_before_hold": null,
+  "hold": null,
+  "counts": {
+    "drafts": 0,
+    "sent_unclaimed": 0,
+    "unseen": 0,
+    "unasked": 0,
+    "not_handled": 0,
+    "open_asks": 0,
+    "later": 1,
+    "lost": 0,
+    "items": 10,
+    "decided": 4,
+    "attention": 2
+  },
+  "items": [
+    {
+      "n": 4,
+      "op": "comment",
+      "by": {
+        "type": "human",
+        "name": "andres",
+        "via": "browser"
+      },
+      "cid": "c-4",
+      "ts": 1790000004000,
+      "at": {
+        "kind": "anchor",
+        "scope": "block",
+        "quote": "- first item",
+        "rev": "21e4c7251bbee8cd8d40ac78988ff326db67ae96",
+        "loc": null
+      },
+      "verdict": "no",
+      "status": "handled",
+      "sent_in": 10,
+      "turn": 11,
+      "amended": [],
+      "replies": [],
+      "outcome": {
+        "done": true,
+        "no_change": true,
+        "changes": []
+      }
+    },
+    {
+      "n": 5,
+      "op": "comment",
+      "by": {
+        "type": "human",
+        "name": "andres",
+        "via": "browser"
+      },
+      "cid": "c-5",
+      "ts": 1790000005000,
+      "at": {
+        "kind": "anchor",
+        "scope": "block",
+        "quote": "- second item\n  - nested item",
+        "rev": "21e4c7251bbee8cd8d40ac78988ff326db67ae96",
+        "loc": null
+      },
+      "verdict": "ask",
+      "status": "handled",
+      "sent_in": 10,
+      "turn": 11,
+      "amended": [],
+      "replies": [
+        {
+          "n": 13,
+          "id": "#13",
+          "by": {
+            "type": "agent",
+            "name": "claude",
+            "via": "cli"
+          },
+          "kind": "answer",
+          "body": "two cases need it",
+          "ts": 1790000013000,
+          "seen": false
+        }
+      ]
+    },
+    {
+      "n": 6,
+      "op": "comment",
+      "by": {
+        "type": "human",
+        "name": "andres",
+        "via": "browser"
+      },
+      "cid": "c-6",
+      "ts": 1790000006000,
+      "at": {
+        "kind": "anchor",
+        "scope": "block",
+        "quote": "- third item",
+        "rev": "21e4c7251bbee8cd8d40ac78988ff326db67ae96",
+        "loc": null
+      },
+      "verdict": "yes",
+      "status": "handled",
+      "sent_in": 10,
+      "turn": 11,
+      "amended": [],
+      "replies": []
+    },
+    {
+      "n": 7,
+      "op": "comment",
+      "by": {
+        "type": "human",
+        "name": "andres",
+        "via": "browser"
+      },
+      "cid": "c-7",
+      "ts": 1790000007000,
+      "at": {
+        "kind": "anchor",
+        "scope": "block",
+        "quote": "- detail one",
+        "rev": "21e4c7251bbee8cd8d40ac78988ff326db67ae96",
+        "loc": null
+      },
+      "verdict": "later",
+      "status": "later",
+      "sent_in": 10,
+      "turn": 11,
+      "amended": [],
+      "replies": []
+    },
+    {
+      "n": 8,
+      "op": "comment",
+      "by": {
+        "type": "human",
+        "name": "andres",
+        "via": "browser"
+      },
+      "cid": "c-8",
+      "ts": 1790000008000,
+      "at": {
+        "kind": "anchor",
+        "scope": "block",
+        "quote": "- detail two",
+        "rev": "21e4c7251bbee8cd8d40ac78988ff326db67ae96",
+        "loc": null
+      },
+      "verdict": "stet",
+      "status": "handled",
+      "sent_in": 10,
+      "turn": 11,
+      "amended": [],
+      "replies": []
+    },
+    {
+      "n": 9,
+      "op": "comment",
+      "by": {
+        "type": "human",
+        "name": "andres",
+        "via": "browser"
+      },
+      "cid": "c-9",
+      "ts": 1790000009000,
+      "at": {
+        "kind": "doc",
+        "loc": null
+      },
+      "body": "tighten the intro",
+      "status": "handled",
+      "sent_in": 10,
+      "turn": 11,
+      "amended": [],
+      "replies": [
+        {
+          "n": 14,
+          "id": "#14",
+          "by": {
+            "type": "agent",
+            "name": "claude",
+            "via": "cli"
+          },
+          "kind": "didnt",
+          "body": "the intro is already short",
+          "ts": 1790000014000,
+          "seen": false
+        }
+      ]
+    }
+  ],
+  "changes": [],
+  "deletions": [],
+  "later": [
+    7
+  ],
+  "lost": [],
+  "rounds": [
+    {
+      "submit": 10,
+      "ts": 1790000010000,
+      "by": "andres",
+      "to": "*",
+      "items": [
+        4,
+        5,
+        6,
+        7,
+        8,
+        9
+      ],
+      "claim": 11,
+      "claimed_by": "claude",
+      "yield": 16,
+      "released": false
+    }
+  ],
+  "warnings": []
+}

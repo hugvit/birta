@@ -31,7 +31,7 @@ pub struct Step {
 pub enum Cause {
     /// birta's own write: an `edit`.
     Edit,
-    /// An `external` while exactly one agent held a claim.
+    /// An `external` while an agent held an open claim.
     Agent,
     /// Any other write, including a snap standing in for one.
     Outside { git: bool },
@@ -117,7 +117,7 @@ impl Chain {
                         cause,
                         ..
                     } => {
-                        let cause = if claims.open.len() == 1 {
+                        let cause = if !claims.open.is_empty() {
                             Cause::Agent
                         } else {
                             Cause::Outside {
@@ -126,15 +126,19 @@ impl Chain {
                         };
                         patch(rev, to_rev, hunks, cause)
                     }
-                    Op::Claim { round } => {
-                        claims.claim(*round, line.by.name.clone());
+                    Op::Approve { .. } => {
+                        claims.approves.insert(line.n);
                         None
                     }
-                    Op::Yield { release, .. } => {
-                        if *release && line.by.kind == ByKind::Human {
-                            claims.open.clear();
-                        } else {
-                            claims.open.retain(|name| *name != line.by.name);
+                    Op::Claim { round } => {
+                        claims.claim(line.n, *round, line.by.name.clone());
+                        None
+                    }
+                    Op::Yield { release, turn } => {
+                        match (line.by.kind, *release, *turn) {
+                            (ByKind::Human, true, Some(turn)) => claims.release(turn),
+                            (ByKind::Human, ..) => {}
+                            _ => claims.end(*turn, &line.by.name),
                         }
                         None
                     }
@@ -264,17 +268,39 @@ impl Chain {
 /// Agents holding a turn, for telling their writes from outside ones.
 #[derive(Default)]
 struct Claims {
-    /// Rounds claimed so far; a later claim of one lost the race.
+    /// Approve lines: claiming one opens no turn, since nothing is asked of the agent.
+    approves: HashSet<u32>,
+    /// Rounds with a claim nobody released; a later claim of one lost the race.
     rounds: HashSet<u32>,
-    /// The name on each open claim.
-    open: Vec<Option<String>>,
+    /// Open turns, oldest first.
+    open: Vec<OpenClaim>,
+}
+
+struct OpenClaim {
+    n: u32,
+    round: u32,
+    name: Option<String>,
 }
 
 impl Claims {
-    fn claim(&mut self, round: u32, name: Option<String>) {
-        if self.rounds.insert(round) {
-            self.open.push(name);
+    fn claim(&mut self, n: u32, round: u32, name: Option<String>) {
+        if self.rounds.insert(round) && !self.approves.contains(&round) {
+            self.open.push(OpenClaim { n, round, name });
         }
+    }
+
+    /// The human takes back the round of claim `turn`, which may then be claimed again.
+    fn release(&mut self, turn: u32) {
+        if let Some(i) = self.open.iter().position(|c| c.n == turn) {
+            let claim = self.open.remove(i);
+            self.rounds.remove(&claim.round);
+        }
+    }
+
+    /// An agent's yield ends its turn `turn`, or all its turns when it names none.
+    fn end(&mut self, turn: Option<u32>, name: &Option<String>) {
+        self.open
+            .retain(|c| c.name != *name || turn.is_some_and(|turn| turn != c.n));
     }
 }
 

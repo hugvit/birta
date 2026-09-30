@@ -504,3 +504,172 @@ fn a_ts_at_u64_max_does_not_panic() {
         let _ = t.check_submit(4, u64::MAX);
     }
 }
+
+// --- release ---
+
+fn claim_as(ts: u64, round: u32, name: &str) -> Value {
+    json!({"ts": ts, "by": {"type": "agent", "name": name, "via": "cli"}, "op": "claim", "round": round})
+}
+
+/// The human takes the round back from the claim on line `turn`.
+fn release(ts: u64, turn: u32) -> Value {
+    json!({"ts": ts, "by": human(), "op": "yield", "turn": turn, "release": true})
+}
+
+fn agent_yield(ts: u64, turn: u32) -> Value {
+    json!({"ts": ts, "by": agent(), "op": "yield", "turn": turn})
+}
+
+#[test]
+fn a_released_round_is_claimable_again() {
+    // 4 note, 5 submit, 6 claim(5), 7 release(6)
+    let ops = [
+        note(1_000),
+        submit(2_000, 4, 7_000),
+        claim(8_000, 5),
+        release(9_000, 6),
+    ];
+    let t = idx(&ops, 10_000);
+    assert_eq!(t.rounds[0].claim, None);
+    assert_eq!(t.check_claim(5, 10_000), Ok(()));
+    assert_eq!(t.claimable_round(10_000), Some(5));
+    assert_eq!(t.pending_deadline(), Some(7_000));
+    // Before the release the same log refuses the claim
+    assert_eq!(
+        idx(&ops[..3], 10_000).check_claim(5, 10_000),
+        Err(Reject::AlreadyClaimed)
+    );
+}
+
+#[test]
+fn a_claim_after_a_release_is_the_live_one() {
+    let t = idx(
+        &[
+            note(1_000),
+            submit(2_000, 4, 7_000),
+            claim(8_000, 5),
+            release(9_000, 6),
+            claim_as(10_000, 5, "other"),
+        ],
+        11_000,
+    );
+    assert_eq!(t.rounds[0].claim, Some(8));
+    assert_eq!(t.check_claim(5, 11_000), Err(Reject::AlreadyClaimed));
+    assert_eq!(t.claimable_round(11_000), None);
+}
+
+#[test]
+fn a_claim_that_lost_the_race_does_not_come_back_after_a_release() {
+    // 6 wins, 7 lost the race, 8 releases 6
+    let t = idx(
+        &[
+            note(1_000),
+            submit(2_000, 4, 7_000),
+            claim(8_000, 5),
+            claim_as(8_500, 5, "other"),
+            release(9_000, 6),
+        ],
+        10_000,
+    );
+    assert_eq!(t.rounds[0].claim, None);
+    assert_eq!(t.check_claim(5, 10_000), Ok(()));
+}
+
+#[test]
+fn only_a_human_release_of_the_live_claim_releases() {
+    let base = [note(1_000), submit(2_000, 4, 7_000), claim(8_000, 5)];
+    let cases = [
+        ("a release naming another line", release(9_000, 99)),
+        (
+            "an agent yield with release",
+            json!({"ts": 9_000, "by": agent(), "op": "yield", "turn": 6, "release": true}),
+        ),
+        (
+            "a human yield without release",
+            json!({"ts": 9_000, "by": human(), "op": "yield", "turn": 6}),
+        ),
+        (
+            "a release with no author",
+            json!({"ts": 9_000, "op": "yield", "turn": 6, "release": true}),
+        ),
+    ];
+    for (what, op) in cases {
+        let mut ops = base.to_vec();
+        ops.push(op);
+        let t = idx(&ops, 10_000);
+        assert_eq!(t.rounds[0].claim, Some(6), "{what}");
+        assert_eq!(
+            t.check_claim(5, 10_000),
+            Err(Reject::AlreadyClaimed),
+            "{what}"
+        );
+    }
+}
+
+#[test]
+fn a_release_after_the_agent_yielded_changes_nothing() {
+    let t = idx(
+        &[
+            note(1_000),
+            submit(2_000, 4, 7_000),
+            claim(8_000, 5),
+            agent_yield(9_000, 6),
+            release(10_000, 6),
+        ],
+        11_000,
+    );
+    assert_eq!(t.rounds[0].claim, Some(6));
+    assert_eq!(t.check_claim(5, 11_000), Err(Reject::AlreadyClaimed));
+    assert_eq!(t.claimable_round(11_000), None);
+}
+
+#[test]
+fn a_released_round_is_still_sent() {
+    let ops = [
+        note(1_000),
+        submit(2_000, 4, 7_000),
+        claim(8_000, 5),
+        release(9_000, 6),
+    ];
+    let t = idx(&ops, 10_000);
+    // A claim named it, so it can't be withdrawn, and its notes stay handed back
+    assert_eq!(t.check_withdraw(5), Err(Reject::NotWithdrawable));
+    assert_eq!(t.check_submit(7, 10_000), Err(Reject::NothingToSend));
+}
+
+#[test]
+fn releasing_a_later_round_frees_the_earlier_ones_it_took() {
+    // 4 note, 5 submit, 6 note, 7 submit, 8 claim(7), 9 release(8)
+    let t = idx(
+        &[
+            note(1_000),
+            submit(2_000, 4, 3_000),
+            note(4_000),
+            submit(5_000, 6, 6_000),
+            claim(7_000, 7),
+            release(8_000, 8),
+        ],
+        9_000,
+    );
+    assert_eq!(t.claimable_round(9_000), Some(7));
+    assert_eq!(t.check_claim(5, 9_000), Ok(()));
+    assert_eq!(t.check_claim(7, 9_000), Ok(()));
+}
+
+#[test]
+fn a_withdraw_line_after_a_release_is_ignored() {
+    // Clearing the released claim must not reopen the round to a withdraw
+    let t = idx(
+        &[
+            note(1_000),
+            submit(2_000, 4, 7_000),
+            claim(8_000, 5),
+            release(9_000, 6),
+            withdraw(10_000, 5),
+        ],
+        11_000,
+    );
+    assert_eq!(t.rounds[0].withdrawn, None);
+    assert_eq!(t.check_claim(5, 11_000), Ok(()));
+    assert_eq!(t.claimable_round(11_000), Some(5));
+}

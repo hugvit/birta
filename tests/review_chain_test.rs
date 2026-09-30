@@ -700,3 +700,83 @@ fn a_recorded_history_rebuilds_every_text() {
         );
     }
 }
+
+// --- who wrote an external: claims, releases, approves ---
+
+const W0: &str = "one\ntwo\n";
+const W1: &str = "one\ntwo, edited\n";
+
+fn submit(upto: u32) -> Value {
+    json!({"by": {"type": "human"}, "op": "submit", "upto": upto, "not_before": 0, "hold_ms": 0})
+}
+
+fn claim_by(name: &str, round: u32) -> Value {
+    json!({"by": {"type": "agent", "name": name}, "op": "claim", "round": round})
+}
+
+fn release(turn: u32) -> Value {
+    json!({"by": {"type": "human"}, "op": "yield", "turn": turn, "release": true})
+}
+
+/// The cause of the one write, `W0` to `W1`, logged after `ops` (which start on line 3).
+fn cause_after(ops: &[Value]) -> Cause {
+    let mut all = vec![snap(W0)];
+    all.extend_from_slice(ops);
+    all.push(external(W0, W1));
+    let chain = build(&all);
+    chain.steps(&rev(W0), &rev(W1)).unwrap()[0].cause
+}
+
+#[test]
+fn a_claim_taken_again_after_a_release_is_an_agents_turn() {
+    // 3 note, 4 submit, 5 claim, 6 release(5), 7 claim again
+    let cause = cause_after(&[
+        note(),
+        submit(3),
+        claim_by("claude", 4),
+        release(5),
+        claim_by("other", 4),
+    ]);
+    assert_eq!(cause, Cause::Agent);
+}
+
+#[test]
+fn a_release_frees_only_the_claim_it_names() {
+    // 3 note, 4 submit, 5 claim(4), 6 note, 7 submit, 8 claim(7), 9 release(5)
+    let ops = [
+        note(),
+        submit(3),
+        claim_by("claude", 4),
+        note(),
+        submit(6),
+        claim_by("other", 7),
+        release(5),
+    ];
+    assert_eq!(cause_after(&ops), Cause::Agent);
+    // A release naming a line that holds no claim frees nothing
+    let ops = [note(), submit(3), claim_by("claude", 4), release(9)];
+    assert_eq!(cause_after(&ops), Cause::Agent);
+    let ops = [note(), submit(3), claim_by("claude", 4), release(5)];
+    assert_eq!(cause_after(&ops), Cause::Outside { git: false });
+}
+
+#[test]
+fn a_claimed_approve_opens_no_turn() {
+    let approve = json!({"by": {"type": "human"}, "op": "approve", "rev": rev(W0), "not_before": 0, "hold_ms": 0});
+    let cause = cause_after(&[note(), approve, claim_by("claude", 4)]);
+    assert_eq!(cause, Cause::Outside { git: false });
+}
+
+#[test]
+fn two_open_claims_make_the_write_an_agents() {
+    // 3 note, 4 submit, 5 claim(4), 6 note, 7 submit, 8 claim(7)
+    let cause = cause_after(&[
+        note(),
+        submit(3),
+        claim_by("claude", 4),
+        note(),
+        submit(6),
+        claim_by("other", 7),
+    ]);
+    assert_eq!(cause, Cause::Agent);
+}

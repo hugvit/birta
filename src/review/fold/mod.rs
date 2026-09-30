@@ -1,8 +1,33 @@
 //! Reading a review log into state. [`scan`] is the cheap pass the write guards and
-//! `--wait` use: rounds, claims and withdrawals, with no chain or doc.
+//! `--wait` use: rounds, claims and withdrawals, with no chain or doc. [`fold`] builds
+//! the whole [`ReviewState`].
+
+mod items;
+mod turns;
+
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use super::Reject;
-use super::ops::{ByKind, Op, Parsed};
+use super::chain::Chain;
+use super::doc::Doc;
+use super::ladder;
+use super::ops::{At, ByKind, Line, Op, Parsed, Verdict};
+use super::state::{
+    ApproveState, AtKind, AtState, Counts, Hold, HoldKind, Item, ItemOutcome, ItemStatus, LogInfo,
+    OwnerState, Phrase, PickedUp, Replied, ReplyState, ReviewState, Round as RoundState, Sent,
+    Silence, Stage,
+};
+use crate::anchor::StopKind;
+use items::{Notes, Outcome, Texts, cover};
+use turns::{RoundRec, Turns};
+
+/// Minutes of agent silence after which the human may release a claim, in ms.
+const SILENCE_MS: u64 = 900_000;
+/// Creation writes the doc's owner on this line; later owner lines count only from the human.
+const OWNER_LINE: u32 = 3;
+/// Lines of a turn note the phrase keeps.
+const NOTE_LINES: usize = 2;
 
 /// A `not_before` further than this past its line's `ts` is a bad clock or a hand edit.
 const FAR_FUTURE_MS: u64 = 60_000;
@@ -24,8 +49,13 @@ pub struct Round {
     pub not_before: u64,
     /// The last human op line it covers.
     pub upto: u32,
-    /// The claim that took it; later claims of the same round lost the race.
+    /// The live claim; later claims of the same round lost the race.
     pub claim: Option<u32>,
+    pub claimed_by: Option<String>,
+    /// The agent's yield that ended the live claim's turn.
+    pub yielded: Option<u32>,
+    /// A claim of it was released, so the human took it back from an agent once.
+    pub released: bool,
     /// The withdraw that took it back before any claim.
     pub withdrawn: Option<u32>,
 }
@@ -42,42 +72,7 @@ pub struct TurnIndex {
 pub fn scan(parsed: &Parsed, _now_ms: u64) -> TurnIndex {
     let mut index = TurnIndex::default();
     for line in &parsed.lines {
-        let round = |kind, not_before, upto| Round {
-            n: line.n,
-            kind,
-            not_before: due_at(line.ts, not_before),
-            upto,
-            claim: None,
-            withdrawn: None,
-        };
-        match &line.op {
-            Op::Submit {
-                upto, not_before, ..
-            } => index
-                .rounds
-                .push(round(RoundKind::Submit, *not_before, *upto)),
-            Op::Approve { not_before, .. } => {
-                index
-                    .rounds
-                    .push(round(RoundKind::Approve, *not_before, line.n));
-            }
-            Op::Claim { round } => {
-                if let Some(r) = index.open_round(*round) {
-                    r.claim = Some(line.n);
-                }
-            }
-            Op::Withdraw { to } => {
-                if let Some(r) = index.open_round(*to) {
-                    r.withdrawn = Some(line.n);
-                }
-            }
-            Op::Comment { .. } | Op::Reply { .. } | Op::Amend { .. } | Op::Retract { .. }
-                if line.by.kind == ByKind::Human =>
-            {
-                index.notes.push(line.n);
-            }
-            _ => {}
-        }
+        index.step(line);
     }
     index
 }
@@ -95,6 +90,78 @@ fn due_at(ts: Option<u64>, not_before: u64) -> u64 {
 }
 
 impl TurnIndex {
+    /// Takes in the next line of the log.
+    pub(crate) fn step(&mut self, line: &Line) {
+        let round = |kind, not_before, upto| Round {
+            n: line.n,
+            kind,
+            not_before: due_at(line.ts, not_before),
+            upto,
+            claim: None,
+            claimed_by: None,
+            yielded: None,
+            released: false,
+            withdrawn: None,
+        };
+        match &line.op {
+            Op::Submit {
+                upto, not_before, ..
+            } => self
+                .rounds
+                .push(round(RoundKind::Submit, *not_before, *upto)),
+            Op::Approve { not_before, .. } => {
+                self.rounds
+                    .push(round(RoundKind::Approve, *not_before, line.n));
+            }
+            Op::Claim { round } => {
+                if let Some(r) = self.open_round(*round) {
+                    r.claim = Some(line.n);
+                    r.claimed_by.clone_from(&line.by.name);
+                }
+            }
+            Op::Withdraw { to } => {
+                if let Some(r) = self.open_round(*to).filter(|r| !r.released) {
+                    r.withdrawn = Some(line.n);
+                }
+            }
+            Op::Yield { turn, release } => match (line.by.kind, *release, *turn) {
+                (ByKind::Human, true, Some(turn)) => {
+                    if let Some(r) = self.live_turn(turn) {
+                        r.claim = None;
+                        r.claimed_by = None;
+                        r.released = true;
+                    }
+                }
+                (ByKind::Human, ..) => {}
+                (_, _, turn) => {
+                    let name = &line.by.name;
+                    let ended = self.rounds.iter_mut().rev().find(|r| {
+                        r.claim.is_some()
+                            && r.yielded.is_none()
+                            && r.claimed_by == *name
+                            && turn.is_none_or(|turn| r.claim == Some(turn))
+                    });
+                    if let Some(r) = ended {
+                        r.yielded = Some(line.n);
+                    }
+                }
+            },
+            Op::Comment { .. } | Op::Reply { .. } | Op::Amend { .. } | Op::Retract { .. }
+                if line.by.kind == ByKind::Human =>
+            {
+                self.notes.push(line.n);
+            }
+            _ => {}
+        }
+    }
+
+    /// The round whose live claim is `turn`, while the agent hasn't yielded it.
+    fn live_turn(&mut self, turn: u32) -> Option<&mut Round> {
+        self.rounds
+            .iter_mut()
+            .find(|r| r.claim == Some(turn) && r.yielded.is_none())
+    }
+
     /// The latest round that is due and still unclaimed and unwithdrawn.
     pub fn claimable_round(&self, now_ms: u64) -> Option<u32> {
         self.pending()
@@ -126,10 +193,10 @@ impl TurnIndex {
         Ok(())
     }
 
-    /// A round can be withdrawn until a claim names it.
+    /// A round can be withdrawn until a claim names it, even one released since.
     pub fn check_withdraw(&self, to: u32) -> Result<(), Reject> {
         match self.rounds.iter().find(|r| r.n == to) {
-            Some(r) if r.claim.is_none() && r.withdrawn.is_none() => Ok(()),
+            Some(r) if r.claim.is_none() && !r.released && r.withdrawn.is_none() => Ok(()),
             _ => Err(Reject::NotWithdrawable),
         }
     }
@@ -175,4 +242,459 @@ impl TurnIndex {
             .iter_mut()
             .find(|r| r.n == n && r.claim.is_none() && r.withdrawn.is_none())
     }
+}
+
+/// A folded review log.
+pub struct Folded {
+    pub state: ReviewState,
+}
+
+/// The line the human copies to point an agent at the notes on `doc`.
+pub fn hand_off(doc: &Path) -> String {
+    format!("Take a look at my notes: `birta review {}`", doc.display())
+}
+
+/// Folds `parsed` into the state of `doc`, its current text. Pure and clock-free: the
+/// caller fills `server_now`, `writable`, `log_writable` and `hand_off`.
+pub fn fold(parsed: &Parsed, chain: &Chain, doc: &Doc) -> Folded {
+    let mut warnings: Vec<String> = parsed
+        .unknown
+        .iter()
+        .map(|u| format!("line {}: unknown op {:?}", u.n, u.op))
+        .collect();
+    let mut index = TurnIndex::default();
+    let mut turns = Turns::default();
+    let mut notes = Notes::default();
+    let mut drafted_by = None;
+    let mut seen = HashSet::new();
+    for line in &parsed.lines {
+        notes.step(line, &index, &mut warnings);
+        index.step(line);
+        turns.step(line, &index, &mut warnings);
+        match &line.op {
+            Op::Owner { drafted_by: owner } => {
+                if line.n == OWNER_LINE || line.by.kind == ByKind::Human {
+                    drafted_by.clone_from(owner);
+                } else {
+                    warnings.push(format!(
+                        "line {}: owner ignored: only the human changes it",
+                        line.n
+                    ));
+                }
+            }
+            Op::Seen { ids } => seen.extend(ids.iter().cloned()),
+            _ => {}
+        }
+    }
+
+    let lines: HashMap<u32, &Line> = parsed.lines.iter().map(|l| (l.n, l)).collect();
+    let mut texts = Texts::new(chain);
+    let facts: Vec<Facts> = notes
+        .notes
+        .iter()
+        .map(|note| {
+            let round = (note.human() && !note.retracted)
+                .then(|| cover(&turns.rounds, note.n, None))
+                .flatten();
+            let submit = round.filter(|r| r.kind == RoundKind::Submit);
+            let held_by: Vec<u32> = submit
+                .map(|r| {
+                    r.taker
+                        .into_iter()
+                        .chain(r.released.iter().copied())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let out = if held_by.is_empty() {
+                Outcome::default()
+            } else {
+                items::outcome(note, &held_by, &turns, &lines, &mut texts)
+            };
+            Facts {
+                status: items::status(note, round, &turns, &out),
+                sent_in: submit.map(|r| r.n),
+                turn: submit.and_then(|r| r.taker),
+                out,
+            }
+        })
+        .collect();
+
+    let fold = Fold {
+        turns: &turns,
+        notes: &notes,
+        facts: &facts,
+        lines: &lines,
+    };
+    let items: Vec<Item> = notes
+        .notes
+        .iter()
+        .zip(&facts)
+        .map(|(note, f)| item(note, f, &seen))
+        .collect();
+    let count = |status| facts.iter().filter(|f| f.status == status).count() as u32;
+    let later: Vec<u32> = items
+        .iter()
+        .filter(|i| i.status == ItemStatus::Later)
+        .map(|i| i.n)
+        .collect();
+    let attention = items
+        .iter()
+        .map(|i| {
+            let replies = i
+                .replies
+                .iter()
+                .filter(|r| r.by.kind == ByKind::Agent && !r.seen)
+                .count();
+            let open = i.status == ItemStatus::Open && i.verdict == Some(Verdict::Ask);
+            let unseen_nh = i.id.as_ref().is_some_and(|id| !seen.contains(id));
+            replies + usize::from(open) + usize::from(unseen_nh)
+        })
+        .sum::<usize>() as u32;
+    let counts = Counts {
+        drafts: fold.drafts(None),
+        sent_unclaimed: count(ItemStatus::Sent),
+        unseen: 0,
+        unasked: 0,
+        not_handled: count(ItemStatus::NotHandled),
+        open_asks: items
+            .iter()
+            .filter(|i| i.status == ItemStatus::Open && i.verdict == Some(Verdict::Ask))
+            .count() as u32,
+        later: later.len() as u32,
+        lost: 0,
+        items: item_stops(doc).count() as u32,
+        decided: decided(&notes, doc, chain),
+        attention,
+    };
+
+    let latest = turns.rounds.iter().rev().find(|r| !r.withdrawn);
+    let pending = latest.filter(|r| r.unclaimed() && r.ts.is_some_and(|ts| r.due > ts));
+    let hold = pending.map(|r| Hold {
+        n: r.n,
+        kind: match r.kind {
+            RoundKind::Submit => HoldKind::HandBack,
+            RoundKind::Approve => HoldKind::Approve,
+        },
+        count: fold.sent_by(r.n, None),
+        not_before: r.due,
+    });
+    let approve = latest
+        .filter(|r| r.kind == RoundKind::Approve)
+        .and_then(|r| {
+            let rev = r.rev.as_ref()?;
+            let current_matches = *rev == doc.rev;
+            Some(ApproveState {
+                n: r.n,
+                ts: r.due,
+                rev: rev.as_str().to_string(),
+                current_matches,
+                changed_since: !current_matches,
+                later: later.len() as u32,
+                can_withdraw: r.unclaimed(),
+            })
+        });
+    let rounds = turns
+        .rounds
+        .iter()
+        .filter(|r| r.kind == RoundKind::Submit && !r.withdrawn)
+        .map(|r| {
+            let taker = r.taker.and_then(|t| turns.turn(t));
+            RoundState {
+                submit: r.n,
+                ts: r.due,
+                by: r.by.clone().unwrap_or_default(),
+                to: r.to.clone(),
+                batch: r.batch,
+                items: fold.sent_items(r.n, None).collect(),
+                claim: r.taker,
+                claimed_by: taker.and_then(|t| t.agent.clone()),
+                r#yield: taker.and_then(|t| t.end),
+                released: !r.released.is_empty(),
+            }
+        })
+        .collect();
+
+    let last_line = parsed
+        .lines
+        .iter()
+        .map(|l| l.n)
+        .chain(parsed.bad.iter().map(|b| b.n))
+        .chain(parsed.unknown.iter().map(|u| u.n))
+        .chain(parsed.header.as_ref().map(|_| 1))
+        .max()
+        .unwrap_or(0);
+    let state = ReviewState {
+        schema: super::SCHEMA_STATE.to_string(),
+        doc: parsed
+            .header
+            .as_ref()
+            .map(|h| h.doc.clone())
+            .unwrap_or_default(),
+        rev: doc.rev.as_str().to_string(),
+        server_now: 0,
+        writable: true,
+        log_writable: true,
+        hand_off: String::new(),
+        log: LogInfo {
+            lines: last_line,
+            bad: parsed.bad.len() as u32,
+            unknown_ops: parsed.unknown.len() as u32,
+            read_only: parsed.read_only,
+            baseline_available: chain.head().is_some(),
+            baseline_from: None,
+        },
+        owner: OwnerState { drafted_by },
+        phrase: fold.phrase(None),
+        phrase_before_hold: pending.map(|r| fold.phrase(Some(r.n))),
+        hold,
+        counts,
+        items,
+        changes: Vec::new(),
+        deletions: Vec::new(),
+        rewrite: None,
+        later,
+        lost: Vec::new(),
+        approve,
+        rounds,
+        warnings,
+    };
+    Folded { state }
+}
+
+/// What the fold worked out for one note.
+struct Facts {
+    status: ItemStatus,
+    sent_in: Option<u32>,
+    turn: Option<u32>,
+    out: Outcome,
+}
+
+struct Fold<'a> {
+    turns: &'a Turns,
+    notes: &'a Notes,
+    facts: &'a [Facts],
+    lines: &'a HashMap<u32, &'a Line>,
+}
+
+impl Fold<'_> {
+    /// Human notes and replies no hand-back covers, as if round `ignore` were absent.
+    fn drafts(&self, ignore: Option<u32>) -> u32 {
+        let rounds = &self.turns.rounds;
+        let notes = self
+            .notes
+            .notes
+            .iter()
+            .filter(|n| n.human() && !n.retracted && cover(rounds, n.n, ignore).is_none())
+            .count();
+        let replies = self
+            .notes
+            .human_replies
+            .iter()
+            .filter(|&&n| cover(rounds, n, ignore).is_none())
+            .count();
+        (notes + replies) as u32
+    }
+
+    /// The human notes round `round` handed back.
+    fn sent_items(&self, round: u32, ignore: Option<u32>) -> impl Iterator<Item = u32> {
+        self.notes
+            .notes
+            .iter()
+            .filter(move |n| {
+                n.human()
+                    && !n.retracted
+                    && cover(&self.turns.rounds, n.n, ignore).is_some_and(|r| r.n == round)
+            })
+            .map(|n| n.n)
+    }
+
+    fn sent_by(&self, round: u32, ignore: Option<u32>) -> u32 {
+        self.sent_items(round, ignore).count() as u32
+    }
+
+    fn ts(&self, n: u32) -> u64 {
+        self.lines.get(&n).and_then(|l| l.ts).unwrap_or(0)
+    }
+
+    /// The phrase facts, as if round `ignore` were absent.
+    fn phrase(&self, ignore: Option<u32>) -> Phrase {
+        let live = |r: &&RoundRec| !r.withdrawn && Some(r.n) != ignore;
+        let rounds = &self.turns.rounds;
+        let latest = rounds.iter().rev().find(live);
+        let submit = rounds
+            .iter()
+            .rev()
+            .filter(live)
+            .find(|r| r.kind == RoundKind::Submit);
+        let turn = submit
+            .and_then(|r| r.taker)
+            .and_then(|t| self.turns.turn(t));
+        let stage = match latest {
+            None if self.drafts(ignore) > 0 => Stage::Drafts,
+            None => Stage::Idle,
+            Some(r) if r.kind == RoundKind::Approve => Stage::Approved,
+            Some(_) => match turn {
+                None => Stage::Sent,
+                Some(t) if t.open() => Stage::PickedUp,
+                Some(_) => Stage::Replied,
+            },
+        };
+        Phrase {
+            stage,
+            sent: submit.map(|r| Sent {
+                n: r.n,
+                ts: r.due,
+                items: self.sent_by(r.n, ignore),
+                can_withdraw: r.unclaimed(),
+            }),
+            picked_up: turn.map(|t| PickedUp {
+                n: t.n,
+                ts: t.ts,
+                by: t.agent.clone().unwrap_or_default(),
+                silence: Silence {
+                    since_ts: t.ts,
+                    threshold_ms: SILENCE_MS,
+                },
+            }),
+            replied: turn.and_then(|t| {
+                let end = t.end?;
+                let mine = || {
+                    self.notes
+                        .notes
+                        .iter()
+                        .zip(self.facts)
+                        .filter(|(_, f)| f.turn == Some(t.n))
+                };
+                let tally =
+                    |pick: fn(&Facts) -> bool| mine().filter(|(_, f)| pick(f)).count() as u32;
+                Some(Replied {
+                    turn: t.n,
+                    ts: self.ts(end),
+                    by: t.agent.clone().unwrap_or_default(),
+                    done: tally(|f| f.out.done),
+                    answered: tally(|f| f.out.answered),
+                    didnt: tally(|f| f.out.didnt),
+                    asked: self
+                        .turns
+                        .comments
+                        .iter()
+                        .filter(|(n, turn)| {
+                            **turn == t.n && self.notes.get(**n).is_some_and(|n| n.blank())
+                        })
+                        .count() as u32,
+                    unasked: self.turns.unasked.get(&t.n).copied().unwrap_or(0),
+                    not_handled: tally(|f| f.status == ItemStatus::NotHandled),
+                    note: self
+                        .turns
+                        .notes
+                        .get(&t.n)
+                        .map(|body| body.lines().take(NOTE_LINES).collect::<Vec<_>>().join("\n")),
+                })
+            }),
+        }
+    }
+}
+
+fn item(note: &items::Note, f: &Facts, seen: &HashSet<String>) -> Item {
+    let at = match &note.at {
+        At::Doc | At::Dir => AtState {
+            kind: if matches!(note.at, At::Doc) {
+                AtKind::Doc
+            } else {
+                AtKind::Dir
+            },
+            status: None,
+            scope: None,
+            quote: None,
+            shown: None,
+            lines: None,
+            range: None,
+            block: None,
+            section: None,
+            rev: None,
+            loc: None,
+        },
+        At::Anchor(anchor) => AtState {
+            kind: AtKind::Anchor,
+            status: None,
+            scope: Some(anchor.scope),
+            quote: Some(anchor.quote.clone()),
+            shown: anchor.shown.clone(),
+            lines: None,
+            range: None,
+            block: None,
+            section: None,
+            rev: Some(anchor.rev.as_str().to_string()),
+            loc: None,
+        },
+    };
+    let out = &f.out;
+    Item {
+        n: note.n,
+        id: (f.status == ItemStatus::NotHandled).then(|| format!("nh:{}", note.n)),
+        op: "comment".to_string(),
+        by: note.by.clone(),
+        cid: note.cid.clone(),
+        ts: note.ts,
+        at,
+        verdict: note.verdict,
+        body: note.body.clone(),
+        to: note.to,
+        kind: note.kind,
+        status: f.status,
+        sent_in: f.sent_in,
+        turn: f.turn,
+        amended: note.amended.clone(),
+        replies: note
+            .replies
+            .iter()
+            .map(|r| {
+                let id = format!("#{}", r.n);
+                ReplyState {
+                    n: r.n,
+                    seen: seen.contains(&id),
+                    id,
+                    by: r.by.clone(),
+                    kind: r.kind,
+                    verdict: r.verdict,
+                    body: r.body.clone(),
+                    ts: r.ts,
+                }
+            })
+            .collect(),
+        outcome: (out.done || !out.changes.is_empty()).then(|| ItemOutcome {
+            done: out.done,
+            no_change: out.done && out.no_change,
+            changes: out.changes.clone(),
+        }),
+    }
+}
+
+fn item_stops(doc: &Doc) -> impl Iterator<Item = &crate::anchor::Stop> {
+    doc.blocks
+        .stops
+        .iter()
+        .filter(|s| matches!(s.kind, StopKind::ListItem | StopKind::TableRow))
+}
+
+/// Item stops a live human verdict covers: on the item, or on an item or heading
+/// section holding it. `ask` is a question, not a decision.
+fn decided(notes: &Notes, doc: &Doc, chain: &Chain) -> u32 {
+    let spans: Vec<(u32, u32)> = notes
+        .notes
+        .iter()
+        .filter(|n| n.human() && !n.retracted)
+        .filter(|n| n.verdict.is_some_and(|v| v != Verdict::Ask))
+        .filter_map(|n| {
+            let anchor = n.anchor()?;
+            items::span_of(anchor, &ladder::relocate(anchor, doc, chain))
+        })
+        .collect();
+    item_stops(doc)
+        .filter(|s| {
+            spans
+                .iter()
+                .any(|&(first, last)| first <= s.lines.0 && s.lines.1 <= last)
+        })
+        .count() as u32
 }

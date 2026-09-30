@@ -2270,6 +2270,7 @@ fn long_context_costs_no_more_than_the_page_sends() {
 }
 
 #[test]
+#[ignore = "timing on 1 MB; noisy under load, run in CI with --ignored"]
 fn balancing_stays_linear_in_the_emphasis_count() {
     // 1 MB of emphasis; debug comrak alone takes about a second to parse it
     let md = "*a* ".repeat(250_000);

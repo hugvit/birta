@@ -79,7 +79,10 @@ pub(super) struct Turns {
     /// Turns that agent comments were written in, by the comment's line.
     pub comments: HashMap<u32, u32>,
     pub notes: HashMap<u32, String>,
-    pub unasked: HashMap<u32, u32>,
+    /// Text the agent flagged as changed unasked, by turn.
+    pub unasked: HashMap<u32, Vec<String>>,
+    /// The notes the agent cited for text it wrote, by turn: `(note, quote)`.
+    pub covers: HashMap<u32, Vec<(u32, String)>>,
 }
 
 impl Turns {
@@ -127,7 +130,8 @@ impl Turns {
                 (ByKind::Human, ..) => {}
                 (_, _, turn) => self.end(line.n, turn, name),
             },
-            Op::External { .. } => {
+            // A checkout or pull is nobody's turn
+            Op::External { cause, .. } if cause.as_deref() != Some("git") => {
                 if let Some(t) = self.turns.iter().rev().find(|t| t.open()) {
                     self.writes.insert(line.n, t.n);
                 }
@@ -153,8 +157,14 @@ impl Turns {
             Op::TurnNote { body, turn } if self.counts_for(*turn, name) => {
                 self.notes.insert(*turn, body.clone());
             }
-            Op::Unasked { turn, .. } if self.counts_for(*turn, name) => {
-                *self.unasked.entry(*turn).or_default() += 1;
+            Op::Unasked { turn, quote, .. } if self.counts_for(*turn, name) => {
+                self.unasked.entry(*turn).or_default().push(quote.clone());
+            }
+            Op::Covers { to, quote, turn } if self.counts_for(*turn, name) => {
+                self.covers
+                    .entry(*turn)
+                    .or_default()
+                    .push((*to, quote.clone()));
             }
             _ => {}
         }

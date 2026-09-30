@@ -1,18 +1,11 @@
 //! Notes and what became of them: amends, retracts, replies, and whether the turn that
 //! took each one answered it.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
+use super::texts::{Texts, touches, untouched};
 use super::turns::{RoundRec, Turns};
 use super::{RoundKind, TurnIndex};
 use crate::rev::Rev;
-use crate::review::chain::Chain;
-use crate::review::doc::Doc;
-use crate::review::ladder::{self, Located};
-use crate::review::ops::{
-    Anchor, At, By, ByKind, CommentKind, Hunk, Line, Op, ReplyKind, Scope, Verdict,
-};
+use crate::review::ops::{Anchor, At, By, ByKind, CommentKind, Line, Op, ReplyKind, Verdict};
 use crate::review::state::ItemStatus;
 
 /// A comment, human or agent, as its amends left it.
@@ -202,71 +195,11 @@ pub(super) struct Outcome {
     /// Ids of changes on the note's block.
     pub changes: Vec<String>,
     pub no_change: bool,
+    /// The turn's first and last revs, when only comparing their texts can tell `no_change`.
+    pub compare: Option<(Rev, Rev)>,
 }
 
-/// Texts and docs of the revs the fold looks at, each built once.
-pub(super) struct Texts<'a> {
-    chain: &'a Chain,
-    docs: HashMap<Rev, Option<Arc<Doc>>>,
-}
-
-impl<'a> Texts<'a> {
-    pub fn new(chain: &'a Chain) -> Self {
-        Self {
-            chain,
-            docs: HashMap::new(),
-        }
-    }
-
-    fn doc(&mut self, rev: &Rev) -> Option<Arc<Doc>> {
-        let chain = self.chain;
-        self.docs
-            .entry(rev.clone())
-            .or_insert_with(|| chain.text(rev).map(|text| Arc::new(Doc::new(&text))))
-            .clone()
-    }
-
-    /// The lines a note's verdict or change covers in the text of `rev`.
-    fn span(&mut self, anchor: &Anchor, rev: &Rev) -> Option<(Arc<Doc>, (u32, u32))> {
-        let doc = self.doc(rev)?;
-        let span = span_of(anchor, &ladder::relocate(anchor, &doc, self.chain))?;
-        Some((doc, span))
-    }
-}
-
-/// The lines a located anchor covers: a quote's block, or a block's or section's lines.
-pub(super) fn span_of(anchor: &Anchor, located: &Located) -> Option<(u32, u32)> {
-    match anchor.scope {
-        Scope::Quote => located.block,
-        Scope::Block | Scope::Section => located.lines,
-    }
-}
-
-/// Whether hunk `h`, in its old text, touches lines `span`.
-fn touches(h: &Hunk, (first, last): (u32, u32)) -> bool {
-    let a = h.a;
-    if h.d.is_empty() {
-        // Inserted after line `a`
-        return first <= a && a <= last;
-    }
-    let end = a + h.d.len() as u32;
-    a < last && first <= end
-}
-
-/// The source of `span` in `doc`.
-fn span_text(doc: &Doc, (first, last): (u32, u32)) -> Option<&str> {
-    let start = doc.lines.range(first)?.start;
-    let end = doc.lines.range(last)?.end;
-    doc.text.get(start..end)
-}
-
-pub(super) fn outcome(
-    note: &Note,
-    held_by: &[u32],
-    turns: &Turns,
-    lines: &HashMap<u32, &Line>,
-    texts: &mut Texts,
-) -> Outcome {
+pub(super) fn outcome(note: &Note, held_by: &[u32], turns: &Turns, texts: &mut Texts) -> Outcome {
     let mut out = Outcome::default();
     if let Some(dones) = turns.dones.get(&note.n) {
         out.done_in = dones.iter().copied().find(|t| held_by.contains(t));
@@ -288,23 +221,22 @@ pub(super) fn outcome(
     let Some(anchor) = note.anchor() else {
         return out;
     };
-    let mut writes: Vec<(u32, u32)> = turns
+    let mut writes: Vec<u32> = turns
         .writes
         .iter()
         .filter(|(_, t)| held_by.contains(t))
-        .map(|(&n, &t)| (n, t))
+        .map(|(&n, _)| n)
         .collect();
     writes.sort_unstable();
-    for (n, _) in writes {
-        let Some(Op::External {
-            rev,
-            patch: Some(hunks),
-            ..
-        }) = lines.get(&n).map(|line| &line.op)
-        else {
+    for n in writes {
+        // The chain has the hunks even of a write recorded by rev only
+        let Some((_, step)) = texts.step_at(n) else {
             continue;
         };
-        let Some((_, span)) = texts.span(anchor, rev) else {
+        let Some(hunks) = &step.hunks else {
+            continue;
+        };
+        let Some(span) = texts.span_at(note.n, anchor, &step.from) else {
             continue;
         };
         for (i, h) in hunks.iter().enumerate() {
@@ -314,24 +246,38 @@ pub(super) fn outcome(
         }
     }
     if let Some(turn) = out.done_in.and_then(|t| turns.turn(t)) {
+        let chain = texts.chain;
         let (from, to) = (
-            texts.chain.rev_at_line(turn.n).cloned(),
-            texts.chain.rev_at_line(turn.close()).cloned(),
+            chain.rev_at_line(turn.n).cloned(),
+            chain.rev_at_line(turn.close()).cloned(),
         );
-        out.no_change = match (from, to) {
-            (Some(from), Some(to)) if from == to => true,
-            (Some(from), Some(to)) => {
-                let before = texts.span(anchor, &from);
-                let after = texts.span(anchor, &to);
-                match (before, after) {
-                    (Some((a, sa)), Some((b, sb))) => span_text(&a, sa) == span_text(&b, sb),
-                    _ => false,
-                }
+        if let (Some(from), Some(to)) = (from, to) {
+            let span = texts.span_at(note.n, anchor, &from);
+            let steps = chain.steps(&from, &to);
+            out.no_change = from == to
+                || matches!((span, steps), (Some(span), Some(steps)) if untouched(steps, span));
+            if !out.no_change {
+                out.compare = Some((from, to));
             }
-            _ => false,
-        };
+        }
     }
     out
+}
+
+/// Whether the note's span reads the same at both ends of the turn, for a `done` whose
+/// turn wrote on or near it. The texts are expected prefetched.
+pub(super) fn same_text(note: &Note, (from, to): &(Rev, Rev), texts: &mut Texts) -> bool {
+    let Some(anchor) = note.anchor() else {
+        return false;
+    };
+    let mut read = |rev: &Rev| {
+        let span = texts.span_at(note.n, anchor, rev)?;
+        let (text, lines) = (texts.text(rev)?, texts.lines(rev)?);
+        let bytes = lines.range(span.0)?.start..lines.range(span.1)?.end;
+        text.get(bytes).map(str::to_string)
+    };
+    let before = read(from);
+    before.is_some() && before == read(to)
 }
 
 /// Where a human note stands, given the round that sent it and what was done about it.

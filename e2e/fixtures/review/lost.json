@@ -1,13 +1,13 @@
 {
   "schema": "review-state/1",
   "doc": "pr.md",
-  "rev": "ce013625030ba8dba906f756967f9e9ca394464a",
+  "rev": "b899ad59e6693b42a5df702a953fdea958e5e8a9",
   "server_now": 1790000600000,
   "writable": true,
   "log_writable": true,
   "hand_off": "Take a look at my notes: `birta review /work/pr.md`",
   "log": {
-    "lines": 13,
+    "lines": 14,
     "bad": 0,
     "unknown_ops": 0,
     "read_only": false,
@@ -20,22 +20,22 @@
     "stage": "replied",
     "sent": {
       "n": 7,
-      "ts": 1790000012000,
+      "ts": 1790000007000,
       "items": 3,
       "can_withdraw": false
     },
     "picked_up": {
       "n": 8,
-      "ts": 1790000020000,
+      "ts": 1790000008000,
       "by": "claude",
       "silence": {
-        "since_ts": 1790000020000,
+        "since_ts": 1790000008000,
         "threshold_ms": 900000
       }
     },
     "replied": {
       "turn": 8,
-      "ts": 1790000300000,
+      "ts": 1790000013000,
       "by": "claude",
       "done": 1,
       "answered": 1,
@@ -51,15 +51,15 @@
   "counts": {
     "drafts": 0,
     "sent_unclaimed": 0,
-    "unseen": 1,
+    "unseen": 2,
     "unasked": 0,
     "not_handled": 1,
     "open_asks": 0,
     "later": 0,
     "lost": 1,
-    "items": 5,
+    "items": 3,
     "decided": 1,
-    "attention": 3
+    "attention": 4
   },
   "items": [
     {
@@ -67,7 +67,8 @@
       "op": "comment",
       "by": {
         "type": "human",
-        "name": "andres"
+        "name": "andres",
+        "via": "browser"
       },
       "cid": "c-4",
       "ts": 1790000004000,
@@ -77,16 +78,7 @@
         "scope": "quote",
         "quote": "we just fail",
         "shown": "we just fail",
-        "lines": [
-          5,
-          5
-        ],
-        "block": [
-          5,
-          5
-        ],
-        "section": "Why",
-        "rev": "ce013625030ba8dba906f756967f9e9ca394464a",
+        "rev": "7956425b78307ed38a115054d90494e18cff956c",
         "loc": null
       },
       "verdict": "no",
@@ -110,7 +102,8 @@
       "op": "comment",
       "by": {
         "type": "human",
-        "name": "andres"
+        "name": "andres",
+        "via": "browser"
       },
       "cid": "c-5",
       "ts": 1790000005000,
@@ -119,19 +112,22 @@
         "status": "ok",
         "scope": "block",
         "quote": "- retries on 503",
-        "shown": "- retries on 503",
         "lines": [
-          9,
-          9
+          10,
+          10
+        ],
+        "range": [
+          169,
+          185
         ],
         "block": [
-          9,
-          9
+          10,
+          10
         ],
-        "section": "Why",
-        "rev": "ce013625030ba8dba906f756967f9e9ca394464a",
+        "section": "What changes",
+        "rev": "7956425b78307ed38a115054d90494e18cff956c",
         "loc": {
-          "sp": "9:1-9:17"
+          "sp": "10:1-10:16"
         }
       },
       "verdict": "no",
@@ -147,7 +143,8 @@
       "op": "comment",
       "by": {
         "type": "human",
-        "name": "andres"
+        "name": "andres",
+        "via": "browser"
       },
       "cid": "c-6",
       "ts": 1790000006000,
@@ -166,11 +163,12 @@
           "id": "#11",
           "by": {
             "type": "agent",
-            "name": "claude"
+            "name": "claude",
+            "via": "cli"
           },
           "kind": "answer",
           "body": "Yes: CI runs it on every push.",
-          "ts": 1790000300000,
+          "ts": 1790000011000,
           "seen": false
         }
       ]
@@ -188,24 +186,24 @@
         "name": "claude"
       },
       "old": [
-        5,
-        5
+        6,
+        6
       ],
       "new": [
-        5,
-        5
+        6,
+        6
       ],
       "range": {
         "status": "ok",
         "lines": [
-          5,
-          5
+          6,
+          6
         ],
         "bytes": [
-          200,
-          260
+          82,
+          150
         ],
-        "sp": "5:1-5:71"
+        "sp": "5:1-6:68"
       },
       "asked": {
         "kind": "location",
@@ -220,18 +218,82 @@
       "what": {
         "old_lines": 1,
         "new_lines": 1,
-        "words": 3,
+        "touches_html": false
+      },
+      "is_rewrite": false,
+      "reversible": {
+        "ok": true,
+        "reason": "none"
+      },
+      "op_hunks": 1
+    },
+    {
+      "id": "14.0",
+      "op": 14,
+      "idx": 0,
+      "attr": "outside",
+      "by": {
+        "type": "birta"
+      },
+      "old": [
+        5,
+        5
+      ],
+      "new": [
+        5,
+        5
+      ],
+      "range": {
+        "status": "ok",
+        "lines": [
+          5,
+          5
+        ],
+        "bytes": [
+          26,
+          81
+        ],
+        "sp": "5:1-6:68"
+      },
+      "asked": {
+        "kind": "outside",
+        "notes": []
+      },
+      "reverts_your_edit": false,
+      "breaks_stet": [],
+      "seen": false,
+      "settled": false,
+      "what": {
+        "old_lines": 1,
+        "new_lines": 1,
         "touches_html": false
       },
       "is_rewrite": false,
       "reversible": {
         "ok": false,
-        "reason": "multi_hunk"
+        "reason": "outside"
       },
       "op_hunks": 1
     }
   ],
-  "deletions": [],
+  "deletions": [
+    {
+      "change": "9.0",
+      "kind": "words",
+      "at_line": 6,
+      "at_byte": 129,
+      "removed": " with backoff",
+      "after_sp": "5:1-6:68"
+    },
+    {
+      "change": "14.0",
+      "kind": "words",
+      "at_line": 5,
+      "at_byte": 53,
+      "removed": "we just fail and ",
+      "after_sp": "5:1-6:68"
+    }
+  ],
   "later": [],
   "lost": [
     4
@@ -239,7 +301,7 @@
   "rounds": [
     {
       "submit": 7,
-      "ts": 1790000012000,
+      "ts": 1790000007000,
       "by": "andres",
       "to": "*",
       "items": [

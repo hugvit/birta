@@ -9,11 +9,18 @@ pub mod log;
 pub mod ops;
 pub mod state;
 
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+
+use anyhow::Context;
+
 use crate::anchor::{self, Reason, ResolveReq, Resolved};
 use crate::config::Config;
 use crate::rev::Rev;
+use chain::Chain;
 use doc::Doc;
 use ops::{Anchor, AnchorReq, At, BlockScope, Scope};
+use state::Summary;
 
 /// Code points of a block's source a block anchor keeps.
 const BLOCK_QUOTE: usize = 60;
@@ -22,9 +29,46 @@ const BLOCK_QUOTE: usize = 60;
 pub const SCHEMA_LOG: &str = "review/1";
 pub const SCHEMA_STATE: &str = "review-state/1";
 
+/// What a doc's name gets to name its review file.
+const REVIEW_SUFFIX: &str = ".birta.jsonl";
+/// A folder's own review file, at its root; its notes are on the folder.
+pub const FOLDER_REVIEW: &str = REVIEW_SUFFIX;
+
 /// Review is on when `[review] enabled = true`, or forced by `BIRTA_REVIEW=1`.
 pub fn enabled(config: &Config) -> bool {
     config.review.enabled || std::env::var_os("BIRTA_REVIEW").is_some_and(|v| v == "1")
+}
+
+/// `<doc>.birta.jsonl` beside `doc`, keeping the name's bytes as they are.
+pub fn review_path_for(doc: &Path) -> PathBuf {
+    let mut path = OsString::from(doc.as_os_str());
+    path.push(REVIEW_SUFFIX);
+    PathBuf::from(path)
+}
+
+/// Whether a file name is a review file's, in any case.
+pub fn is_review_file(name: &str) -> bool {
+    crate::paths::is_review_file(name)
+}
+
+/// The review of the doc at `doc_path`, as it is on disk, in brief. An error when
+/// either file can't be read, so a listing shows no summary.
+pub fn summarize(review_path: &Path, doc_path: &Path) -> anyhow::Result<Summary> {
+    let parsed = log::Log::open(review_path)
+        .read()
+        .with_context(|| format!("reading {}", review_path.display()))?
+        .with_context(|| format!("no review file at {}", review_path.display()))?;
+    let bytes =
+        std::fs::read(doc_path).with_context(|| format!("reading {}", doc_path.display()))?;
+    let text = String::from_utf8(bytes).context("the doc is not UTF-8")?;
+    let chain = Chain::build(&parsed);
+    let doc = Doc::new(&text);
+    let state = fold::fold(&parsed, &chain, &doc).state;
+    Ok(Summary {
+        stage: state.phrase.stage,
+        phrase: state.phrase,
+        counts: state.counts,
+    })
 }
 
 /// Why a review op was refused. Checked under the log lock, so a refusal writes nothing.

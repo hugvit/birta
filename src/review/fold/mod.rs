@@ -2,24 +2,29 @@
 //! `--wait` use: rounds, claims and withdrawals, with no chain or doc. [`fold`] builds
 //! the whole [`ReviewState`].
 
+mod changes;
 mod items;
+mod texts;
 mod turns;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use super::Reject;
 use super::chain::Chain;
 use super::doc::Doc;
 use super::ladder;
-use super::ops::{At, ByKind, Line, Op, Parsed, Verdict};
+use super::ops::{At, ByKind, Line, Op, Parsed, Scope, Verdict};
 use super::state::{
-    ApproveState, AtKind, AtState, Counts, Hold, HoldKind, Item, ItemOutcome, ItemStatus, LogInfo,
-    OwnerState, Phrase, PickedUp, Replied, ReplyState, ReviewState, Round as RoundState, Sent,
-    Silence, Stage,
+    AnchorStatus, ApproveState, AskedKind, AtKind, AtState, Attr, Change, Counts, Hold, HoldKind,
+    Item, ItemOutcome, ItemStatus, Loc, LogInfo, OwnerState, Phrase, PickedUp, Replied, ReplyState,
+    ReviewState, Round as RoundState, Sent, Silence, Stage,
 };
-use crate::anchor::StopKind;
-use items::{Notes, Outcome, Texts, cover};
+use crate::anchor::{self, StopKind};
+use crate::rev::Rev;
+use items::{Notes, Outcome, cover};
+use texts::{Texts, span_of};
 use turns::{RoundRec, Turns};
 
 /// Minutes of agent silence after which the human may release a claim, in ms.
@@ -244,9 +249,98 @@ impl TurnIndex {
     }
 }
 
-/// A folded review log.
-pub struct Folded {
+/// A folded review log, and what the CLI and server ask of it beyond the state.
+pub struct Folded<'a> {
     pub state: ReviewState,
+    index: TurnIndex,
+    chain: &'a Chain,
+    doc: &'a Doc,
+    /// Items each hand-back or approve covers, by its line.
+    covered: HashMap<u32, Vec<usize>>,
+}
+
+/// How the current text ends its lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Eol {
+    Lf,
+    Crlf,
+    Cr,
+    Mixed,
+    /// A single line with no terminator.
+    None,
+}
+
+/// The current text's rev and the byte habits a writer must keep.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeadInfo {
+    pub rev: Rev,
+    pub bom: bool,
+    pub eol: Eol,
+}
+
+impl Folded<'_> {
+    /// The latest round that is due at `now_ms` and still unclaimed, as [`scan`] says.
+    pub fn claimable_round(&self, now_ms: u64) -> Option<u32> {
+        self.index.claimable_round(now_ms)
+    }
+
+    /// The hand-back or approve on line `n`.
+    pub fn round(&self, n: u32) -> Option<&Round> {
+        self.index.rounds.iter().find(|r| r.n == n)
+    }
+
+    /// The human notes round `round` covers, retracted ones aside.
+    pub fn notes_covered_by(&self, round: u32) -> Vec<&Item> {
+        self.covered
+            .get(&round)
+            .into_iter()
+            .flatten()
+            .map(|&i| &self.state.items[i])
+            .collect()
+    }
+
+    pub fn text_at(&self, rev: &Rev) -> Option<Arc<str>> {
+        if *rev == self.doc.rev {
+            return Some(self.doc.text.clone());
+        }
+        self.chain.text(rev)
+    }
+
+    /// The bytes of `rev` as they were on disk, a BOM included.
+    pub fn text_bytes_at(&self, rev: &Rev) -> Option<Vec<u8>> {
+        self.text_at(rev).map(|text| text.as_bytes().to_vec())
+    }
+
+    pub fn head_info(&self) -> HeadInfo {
+        let text = &self.doc.text;
+        let bytes = text.as_bytes();
+        let (mut lf, mut crlf, mut cr) = (false, false, false);
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\r' if bytes.get(i + 1) == Some(&b'\n') => {
+                    crlf = true;
+                    i += 1;
+                }
+                b'\r' => cr = true,
+                b'\n' => lf = true,
+                _ => {}
+            }
+            i += 1;
+        }
+        let eol = match (lf, crlf, cr) {
+            (false, false, false) => Eol::None,
+            (true, false, false) => Eol::Lf,
+            (false, true, false) => Eol::Crlf,
+            (false, false, true) => Eol::Cr,
+            _ => Eol::Mixed,
+        };
+        HeadInfo {
+            rev: self.doc.rev.clone(),
+            bom: text.starts_with('\u{feff}'),
+            eol,
+        }
+    }
 }
 
 /// The line the human copies to point an agent at the notes on `doc`.
@@ -256,7 +350,7 @@ pub fn hand_off(doc: &Path) -> String {
 
 /// Folds `parsed` into the state of `doc`, its current text. Pure and clock-free: the
 /// caller fills `server_now`, `writable`, `log_writable` and `hand_off`.
-pub fn fold(parsed: &Parsed, chain: &Chain, doc: &Doc) -> Folded {
+pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
     let mut warnings: Vec<String> = parsed
         .unknown
         .iter()
@@ -267,6 +361,7 @@ pub fn fold(parsed: &Parsed, chain: &Chain, doc: &Doc) -> Folded {
     let mut notes = Notes::default();
     let mut drafted_by = None;
     let mut seen = HashSet::new();
+    let mut seen_at: HashMap<String, u32> = HashMap::new();
     for line in &parsed.lines {
         notes.step(line, &index, &mut warnings);
         index.step(line);
@@ -282,14 +377,19 @@ pub fn fold(parsed: &Parsed, chain: &Chain, doc: &Doc) -> Folded {
                     ));
                 }
             }
-            Op::Seen { ids } => seen.extend(ids.iter().cloned()),
+            Op::Seen { ids } if line.by.kind == ByKind::Human => {
+                for id in ids {
+                    seen.insert(id.clone());
+                    seen_at.entry(id.clone()).or_insert(line.n);
+                }
+            }
             _ => {}
         }
     }
 
     let lines: HashMap<u32, &Line> = parsed.lines.iter().map(|l| (l.n, l)).collect();
-    let mut texts = Texts::new(chain);
-    let facts: Vec<Facts> = notes
+    let mut texts = Texts::new(chain, doc);
+    let mut facts: Vec<Facts> = notes
         .notes
         .iter()
         .map(|note| {
@@ -308,35 +408,99 @@ pub fn fold(parsed: &Parsed, chain: &Chain, doc: &Doc) -> Folded {
             let out = if held_by.is_empty() {
                 Outcome::default()
             } else {
-                items::outcome(note, &held_by, &turns, &lines, &mut texts)
+                items::outcome(note, &held_by, &turns, &mut texts)
             };
             Facts {
                 status: items::status(note, round, &turns, &out),
                 sent_in: submit.map(|r| r.n),
                 turn: submit.and_then(|r| r.taker),
+                sent_by: round.map(|r| r.n),
+                held_by,
                 out,
             }
         })
         .collect();
+    // Texts are read only where the turn wrote near a note it marked done
+    texts.prefetch(
+        facts
+            .iter()
+            .filter_map(|f| f.out.compare.clone())
+            .flat_map(|(from, to)| [from, to]),
+    );
+    for (note, f) in notes.notes.iter().zip(&mut facts) {
+        if let Some(pair) = f.out.compare.take() {
+            f.out.no_change = items::same_text(note, &pair, &mut texts);
+        }
+    }
 
+    let mut held: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (note, f) in notes.notes.iter().zip(&facts) {
+        for &turn in &f.held_by {
+            held.entry(turn).or_default().push(note.n);
+        }
+    }
+    let stets: Vec<(u32, u32)> = notes
+        .notes
+        .iter()
+        .zip(&facts)
+        .filter(|(note, _)| note.human() && !note.retracted && note.verdict == Some(Verdict::Stet))
+        .filter_map(|(note, f)| Some((note.n, f.sent_by?)))
+        .collect();
+    let standing: Vec<u32> = turns
+        .rounds
+        .iter()
+        .filter(|r| !r.withdrawn)
+        .map(|r| r.n)
+        .collect();
+    let built = changes::build(
+        &changes::Input {
+            lines: &parsed.lines,
+            turns: &turns,
+            notes: &notes,
+            held: &held,
+            stets: &stets,
+            seen: &seen_at,
+            rounds: &standing,
+        },
+        &mut texts,
+    );
+
+    let locator = anchor::Locator::new(&doc.text);
+    let items: Vec<Item> = notes
+        .notes
+        .iter()
+        .zip(&facts)
+        .map(|(note, f)| item(note, f, &seen, at_state(note, &mut texts, &locator)))
+        .collect();
     let fold = Fold {
         turns: &turns,
         notes: &notes,
         facts: &facts,
         lines: &lines,
+        changes: &built.changes,
     };
-    let items: Vec<Item> = notes
-        .notes
-        .iter()
-        .zip(&facts)
-        .map(|(note, f)| item(note, f, &seen))
-        .collect();
     let count = |status| facts.iter().filter(|f| f.status == status).count() as u32;
     let later: Vec<u32> = items
         .iter()
         .filter(|i| i.status == ItemStatus::Later)
         .map(|i| i.n)
         .collect();
+    let lost: Vec<u32> = notes
+        .notes
+        .iter()
+        .zip(&items)
+        .filter(|(note, i)| {
+            !note.retracted
+                && i.at.status == Some(AnchorStatus::Orphaned)
+                && !(i.status == ItemStatus::Handled && lost_in_turn(note, i, &turns, &mut texts))
+        })
+        .map(|(note, _)| note.n)
+        .collect();
+    let unseen = built
+        .changes
+        .iter()
+        .filter(|c| c.attr != Attr::Human && !c.seen && !c.settled)
+        .count() as u32;
     let attention = items
         .iter()
         .map(|i| {
@@ -349,21 +513,26 @@ pub fn fold(parsed: &Parsed, chain: &Chain, doc: &Doc) -> Folded {
             let unseen_nh = i.id.as_ref().is_some_and(|id| !seen.contains(id));
             replies + usize::from(open) + usize::from(unseen_nh)
         })
-        .sum::<usize>() as u32;
+        .sum::<usize>() as u32
+        + unseen;
     let counts = Counts {
         drafts: fold.drafts(None),
         sent_unclaimed: count(ItemStatus::Sent),
-        unseen: 0,
-        unasked: 0,
+        unseen,
+        unasked: built
+            .changes
+            .iter()
+            .filter(|c| c.asked.kind == AskedKind::Unasked && !c.settled)
+            .count() as u32,
         not_handled: count(ItemStatus::NotHandled),
         open_asks: items
             .iter()
             .filter(|i| i.status == ItemStatus::Open && i.verdict == Some(Verdict::Ask))
             .count() as u32,
         later: later.len() as u32,
-        lost: 0,
+        lost: lost.len() as u32,
         items: item_stops(doc).count() as u32,
-        decided: decided(&notes, doc, chain),
+        decided: decided(&notes, doc, &mut texts),
         attention,
     };
 
@@ -414,15 +583,12 @@ pub fn fold(parsed: &Parsed, chain: &Chain, doc: &Doc) -> Folded {
         })
         .collect();
 
-    let last_line = parsed
-        .lines
-        .iter()
-        .map(|l| l.n)
-        .chain(parsed.bad.iter().map(|b| b.n))
-        .chain(parsed.unknown.iter().map(|u| u.n))
-        .chain(parsed.header.as_ref().map(|_| 1))
-        .max()
-        .unwrap_or(0);
+    let mut covered: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (i, f) in facts.iter().enumerate() {
+        if let Some(round) = f.sent_by {
+            covered.entry(round).or_default().push(i);
+        }
+    }
     let state = ReviewState {
         schema: super::SCHEMA_STATE.to_string(),
         doc: parsed
@@ -435,30 +601,143 @@ pub fn fold(parsed: &Parsed, chain: &Chain, doc: &Doc) -> Folded {
         writable: true,
         log_writable: true,
         hand_off: String::new(),
-        log: LogInfo {
-            lines: last_line,
-            bad: parsed.bad.len() as u32,
-            unknown_ops: parsed.unknown.len() as u32,
-            read_only: parsed.read_only,
-            baseline_available: chain.head().is_some(),
-            baseline_from: None,
-        },
+        log: log_info(parsed, chain),
         owner: OwnerState { drafted_by },
         phrase: fold.phrase(None),
         phrase_before_hold: pending.map(|r| fold.phrase(Some(r.n))),
         hold,
         counts,
         items,
-        changes: Vec::new(),
-        deletions: Vec::new(),
-        rewrite: None,
+        changes: built.changes,
+        deletions: built.deletions,
+        rewrite: built.rewrite,
         later,
-        lost: Vec::new(),
+        lost,
         approve,
         rounds,
         warnings,
     };
-    Folded { state }
+    Folded {
+        state,
+        index,
+        chain,
+        doc,
+        covered,
+    }
+}
+
+fn log_info(parsed: &Parsed, chain: &Chain) -> LogInfo {
+    let last_line = parsed
+        .lines
+        .iter()
+        .map(|l| l.n)
+        .chain(parsed.bad.iter().map(|b| b.n))
+        .chain(parsed.unknown.iter().map(|u| u.n))
+        .chain(parsed.header.as_ref().map(|_| 1))
+        .max()
+        .unwrap_or(0);
+    LogInfo {
+        lines: last_line,
+        bad: parsed.bad.len() as u32,
+        unknown_ops: parsed.unknown.len() as u32,
+        read_only: parsed.read_only,
+        baseline_available: chain.head().is_some(),
+        baseline_from: None,
+    }
+}
+
+/// Folds a folder's review file, whose notes are on the folder: the same walk with no
+/// doc, so no changes and no items to decide.
+pub fn fold_dir(parsed: &Parsed) -> ReviewState {
+    let mut notes_only = parsed.clone();
+    notes_only.lines.retain(|l| {
+        !matches!(
+            l.op,
+            Op::Snap { .. } | Op::Edit { .. } | Op::External { .. }
+        )
+    });
+    let chain = Chain::build(&notes_only);
+    let doc = Doc::new("");
+    let mut state = fold(&notes_only, &chain, &doc).state;
+    state.rev = String::new();
+    state.log = log_info(parsed, &chain);
+    state
+}
+
+/// Whether a handled note was already gone when its own turn ended, so the change that
+/// handled it took its text.
+fn lost_in_turn(note: &items::Note, item: &Item, turns: &Turns, texts: &mut Texts) -> bool {
+    let (Some(anchor), Some(turn)) = (note.anchor(), item.turn.and_then(|t| turns.turn(t))) else {
+        return false;
+    };
+    let chain = texts.chain;
+    let Some(rev) = chain.rev_at_line(turn.close()).cloned() else {
+        return false;
+    };
+    texts
+        .with_doc(&rev, |doc| {
+            ladder::relocate(anchor, doc, chain).status == AnchorStatus::Orphaned
+        })
+        .unwrap_or(false)
+}
+
+/// Where a note is on the current text, and the place the page paints for it.
+fn at_state(note: &items::Note, texts: &mut Texts, locator: &anchor::Locator) -> AtState {
+    let anchor = match &note.at {
+        At::Doc | At::Dir => {
+            return AtState {
+                kind: if matches!(note.at, At::Doc) {
+                    AtKind::Doc
+                } else {
+                    AtKind::Dir
+                },
+                status: None,
+                scope: None,
+                quote: None,
+                shown: None,
+                lines: None,
+                range: None,
+                block: None,
+                section: None,
+                rev: None,
+                loc: None,
+            };
+        }
+        At::Anchor(anchor) => anchor,
+    };
+    let head = texts.head;
+    let located = texts.located(note.n, anchor).clone();
+    let loc = match (anchor.scope, &located.bytes, located.lines) {
+        (Scope::Quote, Some(bytes), _) => locator.locate(bytes.clone()).map(|l| Loc {
+            sp: l.sp,
+            off: Some(l.off),
+            tl: Some(l.tl),
+        }),
+        (Scope::Block | Scope::Section, _, Some((first, _))) => head
+            .blocks
+            .stops
+            .iter()
+            .find(|s| s.lines.0 == first)
+            .map(|s| Loc {
+                sp: s.sp.clone(),
+                off: None,
+                tl: None,
+            }),
+        _ => None,
+    };
+    AtState {
+        kind: AtKind::Anchor,
+        status: Some(located.status),
+        scope: Some(anchor.scope),
+        quote: Some(anchor.quote.clone()),
+        shown: anchor.shown.clone(),
+        lines: located.lines,
+        range: located.bytes.map(|b| (b.start, b.end)),
+        block: located.block,
+        section: located.section,
+        rev: Some(anchor.rev.as_str().to_string()),
+        loc,
+    }
 }
 
 /// What the fold worked out for one note.
@@ -466,6 +745,10 @@ struct Facts {
     status: ItemStatus,
     sent_in: Option<u32>,
     turn: Option<u32>,
+    /// The hand-back or approve that covers it.
+    sent_by: Option<u32>,
+    /// Claims that held it: the live one, and any released.
+    held_by: Vec<u32>,
     out: Outcome,
 }
 
@@ -474,6 +757,7 @@ struct Fold<'a> {
     notes: &'a Notes,
     facts: &'a [Facts],
     lines: &'a HashMap<u32, &'a Line>,
+    changes: &'a [Change],
 }
 
 impl Fold<'_> {
@@ -582,7 +866,11 @@ impl Fold<'_> {
                             **turn == t.n && self.notes.get(**n).is_some_and(|n| n.blank())
                         })
                         .count() as u32,
-                    unasked: self.turns.unasked.get(&t.n).copied().unwrap_or(0),
+                    unasked: self
+                        .changes
+                        .iter()
+                        .filter(|c| c.turn == Some(t.n) && c.asked.kind == AskedKind::Unasked)
+                        .count() as u32,
                     not_handled: tally(|f| f.status == ItemStatus::NotHandled),
                     note: self
                         .turns
@@ -595,39 +883,7 @@ impl Fold<'_> {
     }
 }
 
-fn item(note: &items::Note, f: &Facts, seen: &HashSet<String>) -> Item {
-    let at = match &note.at {
-        At::Doc | At::Dir => AtState {
-            kind: if matches!(note.at, At::Doc) {
-                AtKind::Doc
-            } else {
-                AtKind::Dir
-            },
-            status: None,
-            scope: None,
-            quote: None,
-            shown: None,
-            lines: None,
-            range: None,
-            block: None,
-            section: None,
-            rev: None,
-            loc: None,
-        },
-        At::Anchor(anchor) => AtState {
-            kind: AtKind::Anchor,
-            status: None,
-            scope: Some(anchor.scope),
-            quote: Some(anchor.quote.clone()),
-            shown: anchor.shown.clone(),
-            lines: None,
-            range: None,
-            block: None,
-            section: None,
-            rev: Some(anchor.rev.as_str().to_string()),
-            loc: None,
-        },
-    };
+fn item(note: &items::Note, f: &Facts, seen: &HashSet<String>, at: AtState) -> Item {
     let out = &f.out;
     Item {
         n: note.n,
@@ -679,7 +935,7 @@ fn item_stops(doc: &Doc) -> impl Iterator<Item = &crate::anchor::Stop> {
 
 /// Item stops a live human verdict covers: on the item, or on an item or heading
 /// section holding it. `ask` is a question, not a decision.
-fn decided(notes: &Notes, doc: &Doc, chain: &Chain) -> u32 {
+fn decided(notes: &Notes, doc: &Doc, texts: &mut Texts) -> u32 {
     let spans: Vec<(u32, u32)> = notes
         .notes
         .iter()
@@ -687,7 +943,7 @@ fn decided(notes: &Notes, doc: &Doc, chain: &Chain) -> u32 {
         .filter(|n| n.verdict.is_some_and(|v| v != Verdict::Ask))
         .filter_map(|n| {
             let anchor = n.anchor()?;
-            items::span_of(anchor, &ladder::relocate(anchor, doc, chain))
+            span_of(anchor, texts.located(n.n, anchor))
         })
         .collect();
     item_stops(doc)

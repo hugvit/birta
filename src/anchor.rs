@@ -554,52 +554,87 @@ pub fn search(markdown: &str, text: &str) -> Vec<Cand> {
 
 /// Where `bytes` show on the page, if they fall in one owner's text.
 pub fn locate(markdown: &str, bytes: Range<usize>) -> Option<Loc> {
-    if bytes.start >= bytes.end || bytes.end > markdown.len() {
-        return None;
-    }
-    let arena = Arena::new();
-    let root = parse_document(&arena, markdown, &parse_options());
-    let lines = LineMap::new(markdown);
-    let mut found = None;
-    for (node, kind) in owners(root) {
-        let owned = OwnerText::new(node, kind, &lines);
-        if !owned.mapped || owned.diagram {
-            continue;
-        }
-        let touched: Vec<usize> = (0..owned.units.len())
-            .filter(|&i| {
-                let u = &owned.units[i];
-                u.s < u.e && u.s < bytes.end && u.e > bytes.start
+    Locator::new(markdown).locate(bytes)
+}
+
+/// A doc's owners and where their text sits in its source, built once so that
+/// placing many ranges on one text parses it once.
+pub struct Locator {
+    len: usize,
+    owners: Vec<LocOwner>,
+}
+
+struct LocOwner {
+    sp: String,
+    /// Source bytes of each unit of rendered text.
+    units: Vec<(usize, usize)>,
+    /// The node's bytes, widened to cover its text.
+    span: Range<usize>,
+    /// Bytes from the first unit with source to the last, for skipping it quickly.
+    touch: Range<usize>,
+}
+
+impl Locator {
+    pub fn new(markdown: &str) -> Self {
+        let arena = Arena::new();
+        let root = parse_document(&arena, markdown, &parse_options());
+        let lines = LineMap::new(markdown);
+        let owners = owners(root)
+            .filter_map(|(node, kind)| {
+                let owned = OwnerText::new(node, kind, &lines);
+                if !owned.mapped || owned.diagram {
+                    return None;
+                }
+                let node_bytes = lines.bytes(node.data.borrow().sourcepos);
+                let units: Vec<(usize, usize)> = owned.units.iter().map(|u| (u.s, u.e)).collect();
+                let text_start = units.iter().map(|u| u.0).min().unwrap_or(node_bytes.start);
+                let text_end = units.iter().map(|u| u.1).max().unwrap_or(node_bytes.end);
+                let sourced = units.iter().filter(|u| u.0 < u.1);
+                let touch = sourced.clone().map(|u| u.0).min().unwrap_or(0)
+                    ..sourced.map(|u| u.1).max().unwrap_or(0);
+                Some(LocOwner {
+                    sp: sp_of(node),
+                    units,
+                    span: node_bytes.start.min(text_start)..node_bytes.end.max(text_end),
+                    touch,
+                })
             })
             .collect();
-        let (Some(&first), Some(&last)) = (touched.first(), touched.last()) else {
-            continue;
-        };
-        let node_bytes = lines.bytes(node.data.borrow().sourcepos);
-        let text_bytes = owned
-            .units
-            .iter()
-            .map(|u| u.s)
-            .min()
-            .unwrap_or(node_bytes.start)
-            ..owned
-                .units
-                .iter()
-                .map(|u| u.e)
-                .max()
-                .unwrap_or(node_bytes.end);
-        let inside = bytes.start >= node_bytes.start.min(text_bytes.start)
-            && bytes.end <= node_bytes.end.max(text_bytes.end);
-        if found.is_some() || !inside {
+        Self {
+            len: markdown.len(),
+            owners,
+        }
+    }
+
+    /// Where `bytes` show on the page, if they fall in one owner's text.
+    pub fn locate(&self, bytes: Range<usize>) -> Option<Loc> {
+        if bytes.start >= bytes.end || bytes.end > self.len {
             return None;
         }
-        found = Some(Loc {
-            sp: sp_of(node),
-            off: (first, last + 1),
-            tl: owned.units.len(),
-        });
+        let mut found = None;
+        for owner in &self.owners {
+            if owner.touch.start >= bytes.end || owner.touch.end <= bytes.start {
+                continue;
+            }
+            let touched = |&(s, e): &(usize, usize)| s < e && s < bytes.end && e > bytes.start;
+            let (Some(first), Some(last)) = (
+                owner.units.iter().position(touched),
+                owner.units.iter().rposition(touched),
+            ) else {
+                continue;
+            };
+            let inside = bytes.start >= owner.span.start && bytes.end <= owner.span.end;
+            if found.is_some() || !inside {
+                return None;
+            }
+            found = Some(Loc {
+                sp: owner.sp.clone(),
+                off: (first, last + 1),
+                tl: owner.units.len(),
+            });
+        }
+        found
     }
-    found
 }
 
 /// The rendered text of the owner at `sp`, whitespace collapsed as the page does.

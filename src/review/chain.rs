@@ -31,7 +31,7 @@ pub struct Step {
 pub enum Cause {
     /// birta's own write: an `edit`.
     Edit,
-    /// An `external` while an agent held an open claim.
+    /// An `external` while an agent held an open claim, unless git made it.
     Agent,
     /// Any other write, including a snap standing in for one.
     Outside { git: bool },
@@ -117,12 +117,12 @@ impl Chain {
                         cause,
                         ..
                     } => {
-                        let cause = if !claims.open.is_empty() {
+                        // A checkout or pull is never the claimer's, whoever holds a turn
+                        let git = cause.as_deref() == Some("git");
+                        let cause = if !git && !claims.open.is_empty() {
                             Cause::Agent
                         } else {
-                            Cause::Outside {
-                                git: cause.as_deref() == Some("git"),
-                            }
+                            Cause::Outside { git }
                         };
                         patch(rev, to_rev, hunks, cause)
                     }
@@ -220,6 +220,16 @@ impl Chain {
                 .zip(&revs[j..k])
                 .all(|(step, (_, before))| step.from == *before);
         unbroken.then(|| &steps[range])
+    }
+
+    /// Every step in log order. Step `i` is trustworthy unless [`Chain::broke`] says so.
+    pub fn history(&self) -> &[Step] {
+        &self.walked.steps
+    }
+
+    /// Step `i` of [`Chain::history`] didn't apply, didn't verify, or skipped a rev.
+    pub fn broke(&self, i: usize) -> bool {
+        self.walked.broken.get(i).copied().unwrap_or(true)
     }
 
     /// `Some(n)`: a break left revs recorded before log line `n` without text.

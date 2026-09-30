@@ -46,7 +46,7 @@ pub struct LineIndex {
 }
 
 impl LineIndex {
-    fn new(text: &str) -> Self {
+    pub fn new(text: &str) -> Self {
         let mut start = 0;
         let ranges = hunk::lines(text)
             .into_iter()

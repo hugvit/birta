@@ -1,7 +1,7 @@
 {
   "schema": "review-state/1",
   "doc": "dirmode",
-  "rev": "ce013625030ba8dba906f756967f9e9ca394464a",
+  "rev": "",
   "server_now": 1790000600000,
   "writable": false,
   "log_writable": true,
@@ -11,7 +11,7 @@
     "bad": 0,
     "unknown_ops": 0,
     "read_only": false,
-    "baseline_available": true
+    "baseline_available": false
   },
   "owner": {
     "drafted_by": null
@@ -40,7 +40,8 @@
       "op": "comment",
       "by": {
         "type": "human",
-        "name": "andres"
+        "name": "andres",
+        "via": "browser"
       },
       "cid": "c-4",
       "ts": 1790000004000,
@@ -58,7 +59,8 @@
       "op": "comment",
       "by": {
         "type": "human",
-        "name": "andres"
+        "name": "andres",
+        "via": "browser"
       },
       "cid": "c-5",
       "ts": 1790000005000,

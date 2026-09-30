@@ -78,10 +78,26 @@ expression: json
       "ts": 1790000004000,
       "at": {
         "kind": "anchor",
+        "status": "ok",
         "scope": "block",
         "quote": "- first item",
+        "lines": [
+          6,
+          6
+        ],
+        "range": [
+          51,
+          63
+        ],
+        "block": [
+          6,
+          6
+        ],
+        "section": "Plan",
         "rev": "21e4c7251bbee8cd8d40ac78988ff326db67ae96",
-        "loc": null
+        "loc": {
+          "sp": "6:1-6:12"
+        }
       },
       "verdict": "no",
       "status": "handled",
@@ -107,10 +123,26 @@ expression: json
       "ts": 1790000005000,
       "at": {
         "kind": "anchor",
+        "status": "ok",
         "scope": "block",
         "quote": "- second item\n  - nested item",
+        "lines": [
+          7,
+          8
+        ],
+        "range": [
+          64,
+          93
+        ],
+        "block": [
+          7,
+          8
+        ],
+        "section": "Plan",
         "rev": "21e4c7251bbee8cd8d40ac78988ff326db67ae96",
-        "loc": null
+        "loc": {
+          "sp": "7:1-8:15"
+        }
       },
       "verdict": "ask",
       "status": "handled",
@@ -145,10 +177,26 @@ expression: json
       "ts": 1790000006000,
       "at": {
         "kind": "anchor",
+        "status": "ok",
         "scope": "block",
         "quote": "- third item",
+        "lines": [
+          9,
+          9
+        ],
+        "range": [
+          94,
+          106
+        ],
+        "block": [
+          9,
+          9
+        ],
+        "section": "Plan",
         "rev": "21e4c7251bbee8cd8d40ac78988ff326db67ae96",
-        "loc": null
+        "loc": {
+          "sp": "9:1-10:0"
+        }
       },
       "verdict": "yes",
       "status": "handled",
@@ -169,10 +217,26 @@ expression: json
       "ts": 1790000007000,
       "at": {
         "kind": "anchor",
+        "status": "ok",
         "scope": "block",
         "quote": "- detail one",
+        "lines": [
+          13,
+          13
+        ],
+        "range": [
+          120,
+          132
+        ],
+        "block": [
+          13,
+          13
+        ],
+        "section": "Details",
         "rev": "21e4c7251bbee8cd8d40ac78988ff326db67ae96",
-        "loc": null
+        "loc": {
+          "sp": "13:1-13:12"
+        }
       },
       "verdict": "later",
       "status": "later",
@@ -193,10 +257,26 @@ expression: json
       "ts": 1790000008000,
       "at": {
         "kind": "anchor",
+        "status": "ok",
         "scope": "block",
         "quote": "- detail two",
+        "lines": [
+          14,
+          14
+        ],
+        "range": [
+          133,
+          145
+        ],
+        "block": [
+          14,
+          14
+        ],
+        "section": "Details",
         "rev": "21e4c7251bbee8cd8d40ac78988ff326db67ae96",
-        "loc": null
+        "loc": {
+          "sp": "14:1-14:12"
+        }
       },
       "verdict": "stet",
       "status": "handled",

@@ -6,7 +6,7 @@
 
 use serde::Serialize;
 
-use super::ops::{By, CommentKind, ReplyKind, Scope, To, Verdict};
+use super::ops::{By, CommentKind, Hunk, ReplyKind, Scope, To, Verdict};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ReviewState {
@@ -302,6 +302,9 @@ pub struct Change {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub removed: Option<String>,
     pub is_rewrite: bool,
+    /// The hunk that undoes this one, in the current text's lines; set only when reversible.
+    #[serde(skip)]
+    pub reverse: Option<Hunk>,
     pub reversible: Reversible,
     /// Hunks in the same op, so undoing one can ask to confirm.
     pub op_hunks: u32,
@@ -411,6 +414,14 @@ pub struct ApproveState {
     pub changed_since: bool,
     pub later: u32,
     pub can_withdraw: bool,
+}
+
+/// A review file in brief, for a directory listing: the phrase and the counts.
+#[derive(Clone, Debug, Serialize)]
+pub struct Summary {
+    pub stage: Stage,
+    pub phrase: Phrase,
+    pub counts: Counts,
 }
 
 #[derive(Clone, Debug, Serialize)]

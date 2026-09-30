@@ -43,6 +43,10 @@ insta = { version = "1.46.3", features = ["glob"] }
 tokio-tungstenite = "0.26"
 tower = { version = "0.5.3", features = ["util"] }
 
+# Review logs hash every recorded write; unoptimized hashing dominates debug test runs
+[profile.dev.package.sha1_smol]
+opt-level = 3
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"

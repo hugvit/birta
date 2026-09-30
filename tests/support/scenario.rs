@@ -5,9 +5,10 @@
 
 use birta::rev::Rev;
 use birta::review::anchor_from_req;
-use birta::review::chain::Chain;
+use birta::review::chain::{CHECKPOINT_EVERY, Chain};
 use birta::review::doc::Doc;
 use birta::review::fold::{self, TurnIndex};
+use birta::review::hunk;
 use birta::review::ops::{self, AnchorReq, BlockScope, Parsed};
 use birta::review::state::ReviewState;
 use serde_json::{Value, json};
@@ -78,6 +79,8 @@ pub struct Scenario {
     last_round: u32,
     /// Set by hand-written lines, which may be meant not to parse.
     hand_written: bool,
+    /// Writes made by [`Scenario::external_diffed`].
+    diffed: usize,
 }
 
 impl Scenario {
@@ -96,16 +99,26 @@ impl Scenario {
         Self::created(text, None)
     }
 
+    /// A folder's review file, `<root>/.birta.jsonl`, whose notes are on the folder.
+    pub fn folder(name: &str) -> Self {
+        Self::named(name, "", Some(None))
+    }
+
     fn created(text: &str, owner: Option<Option<&str>>) -> Self {
+        Self::named(DOC_NAME, text, owner)
+    }
+
+    fn named(doc: &str, text: &str, owner: Option<Option<&str>>) -> Self {
         let mut s = Self {
             lines: vec![
-                json!({"birta": "review/1", "doc": DOC_NAME, "about": "ops after the last hand-back are drafts; don't act on them"})
+                json!({"birta": "review/1", "doc": doc, "about": "ops after the last hand-back are drafts; don't act on them"})
                     .to_string(),
             ],
             text: text.to_string(),
             last_human: 0,
             last_round: 0,
             hand_written: false,
+            diffed: 0,
         };
         s.push(
             birta_by(),
@@ -365,6 +378,22 @@ impl Scenario {
         )
     }
 
+    /// The agent cites note `to` for the text `quote` it wrote.
+    pub fn covers(&mut self, name: &str, to: u32, quote: &str, turn: u32) -> u32 {
+        self.push(
+            agent(name),
+            json!({"op": "covers", "to": to, "quote": quote, "turn": turn}),
+        )
+    }
+
+    /// The agent flags its own change of `quote` as one nobody asked for.
+    pub fn unasked(&mut self, name: &str, quote: &str, turn: u32) -> u32 {
+        self.push(
+            agent(name),
+            json!({"op": "unasked", "quote": quote, "body": "while I was there", "turn": turn}),
+        )
+    }
+
     pub fn turn_note(&mut self, name: &str, body: &str, turn: u32) -> u32 {
         self.push(
             agent(name),
@@ -401,6 +430,58 @@ impl Scenario {
             .replacen(&format!("{old}\n"), &format!("{new}\n"), 1)
     }
 
+    /// An `external` that git made, as a checkout or pull would.
+    pub fn external_git(&mut self, new: &str) -> u32 {
+        let chain = Chain::build(&self.parsed());
+        let rec = chain.record(new).expect("the write must change the doc");
+        let line = json!({"op": "external", "rev": rec.rev, "to_rev": rec.to_rev, "patch": rec.patch, "cause": "git"});
+        self.land(birta_by(), line, rec.checkpoint, new)
+    }
+
+    /// An `external` recorded by rev only, with a checkpoint snap giving its text, as a
+    /// write whose patch is too large is recorded.
+    pub fn external_rev_only(&mut self, new: &str) -> u32 {
+        let rev = Rev::of(self.text.as_bytes());
+        let to_rev = Rev::of(new.as_bytes());
+        let line = json!({"op": "external", "rev": rev, "to_rev": to_rev, "patch": null});
+        self.land(birta_by(), line, Some(new.to_string()), new)
+    }
+
+    /// birta's `x` undo of change `of`, leaving the doc as `new`.
+    pub fn undo(&mut self, of: &str, new: &str) -> u32 {
+        let chain = Chain::build(&self.parsed());
+        let rec = chain.record(new).expect("the undo must change the doc");
+        let line = json!({"op": "edit", "rev": rec.rev, "to_rev": rec.to_rev, "patch": rec.patch, "act": "undo", "of": of});
+        self.land(human(), line, rec.checkpoint, new)
+    }
+
+    /// A bare snap of a new text, standing in for a write nobody recorded.
+    pub fn snap_to(&mut self, new: &str) -> u32 {
+        let n = self.push(
+            birta_by(),
+            json!({"op": "snap", "rev": Rev::of(new.as_bytes()), "text": new}),
+        );
+        self.text = new.to_string();
+        n
+    }
+
+    /// An agent's `external` diffed against the kit's own text, without rebuilding the
+    /// chain; a checkpoint snap follows every 20th. Only for logs written this way.
+    pub fn external_diffed(&mut self, new: &str) -> u32 {
+        let line = json!({
+            "op": "external",
+            "rev": Rev::of(self.text.as_bytes()),
+            "to_rev": Rev::of(new.as_bytes()),
+            "patch": hunk::diff(&self.text, new),
+        });
+        self.diffed += 1;
+        let checkpoint = self
+            .diffed
+            .is_multiple_of(CHECKPOINT_EVERY)
+            .then(|| new.to_string());
+        self.land(birta_by(), line, checkpoint, new)
+    }
+
     fn write(&mut self, op: &str, by: Value, new: &str) -> u32 {
         let chain = Chain::build(&self.parsed());
         let rec = chain.record(new).expect("the write must change the doc");
@@ -408,11 +489,17 @@ impl Scenario {
         if op == "edit" {
             line["act"] = json!("edit");
         }
+        self.land(by, line, rec.checkpoint, new)
+    }
+
+    /// Appends a write's line and its checkpoint snap, and makes `new` the doc's text.
+    fn land(&mut self, by: Value, line: Value, checkpoint: Option<String>, new: &str) -> u32 {
+        let to_rev = line["to_rev"].clone();
         let n = self.push(by, line);
-        if let Some(text) = rec.checkpoint {
+        if let Some(text) = checkpoint {
             self.push(
                 birta_by(),
-                json!({"op": "snap", "rev": rec.to_rev, "text": text, "checkpoint": true}),
+                json!({"op": "snap", "rev": to_rev, "text": text, "checkpoint": true}),
             );
         }
         self.text = new.to_string();

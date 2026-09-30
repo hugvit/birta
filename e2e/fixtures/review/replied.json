@@ -1,7 +1,7 @@
 {
   "schema": "review-state/1",
   "doc": "pr.md",
-  "rev": "ce013625030ba8dba906f756967f9e9ca394464a",
+  "rev": "3b68db23bb6083d2a3b7b38c33bc51ac998ae4ea",
   "server_now": 1790000600000,
   "writable": true,
   "log_writable": true,
@@ -20,22 +20,22 @@
     "stage": "replied",
     "sent": {
       "n": 7,
-      "ts": 1790000012000,
+      "ts": 1790000007000,
       "items": 3,
       "can_withdraw": false
     },
     "picked_up": {
       "n": 8,
-      "ts": 1790000020000,
+      "ts": 1790000008000,
       "by": "claude",
       "silence": {
-        "since_ts": 1790000020000,
+        "since_ts": 1790000008000,
         "threshold_ms": 900000
       }
     },
     "replied": {
       "turn": 8,
-      "ts": 1790000300000,
+      "ts": 1790000013000,
       "by": "claude",
       "done": 1,
       "answered": 1,
@@ -57,7 +57,7 @@
     "open_asks": 0,
     "later": 0,
     "lost": 0,
-    "items": 5,
+    "items": 3,
     "decided": 1,
     "attention": 3
   },
@@ -67,7 +67,8 @@
       "op": "comment",
       "by": {
         "type": "human",
-        "name": "andres"
+        "name": "andres",
+        "via": "browser"
       },
       "cid": "c-4",
       "ts": 1790000004000,
@@ -82,22 +83,22 @@
           5
         ],
         "range": [
-          212,
-          224
+          53,
+          65
         ],
         "block": [
           5,
-          5
+          6
         ],
         "section": "Why",
-        "rev": "ce013625030ba8dba906f756967f9e9ca394464a",
+        "rev": "7956425b78307ed38a115054d90494e18cff956c",
         "loc": {
-          "sp": "5:1-5:58",
+          "sp": "5:1-6:68",
           "off": [
-            21,
-            33
+            27,
+            39
           ],
-          "tl": 58
+          "tl": 141
         }
       },
       "verdict": "no",
@@ -121,7 +122,8 @@
       "op": "comment",
       "by": {
         "type": "human",
-        "name": "andres"
+        "name": "andres",
+        "via": "browser"
       },
       "cid": "c-5",
       "ts": 1790000005000,
@@ -130,19 +132,22 @@
         "status": "ok",
         "scope": "block",
         "quote": "- retries on 503",
-        "shown": "- retries on 503",
         "lines": [
-          9,
-          9
+          10,
+          10
+        ],
+        "range": [
+          186,
+          202
         ],
         "block": [
-          9,
-          9
+          10,
+          10
         ],
-        "section": "Why",
-        "rev": "ce013625030ba8dba906f756967f9e9ca394464a",
+        "section": "What changes",
+        "rev": "7956425b78307ed38a115054d90494e18cff956c",
         "loc": {
-          "sp": "9:1-9:17"
+          "sp": "10:1-10:16"
         }
       },
       "verdict": "no",
@@ -158,7 +163,8 @@
       "op": "comment",
       "by": {
         "type": "human",
-        "name": "andres"
+        "name": "andres",
+        "via": "browser"
       },
       "cid": "c-6",
       "ts": 1790000006000,
@@ -177,11 +183,12 @@
           "id": "#11",
           "by": {
             "type": "agent",
-            "name": "claude"
+            "name": "claude",
+            "via": "cli"
           },
           "kind": "answer",
           "body": "Yes: CI runs it on every push.",
-          "ts": 1790000300000,
+          "ts": 1790000011000,
           "seen": false
         }
       ]
@@ -199,24 +206,24 @@
         "name": "claude"
       },
       "old": [
-        5,
-        5
+        6,
+        6
       ],
       "new": [
-        5,
-        5
+        6,
+        6
       ],
       "range": {
         "status": "ok",
         "lines": [
-          5,
-          5
+          6,
+          6
         ],
         "bytes": [
-          200,
-          260
+          99,
+          167
         ],
-        "sp": "5:1-5:71"
+        "sp": "5:1-6:68"
       },
       "asked": {
         "kind": "location",
@@ -231,24 +238,32 @@
       "what": {
         "old_lines": 1,
         "new_lines": 1,
-        "words": 3,
         "touches_html": false
       },
       "is_rewrite": false,
       "reversible": {
-        "ok": false,
-        "reason": "multi_hunk"
+        "ok": true,
+        "reason": "none"
       },
       "op_hunks": 1
     }
   ],
-  "deletions": [],
+  "deletions": [
+    {
+      "change": "9.0",
+      "kind": "words",
+      "at_line": 6,
+      "at_byte": 146,
+      "removed": " with backoff",
+      "after_sp": "5:1-6:68"
+    }
+  ],
   "later": [],
   "lost": [],
   "rounds": [
     {
       "submit": 7,
-      "ts": 1790000012000,
+      "ts": 1790000007000,
       "by": "andres",
       "to": "*",
       "items": [

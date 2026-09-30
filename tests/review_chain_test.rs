@@ -780,3 +780,13 @@ fn two_open_claims_make_the_write_an_agents() {
     ]);
     assert_eq!(cause, Cause::Agent);
 }
+
+#[test]
+fn a_git_write_during_a_claim_is_from_outside() {
+    // 3 note, 4 submit, 5 claim(4), 6 the checkout
+    let mut git = external(W0, W1);
+    git["cause"] = json!("git");
+    let chain = build(&[snap(W0), note(), submit(3), claim_by("claude", 4), git]);
+    let cause = chain.steps(&rev(W0), &rev(W1)).unwrap()[0].cause;
+    assert_eq!(cause, Cause::Outside { git: true });
+}

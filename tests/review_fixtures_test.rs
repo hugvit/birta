@@ -211,6 +211,7 @@ fn full_state() -> ReviewState {
             },
             removed: Some("old text".to_string()),
             is_rewrite: false,
+            reverse: None,
             reversible: Reversible {
                 ok: false,
                 reason: ReversibleReason::MultiHunk,
@@ -585,6 +586,7 @@ fn nested_optionals_are_omitted() {
         },
         removed: None,
         is_rewrite: false,
+        reverse: None,
         reversible: Reversible {
             ok: true,
             reason: ReversibleReason::None,
@@ -694,516 +696,168 @@ fn a_not_handled_row_carries_its_seen_id() {
     assert_eq!(v["status"], "not_handled");
 }
 
-// --- the contract fixtures in e2e/fixtures/review ---
+// --- the contract fixtures in e2e/fixtures/review, folded from real logs ---
 
-const T: u64 = 1_790_000_000_000;
+mod support {
+    pub mod scenario;
+}
+use support::scenario::{Scenario, T0, ts};
+
+const CLAUDE: &str = "claude";
 const PR_HAND_OFF: &str = "Take a look at my notes: `birta review /work/pr.md`";
+/// Well after every line the fixtures write, so no hold is still running.
+const LATER: u64 = T0 + 600_000;
 
-fn fixture_base(stage: Stage, log_lines: u32) -> ReviewState {
-    ReviewState {
-        schema: review::SCHEMA_STATE.to_string(),
-        doc: "pr.md".to_string(),
-        rev: REV.to_string(),
-        server_now: T + 600_000,
-        writable: true,
-        log_writable: true,
-        hand_off: PR_HAND_OFF.to_string(),
-        log: LogInfo {
-            lines: log_lines,
-            bad: 0,
-            unknown_ops: 0,
-            read_only: false,
-            baseline_available: true,
-            baseline_from: None,
-        },
-        owner: OwnerState {
-            drafted_by: Some("claude".to_string()),
-        },
-        phrase: Phrase {
-            stage,
-            sent: None,
-            picked_up: None,
-            replied: None,
-        },
-        phrase_before_hold: None,
-        hold: None,
-        counts: Counts {
-            items: 5,
-            ..counts(0)
-        },
-        items: vec![],
-        changes: vec![],
-        deletions: vec![],
-        rewrite: None,
-        later: vec![],
-        lost: vec![],
-        approve: None,
-        rounds: vec![],
-        warnings: vec![],
-    }
-}
+/// The draft the fixtures review. Stops: headings 1, 3, 8, 14; paragraphs 5-6, 16;
+/// items 10, 11, 12.
+const PR: &str = "\
+# Upload retries
 
-fn anchor_at(
-    scope: Scope,
-    quote: &str,
-    lines: (u32, u32),
-    sp: &str,
-    off: Option<(usize, usize)>,
-) -> AtState {
-    AtState {
-        kind: AtKind::Anchor,
-        status: Some(AnchorStatus::Ok),
-        scope: Some(scope),
-        quote: Some(quote.to_string()),
-        shown: Some(quote.to_string()),
-        lines: Some(lines),
-        range: None,
-        block: Some(lines),
-        section: Some("Why".to_string()),
-        rev: Some(REV.to_string()),
-        loc: Some(Loc {
-            sp: sp.to_string(),
-            off,
-            tl: off.map(|_| 58),
-        }),
-    }
-}
+## Why
 
-fn place_at(kind: AtKind) -> AtState {
-    AtState {
-        kind,
-        status: None,
-        scope: None,
-        quote: None,
-        shown: None,
-        lines: None,
-        range: None,
-        block: None,
-        section: None,
-        rev: None,
-        loc: None,
-    }
-}
+When the upload hits a 503 we just fail and the user has to start again.
+Retrying three times with backoff fixes most of these.
 
-fn note(n: u32, at: AtState, verdict: Option<Verdict>, body: &str) -> Item {
-    Item {
-        n,
-        id: None,
-        op: "comment".to_string(),
-        by: human(),
-        cid: Some(format!("c-{n}")),
-        ts: T + u64::from(n) * 1000,
-        at,
-        verdict,
-        body: (!body.is_empty()).then(|| body.to_string()),
-        to: None,
-        kind: None,
-        status: ItemStatus::Draft,
-        sent_in: None,
-        turn: None,
-        amended: vec![],
-        replies: vec![],
-        outcome: None,
-    }
-}
+## What changes
 
-/// Three drafts: a quote note, a verdict on a list item, a note on the whole doc.
-fn draft_items() -> Vec<Item> {
-    vec![
-        note(
-            4,
-            AtState {
-                range: Some((212, 224)),
-                ..anchor_at(
-                    Scope::Quote,
-                    "we just fail",
-                    (5, 5),
-                    "5:1-5:58",
-                    Some((21, 33)),
-                )
-            },
-            Some(Verdict::No),
-            "say why",
-        ),
-        note(
-            5,
-            anchor_at(Scope::Block, "- retries on 503", (9, 9), "9:1-9:17", None),
-            Some(Verdict::No),
-            "drop this bullet",
-        ),
-        note(
-            6,
-            place_at(AtKind::Doc),
-            None,
-            "is the test ladder still needed?",
-        ),
-    ]
-}
+- retries on 503
+- backoff of 1, 2 and 4 seconds
+- metrics dashboard
 
-fn drafts_phrase() -> Phrase {
-    Phrase {
-        stage: Stage::Drafts,
-        sent: None,
-        picked_up: None,
-        replied: None,
-    }
-}
+## Stacked on
 
-fn sent_phrase(can_withdraw: bool) -> Phrase {
-    Phrase {
-        stage: Stage::Sent,
-        sent: Some(Sent {
-            n: 7,
-            ts: T + 12_000,
-            items: 3,
-            can_withdraw,
-        }),
-        picked_up: None,
-        replied: None,
-    }
-}
+Nothing yet.
+";
 
-fn round(claim: bool, r#yield: bool) -> Round {
-    Round {
-        submit: 7,
-        ts: T + 12_000,
-        by: "andres".to_string(),
-        to: Some(To::One("*".to_string())),
-        batch: None,
-        items: vec![4, 5, 6],
-        claim: claim.then_some(8),
-        claimed_by: claim.then(|| "claude".to_string()),
-        r#yield: r#yield.then_some(13),
-        released: false,
-    }
-}
-
-fn picked_phrase() -> Phrase {
-    Phrase {
-        stage: Stage::PickedUp,
-        picked_up: Some(PickedUp {
-            n: 8,
-            ts: T + 20_000,
-            by: "claude".to_string(),
-            silence: Silence {
-                since_ts: T + 20_000,
-                threshold_ms: 900_000,
-            },
-        }),
-        ..sent_phrase(false)
-    }
-}
-
-fn agent_change(
-    idx: u32,
-    asked: AskedKind,
-    notes: Vec<u32>,
-    lines: (u32, u32),
-    sp: &str,
-) -> Change {
-    Change {
-        id: format!("9.{idx}"),
-        op: 9,
-        idx,
-        turn: Some(8),
-        attr: Attr::Agent,
-        by: agent(),
-        cause: None,
-        old: lines,
-        new: lines,
-        range: ChangeRange {
-            status: RangeStatus::Ok,
-            lines,
-            bytes: (200, 260),
-            sp: Some(sp.to_string()),
-        },
-        asked: Asked { kind: asked, notes },
-        changes_your_edit: None,
-        reverts_your_edit: false,
-        breaks_stet: vec![],
-        seen: false,
-        settled: false,
-        undone_by: None,
-        what: What {
-            old_lines: lines.1 - lines.0 + 1,
-            new_lines: lines.1 - lines.0 + 1,
-            words: Some(3),
-            touches_html: false,
-        },
-        removed: None,
-        is_rewrite: false,
-        reversible: Reversible {
-            ok: false,
-            reason: ReversibleReason::MultiHunk,
-        },
-        op_hunks: 1,
-    }
-}
-
-/// The agent's turn 8: one fix on note #4, an answer to #6, nothing for #5.
-fn replied_state() -> ReviewState {
-    let mut state = fixture_base(Stage::Replied, 13);
-    let mut items = draft_items();
-    for item in &mut items {
-        item.sent_in = Some(7);
-        item.turn = Some(8);
-        item.status = ItemStatus::Handled;
-    }
-    items[0].outcome = Some(ItemOutcome {
-        done: true,
-        no_change: false,
-        changes: vec!["9.0".to_string()],
-    });
-    items[1].status = ItemStatus::NotHandled;
-    items[1].id = Some("nh:5".to_string());
-    items[2].replies = vec![ReplyState {
-        n: 11,
-        id: "#11".to_string(),
-        by: agent(),
-        kind: Some(ReplyKind::Answer),
-        verdict: None,
-        body: Some("Yes: CI runs it on every push.".to_string()),
-        ts: T + 300_000,
-        seen: false,
-    }];
-    state.items = items;
-    state.changes = vec![agent_change(
-        0,
-        AskedKind::Location,
-        vec![4],
-        (5, 5),
-        "5:1-5:71",
-    )];
-    state.phrase = Phrase {
-        stage: Stage::Replied,
-        replied: Some(Replied {
-            turn: 8,
-            ts: T + 300_000,
-            by: "claude".to_string(),
-            done: 1,
-            answered: 1,
-            didnt: 0,
-            asked: 0,
-            unasked: 0,
-            not_handled: 1,
-            note: Some("Said why the upload fails.".to_string()),
-        }),
-        ..picked_phrase()
-    };
-    state.rounds = vec![round(true, true)];
-    state.counts = Counts {
-        items: 5,
-        decided: 1,
-        unseen: 1,
-        not_handled: 1,
-        attention: 3,
-        ..counts(0)
-    };
+/// What the server adds to a fold before sending it.
+fn served(mut state: ReviewState, server_now: u64) -> ReviewState {
+    state.server_now = server_now;
+    state.hand_off = PR_HAND_OFF.to_string();
     state
 }
 
-fn contract_fixtures() -> Vec<(&'static str, ReviewState)> {
-    let fresh = fixture_base(Stage::Idle, 3);
+/// Three drafts: a quote note, a verdict on a list item, a note on the whole doc.
+fn drafted() -> (Scenario, [u32; 3]) {
+    let mut s = Scenario::drafted_by(PR, CLAUDE);
+    let quote = s.quote("we just fail");
+    let q = s.comment(quote, Some("no"), Some("say why"));
+    let item = s.block("- retries on 503");
+    let v = s.comment(item, Some("no"), Some("drop this bullet"));
+    let d = s.note("is the test ladder still needed?");
+    (s, [q, v, d])
+}
 
-    let mut drafts = fixture_base(Stage::Drafts, 6);
-    drafts.items = draft_items();
-    drafts.counts = Counts {
-        items: 5,
-        drafts: 3,
-        decided: 1,
-        ..counts(0)
-    };
+/// The drafts handed back and claimed. A claim can't land inside a hold, so this
+/// hand-back is due at once.
+fn picked() -> (Scenario, [u32; 3], u32, u32) {
+    let (mut s, notes) = drafted();
+    let sub = s.submit();
+    let turn = s.claim(CLAUDE);
+    (s, notes, sub, turn)
+}
 
-    let mut sent = drafts.clone();
-    sent.log.lines = 7;
-    sent.phrase = sent_phrase(true);
-    for item in &mut sent.items {
-        item.status = ItemStatus::Sent;
-        item.sent_in = Some(7);
-    }
-    sent.rounds = vec![round(false, false)];
-    sent.counts = Counts {
-        items: 5,
-        sent_unclaimed: 3,
-        decided: 1,
-        ..counts(0)
-    };
-
-    let mut hold = sent.clone();
-    hold.server_now = T + 9_000;
-    hold.hold = Some(Hold {
-        n: 7,
-        kind: HoldKind::HandBack,
-        count: 3,
-        not_before: T + 12_000,
-    });
-    hold.phrase_before_hold = Some(drafts_phrase());
-
-    let mut picked = sent.clone();
-    picked.log.lines = 8;
-    picked.phrase = picked_phrase();
-    for item in &mut picked.items {
-        item.status = ItemStatus::PickedUp;
-        item.turn = Some(8);
-    }
-    picked.rounds = vec![round(true, false)];
-    picked.counts.sent_unclaimed = 0;
-
-    let replied = replied_state();
-
-    let mut unseen = replied_state();
-    unseen.log.lines = 13;
-    unseen.changes.push(agent_change(
-        1,
-        AskedKind::Unasked,
-        vec![],
-        (11, 12),
-        "11:1-12:40",
-    ));
-    let mut removal = agent_change(2, AskedKind::Unasked, vec![], (14, 14), "13:1-13:30");
-    removal.old = (14, 16);
-    removal.what.old_lines = 3;
-    removal.what.new_lines = 0;
-    removal.what.words = None;
-    removal.removed = Some("## Stacked on\n\nNothing yet.\n".to_string());
-    unseen.changes.push(removal);
-    unseen.deletions = vec![Deletion {
-        change: "9.2".to_string(),
-        kind: DeletionKind::Block,
-        at_line: 14,
-        at_byte: Some(412),
-        removed: "## Stacked on\n\nNothing yet.\n".to_string(),
-        after_sp: Some("13:1-13:30".to_string()),
-    }];
-    unseen.counts = Counts {
-        unseen: 3,
-        unasked: 2,
-        attention: 5,
-        ..unseen.counts
-    };
-
-    let mut rewrite = replied_state();
-    rewrite.changes = (0..3)
-        .map(|idx| {
-            let mut change = agent_change(
-                idx,
-                AskedKind::Unasked,
-                vec![],
-                (3 + idx * 4, 5 + idx * 4),
-                "3:1-5:20",
-            );
-            change.is_rewrite = true;
-            change
-        })
-        .collect();
-    rewrite.changes[0].asked = Asked {
-        kind: AskedKind::Location,
-        notes: vec![4],
-    };
-    rewrite.rewrite = Some(Rewrite {
-        turn: 8,
-        pct: 0.75,
-        blocks_changed: 6,
-        blocks_total: 8,
-    });
-    rewrite.counts = Counts {
-        unseen: 3,
-        unasked: 2,
-        attention: 5,
-        ..rewrite.counts
-    };
-
-    let mut approved = replied_state();
-    approved.log.lines = 17;
-    for change in &mut approved.changes {
-        change.seen = true;
-        change.settled = true;
-    }
-    approved.items[2].replies[0].seen = true;
-    let mut later = note(
-        14,
-        anchor_at(
-            Scope::Block,
-            "- metrics dashboard",
-            (10, 10),
-            "10:1-10:20",
-            None,
-        ),
-        Some(Verdict::Later),
-        "next PR",
+/// The agent's turn: a fix on the quote's paragraph, an answer, nothing for the bullet.
+/// `more` writes before the yield. Returns the ids the human would mark seen: the
+/// fix's change and the answer.
+fn replied(more: impl FnOnce(&mut Scenario)) -> (Scenario, [u32; 3], [String; 2]) {
+    let (mut s, [q, v, d], _, turn) = picked();
+    let fix = s.replace_line(
+        "Retrying three times with backoff fixes most of these.",
+        "S3 answers 503 under load; retrying three times fixes most of these.",
     );
-    later.status = ItemStatus::Later;
-    approved.items.push(later);
-    approved.later = vec![14];
-    approved.approve = Some(ApproveState {
-        n: 16,
-        ts: T + 700_000,
-        rev: REV.to_string(),
-        current_matches: true,
-        changed_since: false,
-        later: 1,
-        can_withdraw: false,
+    more(&mut s);
+    s.done(CLAUDE, q, turn);
+    let answer = s.agent_reply(CLAUDE, d, "answer", "Yes: CI runs it on every push.");
+    s.turn_note(CLAUDE, "Said why the upload fails.", turn);
+    s.yield_turn(CLAUDE, turn);
+    (s, [q, v, d], [format!("{fix}.0"), format!("#{answer}")])
+}
+
+/// Each fixture's state, and the doc text it is about (none for the folder).
+fn contract_fixtures() -> Vec<(&'static str, ReviewState, Option<String>)> {
+    let fresh = Scenario::drafted_by(PR, CLAUDE);
+
+    let (drafts, _) = drafted();
+
+    let (mut sent, _) = drafted();
+    let sub = sent.submit_held();
+
+    let (picked, ..) = picked();
+
+    let (replied_log, ..) = replied(|_| {});
+
+    let (unseen, ..) = replied(|s| {
+        s.replace_line(
+            "- backoff of 1, 2 and 4 seconds",
+            "- backoff of 1, 2 and 4 seconds, capped at 8",
+        );
+        let text = s.text().replace("\n\nNothing yet.\n", "\n");
+        s.external(&text);
     });
-    approved.phrase.stage = Stage::Approved;
-    approved.server_now = T + 800_000;
-    approved.counts = Counts {
-        items: 5,
-        decided: 2,
-        later: 1,
-        not_handled: 1,
-        attention: 1,
-        ..counts(0)
-    };
 
-    let mut lost = replied_state();
-    lost.items[0].at.status = Some(AnchorStatus::Orphaned);
-    lost.items[0].at.range = None;
-    lost.items[0].at.loc = None;
-    lost.lost = vec![4];
-    lost.counts.lost = 1;
+    let (rewrite, ..) = replied(|s| {
+        let text = s
+            .text()
+            .replace("- retries on 503\n", "- retries on 502, 503 and 504\n")
+            .replace("- backoff of 1, 2 and 4 seconds\n", "- jittered backoff\n")
+            .replace("- metrics dashboard\n", "- a retry counter\n")
+            .replace("Nothing yet.\n", "The S3 client bump.\n");
+        s.external(&text);
+    });
 
-    let mut dir = fixture_base(Stage::Drafts, 5);
-    dir.doc = "dirmode".to_string();
-    dir.hand_off = "Take a look at my notes: `birta review /work/dirmode`".to_string();
-    dir.owner.drafted_by = None;
-    dir.writable = false;
-    dir.items = vec![
-        note(
-            4,
-            place_at(AtKind::Dir),
-            None,
-            "the sub/ docs repeat the index",
-        ),
-        note(
-            5,
-            place_at(AtKind::Dir),
-            Some(Verdict::Ask),
-            "which of these is current?",
-        ),
-    ];
-    dir.counts = Counts {
-        drafts: 2,
-        ..counts(0)
-    };
+    let (mut approved, _, seen) = replied(|_| {});
+    approved.seen(&[seen[0].as_str(), seen[1].as_str()]);
+    approved.verdict("- metrics dashboard", "later");
+    approved.approve_held();
 
+    let (mut lost, ..) = replied(|_| {});
+    lost.replace_line(
+        "When the upload hits a 503 we just fail and the user has to start again.",
+        "When the upload hits a 503 the user has to start again.",
+    );
+
+    let mut dir = Scenario::folder("dirmode");
+    dir.comment(json!("dir"), None, Some("the sub/ docs repeat the index"));
+    dir.comment(
+        json!("dir"),
+        Some("ask"),
+        Some("which of these is current?"),
+    );
+    let mut dir_state = served(birta::review::fold::fold_dir(&dir.parsed()), LATER);
+    dir_state.hand_off = "Take a look at my notes: `birta review /work/dirmode`".to_string();
+    dir_state.writable = false;
+
+    let hold = served(sent.fold(), ts(sub) + 2_000);
+    let doc = |s: &Scenario| Some(s.text().to_string());
     vec![
-        ("fresh", fresh),
-        ("drafts", drafts),
-        ("sent", sent),
-        ("picked", picked),
-        ("replied", replied),
-        ("unseen", unseen),
-        ("rewrite", rewrite),
-        ("hold", hold),
-        ("approved", approved),
-        ("lost", lost),
-        ("dir", dir),
+        ("fresh", served(fresh.fold(), LATER), doc(&fresh)),
+        ("drafts", served(drafts.fold(), LATER), doc(&drafts)),
+        ("sent", served(sent.fold(), LATER), doc(&sent)),
+        ("picked", served(picked.fold(), LATER), doc(&picked)),
+        (
+            "replied",
+            served(replied_log.fold(), LATER),
+            doc(&replied_log),
+        ),
+        ("unseen", served(unseen.fold(), LATER), doc(&unseen)),
+        ("rewrite", served(rewrite.fold(), LATER), doc(&rewrite)),
+        ("hold", hold, doc(&sent)),
+        ("approved", served(approved.fold(), LATER), doc(&approved)),
+        ("lost", served(lost.fold(), LATER), doc(&lost)),
+        ("dir", dir_state, None),
     ]
 }
 
 #[test]
 fn contract_fixtures_are_consistent() {
-    for (name, state) in contract_fixtures() {
+    for (name, state, text) in contract_fixtures() {
+        if let Some(text) = &text {
+            assert_eq!(
+                state.rev,
+                birta::rev::Rev::of(text.as_bytes()).as_str(),
+                "{name}"
+            );
+        }
         let v = serde_json::to_value(&state).unwrap();
         let want_stage = match name {
             "fresh" => "idle",
@@ -1214,8 +868,13 @@ fn contract_fixtures_are_consistent() {
             _ => "replied",
         };
         assert_eq!(v["phrase"]["stage"], want_stage, "{name}");
-        assert_eq!(state.hold.is_some(), name == "hold", "{name}");
-        assert_eq!(state.phrase_before_hold.is_some(), name == "hold", "{name}");
+        // The fold is clock-free: the page picks the phrase by `server_now`
+        let held = matches!(name, "sent" | "hold" | "approved");
+        assert_eq!(state.hold.is_some(), held, "{name}");
+        assert_eq!(state.phrase_before_hold.is_some(), held, "{name}");
+        if let Some(hold) = &state.hold {
+            assert_eq!(state.server_now < hold.not_before, name == "hold", "{name}");
+        }
         assert!(state.counts.decided <= state.counts.items, "{name}");
         let change_ids: BTreeSet<&str> = state.changes.iter().map(|c| c.id.as_str()).collect();
         for item in &state.items {
@@ -1229,36 +888,117 @@ fn contract_fixtures_are_consistent() {
                 assert!(change_ids.contains(id.as_str()), "{name}: {id}");
             }
             assert_eq!(item.at.kind == AtKind::Dir, name == "dir", "{name}");
+            let placed =
+                item.at.kind == AtKind::Anchor && item.at.status != Some(AnchorStatus::Orphaned);
+            assert_eq!(item.at.loc.is_some(), placed, "{name}: item {}", item.n);
         }
         for deletion in &state.deletions {
             assert!(change_ids.contains(deletion.change.as_str()), "{name}");
         }
-        let lost: Vec<u32> = state
-            .items
-            .iter()
-            .filter(|i| i.at.status == Some(AnchorStatus::Orphaned))
-            .map(|i| i.n)
-            .collect();
-        assert_eq!(state.lost, lost, "{name}");
-        assert_eq!(state.counts.lost as usize, lost.len(), "{name}");
+        // Lost notes are orphaned; only a note its own turn handled away may be left out
+        let orphaned = |i: &&Item| i.at.status == Some(AnchorStatus::Orphaned);
+        for item in state.items.iter().filter(orphaned) {
+            let listed = state.lost.contains(&item.n);
+            assert!(listed || item.status == ItemStatus::Handled, "{name}");
+        }
+        for n in &state.lost {
+            assert!(
+                state.items.iter().filter(orphaned).any(|i| i.n == *n),
+                "{name}"
+            );
+        }
+        assert_eq!(state.counts.lost as usize, state.lost.len(), "{name}");
+        assert_eq!(state.log.bad + state.log.unknown_ops, 0, "{name}");
     }
 }
 
-/// The JSON the page's review code is built against. Rewrite with `BIRTA_UPDATE_FIXTURES=1`.
+/// Each fixture shows what its name says, so the page's specs have something to find.
+#[test]
+fn each_contract_fixture_shows_its_case() {
+    let fixtures = contract_fixtures();
+    let get = |name: &str| &fixtures.iter().find(|(n, ..)| *n == name).unwrap().1;
+    assert_eq!(get("fresh").counts.items, 3);
+    assert_eq!(get("drafts").counts.drafts, 3);
+    assert_eq!(get("sent").counts.sent_unclaimed, 3);
+    assert_eq!(get("picked").phrase.picked_up.as_ref().unwrap().by, CLAUDE);
+
+    let replied = get("replied");
+    assert_eq!(replied.changes.len(), 1);
+    assert_eq!(replied.changes[0].asked.kind, AskedKind::Location);
+    assert_eq!(replied.counts.not_handled, 1);
+    assert_eq!(replied.counts.unseen, 1);
+
+    let unseen = get("unseen");
+    assert_eq!(unseen.changes.len(), 3);
+    assert_eq!(unseen.counts.unasked, 2);
+    assert_eq!(unseen.counts.unseen, 3);
+    // The fix dropped "with backoff"; the last paragraph went whole
+    let kinds: Vec<DeletionKind> = unseen.deletions.iter().map(|d| d.kind).collect();
+    assert_eq!(kinds, [DeletionKind::Words, DeletionKind::Block]);
+    assert!(unseen.rewrite.is_none(), "{:?}", unseen.rewrite);
+
+    assert!(get("rewrite").rewrite.is_some());
+    assert!(get("rewrite").changes.iter().all(|c| c.is_rewrite));
+
+    let approved = get("approved");
+    let approve = approved.approve.as_ref().unwrap();
+    assert!(approve.current_matches && !approve.changed_since);
+    assert_eq!(approved.later.len(), 1);
+    assert_eq!(approved.changes.len(), 1);
+    assert!(approved.changes.iter().all(|c| c.seen && c.settled));
+    assert!(
+        approved
+            .items
+            .iter()
+            .flat_map(|i| &i.replies)
+            .all(|r| r.seen)
+    );
+    assert_eq!(approved.hold.as_ref().unwrap().kind, HoldKind::Approve);
+
+    assert_eq!(get("lost").lost.len(), 1);
+    assert_eq!(get("dir").items.len(), 2);
+
+    assert!(get("sent").phrase.sent.as_ref().unwrap().can_withdraw);
+    assert_eq!(get("hold").hold.as_ref().unwrap().kind, HoldKind::HandBack);
+    let rewrite = get("rewrite");
+    let r = rewrite.rewrite.as_ref().unwrap();
+    assert_eq!((r.blocks_changed, r.blocks_total), (5, 9));
+    assert_eq!(Some(r.turn), rewrite.rounds[0].claim);
+    let lost = get("lost");
+    let q = lost
+        .items
+        .iter()
+        .find(|i| i.at.quote.as_deref() == Some("we just fail"))
+        .unwrap();
+    assert_eq!(q.at.status, Some(AnchorStatus::Orphaned));
+    assert_eq!(lost.lost, [q.n]);
+    assert!(get("replied").changes[0].reversible.ok);
+    assert!(get("unseen").deletions[0].after_sp.is_some());
+}
+
+/// The JSON the page's review code is built against, and the doc each is about.
+/// Rewrite with `BIRTA_UPDATE_FIXTURES=1`.
 #[test]
 fn contract_fixtures_match_the_committed_json() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("e2e/fixtures/review");
     let update = std::env::var_os("BIRTA_UPDATE_FIXTURES").is_some_and(|v| v == "1");
     let fixtures = contract_fixtures();
     let mut stale = Vec::new();
-    for (name, state) in &fixtures {
+    for (name, state, text) in &fixtures {
         let json = serde_json::to_string_pretty(state).unwrap() + "\n";
-        let path = dir.join(format!("{name}.json"));
-        if update {
-            fs::create_dir_all(&dir).unwrap();
-            fs::write(&path, &json).unwrap();
-        } else if fs::read_to_string(&path).ok().as_deref() != Some(json.as_str()) {
-            stale.push(*name);
+        let files = [
+            (format!("{name}.json"), Some(json)),
+            (format!("{name}.md"), text.clone()),
+        ];
+        for (file, want) in files {
+            let Some(want) = want else { continue };
+            let path = dir.join(&file);
+            if update {
+                fs::create_dir_all(&dir).unwrap();
+                fs::write(&path, &want).unwrap();
+            } else if fs::read_to_string(&path).ok().as_deref() != Some(want.as_str()) {
+                stale.push(file);
+            }
         }
     }
     assert!(
@@ -1268,11 +1008,14 @@ fn contract_fixtures_match_the_committed_json() {
     let on_disk: BTreeSet<String> = fs::read_dir(&dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| name.ends_with(".json"))
+        .filter(|name| name.ends_with(".json") || name.ends_with(".md"))
         .collect();
     let want: BTreeSet<String> = fixtures
         .iter()
-        .map(|(name, _)| format!("{name}.json"))
+        .flat_map(|(name, _, text)| {
+            let doc = text.as_ref().map(|_| format!("{name}.md"));
+            std::iter::once(format!("{name}.json")).chain(doc)
+        })
         .collect();
     assert_eq!(on_disk, want, "stray or missing fixture files");
 }

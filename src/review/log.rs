@@ -205,7 +205,8 @@ impl Log {
 }
 
 /// The doc's permission bits without exec, so a private doc gets a private review file.
-/// The folder file follows its folder.
+/// The owner can always write, so a read-only doc still takes notes. The folder file
+/// follows its folder.
 fn doc_mode(review: &Path) -> Option<u32> {
     let name = review.file_name()?.to_str()?;
     let doc = match name.strip_suffix(".birta.jsonl") {
@@ -213,7 +214,7 @@ fn doc_mode(review: &Path) -> Option<u32> {
         Some(doc) => review.with_file_name(doc),
         None => return None,
     };
-    Some(fs::metadata(doc).ok()?.permissions().mode() & 0o666)
+    Some((fs::metadata(doc).ok()?.permissions().mode() & 0o666) | 0o200)
 }
 
 /// Lines as [`ops::parse`] numbers them: an unterminated last line counts.

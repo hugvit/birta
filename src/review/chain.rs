@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use super::fold::TurnIndex;
 use super::hunk;
 use super::ops::{ByKind, Hunk, Op, Parsed};
 use crate::rev::Rev;
@@ -85,10 +86,12 @@ impl Chain {
     /// Never fails: a patch that doesn't apply or verify breaks the chain until a snap.
     pub fn build(parsed: &Parsed) -> Self {
         let mut claims = Claims::default();
+        let mut index = TurnIndex::default();
         let links: Vec<Link> = parsed
             .lines
             .iter()
             .filter_map(|line| {
+                index.step(line);
                 let patch = |rev: &Rev, to: &Rev, hunks: &Option<Vec<Hunk>>, cause| {
                     Some(Link::Patch {
                         n: line.n,
@@ -126,12 +129,12 @@ impl Chain {
                         };
                         patch(rev, to_rev, hunks, cause)
                     }
-                    Op::Approve { .. } => {
-                        claims.approves.insert(line.n);
-                        None
-                    }
-                    Op::Claim { round } => {
-                        claims.claim(line.n, *round, line.by.name.clone());
+                    // Only a claim the fold lets win opens a turn
+                    Op::Claim { round } if index.opens_turn(*round, line.n) => {
+                        claims.open.push(OpenClaim {
+                            n: line.n,
+                            name: line.by.name.clone(),
+                        });
                         None
                     }
                     Op::Yield { release, turn } => {
@@ -278,33 +281,19 @@ impl Chain {
 /// Agents holding a turn, for telling their writes from outside ones.
 #[derive(Default)]
 struct Claims {
-    /// Approve lines: claiming one opens no turn, since nothing is asked of the agent.
-    approves: HashSet<u32>,
-    /// Rounds with a claim nobody released; a later claim of one lost the race.
-    rounds: HashSet<u32>,
     /// Open turns, oldest first.
     open: Vec<OpenClaim>,
 }
 
 struct OpenClaim {
     n: u32,
-    round: u32,
     name: Option<String>,
 }
 
 impl Claims {
-    fn claim(&mut self, n: u32, round: u32, name: Option<String>) {
-        if self.rounds.insert(round) && !self.approves.contains(&round) {
-            self.open.push(OpenClaim { n, round, name });
-        }
-    }
-
     /// The human takes back the round of claim `turn`, which may then be claimed again.
     fn release(&mut self, turn: u32) {
-        if let Some(i) = self.open.iter().position(|c| c.n == turn) {
-            let claim = self.open.remove(i);
-            self.rounds.remove(&claim.round);
-        }
+        self.open.retain(|c| c.n != turn);
     }
 
     /// An agent's yield ends its turn `turn`, or all its turns when it names none.

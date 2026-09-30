@@ -790,3 +790,31 @@ fn a_git_write_during_a_claim_is_from_outside() {
     let cause = chain.steps(&rev(W0), &rev(W1)).unwrap()[0].cause;
     assert_eq!(cause, Cause::Outside { git: true });
 }
+
+#[test]
+fn a_claim_the_turn_index_refuses_opens_no_turn() {
+    let withdraw = json!({"by": {"type": "human"}, "op": "withdraw", "to": 4});
+    let forged: [&[Value]; 4] = [
+        // 3 note, 4 claim naming the note
+        &[note(), claim_by("claude", 3)],
+        // 3 note, 4 submit, 5 withdraw(4), 6 claim(4)
+        &[note(), submit(3), withdraw, claim_by("claude", 4)],
+        // 3 note, 4 claim naming line 5, 5 submit
+        &[note(), claim_by("claude", 5), submit(3)],
+        // 3 note, 4 submit, 5 claim(4), 6 yield, 7 a second claim of the claimed round
+        &[
+            note(),
+            submit(3),
+            claim_by("claude", 4),
+            json!({"by": {"type": "agent", "name": "claude"}, "op": "yield"}),
+            claim_by("other", 4),
+        ],
+    ];
+    let agents: Vec<usize> = (0..forged.len())
+        .filter(|&i| cause_after(forged[i]) != Cause::Outside { git: false })
+        .collect();
+    assert!(
+        agents.is_empty(),
+        "cases {agents:?} made the write an agent's"
+    );
+}

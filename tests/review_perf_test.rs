@@ -7,7 +7,7 @@ use birta::review::chain::Chain;
 use birta::review::doc::Doc;
 use birta::review::fold;
 use birta::review::ops::{AnchorReq, BlockScope};
-use birta::review::state::AtKind;
+use birta::review::state::{AskedKind, AtKind, ReviewState};
 use serde_json::Value;
 
 mod support {
@@ -17,6 +17,8 @@ use support::scenario::Scenario;
 
 const CLAUDE: &str = "claude";
 const ROUNDS: usize = 31;
+/// Writes in the one turn of the rewriting review.
+const WRITES: usize = 40;
 /// Tries at the bound; a busy machine gets another go before the test fails.
 const RUNS: usize = 3;
 
@@ -108,18 +110,66 @@ fn big_review() -> Scenario {
     s
 }
 
-#[test]
-fn a_100_kb_doc_with_400_ops_folds_in_time() {
-    let s = big_review();
-    let parsed = s.parsed();
-    assert!(s.text().len() >= 100_000);
-    assert!(parsed.lines.len() >= 400, "{}", parsed.lines.len());
+/// One turn of [`WRITES`] writes on two held notes: write 1 rewords the quote's
+/// paragraph, write 2 deletes the block's item, and the rest edit other items in place.
+/// Returns the notes and the writes' lines.
+fn rewriting_review() -> (Scenario, [u32; 2], Vec<u32>) {
+    let mut s = Scenario::new(&big_doc());
+    let doc = Doc::new(s.text());
+    let first = item_line(1, 0);
+    let stop = doc
+        .blocks
+        .stops
+        .iter()
+        .find(|st| {
+            doc.lines
+                .range(st.lines.0)
+                .is_some_and(|b| doc.text[b] == *first)
+        })
+        .unwrap();
+    let block = at(
+        &doc,
+        AnchorReq::Block {
+            sp: stop.sp.clone(),
+            scope: BlockScope::Block,
+        },
+    );
+    let quote = at(
+        &doc,
+        AnchorReq::Quote {
+            sp: None,
+            q: "Paragraph 0 explains".to_string(),
+            pre: String::new(),
+            suf: String::new(),
+            off: None,
+            tl: None,
+        },
+    );
+    let b = s.comment(block, Some("no"), Some("drop it"));
+    let q = s.comment(quote, None, Some("wordy"));
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    let mut writes = Vec::new();
+    let text = s.replaced(
+        "Paragraph 0 explains the section in a sentence long enough to be real.",
+        "Section zero is covered briefly here.",
+    );
+    writes.push(s.external_diffed(&text));
+    let text = s.replaced(&first, "");
+    let text = text.replacen("\n\n- item 1.1", "\n- item 1.1", 1);
+    writes.push(s.external_diffed(&text));
+    for r in 2..WRITES {
+        let line = item_line(r, 5);
+        let text = s.replaced(&line, &format!("{line}, edited"));
+        writes.push(s.external_diffed(&text));
+    }
+    s.yield_turn(CLAUDE, turn);
+    (s, [b, q], writes)
+}
 
-    let bound = if cfg!(debug_assertions) {
-        Duration::from_millis(650)
-    } else {
-        Duration::from_millis(50)
-    };
+/// The best of [`RUNS`] timed folds, from the chain's build on.
+fn timed_fold(s: &Scenario, bound: Duration) -> (ReviewState, Duration) {
+    let parsed = s.parsed();
     let mut best = Duration::MAX;
     let mut state = None;
     for _ in 0..RUNS {
@@ -133,7 +183,26 @@ fn a_100_kb_doc_with_400_ops_folds_in_time() {
             break;
         }
     }
-    let state = state.unwrap();
+    (state.unwrap(), best)
+}
+
+fn bound() -> Duration {
+    if cfg!(debug_assertions) {
+        Duration::from_millis(650)
+    } else {
+        Duration::from_millis(50)
+    }
+}
+
+#[test]
+fn a_100_kb_doc_with_400_ops_folds_in_time() {
+    let s = big_review();
+    let parsed = s.parsed();
+    assert!(s.text().len() >= 100_000);
+    assert!(parsed.lines.len() >= 400, "{}", parsed.lines.len());
+
+    let bound = bound();
+    let (state, best) = timed_fold(&s, bound);
     eprintln!(
         "fold of {} ops on {} bytes: {best:?}",
         parsed.lines.len(),
@@ -151,5 +220,29 @@ fn a_100_kb_doc_with_400_ops_folds_in_time() {
             .iter()
             .all(|i| i.at.kind == AtKind::Doc || i.at.loc.is_some())
     );
+    assert!(best < bound, "{best:?} over {bound:?}");
+}
+
+#[test]
+fn a_turn_that_rewrites_its_notes_folds_in_time() {
+    let (s, [b, q], writes) = rewriting_review();
+    assert!(s.text().len() >= 100_000);
+    let bound = bound();
+    let (state, best) = timed_fold(&s, bound);
+    eprintln!("fold of {WRITES} writes over two held notes: {best:?}");
+
+    let item = |n: u32| state.items.iter().find(|i| i.n == n).unwrap();
+    let changes = |n: u32| item(n).outcome.as_ref().unwrap().changes.clone();
+    assert_eq!(changes(q), [format!("{}.0", writes[0])]);
+    assert_eq!(changes(b), [format!("{}.0", writes[1])]);
+    assert_eq!(state.changes.len(), WRITES);
+    for (k, c) in state.changes.iter().enumerate() {
+        let want = match k {
+            0 => (AskedKind::Location, vec![q]),
+            1 => (AskedKind::Location, vec![b]),
+            _ => (AskedKind::Unasked, vec![]),
+        };
+        assert_eq!((c.asked.kind, c.asked.notes.clone()), want, "{}", c.id);
+    }
     assert!(best < bound, "{best:?} over {bound:?}");
 }

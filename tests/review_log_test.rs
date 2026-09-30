@@ -383,6 +383,27 @@ fn the_review_file_takes_the_docs_permissions_without_exec() {
     assert_eq!(mode(&folder_file), 0o640);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_read_only_doc_still_takes_notes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let doc = dir.path().join("pr.md");
+    fs::write(&doc, BASELINE).unwrap();
+    fs::set_permissions(&doc, fs::Permissions::from_mode(0o444)).unwrap();
+    let log = created(dir.path());
+    let path = review_path(dir.path());
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+    let n = log
+        .append(ctx(1_000), vec![note("hi")], anything)
+        .expect("notes still work on a read-only doc");
+    assert_eq!(n, [4]);
+}
+
 #[test]
 fn create_if_missing_never_creates_folders() {
     let dir = tempfile::tempdir().unwrap();

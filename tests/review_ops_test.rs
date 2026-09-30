@@ -1022,3 +1022,48 @@ fn invalid_utf8_spoils_only_its_own_line() {
     assert!(parsed.read_only);
     assert_eq!(parsed.lines.len(), 1);
 }
+
+#[test]
+fn anchor_lines_that_are_zero_or_inverted_are_bad() {
+    let comment = |lines: &str| {
+        format!(
+            r#"{{"op":"comment","at":{{"quote":"x","pre":"","suf":"","lines":{lines},"rev":"{REV_A}","scope":"quote"}}}}"#
+        )
+    };
+    for lines in ["[5,2]", "[0,3]", "[0,0]", "[1,4294967296]"] {
+        assert!(is_bad(4, &comment(lines)), "{lines}");
+    }
+    for lines in ["[1,1]", "[2,5]", "[4294967295,4294967295]"] {
+        ok(4, &comment(lines));
+    }
+}
+
+#[test]
+fn a_hunk_whose_lines_run_past_u32_is_bad() {
+    let edit = |a: u32, d: &str, i: &str| {
+        format!(
+            r#"{{"op":"edit","rev":"{REV_A}","to_rev":"{REV_B}","patch":[{{"a":{a},"d":{d},"i":{i}}}],"act":"edit"}}"#
+        )
+    };
+    let max = u32::MAX;
+    for raw in [
+        edit(max, "[]", "[]"),
+        edit(max - 1, r#"["x\n"]"#, "[]"),
+        edit(max - 1, "[]", r#"["x\n"]"#),
+        edit(max - 2, r#"["x\n","y\n"]"#, "[]"),
+    ] {
+        assert!(is_bad(4, &raw), "{raw}");
+    }
+    ok(4, &edit(max - 2, r#"["x\n"]"#, r#"["y\n"]"#));
+    // An earlier hunk's inserts push a later one's new lines past the end
+    let pushed = format!(
+        r#"{{"op":"external","rev":"{REV_A}","to_rev":"{REV_B}","patch":[{{"a":0,"d":[],"i":["x\n","y\n"]}},{{"a":{},"d":[],"i":["z\n"]}}]}}"#,
+        max - 3
+    );
+    assert!(is_bad(4, &pushed), "{pushed}");
+    // Out of order, the second hunk would start before the first ended
+    let unordered = format!(
+        r#"{{"op":"external","rev":"{REV_A}","to_rev":"{REV_B}","patch":[{{"a":0,"d":["x\n"],"i":[]}},{{"a":0,"d":[],"i":["y\n"]}}]}}"#
+    );
+    assert!(is_bad(4, &unordered), "{unordered}");
+}

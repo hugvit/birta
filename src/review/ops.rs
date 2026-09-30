@@ -264,6 +264,7 @@ pub enum Op {
     Edit {
         rev: Rev,
         to_rev: Rev,
+        #[serde(default, deserialize_with = "patch")]
         patch: Option<Vec<Hunk>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         of: Option<String>,
@@ -273,6 +274,7 @@ pub enum Op {
     External {
         rev: Rev,
         to_rev: Rev,
+        #[serde(default, deserialize_with = "patch")]
         patch: Option<Vec<Hunk>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cause: Option<String>,
@@ -283,6 +285,36 @@ pub enum Op {
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+/// Hunks in order whose old and new lines all fit in `u32`, so line arithmetic on them
+/// can't overflow even when the patch never applied.
+fn patch<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Vec<Hunk>>, D::Error> {
+    let hunks = Option::<Vec<Hunk>>::deserialize(deserializer)?;
+    let (mut shift, mut next) = (0i64, 0i64);
+    for h in hunks.iter().flatten() {
+        let (a, d, i) = (i64::from(h.a), h.d.len() as i64, h.i.len() as i64);
+        if a < next {
+            return Err(de::Error::custom(format!(
+                "hunk at {} is out of order",
+                h.a
+            )));
+        }
+        if a + d >= i64::from(u32::MAX) || a + shift + i >= i64::from(u32::MAX) {
+            return Err(de::Error::custom(format!("hunk at {} runs past u32", h.a)));
+        }
+        (shift, next) = (shift + i - d, a + d);
+    }
+    Ok(hunks)
+}
+
+/// 1-based lines, first to last; anything else can't have come from a text.
+fn line_span<'de, D: Deserializer<'de>>(deserializer: D) -> Result<(u32, u32), D::Error> {
+    let (first, last) = <(u32, u32)>::deserialize(deserializer)?;
+    if first == 0 || first > last {
+        return Err(de::Error::custom(format!("bad lines [{first},{last}]")));
+    }
+    Ok((first, last))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,6 +374,7 @@ pub struct Anchor {
     pub pre: String,
     pub suf: String,
     /// 1-based inclusive lines in the text of `rev`.
+    #[serde(deserialize_with = "line_span")]
     pub lines: (u32, u32),
     pub rev: Rev,
     pub scope: Scope,

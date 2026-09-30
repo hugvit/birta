@@ -1,5 +1,7 @@
 use birta::anchor;
+use birta::rev::Rev;
 use birta::review::doc::Doc;
+use birta::review::fold;
 use birta::review::hunk;
 use birta::review::ops::ByKind;
 use birta::review::state::{
@@ -1202,18 +1204,19 @@ fn deleting_a_noted_block_is_asked_by_location_and_handles_the_note() {
         item(&state, x).outcome.as_ref().unwrap().changes,
         [id(ext, 0)]
     );
+    // Its block is gone, so it is painted nowhere and decides nothing
+    assert_eq!(item(&state, x).at.status, Some(AnchorStatus::Orphaned));
+    assert!(item(&state, x).at.loc.is_none());
+    assert_eq!(state.counts.decided, 0);
 }
 
 #[test]
 fn a_note_its_own_turn_deleted_is_not_lost() {
     let mut s = Scenario::new(DOC);
-    let at = s.quote("Intro paragraph here");
-    let x = s.comment(at, Some("no"), Some("cut it"));
+    let x = s.verdict("- third item", "no");
     s.submit();
     let turn = s.claim(CLAUDE);
-    let text = s
-        .text()
-        .replace("Intro paragraph here,\nwith a second line.\n\n", "");
+    let text = s.text().replace("- third item\n", "");
     s.external(&text);
     s.yield_turn(CLAUDE, turn);
     let state = s.fold();
@@ -1672,4 +1675,149 @@ fn your_edit_flag_clears_once_the_change_is_seen() {
     let c = change(&state, &id(ext, 0));
     assert_eq!(c.changes_your_edit, None);
     assert!(!c.reverts_your_edit);
+}
+
+// --- hostile lines ---
+
+/// Folds the log on `now`, which the kit's own text may not have followed.
+fn fold_on(s: &Scenario, now: &str) -> ReviewState {
+    let (parsed, chain, _) = s.build();
+    fold::fold(&parsed, &chain, &Doc::new(now)).state
+}
+
+#[test]
+fn notes_on_lines_at_the_end_of_u32_fold() {
+    let mut s = Scenario::new(DOC);
+    let rev = Rev::of(DOC.as_bytes());
+    let mut notes = Vec::new();
+    for scope in ["quote", "block", "section"] {
+        for lines in [[u32::MAX, u32::MAX], [1, u32::MAX]] {
+            let at = json!({"quote": "item", "pre": "", "suf": "", "lines": lines,
+                            "rev": rev, "scope": scope});
+            notes.push(s.comment(at, Some("no"), Some("fix")));
+        }
+    }
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    s.replace_line("- first item", "- first item, reworded");
+    let text = s.text().replace("- third item\n", "");
+    s.external(&text);
+    s.yield_turn(CLAUDE, turn);
+    let state = s.fold();
+    for n in notes {
+        item(&state, n);
+    }
+}
+
+#[test]
+fn a_forged_hunk_after_a_break_does_not_break_the_fold() {
+    let max = u32::MAX;
+    // (patch, whether the line is bad)
+    let forged = [
+        (json!([{"a": max, "d": ["x\n"], "i": []}]), true),
+        (
+            json!([{"a": 0, "d": ["x\n"], "i": []}, {"a": 0, "d": [], "i": ["y\n"]}]),
+            true,
+        ),
+        (
+            json!([{"a": 0, "d": [], "i": ["x\n", "y\n"]},
+                {"a": max - 3, "d": [], "i": ["p\n", "q\n"]}]),
+            true,
+        ),
+        (json!([{"a": max - 2, "d": ["x\n"], "i": ["y\n"]}]), false),
+        (
+            json!([{"a": 0, "d": [], "i": ["x\n", "y\n"]},
+                {"a": max - 4, "d": [], "i": ["z\n"]}]),
+            false,
+        ),
+    ];
+    for (patch, bad) in forged {
+        let mut s = Scenario::new(DOC);
+        s.verdict("- first item", "no");
+        s.submit();
+        let turn = s.claim(CLAUDE);
+        let (a, b, c) = (Rev::of(DOC.as_bytes()), Rev::of(b"b\n"), Rev::of(b"c\n"));
+        // The first patch doesn't apply, so the second is kept without being applied
+        s.raw(
+            json!({"by": {"type": "birta"}, "op": "external", "rev": a, "to_rev": b,
+                     "patch": [{"a": 0, "d": ["nope\n"], "i": []}]}),
+        );
+        s.raw(
+            json!({"by": {"type": "birta"}, "op": "external", "rev": b, "to_rev": c,
+                     "patch": patch}),
+        );
+        s.yield_turn(CLAUDE, turn);
+        let state = fold_on(&s, "c\n");
+        assert_eq!(state.log.bad, u32::from(bad), "{patch}");
+    }
+}
+
+#[test]
+fn many_deletions_are_ordered_in_linear_time() {
+    // One stop, so placing each deletion is cheap and only their ordering is at stake
+    let lines = 40_000;
+    let body: String = (0..lines).map(|i| format!("line {i}\n")).collect();
+    let mut s = Scenario::new(&format!("```\n{body}```\n"));
+    let kept: String = (0..lines)
+        .filter(|i| i % 2 == 0)
+        .map(|i| format!("line {i}\n"))
+        .collect();
+    s.external(&format!("```\n{kept}```\n"));
+    let (parsed, chain, doc) = s.build();
+    let start = std::time::Instant::now();
+    let state = fold::fold(&parsed, &chain, &doc).state;
+    let took = start.elapsed();
+    assert_eq!(state.changes.len(), lines / 2, "setup");
+    assert_eq!(state.deletions.len(), lines / 2, "setup");
+    eprintln!("fold of {} deletions: {took:?}", lines / 2);
+    assert!(took < std::time::Duration::from_millis(1_000), "{took:?}");
+}
+
+#[test]
+fn an_edit_to_a_moved_note_is_asked_by_location() {
+    let mut unasked = Vec::new();
+    for quote in [false, true] {
+        for next_turn in [false, true] {
+            for one_write in [false, true] {
+                let case = format!("quote {quote}, next turn {next_turn}, one write {one_write}");
+                let mut s = Scenario::new(DOC);
+                let x = if quote {
+                    let at = s.quote("third item");
+                    s.comment(at, Some("no"), Some("move it"))
+                } else {
+                    s.verdict("- third item", "no")
+                };
+                s.submit();
+                let turn = s.claim(CLAUDE);
+                let moved = s
+                    .text()
+                    .replace("- third item\n", "")
+                    .replace("- more item\n", "- more item\n- third item\n");
+                if one_write {
+                    s.external(&moved);
+                } else {
+                    s.external(&s.text().replace("- third item\n", ""));
+                    s.external(&moved);
+                }
+                let turn = if next_turn {
+                    s.release(turn);
+                    s.claim(CLAUDE)
+                } else {
+                    turn
+                };
+                let edit = s.replace_line("- third item", "- third item, reworded");
+                s.yield_turn(CLAUDE, turn);
+                let state = s.fold();
+                let c = change(&state, &id(edit, 0));
+                let outcome = item(&state, x).outcome.as_ref().unwrap();
+                if c.asked.kind != AskedKind::Location
+                    || c.asked.notes != [x]
+                    || !outcome.changes.contains(&id(edit, 0))
+                {
+                    unasked.push(case);
+                }
+            }
+        }
+    }
+    assert!(unasked.is_empty(), "{unasked:#?}");
 }

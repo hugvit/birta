@@ -160,6 +160,16 @@ impl TurnIndex {
         }
     }
 
+    /// Whether claim line `n` of `round`, just stepped, won a hand-back: that opens an
+    /// agent's turn. An approve's claim asks nothing of the agent.
+    pub(crate) fn opens_turn(&self, round: u32, n: u32) -> bool {
+        self.rounds
+            .binary_search_by_key(&round, |r| r.n)
+            .is_ok_and(|i| {
+                self.rounds[i].claim == Some(n) && self.rounds[i].kind == RoundKind::Submit
+            })
+    }
+
     /// The round whose live claim is `turn`, while the agent hasn't yielded it.
     fn live_turn(&mut self, turn: u32) -> Option<&mut Round> {
         self.rounds
@@ -234,18 +244,25 @@ impl TurnIndex {
         self.rounds[i..].iter().any(|r| r.claim.is_some())
     }
 
+    /// Rounds neither withdrawn nor taken by a claim of theirs or of a later round.
     fn pending(&self) -> impl DoubleEndedIterator<Item = (usize, &Round)> {
+        let after = self
+            .rounds
+            .iter()
+            .rposition(|r| r.claim.is_some())
+            .map_or(0, |i| i + 1);
         self.rounds
             .iter()
             .enumerate()
-            .filter(|(i, r)| r.withdrawn.is_none() && !self.claimed(*i))
+            .skip(after)
+            .filter(|(_, r)| r.withdrawn.is_none())
     }
 
     /// A round nothing has claimed or withdrawn yet, so the first such op decides it.
     fn open_round(&mut self, n: u32) -> Option<&mut Round> {
-        self.rounds
-            .iter_mut()
-            .find(|r| r.n == n && r.claim.is_none() && r.withdrawn.is_none())
+        // Rounds are in log order
+        let i = self.rounds.binary_search_by_key(&n, |r| r.n).ok()?;
+        Some(&mut self.rounds[i]).filter(|r| r.claim.is_none() && r.withdrawn.is_none())
     }
 }
 
@@ -389,6 +406,19 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
 
     let lines: HashMap<u32, &Line> = parsed.lines.iter().map(|l| (l.n, l)).collect();
     let mut texts = Texts::new(chain, doc);
+    let froms: Vec<Rev> = turns
+        .writes
+        .keys()
+        .filter_map(|&n| texts.step_at(n))
+        .map(|(_, step)| step.from.clone())
+        .collect();
+    texts.will_ask(froms);
+    texts.prefetch_bases(
+        notes
+            .notes
+            .iter()
+            .filter_map(|note| Some((note.n, note.anchor()?))),
+    );
     let mut facts: Vec<Facts> = notes
         .notes
         .iter()
@@ -485,13 +515,24 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
         .filter(|i| i.status == ItemStatus::Later)
         .map(|i| i.n)
         .collect();
+    let orphaned = |note: &items::Note, i: &Item| {
+        !note.retracted && i.at.status == Some(AnchorStatus::Orphaned)
+    };
+    // The texts at the end of the turns that may have taken them, in one pass
+    texts.prefetch(
+        notes
+            .notes
+            .iter()
+            .zip(&items)
+            .filter(|(note, i)| orphaned(note, i) && i.status == ItemStatus::Handled)
+            .filter_map(|(_, i)| chain.rev_at_line(turns.turn(i.turn?)?.close()).cloned()),
+    );
     let lost: Vec<u32> = notes
         .notes
         .iter()
         .zip(&items)
         .filter(|(note, i)| {
-            !note.retracted
-                && i.at.status == Some(AnchorStatus::Orphaned)
+            orphaned(note, i)
                 && !(i.status == ItemStatus::Handled && lost_in_turn(note, i, &turns, &mut texts))
         })
         .map(|(note, _)| note.n)

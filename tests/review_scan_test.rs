@@ -673,3 +673,21 @@ fn a_withdraw_line_after_a_release_is_ignored() {
     assert_eq!(t.check_claim(5, 11_000), Ok(()));
     assert_eq!(t.claimable_round(11_000), Some(5));
 }
+
+// --- hostile logs ---
+
+#[test]
+fn many_unclaimed_rounds_are_checked_in_linear_time() {
+    let rounds = 20_000u32;
+    let mut ops = vec![note(1)];
+    ops.extend((0..rounds).map(|i| submit(2 + u64::from(i), 4, 0)));
+    let t = idx(&ops, 0);
+    assert_eq!(t.rounds.len(), rounds as usize, "setup");
+
+    let start = std::time::Instant::now();
+    assert_eq!(t.claimable_round(1), Some(4 + rounds));
+    assert_eq!(t.pending_deadline(), Some(0));
+    assert_eq!(t.check_submit(4, 1), Err(Reject::NothingToSend));
+    let took = start.elapsed();
+    assert!(took < std::time::Duration::from_millis(100), "{took:?}");
+}

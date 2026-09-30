@@ -294,10 +294,12 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
             c.is_rewrite = c.turn == Some(r.turn);
         }
     }
-    deletions.sort_by_key(|d| {
-        let c = changes.iter().position(|c| c.id == d.change);
-        c.unwrap_or(usize::MAX)
-    });
+    let order: HashMap<&str, usize> = changes
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.id.as_str(), i))
+        .collect();
+    deletions.sort_by_key(|d| order.get(d.change.as_str()).copied().unwrap_or(usize::MAX));
     Built {
         changes,
         deletions,
@@ -525,7 +527,12 @@ fn words(h: &Hunk) -> (Option<u32>, Vec<(usize, String)>) {
     let old_words: Vec<&str> = diff.iter_old_slices().collect();
     let new_words: Vec<&str> = diff.iter_new_slices().collect();
     let count = |ws: &[&str]| ws.iter().filter(|w| !w.trim().is_empty()).count();
-    let offset = |i: usize| new_words[..i].iter().map(|w| w.len()).sum::<usize>();
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(new_words.iter().scan(0, |at, w| {
+            *at += w.len();
+            Some(*at)
+        }))
+        .collect();
     let (mut removed, mut added) = (0, 0);
     let mut gaps = Vec::new();
     for op in diff.ops() {
@@ -540,7 +547,7 @@ fn words(h: &Hunk) -> (Option<u32>, Vec<(usize, String)>) {
                 removed += count(gone);
                 // Only a replace hunk has a caret; a pure delete leaves a block tick
                 if count(gone) > 0 && !h.i.is_empty() {
-                    gaps.push((offset(new_index), gone.concat()));
+                    gaps.push((starts[new_index], gone.concat()));
                 }
             }
             DiffOp::Insert {

@@ -64,8 +64,8 @@ pub fn relocate(anchor: &Anchor, doc: &Doc, chain: &Chain) -> Located {
     };
     let mapped = steps.map_or(Mapped::Unknown, |steps| map_span(steps, span));
     let found = match anchor.scope {
-        Scope::Quote => place_quote(anchor, doc, span, mapped),
-        Scope::Block | Scope::Section => place_block(anchor, doc, span, mapped),
+        Scope::Quote => place_quote(anchor, doc, span, &mapped),
+        Scope::Block | Scope::Section => place_block(anchor, doc, span, &mapped),
     };
     match found {
         Some(located) if located.status != AnchorStatus::Fuzzy => located,
@@ -74,6 +74,17 @@ pub fn relocate(anchor: &Anchor, doc: &Doc, chain: &Chain) -> Located {
         }
         found => found.unwrap_or_else(|| Located::nowhere(AnchorStatus::Orphaned)),
     }
+}
+
+/// Whether `text` holds what re-locating `anchor` looks for, whitespace runs aside: a
+/// cheap test before parsing a text to place it.
+pub(crate) fn text_may_hold(anchor: &Anchor, text: &str) -> bool {
+    let want = if anchor.scope == Scope::Section || anchor.quote.starts_with('#') {
+        heading_text(&anchor.quote)
+    } else {
+        trimmed(&anchor.quote)
+    };
+    !want.is_empty() && trimmed(text).contains(&want)
 }
 
 /// Up to [`CONTEXT`] code points of whitespace-collapsed source on each side of `bytes`.
@@ -87,18 +98,25 @@ pub(crate) fn context(text: &str, bytes: &Range<usize>) -> (String, String) {
 }
 
 /// Where the chain puts a span of old lines.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum Mapped {
     /// No step touched the span; these are its lines now.
     Exact(u32, u32),
     /// A step changed the span; these lines cover what replaced it.
     Near(u32, u32),
+    /// A step deleted the whole span. `near` is the line after the gap, and only lines
+    /// the steps inserted can hold it now: anything else is a neighbour it left behind.
+    Gone {
+        near: (u32, u32),
+        inserted: Vec<(u32, u32)>,
+    },
     /// A step has no hunks, or the chain doesn't join the two revs.
     Unknown,
 }
 
 fn map_span(steps: &[Step], (mut lo, mut hi): (u32, u32)) -> Mapped {
     let mut exact = true;
+    let mut gone = false;
     for step in steps {
         let Some(hunks) = &step.hunks else {
             return Mapped::Unknown;
@@ -127,22 +145,78 @@ fn map_span(steps: &[Step], (mut lo, mut hi): (u32, u32)) -> Mapped {
             }
             shift += i - d;
         }
-        let lo_ = new_lo.unwrap_or(i64::from(lo) + shift).max(1);
-        let hi_ = new_hi.unwrap_or(i64::from(hi) + shift).max(lo_);
-        (lo, hi) = (lo_ as u32, hi_ as u32);
+        let lo_ = new_lo.unwrap_or(i64::from(lo) + shift);
+        let hi_ = new_hi.unwrap_or(i64::from(hi) + shift);
+        gone |= !exact && hi_ < lo_;
+        let lo_ = lo_.max(1);
+        (lo, hi) = (to_line(lo_), to_line(hi_.max(lo_)));
     }
-    if exact {
+    if gone {
+        Mapped::Gone {
+            near: (lo, hi),
+            inserted: inserted(steps),
+        }
+    } else if exact {
         Mapped::Exact(lo, hi)
     } else {
         Mapped::Near(lo, hi)
     }
 }
 
-fn place_quote(anchor: &Anchor, doc: &Doc, span: (u32, u32), mapped: Mapped) -> Option<Located> {
+/// Lines of the last text that some step inserted, as sorted, merged spans.
+fn inserted(steps: &[Step]) -> Vec<(u32, u32)> {
+    let mut spans: Vec<(i64, i64)> = Vec::new();
+    for hunks in steps.iter().filter_map(|step| step.hunks.as_deref()) {
+        let mut next = Vec::new();
+        // Earlier inserts move with this step, less any lines it deleted
+        for &(lo, hi) in &spans {
+            let mut lo = lo;
+            let mut shift = 0i64;
+            for h in hunks {
+                let (a, d, i) = (i64::from(h.a), h.d.len() as i64, h.i.len() as i64);
+                if lo > hi {
+                    break;
+                }
+                if lo <= a {
+                    let end = hi.min(a);
+                    next.push((lo + shift, end + shift));
+                    lo = end + 1;
+                }
+                lo = lo.max(a + d + 1);
+                shift += i - d;
+            }
+            if lo <= hi {
+                next.push((lo + shift, hi + shift));
+            }
+        }
+        let mut shift = 0i64;
+        for h in hunks {
+            let (a, d, i) = (i64::from(h.a), h.d.len() as i64, h.i.len() as i64);
+            if i > 0 {
+                next.push((a + shift + 1, a + shift + i));
+            }
+            shift += i - d;
+        }
+        next.sort_unstable();
+        spans.clear();
+        for (lo, hi) in next {
+            match spans.last_mut() {
+                Some(last) if lo <= last.1 + 1 => last.1 = last.1.max(hi),
+                _ => spans.push((lo, hi)),
+            }
+        }
+    }
+    spans
+        .into_iter()
+        .map(|(lo, hi)| (to_line(lo.max(1)), to_line(hi)))
+        .collect()
+}
+
+fn place_quote(anchor: &Anchor, doc: &Doc, span: (u32, u32), mapped: &Mapped) -> Option<Located> {
     let search = doc.search();
     let score = |hit: &Range<usize>| context_score(&doc.text, hit, &anchor.pre, &anchor.suf);
 
-    if let Mapped::Exact(lo, hi) = mapped
+    if let Mapped::Exact(lo, hi) = *mapped
         && let Some(within) = line_bytes(doc, lo, hi)
     {
         let best = search
@@ -168,6 +242,7 @@ fn place_quote(anchor: &Anchor, doc: &Doc, span: (u32, u32), mapped: Mapped) -> 
     let scored: Vec<(Range<usize>, usize, usize)> = search
         .hits(&anchor.quote, 0..doc.text.len())
         .into_iter()
+        .filter(|hit| mapped.may_hold(lines_of(doc, hit)))
         .map(|hit| {
             let (pre, suf) = score(&hit);
             (hit, pre, suf)
@@ -180,7 +255,9 @@ fn place_quote(anchor: &Anchor, doc: &Doc, span: (u32, u32), mapped: Mapped) -> 
             .collect();
         if let [(hit, pre, suf)] = top[..] {
             let line = doc.lines.line_of(hit.start);
-            let sure = (*pre).max(*suf) >= EVIDENCE || same_section(doc, near.0, line);
+            let sure = matches!(mapped, Mapped::Gone { .. })
+                || (*pre).max(*suf) >= EVIDENCE
+                || same_section(doc, near.0, line);
             let status = if sure {
                 AnchorStatus::Moved
             } else {
@@ -194,12 +271,12 @@ fn place_quote(anchor: &Anchor, doc: &Doc, span: (u32, u32), mapped: Mapped) -> 
         return Some(located(doc, AnchorStatus::Fuzzy, hit.clone()));
     }
 
-    let bytes = fuzzy_window(anchor, doc, near, span, false)?;
+    let bytes = fuzzy_window(anchor, doc, mapped, span, false)?;
     Some(located(doc, AnchorStatus::Fuzzy, bytes))
 }
 
 /// Block and section anchors follow a stop: its first 60 code points, or a heading's text.
-fn place_block(anchor: &Anchor, doc: &Doc, span: (u32, u32), mapped: Mapped) -> Option<Located> {
+fn place_block(anchor: &Anchor, doc: &Doc, span: (u32, u32), mapped: &Mapped) -> Option<Located> {
     let search = doc.search();
     let stops = &doc.blocks.stops;
     let section = anchor.scope == Scope::Section;
@@ -216,6 +293,7 @@ fn place_block(anchor: &Anchor, doc: &Doc, span: (u32, u32), mapped: Mapped) -> 
         let stop = &stops[i];
         let source = &doc.text[search.stop_bytes[i].clone()];
         (!section || stop.section.is_some())
+            && mapped.may_hold((stop.lines.0, stop.lines.0))
             && if heading {
                 stop.kind == StopKind::Heading && heading_text(source) == want
             } else {
@@ -223,7 +301,7 @@ fn place_block(anchor: &Anchor, doc: &Doc, span: (u32, u32), mapped: Mapped) -> 
             }
     };
 
-    if let Mapped::Exact(lo, _) = mapped
+    if let Mapped::Exact(lo, _) = *mapped
         && let Some(i) = (0..stops.len()).find(|&i| stops[i].lines.0 == lo && fits(i))
     {
         // The block may have grown or shrunk; only where it starts says it moved
@@ -249,20 +327,21 @@ fn place_block(anchor: &Anchor, doc: &Doc, span: (u32, u32), mapped: Mapped) -> 
         }
     }
 
-    let bytes = fuzzy_window(anchor, doc, near, span, !heading)?;
+    let bytes = fuzzy_window(anchor, doc, mapped, span, !heading)?;
     let i = innermost(stops, doc.lines.line_of(bytes.start))?;
     (!section || stops[i].section.is_some()).then(|| at_stop(doc, i, section, AnchorStatus::Fuzzy))
 }
 
-/// The best window of whole lines near `near` whose text is like the quote.
-/// `prefix` compares only as much of each window as the quote is long.
+/// The best window of whole lines near where `mapped` puts the span whose text is like
+/// the quote. `prefix` compares only as much of each window as the quote is long.
 fn fuzzy_window(
     anchor: &Anchor,
     doc: &Doc,
-    near: (u32, u32),
+    mapped: &Mapped,
     span: (u32, u32),
     prefix: bool,
 ) -> Option<Range<usize>> {
+    let near = mapped.near().unwrap_or(span);
     let quote = trimmed(&anchor.quote);
     let q_len = quote.chars().count();
     if q_len == 0 {
@@ -270,15 +349,27 @@ fn fuzzy_window(
     }
     let count = doc.lines.count();
     let from = near.0.saturating_sub(FUZZY_REACH).max(1);
-    let to = (near.1 + FUZZY_REACH).min(count).min(from + FUZZY_LINES);
-    let size = span.1 - span.0 + 1;
+    let to = near
+        .1
+        .saturating_add(FUZZY_REACH)
+        .min(count)
+        .min(from.saturating_add(FUZZY_LINES));
+    // A span from the log may be inverted or huge; windows longer than the text never fit
+    let size = span
+        .1
+        .saturating_sub(span.0)
+        .saturating_add(1)
+        .min(count.saturating_add(2));
     let mut best: Option<(f32, u32, Range<usize>)> = None;
     for start in from..=to {
-        for size in size.saturating_sub(1).max(1)..=size + 1 {
-            let end = start + size - 1;
+        for size in size.saturating_sub(1).max(1)..=size.saturating_add(1) {
+            let end = start.saturating_add(size - 1);
             let (Some(a), Some(b)) = (doc.lines.range(start), doc.lines.range(end)) else {
                 break;
             };
+            if !mapped.may_hold((start, end)) {
+                continue;
+            }
             let bytes = trim_bytes(&doc.text, a.start..b.end);
             if bytes.is_empty() {
                 continue;
@@ -323,10 +414,20 @@ fn may_be_undone(steps: &[Step], doc: &Doc) -> bool {
 }
 
 impl Mapped {
-    fn near(self) -> Option<(u32, u32)> {
-        match self {
-            Self::Exact(lo, hi) | Self::Near(lo, hi) => Some((lo, hi)),
+    fn near(&self) -> Option<(u32, u32)> {
+        match *self {
+            Self::Exact(lo, hi) | Self::Near(lo, hi) | Self::Gone { near: (lo, hi), .. } => {
+                Some((lo, hi))
+            }
             Self::Unknown => None,
+        }
+    }
+
+    /// Whether the anchor may now be on `lines`.
+    fn may_hold(&self, (lo, hi): (u32, u32)) -> bool {
+        match self {
+            Self::Gone { inserted, .. } => inserted.iter().any(|&(a, b)| a <= lo && hi <= b),
+            _ => true,
         }
     }
 }
@@ -368,7 +469,14 @@ fn lines_of(doc: &Doc, bytes: &Range<usize>) -> (u32, u32) {
 
 /// Bytes of lines `lo..=hi`, from the first's start to the last's end.
 fn line_bytes(doc: &Doc, lo: u32, hi: u32) -> Option<Range<usize>> {
+    if lo > hi {
+        return None;
+    }
     Some(doc.lines.range(lo)?.start..doc.lines.range(hi)?.end)
+}
+
+fn to_line(line: i64) -> u32 {
+    line.clamp(0, i64::from(u32::MAX)) as u32
 }
 
 fn distance(line: u32, (lo, hi): (u32, u32)) -> u32 {
@@ -376,7 +484,7 @@ fn distance(line: u32, (lo, hi): (u32, u32)) -> u32 {
 }
 
 /// The last-starting stop holding `line`, which is the innermost one.
-fn innermost(stops: &[Stop], line: u32) -> Option<usize> {
+pub(crate) fn innermost(stops: &[Stop], line: u32) -> Option<usize> {
     let before = stops.partition_point(|s| s.lines.0 <= line);
     (0..before).rev().find(|&i| stops[i].lines.1 >= line)
 }

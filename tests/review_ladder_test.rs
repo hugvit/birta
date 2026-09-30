@@ -693,7 +693,7 @@ fn evidence_is_8_chars_on_one_side() {
 
 #[test]
 fn a_reword_moved_past_its_old_place_is_still_found() {
-    // One hunk deletes it, another inserts the reworded line below the next paragraph
+    // One hunk replaces it with `Mid.`, another replaces the old `Mid.` with the reword
     let md1 = "Intro.\n\nMid.\n\nthe upload tries three times and then gives up\n\nOutro.\n";
     let md0 = "Intro.\n\nthe upload retries three times before giving up\n\nMid.\n\nOutro.\n";
     let anchor = quote(
@@ -885,4 +885,86 @@ fn a_heading_that_changes_level_keeps_its_anchors() {
         relocate_on(&word, &[md0, md1]),
         at(AnchorStatus::Moved, (1, 1), 4..7, (1, 1), Some("One"))
     );
+}
+
+// A deleted span
+
+const LIST: &str =
+    "- first item\n- second item\n  - nested item\n- third item\n\n## Details\n\n- detail one\n";
+
+fn third_item() -> [Anchor; 2] {
+    [
+        block(LIST, "- third item", (4, 4), Scope::Block),
+        quote(
+            LIST,
+            "item",
+            (
+                "cond item - nested item - third ",
+                " ## Details - detail one ",
+            ),
+            (4, 4),
+        ),
+    ]
+}
+
+#[test]
+fn a_deleted_item_is_not_placed_on_a_sibling() {
+    let cut = LIST.replace("- third item\n", "");
+    for anchor in third_item() {
+        assert_eq!(
+            relocate_on(&anchor, &[LIST, &cut]),
+            nowhere(AnchorStatus::Orphaned),
+            "{:?}",
+            anchor.scope
+        );
+        let chain = build(&[snap(LIST), git(LIST, &cut)]);
+        assert_eq!(
+            relocate(&anchor, &Doc::new(&cut), &chain),
+            nowhere(AnchorStatus::Suspended),
+            "{:?}",
+            anchor.scope
+        );
+    }
+}
+
+#[test]
+fn a_cut_item_pasted_elsewhere_is_moved() {
+    let cut = LIST.replace("- third item\n", "");
+    let pasted = format!("{cut}- third item\n");
+    for texts in [vec![LIST, &pasted], vec![LIST, &cut, &pasted]] {
+        for anchor in third_item() {
+            let got = relocate_on(&anchor, &texts);
+            assert_eq!(
+                (got.status, got.lines, got.block, got.section.as_deref()),
+                (
+                    AnchorStatus::Moved,
+                    Some((8, 8)),
+                    Some((8, 8)),
+                    Some("Details")
+                ),
+                "{:?} over {} writes",
+                anchor.scope,
+                texts.len() - 1
+            );
+            assert!(text_at(&pasted, &got).ends_with("item"));
+        }
+    }
+}
+
+// Hostile input
+
+#[test]
+fn hostile_lines_never_panic() {
+    let after = format!("Intro.\n\n{BASE}");
+    for lines in [(5, 2), (1, u32::MAX), (u32::MAX, u32::MAX), (0, 0)] {
+        for scope in [Scope::Quote, Scope::Block, Scope::Section] {
+            let anchor = Anchor {
+                lines,
+                scope,
+                ..the_upload()
+            };
+            relocate_on(&anchor, &[BASE]);
+            relocate_on(&anchor, &[BASE, &after]);
+        }
+    }
 }

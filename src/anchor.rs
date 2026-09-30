@@ -512,6 +512,15 @@ pub fn resolve(markdown: &str, req: &ResolveReq) -> Resolved {
 
 /// Places typed text: every hit in any owner's rendered text, else in raw source.
 pub fn search(markdown: &str, text: &str) -> Vec<Cand> {
+    search_up_to(markdown, text, MAX_CANDIDATES)
+}
+
+/// [`search`] without its cap, for a caller that must count or rank every hit.
+pub fn search_all(markdown: &str, text: &str) -> Vec<Cand> {
+    search_up_to(markdown, text, usize::MAX)
+}
+
+fn search_up_to(markdown: &str, text: &str, max: usize) -> Vec<Cand> {
     let typed = collapse_str(text);
     let q = trim_spaces(&typed);
     if q.is_empty() {
@@ -529,7 +538,7 @@ pub fn search(markdown: &str, text: &str) -> Vec<Cand> {
         let sp = sp_of(node);
         for a in occurrences(&owned.chars(), q) {
             found.push(owned.cand(node, kind, &sp, markdown, a, q.len()));
-            if found.len() == MAX_CANDIDATES {
+            if found.len() == max {
                 return found;
             }
         }
@@ -539,7 +548,7 @@ pub fn search(markdown: &str, text: &str) -> Vec<Cand> {
         let needle: String = q.iter().collect();
         found = markdown
             .match_indices(&needle)
-            .take(MAX_CANDIDATES)
+            .take(max)
             .map(|(i, hit)| Cand {
                 sp: None,
                 off: None,

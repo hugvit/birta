@@ -1,11 +1,13 @@
 //! The agent verbs. They run synchronously, with no server, no runtime and no theme
 //! install, and only while the review gate is on.
 
+pub mod comment;
 pub mod identity;
 pub mod render;
 pub mod respond;
 pub mod respond_apply;
 pub mod review_cmd;
+pub mod show;
 pub mod wait;
 
 use std::path::PathBuf;
@@ -85,9 +87,9 @@ pub struct RespondArgs {
 pub struct CommentArgs {
     pub file: PathBuf,
     /// Anchor on this quoted text
-    #[arg(long, value_name = "Q", conflicts_with_all = ["line", "doc"])]
+    #[arg(long, value_name = "Q", conflicts_with = "doc")]
     pub quote: Option<String>,
-    /// Anchor on this source line
+    /// Anchor on the block at this source line, or pick the quote nearest it
     #[arg(long, value_name = "N", conflicts_with = "doc")]
     pub line: Option<u32>,
     /// Anchor on the whole doc
@@ -96,8 +98,8 @@ pub struct CommentArgs {
     /// Only `ask`
     #[arg(long, value_name = "VERDICT")]
     pub verdict: Option<String>,
-    /// Who the note is for
-    #[arg(long, value_name = "NAME")]
+    /// The note this one answers: N or #N
+    #[arg(long, value_name = "N")]
     pub to: Option<String>,
     /// Agent name to record
     #[arg(long = "as", value_name = "NAME")]
@@ -113,15 +115,6 @@ pub struct ShowArgs {
 }
 
 impl Cmd {
-    fn verb(&self) -> &'static str {
-        match self {
-            Self::Review(_) => "review",
-            Self::Respond(_) => "respond",
-            Self::Comment(_) => "comment",
-            Self::Show(_) => "show",
-        }
-    }
-
     fn as_name(&self) -> Option<&str> {
         match self {
             Self::Review(a) => a.as_name.as_deref(),
@@ -146,10 +139,9 @@ pub fn run(cmd: Cmd, config: &Config) -> ExitCode {
         return ExitCode::Usage;
     }
     match &cmd {
-        Cmd::Review(args) => return review_cmd::run(args, config),
-        Cmd::Respond(args) => return respond_apply::run(args),
-        _ => {}
+        Cmd::Review(args) => review_cmd::run(args, config),
+        Cmd::Respond(args) => respond_apply::run(args),
+        Cmd::Comment(args) => comment::run(args, config),
+        Cmd::Show(args) => show::run(args),
     }
-    eprintln!("birta: `{}` is not available in this build", cmd.verb());
-    ExitCode::Error
 }

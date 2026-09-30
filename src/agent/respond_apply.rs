@@ -89,15 +89,15 @@ impl Finish {
 }
 
 /// A claim that opened a turn, and what became of it.
-struct ClaimRec {
-    n: u32,
-    name: Option<String>,
+pub(super) struct ClaimRec {
+    pub(super) n: u32,
+    pub(super) name: Option<String>,
     /// The submits it took.
     rounds: Vec<u32>,
-    end: Option<End>,
+    pub(super) end: Option<End>,
 }
 
-enum End {
+pub(super) enum End {
     Yielded,
     Released { at: u64 },
 }
@@ -295,7 +295,7 @@ fn pick(
 
 /// Every claim that opened a turn, with the submits it took and how it ended, the way
 /// the fold reads them.
-fn replay(lines: &[Line]) -> Vec<ClaimRec> {
+pub(super) fn replay(lines: &[Line]) -> Vec<ClaimRec> {
     let mut index = TurnIndex::default();
     let mut claims: Vec<ClaimRec> = Vec::new();
     // Submit line to the claim holding it

@@ -59,7 +59,6 @@ pub(crate) struct DocRef {
     pub(crate) rel: String,
     pub(crate) canonical: PathBuf,
     /// `<canonical>.birta.jsonl`
-    #[cfg_attr(not(test), expect(dead_code, reason = "read once reviews exist"))]
     pub(crate) review_path: PathBuf,
     pub(crate) writable: bool,
     /// Whether a review file may be created beside the canonical doc.

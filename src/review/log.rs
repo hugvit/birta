@@ -10,7 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::Reject;
 use super::chain::Chain;
-use super::ops::{self, By, ByKind, Header, Line, Op, Parsed, ParsedLine};
+use super::ops::{self, Act, By, ByKind, Header, Line, Op, Parsed, ParsedLine};
+use super::sync;
+use crate::doc_write::{EditRecorder, Recording, Via, WriteErr};
 use crate::rev::Rev;
 
 /// Sync tools replace files; give up if the path keeps changing under us.
@@ -174,6 +176,76 @@ impl Log {
             return Ok((file, bytes));
         }
         Err(io::Error::other("review file kept being replaced"))
+    }
+}
+
+impl Log {
+    /// The file under its lock, for a doc write to be recorded in. `None` when there is
+    /// no finished file; `ReadOnly` when it can't take another line.
+    pub(crate) fn hold_for_edit(&self) -> Result<Option<Held>, WriteErr> {
+        match self.hold() {
+            Ok(held) if held.parsed.read_only => Err(WriteErr::ReadOnly),
+            Ok(held) => Ok(Some(held)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => Err(WriteErr::ReadOnly),
+            Err(e) => Err(WriteErr::Io(e)),
+        }
+    }
+}
+
+impl EditRecorder for Log {
+    fn begin(&self) -> Result<Option<Box<dyn Recording + '_>>, WriteErr> {
+        Ok(self
+            .hold_for_edit()?
+            .map(|held| Box::new(held) as Box<dyn Recording>))
+    }
+}
+
+impl Recording for Held {
+    fn sync(&mut self, doc: &Path, bytes: &[u8]) {
+        sync::sync_bytes(self, doc, bytes, epoch_ms());
+    }
+
+    fn record(&mut self, via: &Via, _from: &[u8], to: &[u8]) -> io::Result<()> {
+        // Text the chain can't hold is left for the next sync to skip as well
+        let Ok(text) = std::str::from_utf8(to) else {
+            return Ok(());
+        };
+        let Some(recorded) = Chain::build(&self.parsed).record(text) else {
+            return Ok(());
+        };
+        let (act, of) = match via {
+            Via::Checkbox { .. } => (Act::Checkbox, None),
+            Via::Undo { of } => (Act::Undo, Some(of.clone())),
+        };
+        let mut ops = vec![Op::Edit {
+            rev: recorded.rev,
+            to_rev: recorded.to_rev.clone(),
+            patch: recorded.patch,
+            of,
+            act,
+        }];
+        if let Some(text) = recorded.checkpoint {
+            ops.push(Op::Snap {
+                rev: recorded.to_rev,
+                text,
+                checkpoint: true,
+            });
+        }
+        let ctx = AppendCtx {
+            now_ms: epoch_ms(),
+            by: By {
+                kind: ByKind::Human,
+                name: None,
+                via: Some(ops::Via::Browser),
+            },
+            cid: None,
+        };
+        match self.append_with(ctx, |_, _| Ok(ops)) {
+            Ok(_) => Ok(()),
+            Err(AppendError::Io(e)) => Err(e),
+            Err(AppendError::Rejected(r)) => Err(io::Error::other(format!("{r:?}"))),
+        }
     }
 }
 

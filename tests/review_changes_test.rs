@@ -1465,6 +1465,50 @@ fn undoing_one_hunk_leaves_its_sibling_alone() {
 }
 
 #[test]
+fn undoing_a_whole_write_marks_every_hunk_undone() {
+    let mut s = Scenario::new(DOC);
+    let turn = claimed(&mut s);
+    let text = s
+        .text()
+        .replace("- first item\n", "- first item, a\n")
+        .replace("- detail two\n", "- detail two, b\n")
+        .replace("- more item\n", "- more item, c\n");
+    let ext = s.external(&text);
+    s.yield_turn(CLAUDE, turn);
+    assert_eq!(change(&s.fold(), &id(ext, 1)).op_hunks, 3, "setup");
+
+    // One `x`, confirmed, on the middle hunk.
+    let undo = s.undo(&id(ext, 1), DOC);
+
+    let state = s.fold();
+    for idx in 0..3 {
+        let c = change(&state, &id(ext, idx));
+        assert_eq!((c.undone_by, c.settled), (Some(undo), true), "hunk {idx}");
+    }
+    assert_eq!(state.counts.unseen, 0);
+}
+
+#[test]
+fn an_undo_marks_a_sibling_only_when_its_patch_reverts_it() {
+    let mut s = Scenario::new(DOC);
+    let turn = claimed(&mut s);
+    let text = s
+        .text()
+        .replace("- first item\n", "- first item, a\n")
+        .replace("- more item\n", "- more item, b\n");
+    let ext = s.external(&text);
+    s.yield_turn(CLAUDE, turn);
+
+    // Names the first hunk and touches the second's line, but doesn't restore it.
+    let partial = DOC.replace("- more item\n", "- more item, rewritten\n");
+    let undo = s.undo(&id(ext, 0), &partial);
+
+    let state = s.fold();
+    assert_eq!(change(&state, &id(ext, 0)).undone_by, Some(undo));
+    assert_eq!(change(&state, &id(ext, 1)).undone_by, None);
+}
+
+#[test]
 fn a_covers_quoting_the_text_a_hunk_removed_does_not_cite() {
     let mut s = Scenario::new(DOC);
     let x = s.note("rename the first item");

@@ -1,7 +1,7 @@
 //! The one strict write path for document bytes.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use comrak::nodes::NodeValue;
 use comrak::{Arena, parse_document};
@@ -19,13 +19,20 @@ pub(crate) struct WriteTarget {
 /// What the caller believes is on disk.
 pub(crate) enum Expect {
     Rev(Rev),
+    /// Whatever is on disk, after recording any write the review file missed.
+    #[cfg_attr(not(test), expect(dead_code, reason = "no caller outside tests yet"))]
+    Fresh,
 }
 
 /// Why the document is being written.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum Via {
-    #[expect(dead_code, reason = "for edit recorders, which arrive with reviews")]
-    Checkbox { line: u32 },
+    Checkbox {
+        #[expect(dead_code, reason = "the recorded patch already names the line")]
+        line: u32,
+    },
+    /// `x` on change `of`, reverting the write it belongs to.
+    Undo { of: String },
 }
 
 #[derive(Debug)]
@@ -34,6 +41,7 @@ pub(crate) enum WriteErr {
     ChangedSince,
     /// The edit no longer applies to the current bytes.
     NotApplicable,
+    /// The doc, or the review file that must record the write, can't be written.
     ReadOnly,
     Io(io::Error),
 }
@@ -43,13 +51,33 @@ pub(crate) struct Written {
     pub(crate) rev: Rev,
 }
 
-/// Records a human edit in the review file; nothing implements it until reviews exist.
+/// Where a write records itself, such as a review file.
 pub(crate) trait EditRecorder {
-    fn record(&self, target: &WriteTarget, via: Via, from: &Rev, to: &Rev) -> io::Result<()>;
+    /// Takes the recorder's lock for the whole write. `None` when there is nothing to
+    /// record into; `ReadOnly` when it couldn't take the record, so the doc isn't written.
+    fn begin(&self) -> Result<Option<Box<dyn Recording + '_>>, WriteErr>;
+}
+
+/// A recorder under its lock.
+pub(crate) trait Recording {
+    /// Records `bytes`, read under the lock, unless they are what it already has.
+    fn sync(&mut self, doc: &Path, bytes: &[u8]);
+    /// Records the write that turned `from` into `to`.
+    fn record(&mut self, via: &Via, from: &[u8], to: &[u8]) -> io::Result<()>;
+}
+
+/// Points in a write a test can stop at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Stage {
+    /// The doc was read under the lock.
+    Read,
+    /// The doc was replaced, and the record not yet written.
+    Renamed,
 }
 
 /// Reads the target, checks `expect`, applies `edit`, and replaces the file atomically.
-/// Output identical to the input writes nothing.
+/// Output identical to the input writes nothing. With a recorder, the whole write runs
+/// under its lock, and the record lands before the lock is let go.
 pub(crate) fn write_doc(
     t: &WriteTarget,
     rec: Option<&dyn EditRecorder>,
@@ -57,30 +85,52 @@ pub(crate) fn write_doc(
     via: Via,
     edit: impl FnOnce(&[u8]) -> Result<Vec<u8>, WriteErr>,
 ) -> Result<Written, WriteErr> {
+    let mut held = match rec {
+        Some(rec) => rec.begin()?,
+        None => None,
+    };
     let before = std::fs::read(&t.canonical).map_err(WriteErr::Io)?;
     let from = Rev::of(&before);
-    let Expect::Rev(expected) = expect;
-    if expected != from {
+    if let Expect::Rev(expected) = expect
+        && expected != from
+    {
         return Err(WriteErr::ChangedSince);
+    }
+    if let Some(held) = held.as_mut() {
+        held.sync(&t.canonical, &before);
     }
     let after = edit(&before)?;
     if after == before {
         return Ok(Written { rev: from });
     }
+    replace(t, held.as_deref_mut(), &via, &before, &after, &mut |_| {})
+}
+
+/// Replaces `before`, read under `rec`'s lock, with `after`, then records the write.
+pub(crate) fn replace(
+    t: &WriteTarget,
+    rec: Option<&mut (dyn Recording + '_)>,
+    via: &Via,
+    before: &[u8],
+    after: &[u8],
+    stage: &mut dyn FnMut(Stage),
+) -> Result<Written, WriteErr> {
     // A rename would replace a read-only file, so check before writing.
     if !paths::is_writable(&t.canonical) {
         return Err(WriteErr::ReadOnly);
     }
     // Narrows the window for an editor that saves without taking any lock.
     let unchanged = || std::fs::read(&t.canonical).is_ok_and(|now| now == before);
-    if !atomic_write::write_atomic_if(&t.canonical, &after, unchanged).map_err(WriteErr::Io)? {
+    if !atomic_write::write_atomic_if(&t.canonical, after, unchanged).map_err(WriteErr::Io)? {
         return Err(WriteErr::ChangedSince);
     }
-    let to = Rev::of(&after);
+    stage(Stage::Renamed);
     if let Some(rec) = rec {
-        rec.record(t, via, &from, &to).map_err(WriteErr::Io)?;
+        rec.record(via, before, after).map_err(WriteErr::Io)?;
     }
-    Ok(Written { rev: to })
+    Ok(Written {
+        rev: Rev::of(after),
+    })
 }
 
 /// Flips the task marker of 1-based `line`, keeping every other byte (CRLF, BOM, missing
@@ -135,10 +185,18 @@ fn line_start(bytes: &[u8], line: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::fs::File;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::path::Path;
     use std::time::{Duration, SystemTime};
 
     use super::*;
+    use crate::review::chain::{CHECKPOINT_EVERY, Chain, REV_ONLY_OVER};
+    use crate::review::hunk;
+    use crate::review::log::Log;
+    use crate::review::ops::{Act, ByKind, Line, Op};
+    use crate::review::review_path_for;
+    use crate::review::sync::sync_external;
 
     fn toggle(text: &str, line: usize, checked: bool) -> Option<String> {
         toggle_task_line(text.as_bytes(), line, checked).map(|b| String::from_utf8(b).unwrap())
@@ -364,9 +422,19 @@ mod tests {
     #[derive(Default)]
     struct Spy(RefCell<Vec<(Rev, Rev)>>);
 
+    struct SpyHeld<'a>(&'a Spy);
+
     impl EditRecorder for Spy {
-        fn record(&self, _: &WriteTarget, _: Via, from: &Rev, to: &Rev) -> io::Result<()> {
-            self.0.borrow_mut().push((from.clone(), to.clone()));
+        fn begin(&self) -> Result<Option<Box<dyn Recording + '_>>, WriteErr> {
+            Ok(Some(Box::new(SpyHeld(self))))
+        }
+    }
+
+    impl Recording for SpyHeld<'_> {
+        fn sync(&mut self, _: &Path, _: &[u8]) {}
+
+        fn record(&mut self, _: &Via, from: &[u8], to: &[u8]) -> io::Result<()> {
+            self.0.0.borrow_mut().push((Rev::of(from), Rev::of(to)));
             Ok(())
         }
     }
@@ -416,5 +484,348 @@ mod tests {
                 .is_symlink()
         );
         assert_eq!(std::fs::read(&link).unwrap(), b"- [x] a\n");
+    }
+
+    const TASKS: &[u8] = b"- [ ] a\n- [ ] b\n";
+
+    /// A doc and a review file created on its bytes.
+    fn logged(dir: &Path, bytes: &[u8]) -> (WriteTarget, Log) {
+        let t = doc(dir, bytes);
+        let log = Log::open(&review_path_for(&t.canonical));
+        let text = std::str::from_utf8(bytes).unwrap();
+        assert!(
+            log.create_if_missing("doc.md", text, None).unwrap(),
+            "setup"
+        );
+        (t, log)
+    }
+
+    fn lines(log: &Log) -> Vec<Line> {
+        let parsed = log.read().unwrap().expect("setup: a review file");
+        assert!(parsed.bad.is_empty(), "{:?}", parsed.bad);
+        parsed.lines
+    }
+
+    fn edits(log: &Log) -> Vec<Line> {
+        lines(log)
+            .into_iter()
+            .filter(|l| matches!(l.op, Op::Edit { .. }))
+            .collect()
+    }
+
+    fn head(log: &Log) -> Option<Rev> {
+        Chain::build(&log.read().unwrap().unwrap()).head().cloned()
+    }
+
+    fn tick_line(line: usize) -> impl FnOnce(&[u8]) -> Result<Vec<u8>, WriteErr> {
+        move |b| toggle_task_line(b, line, true).ok_or(WriteErr::NotApplicable)
+    }
+
+    /// Panics unless another process or fd holding the review file's lock would block.
+    fn assert_locked(review: &Path) {
+        let file = File::open(review).unwrap();
+        match file.try_lock() {
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            other => panic!("review file not locked while the doc is written: {other:?}"),
+        }
+    }
+
+    /// The `edit` fields, checked against the texts they claim to join.
+    fn assert_edit(line: &Line, act: Act, old: &[u8], new: &[u8]) {
+        let Op::Edit {
+            rev,
+            to_rev,
+            patch,
+            of,
+            act: got,
+        } = &line.op
+        else {
+            panic!("not an edit: {line:?}");
+        };
+        assert_eq!(*got, act);
+        assert_eq!(*of, None);
+        assert_eq!(*rev, Rev::of(old));
+        assert_eq!(*to_rev, Rev::of(new));
+        let old = std::str::from_utf8(old).unwrap();
+        let new = std::str::from_utf8(new).unwrap();
+        assert_eq!(hunk::apply(old, patch.as_ref().unwrap()).unwrap(), new);
+        assert_eq!(line.by.kind, ByKind::Human);
+    }
+
+    #[test]
+    fn with_a_log_a_checkbox_appends_one_edit_under_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let (t, log) = logged(dir.path(), TASKS);
+        let before = lines(&log).len();
+        let review = log.path().to_path_buf();
+
+        let written = write_doc(
+            &t,
+            Some(&log),
+            Expect::Rev(Rev::of(TASKS)),
+            Via::Checkbox { line: 2 },
+            |b| {
+                assert_locked(&review);
+                tick_line(2)(b)
+            },
+        )
+        .unwrap();
+
+        let after = b"- [ ] a\n- [x] b\n";
+        assert_eq!(std::fs::read(&t.canonical).unwrap(), after);
+        assert_eq!(written.rev, Rev::of(after));
+        let all = lines(&log);
+        assert_eq!(all.len(), before + 1, "{all:#?}");
+        assert_edit(all.last().unwrap(), Act::Checkbox, TASKS, after);
+        assert_eq!(head(&log), Some(Rev::of(after)));
+        let mut held = log.hold().unwrap();
+        assert_eq!(sync_external(&mut held, &t.canonical, 0), None);
+    }
+
+    #[test]
+    fn without_a_log_writes_and_creates_no_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = doc(dir.path(), TASKS);
+        let log = Log::open(&review_path_for(&t.canonical));
+
+        write_doc(&t, Some(&log), Expect::Rev(Rev::of(TASKS)), CHECKBOX, tick).unwrap();
+
+        assert_eq!(std::fs::read(&t.canonical).unwrap(), b"- [x] a\n- [ ] b\n");
+        assert!(!log.path().exists(), "a checkbox created the review file");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn fresh_records_an_outside_write_before_the_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let (t, log) = logged(dir.path(), TASKS);
+        let outside = b"- [ ] a\n- [ ] b\n- [ ] c from an editor\n";
+        std::fs::write(&t.canonical, outside).unwrap();
+        let mut seen = None;
+
+        write_doc(
+            &t,
+            Some(&log),
+            Expect::Fresh,
+            Via::Checkbox { line: 3 },
+            |b| {
+                seen = Some(b.to_vec());
+                tick_line(3)(b)
+            },
+        )
+        .unwrap();
+
+        let after = b"- [ ] a\n- [ ] b\n- [x] c from an editor\n";
+        assert_eq!(seen.as_deref(), Some(&outside[..]));
+        assert_eq!(std::fs::read(&t.canonical).unwrap(), after);
+        let all = lines(&log);
+        let [.., external, edit] = &all[..] else {
+            panic!("{all:#?}");
+        };
+        assert!(
+            matches!(&external.op, Op::External { rev, to_rev, .. }
+                if *rev == Rev::of(TASKS) && *to_rev == Rev::of(outside)),
+            "{external:?}"
+        );
+        assert_edit(edit, Act::Checkbox, outside, after);
+        assert_eq!(head(&log), Some(Rev::of(after)));
+    }
+
+    #[test]
+    fn a_rev_the_client_saw_but_the_log_missed_is_recorded_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let (t, log) = logged(dir.path(), TASKS);
+        // Pushed to the page before the watcher recorded it.
+        let outside = b"- [ ] a\n- [ ] b\n- [ ] c\n";
+        std::fs::write(&t.canonical, outside).unwrap();
+
+        write_doc(
+            &t,
+            Some(&log),
+            Expect::Rev(Rev::of(outside)),
+            Via::Checkbox { line: 3 },
+            tick_line(3),
+        )
+        .unwrap();
+
+        let after = b"- [ ] a\n- [ ] b\n- [x] c\n";
+        let all = lines(&log);
+        let [.., external, edit] = &all[..] else {
+            panic!("{all:#?}");
+        };
+        assert!(
+            matches!(&external.op, Op::External { to_rev, .. } if *to_rev == Rev::of(outside)),
+            "{external:?}"
+        );
+        assert_edit(edit, Act::Checkbox, outside, after);
+        assert_eq!(head(&log), Some(Rev::of(after)));
+    }
+
+    #[test]
+    fn with_a_log_a_refused_write_records_no_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let expect = || Expect::Rev(Rev::of(TASKS));
+        let mut bad = Vec::new();
+        let mut check = |name: &str, log: &Log, result: Result<Written, WriteErr>, ok: bool| {
+            if result.is_ok() != ok || !edits(log).is_empty() {
+                bad.push(format!("{name}: {result:?}, edits {:?}", edits(log)));
+            }
+        };
+
+        let sub = |name: &str| {
+            let d = dir.path().join(name);
+            std::fs::create_dir(&d).unwrap();
+            d
+        };
+
+        let d = sub("stale");
+        let (t, log) = logged(&d, TASKS);
+        let r = write_doc(&t, Some(&log), Expect::Rev(Rev::of(b"x")), CHECKBOX, tick);
+        check("stale", &log, r, false);
+
+        let d = sub("not-applicable");
+        let (t, log) = logged(&d, TASKS);
+        let r = write_doc(&t, Some(&log), expect(), CHECKBOX, |_| {
+            Err(WriteErr::NotApplicable)
+        });
+        check("not applicable", &log, r, false);
+
+        let d = sub("identical");
+        let (t, log) = logged(&d, TASKS);
+        let r = write_doc(&t, Some(&log), expect(), CHECKBOX, |b| Ok(b.to_vec()));
+        check("identical", &log, r, true);
+
+        let d = sub("race");
+        let (t, log) = logged(&d, TASKS);
+        let path = t.canonical.clone();
+        let r = write_doc(&t, Some(&log), expect(), CHECKBOX, |b| {
+            std::fs::write(&path, b"- [ ] a\n- [ ] B\n").unwrap();
+            tick(b)
+        });
+        check("race", &log, r, false);
+        assert_eq!(std::fs::read(&path).unwrap(), b"- [ ] a\n- [ ] B\n");
+
+        let d = sub("read-only");
+        let (t, log) = logged(&d, TASKS);
+        std::fs::set_permissions(&t.canonical, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let r = write_doc(&t, Some(&log), expect(), CHECKBOX, tick);
+        check("read only", &log, r, false);
+
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    #[test]
+    fn a_review_file_that_cannot_take_the_edit_refuses_the_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bad = Vec::new();
+        for name in ["read-only", "newer", "garbled"] {
+            let d = dir.path().join(name);
+            std::fs::create_dir(&d).unwrap();
+            let (t, log) = logged(&d, TASKS);
+            match name {
+                "read-only" => {
+                    std::fs::set_permissions(log.path(), std::fs::Permissions::from_mode(0o444))
+                        .unwrap();
+                }
+                "newer" => {
+                    let text = std::fs::read_to_string(log.path()).unwrap();
+                    std::fs::write(log.path(), text.replacen("review/1", "review/2", 1)).unwrap();
+                }
+                _ => {
+                    let text = std::fs::read_to_string(log.path()).unwrap();
+                    std::fs::write(log.path(), text.replacen("{", "{{", 1)).unwrap();
+                }
+            }
+            if name != "read-only" {
+                assert!(log.read().unwrap().unwrap().read_only, "setup: {name}");
+            }
+            let review = std::fs::read(log.path()).unwrap();
+
+            let result = write_doc(&t, Some(&log), Expect::Rev(Rev::of(TASKS)), CHECKBOX, tick);
+
+            if !matches!(result, Err(WriteErr::ReadOnly))
+                || std::fs::read(&t.canonical).unwrap() != TASKS
+                || std::fs::read(log.path()).unwrap() != review
+            {
+                bad.push(format!("{name}: {result:?}"));
+            }
+        }
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    #[test]
+    fn a_rev_the_log_has_but_the_disk_left_is_changed_since() {
+        let dir = tempfile::tempdir().unwrap();
+        let (t, log) = logged(dir.path(), TASKS);
+        let outside = b"- [ ] a\n- [ ] b\n- [ ] c\n";
+        std::fs::write(&t.canonical, outside).unwrap();
+        assert_eq!(head(&log), Some(Rev::of(TASKS)), "setup");
+
+        // The tick applies to both texts, so only the rev check can refuse it.
+        let result = write_doc(&t, Some(&log), Expect::Rev(Rev::of(TASKS)), CHECKBOX, tick);
+
+        assert!(matches!(result, Err(WriteErr::ChangedSince)), "{result:?}");
+        assert_eq!(std::fs::read(&t.canonical).unwrap(), outside);
+        assert!(edits(&log).is_empty());
+    }
+
+    // Optional: a doc over the rev-only size, and the checkpoint cadence.
+
+    #[test]
+    fn a_rev_only_doc_records_the_edit_without_a_patch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut big = b"- [ ] a\n\n".to_vec();
+        big.extend(b"filler line\n".repeat(REV_ONLY_OVER / 12 + 1));
+        let (t, log) = logged(dir.path(), &big);
+
+        write_doc(&t, Some(&log), Expect::Rev(Rev::of(&big)), CHECKBOX, tick).unwrap();
+
+        let disk = std::fs::read(&t.canonical).unwrap();
+        let all = edits(&log);
+        let [edit] = &all[..] else { panic!("{all:#?}") };
+        assert!(
+            matches!(&edit.op, Op::Edit { rev, to_rev, patch: None, act: Act::Checkbox, .. }
+                if *rev == Rev::of(&big) && *to_rev == Rev::of(&disk)),
+            "{edit:?}"
+        );
+        assert_eq!(head(&log), Some(Rev::of(&disk)));
+    }
+
+    #[test]
+    fn every_twentieth_patch_also_checkpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let (t, log) = logged(dir.path(), TASKS);
+
+        for i in 0..CHECKPOINT_EVERY {
+            let bytes = std::fs::read(&t.canonical).unwrap();
+            let checked = i % 2 == 0;
+            write_doc(
+                &t,
+                Some(&log),
+                Expect::Rev(Rev::of(&bytes)),
+                CHECKBOX,
+                |b| toggle_task_line(b, 1, checked).ok_or(WriteErr::NotApplicable),
+            )
+            .unwrap();
+        }
+
+        let all = lines(&log);
+        let checkpoints: Vec<_> = all
+            .windows(2)
+            .filter_map(|w| match (&w[0].op, &w[1].op) {
+                (
+                    Op::Edit { to_rev, .. },
+                    Op::Snap {
+                        rev,
+                        checkpoint: true,
+                        ..
+                    },
+                ) => Some(to_rev == rev),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(checkpoints, [true], "{all:#?}");
+        let disk = std::fs::read(&t.canonical).unwrap();
+        assert_eq!(head(&log), Some(Rev::of(&disk)));
     }
 }

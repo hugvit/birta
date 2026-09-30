@@ -11,6 +11,7 @@ use super::items::Notes;
 use super::texts::{Texts, carry, touches};
 use super::turns::Turns;
 use crate::anchor;
+use crate::rev::Rev;
 use crate::review::chain::{Cause, Mapped, Step, map_line};
 use crate::review::doc::Doc;
 use crate::review::ops::{Act, By, ByKind, Hunk, Line, Op};
@@ -65,18 +66,7 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
     let chain = texts.chain;
     let head = texts.head;
     let html = Html::new(head);
-    let undone: HashMap<&str, u32> = input
-        .lines
-        .iter()
-        .filter_map(|line| match &line.op {
-            Op::Edit {
-                act: Act::Undo,
-                of: Some(of),
-                ..
-            } => Some((of.as_str(), line.n)),
-            _ => None,
-        })
-        .collect();
+    let undone = undone(input, texts);
     let mut yours: Vec<Yours> = Vec::new();
     let mut changes = Vec::new();
     let mut deletions = Vec::new();
@@ -139,7 +129,8 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
             }
 
             let (words, gaps) = words(h);
-            let reason = if gone {
+            // An undo is the later write over what it reverted
+            let reason = if gone || undone_by.is_some() {
                 ReversibleReason::LaterOverlap
             } else if matches!(line.op, Op::Snap { .. }) {
                 ReversibleReason::Snap
@@ -434,6 +425,64 @@ struct Placed {
 
 /// Lines `new` of a write's text carried through the writes after it. With `gap`, the
 /// hunk removed lines and `new.0` is the line after them.
+/// The undo that reverted each change id. An undo names one change; the rest of its
+/// write counts as undone too when the undo's patch reverted every hunk of it.
+fn undone(input: &Input, texts: &mut Texts) -> HashMap<String, u32> {
+    let mut undone = HashMap::new();
+    for line in input.lines {
+        let Op::Edit {
+            act: Act::Undo,
+            of: Some(of),
+            ..
+        } = &line.op
+        else {
+            continue;
+        };
+        undone.insert(of.clone(), line.n);
+        let Some((op, _)) = of.split_once('.') else {
+            continue;
+        };
+        let Some(op) = op.parse::<u32>().ok().filter(|n| n.to_string() == op) else {
+            continue;
+        };
+        if let Some(hunks) = reverted_whole(texts, op, line.n) {
+            for j in 0..hunks {
+                undone.insert(format!("{op}.{j}"), line.n);
+            }
+        }
+    }
+    undone
+}
+
+/// How many hunks the write on line `op` has, when the undo on line `undo` reverted
+/// all of them at once.
+fn reverted_whole(texts: &mut Texts, op: u32, undo: u32) -> Option<usize> {
+    let (k, step) = texts.step_at(op)?;
+    let hunks = step.hunks.as_ref().filter(|h| h.len() > 1)?;
+    let (u, undo) = texts.step_at(undo)?;
+    let between = texts.chain.history().get(k + 1..u)?;
+    let mut reverses = Vec::with_capacity(hunks.len());
+    let mut shift = 0i64;
+    for h in hunks {
+        let new_a = (i64::from(h.a) + shift) as u32;
+        shift += h.i.len() as i64 - h.d.len() as i64;
+        let at = mapped(map_line(between, new_a + 1))?;
+        // Every line the hunk wrote must still be there, in one piece
+        let il = h.i.len() as u32;
+        if il > 0 && mapped(map_line(between, new_a + il))? != at + il - 1 {
+            return None;
+        }
+        reverses.push(Hunk {
+            a: at - 1,
+            d: h.i.clone(),
+            i: h.d.clone(),
+        });
+    }
+    let from = texts.text(&undo.from)?;
+    let reverted = crate::review::hunk::apply(&from, &reverses).ok()?;
+    (Rev::of(reverted.as_bytes()) == undo.to).then_some(hunks.len())
+}
+
 fn place(later: &[Step], new: (u32, u32), gap: bool, head: &Doc) -> Placed {
     let gone = Placed {
         status: RangeStatus::Superseded,

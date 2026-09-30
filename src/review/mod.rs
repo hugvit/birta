@@ -9,6 +9,7 @@ pub mod log;
 pub mod ops;
 pub mod state;
 pub mod sync;
+pub(crate) mod undo;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

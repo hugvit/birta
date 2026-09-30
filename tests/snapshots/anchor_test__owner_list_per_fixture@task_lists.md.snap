@@ -1,0 +1,10 @@
+---
+source: tests/anchor_test.rs
+expression: "lines.join(\"\\n\")"
+input_file: tests/fixtures/task_lists.md
+---
+item 1:1-1:20 1-1
+item 2:1-2:21 2-2
+item 3:1-4:0 3-3
+item 5:1-5:25 5-5
+item 6:1-6:24 6-6

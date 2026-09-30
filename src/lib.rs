@@ -1,3 +1,4 @@
+pub mod anchor;
 mod atomic_write;
 pub mod config;
 mod doc_write;

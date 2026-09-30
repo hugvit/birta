@@ -1,0 +1,8 @@
+---
+source: tests/anchor_test.rs
+expression: "lines.join(\"\\n\")"
+input_file: tests/fixtures/mermaid.md
+---
+code 1:1-6:3 1-6
+paragraph 8:1-8:22 8-8
+code 10:1-14:3 10-14

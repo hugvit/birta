@@ -1,3 +1,8 @@
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::fmt;
+
+use comrak::adapters::SyntaxHighlighterAdapter;
 use comrak::plugins::syntect::{SyntectAdapter, SyntectAdapterBuilder};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
@@ -9,23 +14,71 @@ use syntect::util::LinesWithEndings;
 
 use crate::theme::SyntaxTheme;
 
+/// Syntect highlighting whose `<pre>` keeps comrak's `data-sourcepos`.
+pub struct Highlighter {
+    syntect: SyntectAdapter,
+    /// Syntect's class mode writes a bare `<pre>`, dropping comrak's attributes.
+    classed: bool,
+}
+
+impl SyntaxHighlighterAdapter for Highlighter {
+    fn write_highlighted(
+        &self,
+        output: &mut dyn fmt::Write,
+        lang: Option<&str>,
+        code: &str,
+    ) -> fmt::Result {
+        self.syntect.write_highlighted(output, lang, code)
+    }
+
+    fn write_pre_tag(
+        &self,
+        output: &mut dyn fmt::Write,
+        attributes: HashMap<&'static str, Cow<'_, str>>,
+    ) -> fmt::Result {
+        if !self.classed {
+            return self.syntect.write_pre_tag(output, attributes);
+        }
+        let mut attrs = vec![("class", "syntax-highlighting")];
+        if let Some(sp) = attributes.get("data-sourcepos") {
+            attrs.push(("data-sourcepos", sp));
+        }
+        comrak::html::write_opening_tag(output, "pre", attrs)
+    }
+
+    fn write_code_tag(
+        &self,
+        output: &mut dyn fmt::Write,
+        attributes: HashMap<&'static str, Cow<'_, str>>,
+    ) -> fmt::Result {
+        self.syntect.write_code_tag(output, attributes)
+    }
+}
+
 /// Create a syntax highlighter adapter using CSS classes (theme-agnostic).
 ///
 /// Light/dark theming is handled by `syntax.css` in the browser.
-pub fn adapter() -> SyntectAdapter {
-    SyntectAdapter::new(None)
+pub fn adapter() -> Highlighter {
+    Highlighter {
+        syntect: SyntectAdapter::new(None),
+        classed: true,
+    }
 }
 
 /// Create a syntax highlighter adapter using inline styles from a loaded theme.
-pub fn adapter_with_theme(syntax_theme: &SyntaxTheme) -> SyntectAdapter {
+pub fn adapter_with_theme(syntax_theme: &SyntaxTheme) -> Highlighter {
     let mut theme_set = ThemeSet::new();
     theme_set
         .themes
         .insert(syntax_theme.theme_name.clone(), syntax_theme.theme.clone());
-    SyntectAdapterBuilder::new()
+    let syntect = SyntectAdapterBuilder::new()
         .theme(&syntax_theme.theme_name)
         .theme_set(theme_set)
-        .build()
+        .build();
+    Highlighter {
+        syntect,
+        classed: false,
+    }
 }
 
 /// Highlight a full markdown file as source code.

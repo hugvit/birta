@@ -1,0 +1,9 @@
+---
+source: tests/anchor_test.rs
+expression: "lines.join(\"\\n\")"
+input_file: tests/fixtures/interactive.md
+---
+0 paragraph 4:1-4:34 4-4
+1 list_item 6:1-6:10 6-6
+2 list_item 7:1-8:0 7-7
+3 paragraph 14:1-14:29 14-14

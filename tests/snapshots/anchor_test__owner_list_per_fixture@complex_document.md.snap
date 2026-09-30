@@ -1,0 +1,30 @@
+---
+source: tests/anchor_test.rs
+expression: "lines.join(\"\\n\")"
+input_file: tests/fixtures/complex_document.md
+---
+heading 1:1-1:16 1-1
+paragraph 3:1-3:67 3-3
+heading 5:1-5:11 5-5
+item 7:1-7:22 7-7
+item 8:1-8:17 8-8
+item 9:1-9:18 9-9
+item 10:1-11:0 10-10
+heading 12:1-12:15 12-12
+code 14:1-16:3 14-16
+heading 18:1-18:8 18-18
+cell 20:2-20:10 20-20
+cell 20:12-20:24 20-20
+cell 22:2-22:18 22-22
+cell 22:20-22:35 22-22
+cell 23:2-23:30 23-23
+cell 23:32-23:50 23-23
+heading 25:1-25:6 25-25
+paragraph 27:1-27:61 27-27
+code 29:1-32:3 29-32
+heading 34:1-34:8 34-34
+paragraph 36:1-36:41 36-36
+paragraph 38:3-38:32 38-38
+paragraph 40:3-40:32 40-40
+paragraph 44:1-44:51 44-44
+paragraph 46:7-46:65 46-46

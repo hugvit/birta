@@ -1,0 +1,155 @@
+---
+source: tests/render_test.rs
+expression: html
+input_file: tests/fixtures/anchor.md
+---
+<h1 data-sourcepos="1:1-1:26"><a href="#retry-layer--design" aria-hidden="true" class="anchor" id="retry-layer--design"></a>Retry “layer” — design</h1>
+<p data-sourcepos="3:1-3:213">This PR <strong data-sourcepos="3:9-3:22">adds retry</strong> with <em data-sourcepos="3:29-3:38">jittered</em> backoff to the <code data-sourcepos="3:55-3:64">upload()</code> client – because S3 returns 503 &amp; drops events… See <a data-sourcepos="3:125-3:161" href="https://example.com/retry">the docs</a> 🎉. He said “we just fail” and don’t *panic*.</p>
+<p data-sourcepos="5:1-7:70">We just <strong data-sourcepos="5:9-5:16">fail</strong> hard here, and we just fail again.
+Soft break line two  with  spaces<br data-sourcepos="6:34-6:36" />
+hard break line three <kbd>Ctrl</kbd> and math <span data-math-style="inline" data-sourcepos="7:48-7:61">e^{i\pi}+1=0</span> end<sup data-sourcepos="7:66-7:69" class="footnote-ref"><a href="#fn-1" id="fnref-1" data-footnote-ref>1</a></sup>.</p>
+<ul data-sourcepos="9:1-12:37">
+<li data-sourcepos="9:1-9:31"><input type="checkbox" disabled="" /> Ran the integration suite</li>
+<li data-sourcepos="10:1-11:22"><input type="checkbox" checked="" disabled="" /> Checked idempotency on every POST
+<ul data-sourcepos="11:3-11:22">
+<li data-sourcepos="11:3-11:22">nested item – one</li>
+</ul>
+</li>
+<li data-sourcepos="12:1-12:37">plain item with <code data-sourcepos="12:19-12:24">code</code> and <del data-sourcepos="12:30-12:37">gone</del></li>
+</ul>
+<table data-sourcepos="14:1-17:31">
+<thead>
+<tr data-sourcepos="14:1-14:22">
+<th data-sourcepos="14:2-14:7">Knob</th>
+<th data-sourcepos="14:9-14:15" align="right">Value</th>
+<th data-sourcepos="14:17-14:21">Why</th>
+</tr>
+</thead>
+<tbody>
+<tr data-sourcepos="16:1-16:31">
+<td data-sourcepos="16:2-16:10">retries</td>
+<td data-sourcepos="16:12-16:14" align="right">5</td>
+<td data-sourcepos="16:16-16:30">5 × 8s = 40s</td>
+</tr>
+<tr data-sourcepos="17:1-17:31">
+<td data-sourcepos="17:2-17:7">base</td>
+<td data-sourcepos="17:9-17:15" align="right">250ms</td>
+<td data-sourcepos="17:17-17:30">jitter floor</td>
+</tr>
+</tbody>
+</table>
+<div class="markdown-alert markdown-alert-note" data-sourcepos="19:1-20:56">
+<p class="markdown-alert-title">Note</p>
+<p data-sourcepos="20:3-20:56">Retries are capped at <strong data-sourcepos="20:25-20:29">5</strong> to fit the 60s job budget.</p>
+</div>
+<p data-sourcepos="22:1-22:52"><a data-sourcepos="22:1-22:26" href="https://example.com/auto">https://example.com/auto</a> and <a data-sourcepos="22:32-22:46" href="http://www.example.org">www.example.org</a> bare.</p>
+<blockquote data-sourcepos="26:1-28:20">
+<p data-sourcepos="26:3-26:39">quoted para with <strong data-sourcepos="26:20-26:27">bold</strong> and “smart”</p>
+<p data-sourcepos="28:3-28:20">second quoted para</p>
+</blockquote>
+<dl data-sourcepos="30:1-32:0">
+<dt data-sourcepos="30:1-30:1">Term one</dt>
+<dd data-sourcepos="31:1-31:32">Definition with <em data-sourcepos="31:19-31:24">emph</em> – dash</dd>
+</dl>
+<h2 data-sourcepos="33:1-34:14"><a href="#setext-heading" aria-hidden="true" class="anchor" id="setext-heading"></a>Setext Heading</h2>
+<ul data-sourcepos="36:1-39:11">
+<li data-sourcepos="36:1-38:21">
+<p data-sourcepos="36:3-36:11">loose one</p>
+<p data-sourcepos="38:3-38:21">loose one continued</p>
+</li>
+<li data-sourcepos="39:1-40:0">
+<p data-sourcepos="39:3-39:11">loose two</p>
+</li>
+</ul>
+<h2 data-sourcepos="41:1-41:7"><a href="#code" aria-hidden="true" class="anchor" id="code"></a>Code</h2>
+<pre class="syntax-highlighting" data-sourcepos="43:1-47:3"><code><span class="source rust"><span class="meta function rust"><span class="meta function rust"><span class="storage type function rust">fn</span> </span><span class="entity name function rust">retry</span></span><span class="meta function rust"><span class="meta function parameters rust"><span class="punctuation section parameters begin rust">(</span></span><span class="meta function rust"><span class="meta function parameters rust"><span class="punctuation section parameters end rust">)</span></span></span></span><span class="meta function rust"> </span><span class="meta function rust"><span class="meta block rust"><span class="punctuation section block begin rust">{</span>
+	<span class="storage type rust">let</span> n <span class="keyword operator rust">=</span> <span class="constant numeric integer decimal rust">5</span><span class="punctuation terminator rust">;</span>
+</span><span class="meta block rust"><span class="punctuation section block end rust">}</span></span></span>
+</span></code></pre>
+<pre class="syntax-highlighting" data-sourcepos="49:3-52:5"><code><span class="text plain">indented fence
+  kept indent
+</span></code></pre>
+<pre class="syntax-highlighting" data-sourcepos="54:5-56:0"><code><span class="text plain">indented code block
+second line
+</span></code></pre>
+<pre class="syntax-highlighting" data-sourcepos="57:1-59:3"><code><span class="text plain">tilde fence
+</span></code></pre>
+<pre class="mermaid" data-sourcepos="61:1-64:3">graph TD
+  A --&gt; B
+</pre>
+<pre lang="math" data-math-style="display" data-sourcepos="66:1-68:3"><code>x^2 + y^2
+</code></pre>
+<h3 data-sourcepos="70:1-70:22"><a href="#quotes-and-details" aria-hidden="true" class="anchor" id="quotes-and-details"></a>Quotes and details</h3>
+<blockquote data-sourcepos="72:1-76:20">
+<p data-sourcepos="72:3-72:13">outer quote</p>
+<blockquote data-sourcepos="74:3-74:35">
+<p data-sourcepos="74:5-74:35">inner quote with café and 🎉</p>
+</blockquote>
+<h3 data-sourcepos="76:3-76:20"><a href="#quoted-heading" aria-hidden="true" class="anchor" id="quoted-heading"></a>Quoted heading</h3>
+</blockquote>
+<details>
+<summary>More</summary>
+<p data-sourcepos="81:1-81:30">Body paragraph inside details.</p>
+</details>
+<table data-sourcepos="85:1-87:24">
+<thead>
+<tr data-sourcepos="85:1-85:16">
+<th data-sourcepos="85:2-85:8">Emoji</th>
+<th data-sourcepos="85:10-85:15">Note</th>
+</tr>
+</thead>
+<tbody>
+<tr data-sourcepos="87:1-87:24">
+<td data-sourcepos="87:2-87:9">🎉</td>
+<td data-sourcepos="87:11-87:23">naïve 🎉</td>
+</tr>
+</tbody>
+</table>
+<p data-sourcepos="89:1-89:46">Hidden <span hidden>secret</span> inline text.</p>
+<ul data-sourcepos="91:1-94:15">
+<li data-sourcepos="91:1-93:21"><input type="checkbox" disabled="" /> 
+<p data-sourcepos="91:7-91:16">loose task</p>
+<p data-sourcepos="93:3-93:21">continued task text</p>
+</li>
+<li data-sourcepos="94:1-95:0"><input type="checkbox" checked="" disabled="" /> 
+<p data-sourcepos="94:7-94:15">done task</p>
+</li>
+</ul>
+<ul data-sourcepos="96:1-97:14">
+<li data-sourcepos="96:1-97:14">parent item
+<ul data-sourcepos="97:3-97:14">
+<li data-sourcepos="97:3-97:14">only child</li>
+</ul>
+</li>
+</ul>
+<p data-sourcepos="99:1-99:39">Second ref<sup data-sourcepos="99:11-99:14" class="footnote-ref"><a href="#fn-2" id="fnref-2" data-footnote-ref>2</a></sup> with blocks in its note.</p>
+<p data-sourcepos="115:1-115:14">Last line here</p>
+<section data-sourcepos="24:1-24:24" class="footnotes" data-footnotes>
+<ol>
+<li data-sourcepos="24:1-24:24" id="fn-1">
+<p data-sourcepos="24:7-24:24">The footnote body. <a href="#fnref-1" class="footnote-backref" data-footnote-backref data-footnote-backref-idx="1" aria-label="Back to reference 1">↩</a></p>
+</li>
+<li data-sourcepos="101:1-113:5" id="fn-2">
+<p data-sourcepos="101:7-101:22">Second footnote.</p>
+<ul data-sourcepos="103:5-103:15">
+<li data-sourcepos="103:5-103:15">foot item</li>
+</ul>
+<h2 data-sourcepos="105:5-105:19"><a href="#foot-heading" aria-hidden="true" class="anchor" id="foot-heading"></a>Foot heading</h2>
+<pre class="syntax-highlighting" data-sourcepos="107:5-109:7"><code><span class="text plain">foot code
+</span></code></pre>
+<table data-sourcepos="111:5-113:5">
+<thead>
+<tr data-sourcepos="111:5-111:9">
+<th data-sourcepos="111:6-111:8">a</th>
+</tr>
+</thead>
+<tbody>
+<tr data-sourcepos="113:5-113:9">
+<td data-sourcepos="113:6-113:8">1</td>
+</tr>
+</tbody>
+</table>
+<a href="#fnref-2" class="footnote-backref" data-footnote-backref data-footnote-backref-idx="2" aria-label="Back to reference 2">↩</a>
+</li>
+</ol>
+</section>

@@ -4,6 +4,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use sha2::{Digest, Sha256};
 
+use crate::anchor::Stop;
 use crate::security::{html_escape_attr, json_for_script};
 use crate::theme::ResolvedTheme;
 
@@ -73,6 +74,8 @@ pub struct PageOptions<'a> {
     pub rev: Option<&'a str>,
     pub nonce: &'a str,
     pub extra_boot: Option<&'a serde_json::Value>,
+    /// Focus stops of `content_html`, left out of BOOT when `None`.
+    pub stops: Option<&'a [Stop]>,
 }
 
 pub fn render_page(opts: &PageOptions<'_>) -> String {
@@ -144,7 +147,7 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
     let keybindings: serde_json::Value =
         serde_json::from_str(opts.keybindings_json).unwrap_or_else(|_| serde_json::json!({}));
     // Read by the viewer script via JSON.parse, so that script is identical on every page
-    let boot_json = json_for_script(&serde_json::json!({
+    let mut boot = serde_json::json!({
         "staticMode": opts.static_mode,
         "themeMode": theme_mode,
         "activeVariant": theme.active_variant.as_str(),
@@ -155,7 +158,11 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
         "rev": opts.rev,
         "initialView": if opts.raw_mode { "raw" } else { "preview" },
         "extra": opts.extra_boot,
-    }));
+    });
+    if let Some(stops) = opts.stops {
+        boot["stops"] = serde_json::json!(stops);
+    }
+    let boot_json = json_for_script(&boot);
 
     let csp_meta = if opts.static_mode {
         format!(
@@ -271,6 +278,7 @@ mod tests {
             current_path: None,
             nonce: "",
             extra_boot: None,
+            stops: None,
             rev: None,
         })
     }
@@ -338,6 +346,7 @@ mod tests {
             current_path: None,
             nonce: "",
             extra_boot: None,
+            stops: None,
             rev: None,
         })
     }
@@ -470,6 +479,7 @@ mod tests {
             current_path: None,
             nonce: "",
             extra_boot: None,
+            stops: None,
             rev: None,
         })
     }
@@ -554,6 +564,7 @@ mod tests {
             current_path: None,
             nonce: "",
             extra_boot: None,
+            stops: None,
             rev: None,
         })
     }
@@ -647,6 +658,7 @@ mod tests {
             current_path: Some("test.md"),
             nonce: "",
             extra_boot: None,
+            stops: None,
             rev: None,
         }
     }
@@ -827,6 +839,7 @@ mod tests {
         let extra = serde_json::json!({"review": {"note": "</script><b>&'\u{2028}"}});
         let page = render_page(&PageOptions {
             extra_boot: Some(&extra),
+            stops: None,
             rev: None,
             ..base_opts(&theme)
         });
@@ -859,6 +872,7 @@ mod tests {
             current_path: Some("sub/x';y\".md"),
             nonce: "abc123",
             extra_boot: Some(&extra),
+            stops: None,
             rev: None,
             ..base_opts(&github)
         });
@@ -1032,6 +1046,7 @@ mod tests {
             current_path: Some("dir/</script>&'\u{2028}.md"),
             keybindings_json: r#"{"toggle_dark":"<!--"}"#,
             extra_boot: Some(&extra),
+            stops: None,
             rev: None,
             ..base_opts(&theme)
         });

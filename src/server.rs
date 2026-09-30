@@ -14,6 +14,7 @@ use axum::routing::{get, post};
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, RwLock, broadcast};
 
+use crate::anchor::Stop;
 use crate::doc_write::{self, Expect, Via, WriteErr, WriteTarget};
 use crate::paths::{Access, FileKind, Roots};
 use crate::rev::Rev;
@@ -31,6 +32,7 @@ pub(crate) struct ContentUpdate {
     pub(crate) file_stats: String,
     /// Rev of the bytes that were rendered.
     pub(crate) rev: Rev,
+    pub(crate) stops: Vec<Stop>,
 }
 
 /// One render of the entry doc, cached for new and lagging connections.
@@ -44,6 +46,8 @@ pub(crate) struct Rendered {
     pub(crate) file_stats: String,
     /// Rev of the bytes behind `html`; `None` when it did not come from a file.
     pub(crate) rev: Option<Rev>,
+    /// Focus stops of `html`.
+    pub(crate) stops: Vec<Stop>,
 }
 
 /// An outbound event fanned out to every WebSocket connection.
@@ -199,6 +203,7 @@ pub(crate) struct AppInit {
     pub(crate) source_html: String,
     pub(crate) file_stats: String,
     pub(crate) rev: Option<Rev>,
+    pub(crate) stops: Vec<Stop>,
     pub(crate) registry: ThemeRegistry,
     pub(crate) custom_css: Option<String>,
     pub(crate) font_css: Option<String>,
@@ -227,6 +232,7 @@ impl AppInit {
             source_html: String::new(),
             file_stats: String::new(),
             rev: None,
+            stops: Vec::new(),
             registry,
             custom_css: opts.custom_css,
             font_css: opts.font_css,
@@ -246,7 +252,8 @@ impl AppInit {
     ) -> anyhow::Result<Self> {
         let mut init = Self::from_opts(opts, listener, Mode::Stdin)?;
         let syntax = init.registry.active().active_data().syntax.as_ref();
-        init.html = render::render(markdown, syntax);
+        let (html, index) = render::render_indexed(markdown, syntax);
+        (init.html, init.stops) = (html, index.stops);
         init.source_html = render::render_source(markdown, syntax);
         init.file_stats = render::format_file_stats(markdown);
         init.rev = Some(Rev::of(markdown.as_bytes()));
@@ -277,7 +284,9 @@ impl AppInit {
 
         let mut init = Self::from_opts(opts, listener, Mode::Serve)?;
         let syntax = init.registry.active().active_data().syntax.as_ref();
-        init.html = render::render_dir(&markdown, syntax, StdPath::new(&target.entry));
+        let (html, index) =
+            render::render_dir_indexed(&markdown, syntax, StdPath::new(&target.entry));
+        (init.html, init.stops) = (html, index.stops);
         init.source_html = render::render_source(&markdown, syntax);
         init.file_stats = render::format_file_stats(&markdown);
         init.rev = Some(rev);
@@ -368,6 +377,7 @@ impl AppState {
                 source_html: init.source_html,
                 file_stats: init.file_stats,
                 rev: init.rev,
+                stops: init.stops,
             }),
             hub,
             connections: AtomicUsize::new(0),
@@ -394,6 +404,7 @@ impl AppState {
                 source_html: update.source_html.clone(),
                 file_stats: update.file_stats.clone(),
                 rev: Some(update.rev.clone()),
+                stops: update.stops.clone(),
             };
         }
         let _ = self.hub.send(WsEvent::Content(update));
@@ -611,6 +622,7 @@ async fn index_handler(
         current_path: None,
         nonce: nonce.as_str(),
         extra_boot: None,
+        stops: Some(&current.stops),
         rev: None,
     });
     Html(page).into_response()
@@ -665,7 +677,8 @@ async fn view_handler(
         reg.active().active_data().syntax.clone()
     };
 
-    let html = render::render_dir(&markdown, syntax_theme.as_ref(), StdPath::new(&path));
+    let (html, index) =
+        render::render_dir_indexed(&markdown, syntax_theme.as_ref(), StdPath::new(&path));
     let source_html = render::render_source(&markdown, syntax_theme.as_ref());
     let file_stats = render::format_file_stats(&markdown);
 
@@ -695,6 +708,7 @@ async fn view_handler(
         current_path: Some(&path),
         nonce: nonce.as_str(),
         extra_boot: None,
+        stops: Some(&index.stops),
         rev: Some(rev.as_str()),
     });
     Html(page).into_response()
@@ -775,16 +789,18 @@ async fn broadcast_theme_update(state: &AppState) {
             Ok(bytes) => {
                 let rev = Rev::of(&bytes);
                 let markdown = String::from_utf8_lossy(&bytes);
-                let rendered = if let Some(relpath) = &state.initial_relpath {
-                    render::render_dir(&markdown, active.syntax.as_ref(), StdPath::new(relpath))
+                let (html, index) = if let Some(relpath) = &state.initial_relpath {
+                    let relpath = StdPath::new(relpath);
+                    render::render_dir_indexed(&markdown, active.syntax.as_ref(), relpath)
                 } else {
-                    render::render(&markdown, active.syntax.as_ref())
+                    render::render_indexed(&markdown, active.syntax.as_ref())
                 };
                 Rendered {
-                    html: rendered,
+                    html,
                     source_html: render::render_source(&markdown, active.syntax.as_ref()),
                     file_stats: render::format_file_stats(&markdown),
                     rev: Some(rev),
+                    stops: index.stops,
                 }
             }
             // In a folder the entry can move away; other pages still need the new theme.
@@ -800,6 +816,7 @@ async fn broadcast_theme_update(state: &AppState) {
     msg["source"] = rendered.source_html.clone().into();
     msg["path"] = state.initial_relpath.as_deref().unwrap_or("").into();
     msg["rev"] = rendered.rev.as_ref().map(Rev::as_str).into();
+    msg["stops"] = serde_json::json!(rendered.stops);
 
     *state.current.write().await = rendered;
 
@@ -953,6 +970,7 @@ fn content_frame(
     source: &str,
     file_stats: &str,
     rev: Option<&Rev>,
+    stops: &[Stop],
 ) -> String {
     serde_json::json!({
         "type": "content",
@@ -961,6 +979,7 @@ fn content_frame(
         "file_stats": file_stats,
         "path": path,
         "rev": rev.map(Rev::as_str),
+        "stops": stops,
     })
     .to_string()
 }
@@ -974,6 +993,7 @@ async fn cached_content_frame(state: &AppState) -> String {
         &current.source_html,
         &current.file_stats,
         current.rev.as_ref(),
+        &current.stops,
     )
 }
 
@@ -1022,12 +1042,14 @@ async fn doc_frame(state: &AppState, rel: &str) -> Option<String> {
     let bytes = tokio::fs::read(&canonical).await.ok()?;
     let rev = Rev::of(&bytes);
     let markdown = String::from_utf8(bytes).ok()?;
+    let (html, index) = render::render_dir_indexed(&markdown, syntax.as_ref(), StdPath::new(rel));
     Some(content_frame(
         rel,
-        &render::render_dir(&markdown, syntax.as_ref(), StdPath::new(rel)),
+        &html,
         &render::render_source(&markdown, syntax.as_ref()),
         &render::format_file_stats(&markdown),
         Some(&rev),
+        &index.stops,
     ))
 }
 
@@ -1093,6 +1115,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
                     &update.source_html,
                     &update.file_stats,
                     Some(&update.rev),
+                    &update.stops,
                 )],
                 Ok(WsEvent::Gone(path)) if sees(&path) => vec![gone_frame(&path)],
                 Ok(WsEvent::Content(_) | WsEvent::Gone(_)) => continue,
@@ -1184,6 +1207,7 @@ mod tests {
             source_html: String::new(),
             file_stats: String::new(),
             rev: None,
+            stops: Vec::new(),
             registry: ThemeRegistry::new(github_theme()),
             custom_css: None,
             font_css: None,
@@ -1782,6 +1806,7 @@ mod tests {
                 source_html: "<pre>source</pre>".to_string(),
                 file_stats: "3 lines".to_string(),
                 rev: None,
+                stops: Vec::new(),
             };
             flood(&state, 256);
 
@@ -1854,6 +1879,7 @@ mod tests {
                 source_html: "<pre>new</pre>".to_string(),
                 file_stats: "1 line".to_string(),
                 rev: Rev::of(b"new"),
+                stops: Vec::new(),
             })
             .await;
         assert!(matches!(spy.try_recv(), Ok(WsEvent::Content(_))));
@@ -1885,6 +1911,7 @@ mod tests {
                             source_html: n.clone(),
                             file_stats: n.clone(),
                             rev: Rev::of(n.as_bytes()),
+                            stops: Vec::new(),
                         })
                         .await;
                 }
@@ -1926,6 +1953,7 @@ mod tests {
                 source_html: String::new(),
                 file_stats: String::new(),
                 rev: Rev::of(b"other"),
+                stops: Vec::new(),
             })
             .await;
         assert_eq!(state.current.read().await.html, "<p>hello</p>");
@@ -3292,6 +3320,7 @@ mod tests {
             source_html: String::new(),
             file_stats: String::new(),
             rev: Rev::of(path.as_bytes()),
+            stops: Vec::new(),
         }
     }
 
@@ -4132,5 +4161,173 @@ mod tests {
             assert_eq!(update["html"], "<p>cached entry</p>", "{update}");
         })
         .await;
+    }
+
+    const STOPS_MD: &[u8] = b"# Title\n\nIntro text.\n\n- one\n- two\n\n```rust\nfn main() {}\n```\n\n```mermaid\ngraph TD\n```\n\n```math\nx^2\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+
+    /// The stops of `STOPS_MD` as sent, without `n`.
+    fn stops_md_stops() -> Vec<serde_json::Value> {
+        vec![
+            serde_json::json!({"kind": "heading", "sp": "1:1-1:7", "lines": [1, 1], "level": 1, "section": [1, 22]}),
+            serde_json::json!({"kind": "paragraph", "sp": "3:1-3:11", "lines": [3, 3]}),
+            serde_json::json!({"kind": "list_item", "sp": "5:1-5:5", "lines": [5, 5]}),
+            serde_json::json!({"kind": "list_item", "sp": "6:1-7:0", "lines": [6, 6]}),
+            serde_json::json!({"kind": "code_block", "sp": "8:1-10:3", "lines": [8, 10]}),
+            serde_json::json!({"kind": "code_block", "sp": "12:1-14:3", "lines": [12, 14]}),
+            serde_json::json!({"kind": "code_block", "sp": "16:1-18:3", "lines": [16, 18]}),
+            serde_json::json!({"kind": "table_row", "sp": "22:1-22:9", "lines": [22, 22]}),
+        ]
+    }
+
+    /// `holder["stops"]` with `n` checked (0, 1, …) and dropped, and null fields left out.
+    fn wire_stops(holder: &serde_json::Value) -> Vec<serde_json::Value> {
+        assert!(
+            holder.get("owners").is_none(),
+            "owners stay server-side: {holder}"
+        );
+        let stops = holder["stops"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no stops: {holder}"));
+        let mut prev: Option<u64> = None;
+        let mut out = Vec::new();
+        for stop in stops {
+            let mut obj = stop.as_object().unwrap().clone();
+            let keys = ["n", "kind", "sp", "lines", "level", "section"];
+            assert!(obj.keys().all(|k| keys.contains(&k.as_str())), "{stop}");
+            let n = obj.remove("n").and_then(|n| n.as_u64()).expect("n");
+            assert_eq!(n, prev.map_or(0, |p| p + 1), "{stops:?}");
+            prev = Some(n);
+            obj.retain(|_, v| !v.is_null());
+            out.push(serde_json::Value::Object(obj));
+        }
+        out
+    }
+
+    async fn page_boot(app: Router, uri: &str) -> serde_json::Value {
+        let response = app.oneshot(get(uri)).await.unwrap();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        boot_of(std::str::from_utf8(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn view_boot_carries_stops() {
+        let site = Site::new(&[("root/doc.md", STOPS_MD)]);
+        let boot = page_boot(router(site.state()), "/view/doc.md").await;
+        assert_eq!(wire_stops(&boot), stops_md_stops(), "{boot}");
+    }
+
+    #[tokio::test]
+    async fn hello_content_carries_stops() {
+        let site = Site::new(&[("root/doc.md", b"# Doc\n"), ("root/sub/stops.md", STOPS_MD)]);
+        let state = site.state();
+        let port = serve(&state).await;
+
+        within(async {
+            let mut ws = connect(port).await;
+            let frames = hello_frames(&mut ws, "sub/stops.md").await;
+            let got = contents(&frames);
+            assert_eq!(got.len(), 1, "{frames:?}");
+            assert_eq!(wire_stops(got[0]), stops_md_stops());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn the_first_frame_and_the_stdin_page_carry_stops() {
+        let site = Site::new(&[("root/doc.md", STOPS_MD)]);
+        let md = std::str::from_utf8(STOPS_MD).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let served = AppInit::serve(&site.root.join("doc.md"), &listener, test_opts()).unwrap();
+        let stdin = AppInit::stdin(md, &listener, test_opts()).unwrap();
+
+        for (mode, init) in [("serve", served), ("stdin", stdin)] {
+            let state = AppState::new(init);
+            let port = serve(&state).await;
+            within(async {
+                let (mut ws, _) =
+                    tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws"))
+                        .await
+                        .unwrap();
+                let initial = next_json(&mut ws).await;
+                assert_eq!(initial["type"], "content", "{mode}");
+                assert_eq!(wire_stops(&initial), stops_md_stops(), "{mode}");
+            })
+            .await;
+            if mode == "stdin" {
+                let boot = page_boot(router(state.clone()), "/").await;
+                assert_eq!(wire_stops(&boot), stops_md_stops(), "stdin page");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_cached_frame_keeps_its_stops_after_a_theme_switch() {
+        let site = Site::new(&[("root/doc.md", STOPS_MD)]);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let init = AppInit::serve(&site.root.join("doc.md"), &listener, test_opts()).unwrap();
+        let state = AppState::new(init);
+        handle_variant_change(&state, Variant::Light).await;
+        let port = serve(&state).await;
+
+        within(async {
+            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws"))
+                .await
+                .unwrap();
+            let initial = next_json(&mut ws).await;
+            assert_eq!(initial["type"], "content");
+            assert_eq!(wire_stops(&initial), stops_md_stops());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn theme_update_carries_the_stops_of_its_html() {
+        let site = Site::new(&[("root/doc.md", STOPS_MD)]);
+        let state = site.state();
+        let port = serve(&state).await;
+
+        within(async {
+            let mut ws = connect(port).await;
+            send_json(
+                &mut ws,
+                serde_json::json!({"type": "variant_change", "variant": "light"}),
+            )
+            .await;
+            let update = loop {
+                let frame = next_json(&mut ws).await;
+                if frame["type"] == "theme_update" {
+                    break frame;
+                }
+            };
+            assert_eq!(update["rev"], git_rev(STOPS_MD), "{update}");
+            assert_eq!(wire_stops(&update), stops_md_stops(), "{update}");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_lag_resync_after_an_update_sends_the_new_stops() {
+        let site = Site::new(&[("root/doc.md", b"# Before\n")]);
+        let state = site.state();
+        let _watch = watcher::watch(state.clone()).unwrap();
+        let port = serve(&state).await;
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws"))
+                .await
+                .unwrap();
+            next_json(&mut ws).await;
+            std::fs::write(site.root.join("doc.md"), STOPS_MD).unwrap();
+            while next_json(&mut ws).await["type"] != "content" {}
+
+            sync(&state, &mut ws, BARRIER).await;
+            flood(&state, 256);
+            let resent = sync(&state, &mut ws, SENTINEL).await;
+            assert_eq!(resent.len(), 1, "{resent:?}");
+            assert_eq!(resent[0]["rev"], git_rev(STOPS_MD));
+            assert_eq!(wire_stops(&resent[0]), stops_md_stops());
+        })
+        .await
+        .expect("timed out");
     }
 }

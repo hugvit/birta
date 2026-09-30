@@ -1,0 +1,16 @@
+---
+source: tests/anchor_test.rs
+expression: "lines.join(\"\\n\")"
+input_file: tests/fixtures/lists.md
+---
+item 1:1-1:10 1-1
+item 2:1-4:18 2-4
+item 3:3-3:15 3-3
+item 4:3-4:18 4-4
+item 5:1-6:0 5-5
+item 7:1-7:8 7-7
+item 8:1-8:9 8-8
+item 9:1-9:8 9-9
+term 11:1-11:1 11-11
+detail 12:1-12:16 12-12
+detail 13:1-13:16 13-13

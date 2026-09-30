@@ -3,13 +3,13 @@ source: tests/render_test.rs
 expression: html
 input_file: tests/fixtures/mermaid.md
 ---
-<pre class="mermaid">graph TD
+<pre class="mermaid" data-sourcepos="1:1-6:3">graph TD
     A[Start] --&gt; B{Decision}
     B --&gt;|Yes| C[OK]
     B --&gt;|No| D[End]
 </pre>
 <p data-sourcepos="8:1-8:22">Text between diagrams.</p>
-<pre class="mermaid">sequenceDiagram
+<pre class="mermaid" data-sourcepos="10:1-14:3">sequenceDiagram
     Alice-&gt;&gt;Bob: Hello
     Bob--&gt;&gt;Alice: Hi
 </pre>

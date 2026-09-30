@@ -1,0 +1,8 @@
+---
+source: tests/anchor_test.rs
+expression: "lines.join(\"\\n\")"
+input_file: tests/fixtures/footnotes.md
+---
+paragraph 1:1-1:43 1-1
+paragraph 3:7-3:29 3-3
+paragraph 4:10-4:45 4-4

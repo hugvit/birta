@@ -2,10 +2,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use comrak::nodes::NodeValue;
-use comrak::plugins::syntect::SyntectAdapter;
 use comrak::{Arena, Options, format_html_with_plugins, options, parse_document};
 
-use crate::highlight;
+use crate::anchor::{self, BlockIndex};
+use crate::highlight::{self, Highlighter};
 use crate::theme::SyntaxTheme;
 
 /// Strategy for rewriting relative URLs (images and links).
@@ -100,7 +100,13 @@ impl RewriteMode {
 
 /// Render markdown to HTML, rewriting relative image paths to `/local/` server URLs.
 pub fn render(markdown: &str, syntax_theme: Option<&SyntaxTheme>) -> String {
-    render_with_mode(markdown, syntax_theme, RewriteMode::Server).0
+    render_indexed(markdown, syntax_theme).0
+}
+
+/// [`render`], plus the block index of the same parse.
+pub fn render_indexed(markdown: &str, syntax_theme: Option<&SyntaxTheme>) -> (String, BlockIndex) {
+    let (html, _, index) = render_with_mode(markdown, syntax_theme, RewriteMode::Server);
+    (html, index)
 }
 
 /// Render markdown to HTML with directory navigation support.
@@ -111,15 +117,27 @@ pub fn render_dir(
     syntax_theme: Option<&SyntaxTheme>,
     file_relpath: &Path,
 ) -> String {
+    render_dir_indexed(markdown, syntax_theme, file_relpath).0
+}
+
+/// [`render_dir`], plus the block index of the same parse.
+pub fn render_dir_indexed(
+    markdown: &str,
+    syntax_theme: Option<&SyntaxTheme>,
+    file_relpath: &Path,
+) -> (String, BlockIndex) {
     let file_dir = file_relpath.parent().unwrap_or(Path::new("")).to_path_buf();
-    render_with_mode(markdown, syntax_theme, RewriteMode::Directory { file_dir }).0
+    let mode = RewriteMode::Directory { file_dir };
+    let (html, _, index) = render_with_mode(markdown, syntax_theme, mode);
+    (html, index)
 }
 
 /// Render markdown to HTML for a multi-file static bundle: `.md` links become
 /// relative `.html`, images/assets stay relative. Returns the HTML and the set of
 /// relative URLs referenced (pages to crawl + assets to copy).
 pub fn render_bundle(markdown: &str, syntax_theme: Option<&SyntaxTheme>) -> (String, References) {
-    render_with_mode(markdown, syntax_theme, RewriteMode::StaticBundle)
+    let (html, refs, _) = render_with_mode(markdown, syntax_theme, RewriteMode::StaticBundle);
+    (html, refs)
 }
 
 /// Format file stats for the raw-mode file header, e.g. "215 lines (154 loc) · 5.25 KB".
@@ -174,7 +192,7 @@ fn render_with_mode(
     markdown: &str,
     syntax_theme: Option<&SyntaxTheme>,
     mode: RewriteMode,
-) -> (String, References) {
+) -> (String, References, BlockIndex) {
     let options = options(&mode);
     let adapter = match syntax_theme {
         Some(st) => highlight::adapter_with_theme(st),
@@ -184,6 +202,8 @@ fn render_with_mode(
 
     let arena = Arena::new();
     let root = parse_document(&arena, markdown, &options);
+    // Before the mermaid rewrite below, which turns diagrams into raw HTML
+    let index = anchor::index(root, markdown);
 
     // Collect referenced relative URLs only for bundle export.
     let collect = matches!(mode, RewriteMode::StaticBundle);
@@ -191,11 +211,13 @@ fn render_with_mode(
 
     for node in root.descendants() {
         let mut data = node.data.borrow_mut();
+        let sourcepos = data.sourcepos;
         match &mut data.value {
             // Convert mermaid code blocks to raw HTML so syntect doesn't process them
             NodeValue::CodeBlock(code_block) if code_block.info == "mermaid" => {
                 let html = format!(
-                    "<pre class=\"mermaid\">{}</pre>\n",
+                    "<pre class=\"mermaid\" data-sourcepos=\"{}\">{}</pre>\n",
+                    sourcepos,
                     html_escape(&code_block.literal)
                 );
                 data.value = NodeValue::HtmlBlock(comrak::nodes::NodeHtmlBlock {
@@ -221,7 +243,7 @@ fn render_with_mode(
 
     let mut html = String::new();
     format_html_with_plugins(root, &options, &mut html, &plugins).unwrap();
-    (html, refs)
+    (html, refs, index)
 }
 
 /// Record a markdown link target: `.md`/`.markdown` → page to crawl, else asset.
@@ -253,32 +275,14 @@ fn collect_asset(url: &str, refs: &mut References) {
     }
 }
 
-fn plugins(adapter: &SyntectAdapter) -> options::Plugins<'_> {
+fn plugins(adapter: &Highlighter) -> options::Plugins<'_> {
     let mut plugins = options::Plugins::default();
     plugins.render.codefence_syntax_highlighter = Some(adapter);
     plugins
 }
 
-/// The options `render` parses with, for callers that only need the AST.
-pub(crate) fn parse_options() -> Options<'static> {
-    options(&RewriteMode::Server)
-}
-
 fn options(mode: &RewriteMode) -> Options<'static> {
-    let mut options = Options::default();
-
-    // GFM extensions
-    options.extension.table = true;
-    options.extension.strikethrough = true;
-    options.extension.autolink = true;
-    options.extension.tasklist = true;
-    options.extension.footnotes = true;
-    options.extension.description_lists = true;
-    options.extension.shortcodes = true;
-    options.extension.header_ids = Some(String::new());
-    options.extension.alerts = true;
-    options.extension.math_dollars = true;
-    options.extension.math_code = true;
+    let mut options = anchor::parse_options();
 
     // Rewrite relative image paths using the selected strategy
     let img_mode = mode.clone();
@@ -299,14 +303,6 @@ fn options(mode: &RewriteMode) -> Options<'static> {
         options.extension.link_url_rewriter =
             Some(Arc::new(move |url: &str| link_mode.rewrite_link(url)));
     }
-
-    // Parsing
-    options.parse.smart = true;
-
-    // Rendering
-    options.render.github_pre_lang = true;
-    options.render.r#unsafe = true;
-    options.render.sourcepos = true;
 
     options
 }

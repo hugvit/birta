@@ -1,0 +1,10 @@
+---
+source: tests/anchor_test.rs
+expression: "lines.join(\"\\n\")"
+input_file: tests/fixtures/code_blocks.md
+---
+0 paragraph 1:1-1:19 1-1
+1 code_block 3:1-7:3 3-7
+2 code_block 9:1-12:3 9-12
+3 code_block 14:5-16:0 14-15
+4 code_block 17:1-19:3 17-19

@@ -1,0 +1,20 @@
+---
+source: tests/anchor_test.rs
+expression: "lines.join(\"\\n\")"
+input_file: tests/fixtures/tables.md
+---
+cell 1:2-1:10 1-1
+cell 1:12-1:22 1-1
+cell 3:2-3:10 3-3
+cell 3:12-3:22 3-3
+cell 4:2-4:10 4-4
+cell 4:12-4:22 4-4
+cell 6:2-6:7 6-6
+cell 6:9-6:16 6-6
+cell 6:18-6:24 6-6
+cell 8:2-8:7 8-8
+cell 8:9-8:16 8-8
+cell 8:18-8:24 8-8
+cell 9:2-9:7 9-9
+cell 9:9-9:16 9-9
+cell 9:18-9:24 9-9

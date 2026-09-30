@@ -1,0 +1,71 @@
+---
+source: tests/anchor_test.rs
+expression: "lines.join(\"\\n\")"
+input_file: tests/fixtures/kitchen_sink.md
+---
+0 heading 1:1-1:14 1-1 h1 section 1-171
+1 paragraph 3:1-3:40 3-3
+2 heading 5:1-5:20 5-5 h2 section 5-8
+3 paragraph 7:1-7:72 7-7
+4 heading 9:1-9:8 9-9 h2 section 9-14
+5 paragraph 11:1-11:96 11-11
+6 heading 15:1-15:9 15-15 h2 section 15-20
+7 paragraph 17:1-17:38 17-17
+8 paragraph 19:1-19:78 19-19
+9 heading 21:1-21:11 21-21 h2 section 21-30
+10 heading 23:1-23:15 23-23 h3 section 23-30
+11 heading 25:1-25:17 25-25 h4 section 25-30
+12 heading 27:1-27:17 27-27 h5 section 27-30
+13 heading 29:1-29:18 29-29 h6 section 29-30
+14 heading 31:1-31:8 31-31 h2 section 31-58
+15 heading 33:1-33:13 33-33 h3 section 33-39
+16 list_item 35:1-37:19 35-37
+17 list_item 36:3-37:19 36-37
+18 list_item 37:5-37:19 37-37
+19 list_item 38:1-39:0 38-38
+20 heading 40:1-40:11 40-40 h3 section 40-45
+21 list_item 42:1-42:8 42-42
+22 list_item 43:1-43:9 43-43
+23 list_item 44:1-45:0 44-44
+24 heading 46:1-46:13 46-46 h3 section 46-50
+25 list_item 48:1-48:20 48-48
+26 list_item 49:1-50:0 49-49
+27 heading 51:1-51:20 51-51 h3 section 51-58
+28 heading 59:1-59:8 59-59 h2 section 59-66
+29 table_row 63:1-63:44 63-63
+30 table_row 64:1-64:44 64-64
+31 table_row 65:1-65:44 65-65
+32 heading 67:1-67:14 67-67 h2 section 67-83
+33 code_block 69:1-73:3 69-73
+34 code_block 75:1-78:3 75-78
+35 code_block 80:1-82:3 80-82
+36 heading 84:1-84:13 84-84 h2 section 84-91
+37 paragraph 86:3-86:20 86-86
+38 paragraph 88:3-88:27 88-88
+39 paragraph 90:5-90:22 90-90
+40 heading 92:1-92:9 92-92 h2 section 92-108
+41 paragraph 95:3-95:23 95-95
+42 paragraph 98:3-98:22 98-98
+43 paragraph 101:3-101:29 101-101
+44 paragraph 104:3-104:26 104-104
+45 paragraph 107:3-107:26 107-107
+46 heading 109:1-109:12 109-109 h2 section 109-116
+47 paragraph 111:1-111:45 111-111
+48 heading 117:1-117:23 117-117 h2 section 117-125
+49 paragraph 122:1-122:63 122-122
+50 heading 126:1-126:18 126-126 h2 section 126-129
+51 heading 130:1-130:19 130-130 h2 section 130-133
+52 paragraph 132:1-132:26 132-132
+53 heading 134:1-134:19 134-134 h2 section 134-139
+54 heading 140:1-140:11 140-140 h2 section 140-143
+55 paragraph 142:1-142:52 142-142
+56 heading 144:1-144:7 144-144 h2 section 144-163
+57 paragraph 146:1-146:23 146-146
+58 paragraph 148:1-148:13 148-148
+59 paragraph 150:1-152:2 150-152
+60 paragraph 154:1-154:37 154-154
+61 paragraph 156:1-156:19 156-156
+62 code_block 158:1-160:3 158-160
+63 paragraph 162:1-162:52 162-162
+64 heading 164:1-164:19 164-164 h2 section 164-171
+65 code_block 166:1-171:3 166-171

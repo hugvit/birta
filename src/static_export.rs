@@ -177,6 +177,7 @@ pub fn export_bundle(
             current_path: None,
             nonce: "",
             extra_boot: None,
+            stops: None,
             rev: None,
         });
 

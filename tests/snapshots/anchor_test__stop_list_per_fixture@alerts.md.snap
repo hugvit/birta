@@ -1,0 +1,13 @@
+---
+source: tests/anchor_test.rs
+expression: "lines.join(\"\\n\")"
+input_file: tests/fixtures/alerts.md
+---
+0 paragraph 2:3-2:23 2-2
+1 paragraph 5:3-5:22 5-5
+2 paragraph 8:3-8:29 8-8
+3 paragraph 11:3-11:26 11-11
+4 paragraph 14:3-14:26 14-14
+5 paragraph 17:3-17:65 17-17
+6 list_item 19:3-19:17 19-19
+7 list_item 20:3-20:17 20-20

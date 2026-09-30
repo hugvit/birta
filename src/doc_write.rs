@@ -7,7 +7,7 @@ use comrak::nodes::NodeValue;
 use comrak::{Arena, parse_document};
 
 use crate::rev::Rev;
-use crate::{atomic_write, paths, render};
+use crate::{anchor, atomic_write, paths};
 
 /// A document already resolved and authorised by `Roots::resolve_doc(.., Access::Write)`.
 pub(crate) struct WriteTarget {
@@ -89,7 +89,7 @@ pub(crate) fn write_doc(
 pub(crate) fn toggle_task_line(bytes: &[u8], line: usize, checked: bool) -> Option<Vec<u8>> {
     let text = std::str::from_utf8(bytes).ok()?;
     let arena = Arena::new();
-    let root = parse_document(&arena, text, &render::parse_options());
+    let root = parse_document(&arena, text, &anchor::parse_options());
     let task = root.descendants().find_map(|node| {
         let ast = node.data.borrow();
         match ast.value {

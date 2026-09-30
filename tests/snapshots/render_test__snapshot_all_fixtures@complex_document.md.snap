@@ -13,7 +13,7 @@ input_file: tests/fixtures/complex_document.md
 <li data-sourcepos="10:1-11:0"><input type="checkbox" disabled="" /> Syntax highlighting</li>
 </ul>
 <h2 data-sourcepos="12:1-12:15"><a href="#installation" aria-hidden="true" class="anchor" id="installation"></a>Installation</h2>
-<pre class="syntax-highlighting"><code><span class="source shell bash"><span class="meta function-call shell"><span class="variable function shell">cargo</span></span><span class="meta function-call arguments shell"> install birta</span>
+<pre class="syntax-highlighting" data-sourcepos="14:1-16:3"><code><span class="source shell bash"><span class="meta function-call shell"><span class="variable function shell">cargo</span></span><span class="meta function-call arguments shell"> install birta</span>
 </span></code></pre>
 <h2 data-sourcepos="18:1-18:8"><a href="#usage" aria-hidden="true" class="anchor" id="usage"></a>Usage</h2>
 <table data-sourcepos="20:1-23:51">
@@ -36,7 +36,7 @@ input_file: tests/fixtures/complex_document.md
 </table>
 <h2 data-sourcepos="25:1-25:6"><a href="#api" aria-hidden="true" class="anchor" id="api"></a>API</h2>
 <p data-sourcepos="27:1-27:61">The main function accepts a <code data-sourcepos="27:29-27:34">&amp;str</code> and returns rendered HTML:</p>
-<pre class="syntax-highlighting"><code><span class="source rust"><span class="storage type rust">let</span> html <span class="keyword operator rust">=</span> <span class="meta path rust">birta<span class="punctuation accessor rust">::</span></span>render<span class="meta group rust"><span class="punctuation section group begin rust">(</span><span class="string quoted double rust"><span class="punctuation definition string begin rust">&quot;</span># Hello<span class="punctuation definition string end rust">&quot;</span></span></span><span class="meta group rust"><span class="punctuation section group end rust">)</span></span><span class="punctuation terminator rust">;</span>
+<pre class="syntax-highlighting" data-sourcepos="29:1-32:3"><code><span class="source rust"><span class="storage type rust">let</span> html <span class="keyword operator rust">=</span> <span class="meta path rust">birta<span class="punctuation accessor rust">::</span></span>render<span class="meta group rust"><span class="punctuation section group begin rust">(</span><span class="string quoted double rust"><span class="punctuation definition string begin rust">&quot;</span># Hello<span class="punctuation definition string end rust">&quot;</span></span></span><span class="meta group rust"><span class="punctuation section group end rust">)</span></span><span class="punctuation terminator rust">;</span>
 <span class="support macro rust">assert!</span><span class="meta group rust"><span class="punctuation section group begin rust">(</span>html.<span class="support function rust">contains</span><span class="meta group rust"><span class="punctuation section group begin rust">(</span><span class="string quoted double rust"><span class="punctuation definition string begin rust">&quot;</span>&lt;h1&gt;<span class="punctuation definition string end rust">&quot;</span></span></span><span class="meta group rust"><span class="punctuation section group end rust">)</span></span></span><span class="meta group rust"><span class="punctuation section group end rust">)</span></span><span class="punctuation terminator rust">;</span>
 </span></code></pre>
 <h2 data-sourcepos="34:1-34:8"><a href="#notes" aria-hidden="true" class="anchor" id="notes"></a>Notes</h2>

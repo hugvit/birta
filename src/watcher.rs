@@ -589,7 +589,8 @@ fn publish(state: &AppState, rt: &tokio::runtime::Handle, events: Vec<FsEvent>) 
         let Some((markdown, rev)) = doc else {
             continue;
         };
-        let html = render::render_dir(markdown, syntax_theme.as_ref(), Path::new(&event.rel));
+        let (html, index) =
+            render::render_dir_indexed(markdown, syntax_theme.as_ref(), Path::new(&event.rel));
         let source = render::render_source(markdown, syntax_theme.as_ref());
         let file_stats = render::format_file_stats(markdown);
         rt.block_on(state.publish_content(ContentUpdate {
@@ -598,6 +599,7 @@ fn publish(state: &AppState, rt: &tokio::runtime::Handle, events: Vec<FsEvent>) 
             source_html: source,
             file_stats,
             rev: rev.clone(),
+            stops: index.stops,
         }));
     }
 }

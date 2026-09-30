@@ -1,0 +1,62 @@
+---
+source: tests/anchor_test.rs
+expression: "lines.join(\"\\n\")"
+input_file: tests/fixtures/anchor.md
+---
+heading 1:1-1:26 1-1
+paragraph 3:1-3:213 3-3
+paragraph 5:1-7:70 5-7
+item 9:1-9:31 9-9
+item 10:1-11:22 10-11
+item 11:3-11:22 11-11
+item 12:1-12:37 12-12
+cell 14:2-14:7 14-14
+cell 14:9-14:15 14-14
+cell 14:17-14:21 14-14
+cell 16:2-16:10 16-16
+cell 16:12-16:14 16-16
+cell 16:16-16:30 16-16
+cell 17:2-17:7 17-17
+cell 17:9-17:15 17-17
+cell 17:17-17:30 17-17
+paragraph 20:3-20:56 20-20
+paragraph 22:1-22:52 22-22
+paragraph 26:3-26:39 26-26
+paragraph 28:3-28:20 28-28
+term 30:1-30:1 30-30
+detail 31:1-31:32 31-31
+heading 33:1-34:14 33-34
+paragraph 36:3-36:11 36-36
+paragraph 38:3-38:21 38-38
+paragraph 39:3-39:11 39-39
+heading 41:1-41:7 41-41
+code 43:1-47:3 43-47
+code 49:3-52:5 49-52
+code 54:5-56:0 54-55
+code 57:1-59:3 57-59
+code 61:1-64:3 61-64
+code 66:1-68:3 66-68
+heading 70:1-70:22 70-70
+paragraph 72:3-72:13 72-72
+paragraph 74:5-74:35 74-74
+heading 76:3-76:20 76-76
+paragraph 81:1-81:30 81-81
+cell 85:2-85:8 85-85
+cell 85:10-85:15 85-85
+cell 87:2-87:9 87-87
+cell 87:11-87:23 87-87
+paragraph 89:1-89:46 89-89
+paragraph 91:7-91:16 91-91
+paragraph 93:3-93:21 93-93
+paragraph 94:7-94:15 94-94
+item 96:1-97:14 96-97
+item 97:3-97:14 97-97
+paragraph 99:1-99:39 99-99
+paragraph 115:1-115:14 115-115
+paragraph 24:7-24:24 24-24
+paragraph 101:7-101:22 101-101
+item 103:5-103:15 103-103
+heading 105:5-105:19 105-105
+code 107:5-109:7 107-109
+cell 111:6-111:8 111-111
+cell 113:6-113:8 113-113

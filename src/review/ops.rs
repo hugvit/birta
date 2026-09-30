@@ -475,6 +475,8 @@ pub struct Parsed {
     pub unknown: Vec<UnknownLine>,
     /// Set when the header is missing, malformed or from a later major version.
     pub read_only: bool,
+    /// The last line has no newline and doesn't parse: a write that was cut short.
+    pub torn_tail: bool,
 }
 
 #[derive(Deserialize)]
@@ -525,19 +527,13 @@ pub fn parse(bytes: impl AsRef<[u8]>) -> Parsed {
     let bytes = bytes.as_ref();
     let mut parsed = Parsed::default();
     let body = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    let mut last = 0;
     if !bytes.is_empty() {
         for (i, raw) in body.split(|&b| b == b'\n').enumerate() {
             let n = u32::try_from(i + 1).unwrap_or(u32::MAX);
-            let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
-            let Ok(raw) = std::str::from_utf8(raw) else {
-                parsed.bad.push(BadLine {
-                    n,
-                    err: "invalid UTF-8".to_string(),
-                });
-                continue;
-            };
+            last = n;
             if n == 1 {
-                match Header::parse(raw) {
+                match line_str(raw).and_then(Header::parse) {
                     Some(header) => parsed.header = Some(header),
                     None => parsed.bad.push(BadLine {
                         n,
@@ -546,7 +542,7 @@ pub fn parse(bytes: impl AsRef<[u8]>) -> Parsed {
                 }
                 continue;
             }
-            match parse_line(n, raw) {
+            match parse_raw_line(n, raw) {
                 ParsedLine::Ok(line) => parsed.lines.push(line),
                 ParsedLine::Unknown(unknown) => parsed.unknown.push(unknown),
                 ParsedLine::Bad(bad) => parsed.bad.push(bad),
@@ -554,7 +550,36 @@ pub fn parse(bytes: impl AsRef<[u8]>) -> Parsed {
         }
     }
     parsed.read_only = parsed.header.as_ref().and_then(Header::major) != Some(1);
+    parsed.torn_tail =
+        !bytes.ends_with(b"\n") && parsed.bad.last().is_some_and(|bad| bad.n == last);
     parsed
+}
+
+/// Parses op line `n` as it sits on disk, without its `\n`.
+pub(crate) fn parse_raw_line(n: u32, raw: &[u8]) -> ParsedLine {
+    match line_str(raw) {
+        Some(raw) => parse_line(n, raw),
+        None => ParsedLine::Bad(BadLine {
+            n,
+            err: "invalid UTF-8".to_string(),
+        }),
+    }
+}
+
+fn line_str(raw: &[u8]) -> Option<&str> {
+    std::str::from_utf8(raw.strip_suffix(b"\r").unwrap_or(raw)).ok()
+}
+
+/// A file of at most one line that is not a later version's header: what a creation
+/// cut short leaves behind, so it counts as no file at all.
+pub(crate) fn is_unfinished(bytes: &[u8]) -> bool {
+    let body = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    if body.contains(&b'\n') {
+        return false;
+    }
+    line_str(body)
+        .and_then(Header::parse)
+        .is_none_or(|header| header.major() == Some(1))
 }
 
 /// A JSON value that refuses duplicate object keys, which `Value` would resolve last-wins.

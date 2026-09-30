@@ -186,12 +186,24 @@ html, body {
   border-radius: 6px;
 }
 
-.container .markdown-body {
+/* The frame holds the padding, so the doc's own box is exactly its content */
+#lane-frame {
   padding: 40px;
+  /* github keeps its colours on .markdown-body, where --birta-bg matches them */
+  background-color: var(--bgColor-default, var(--birta-bg));
+}
+
+#content {
+  padding: 0;
+  /* The patcher restores the scroll position itself; native anchoring would apply it twice */
+  overflow-anchor: none;
 }
 
 /* File header bar — GitHub-style */
 .file-header {
+  position: sticky;
+  top: var(--header-h, 0px);
+  z-index: 50;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -320,7 +332,7 @@ html, body {
 }
 
 @media (max-width: 767px) {
-  .container .markdown-body {
+  #lane-frame {
     padding: 16px;
   }
 

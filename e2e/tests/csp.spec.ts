@@ -209,13 +209,16 @@ test.describe("page CSP", () => {
     await settled(page);
     expect(await pwned(page)).toBeUndefined();
 
-    // reload.md is not the entry doc, so a theme swap re-fetches it through /render
-    await page.locator("h1").first().evaluate((el) => el.setAttribute("data-stale", ""));
+    // reload.md is not the entry doc, so a theme swap re-fetches it through /render.
+    // Marking the hostile blocks makes them differ, so the patcher inserts them afresh.
+    await page.route(/\/render\/reload\.md$/, async (route) => {
+      const res = await route.fetch();
+      const body = (await res.text()).replaceAll('class="inj-', 'class="refetched inj-');
+      await route.fulfill({ response: res, body });
+    });
     await page.locator("#theme-dropdown-btn").click();
-    const refetch = page.waitForRequest(/\/render\/reload\.md$/);
     await page.locator('.theme-dropdown-item[data-theme="gruvbox"]').click();
-    await refetch;
-    await expect(page.locator("h1[data-stale]")).toHaveCount(0);
+    await expect(page.locator("article .refetched")).toHaveCount(2);
     await expect(page.locator("h1").first()).toHaveText("Reloaded");
     await settled(page);
     expect(await pwned(page)).toBeUndefined();
@@ -233,14 +236,19 @@ test.describe("page CSP", () => {
     await toggleVariant(page);
     await expect(page.locator("pre.mermaid svg")).toBeVisible();
 
-    await page.locator("h1").first().evaluate((el) => el.setAttribute("data-stale", ""));
+    // Marked so the refetched diagram and math differ, and the patcher draws them afresh
+    await page.route(/\/render\/features\.md$/, async (route) => {
+      const res = await route.fetch();
+      const body = (await res.text())
+        .replace('class="mermaid"', 'class="mermaid refetched"')
+        .replaceAll("<span data-math-style", '<span class="refetched" data-math-style');
+      await route.fulfill({ response: res, body });
+    });
     await page.locator("#theme-dropdown-btn").click();
-    const refetch = page.waitForRequest(/\/render\/features\.md$/);
     await page.locator('.theme-dropdown-item[data-theme="catppuccin"]').click();
-    await refetch;
     await expect(page.locator('.theme-dropdown-item.active[data-theme="catppuccin"]')).toHaveCount(1);
-    await expect(page.locator("h1[data-stale]")).toHaveCount(0);
-    await expectMermaidAndMath(page);
+    await expect(page.locator("pre.mermaid.refetched svg")).toBeVisible({ timeout: CDN_TIMEOUT });
+    await expect(page.locator(".refetched[data-math-style] .katex")).toHaveCount(2);
 
     await page.locator('article.markdown-body input[type="checkbox"]').first().check();
     await expect.poll(() => fs.readFileSync(file, "utf-8")).toContain("- [x] first");

@@ -84,7 +84,9 @@
         </div>
       </div>
     </div>
-    <article class="markdown-body" id="content">{{CONTENT}}</article>
+    <div id="lane-frame">
+      <article class="markdown-body" id="content">{{CONTENT}}</article>
+    </div>
     <div class="source-container" id="source-view" style="display:none">{{SOURCE_HTML}}</div>
   </main>
 
@@ -101,6 +103,8 @@
   <div class="status" id="status"></div>
 
   <script nonce="{{NONCE}}">
+{{PATCH_JS}}
+
     // --- State ---
     var BOOT = JSON.parse(document.getElementById('birta-boot').textContent);
     var STATIC_MODE = BOOT.staticMode;
@@ -128,6 +132,34 @@
     var themeVarsEl = document.getElementById('theme-vars');
     var sourceView = document.getElementById('source-view');
     var currentWs = null;
+
+    // Keyed before math, diagrams or checkboxes touch the server-rendered blocks.
+    birtaPatch.attach(mdBody, {
+      source: sourceView,
+      stats: document.getElementById('file-stats'),
+      onPatched: function() {
+        renderMath();
+        renderMermaid();
+        enableCheckboxes();
+      }
+    });
+
+    function applyContent(html, source, stats) {
+      birtaPatch.apply(html, {
+        source: source,
+        stats: stats,
+        redraw: diagramsStale() ? 'pre.mermaid' : null
+      });
+    }
+
+    // The file header sticks just below the page header, which is hidden by --no-header.
+    function syncHeaderHeight() {
+      var bar = document.querySelector('.header');
+      html.style.setProperty('--header-h', (bar ? bar.offsetHeight : 0) + 'px');
+    }
+    syncHeaderHeight();
+    window.addEventListener('resize', syncHeaderHeight);
+    if (document.fonts) document.fonts.ready.then(syncHeaderHeight);
 
     // --- View Mode (Preview / Raw) ---
     var storedView = null;
@@ -415,13 +447,21 @@
     }
 
     // --- Mermaid diagram rendering ---
-    var mermaidReady = false;
+    // Theme the diagrams on screen were drawn with, or null before the first draw.
+    var mermaidTheme = null;
+    function wantedMermaidTheme() {
+      return activeVariant === 'dark' ? 'dark' : 'default';
+    }
     function initMermaid() {
       if (typeof mermaid === 'undefined') return;
-      if (mermaidReady) return;
-      var theme = activeVariant === 'dark' ? 'dark' : 'default';
+      var theme = wantedMermaidTheme();
+      if (mermaidTheme === theme) return;
       mermaid.initialize({ startOnLoad: false, theme: theme, securityLevel: 'strict' });
-      mermaidReady = true;
+      mermaidTheme = theme;
+    }
+    // A drawn diagram keeps its colours, so a variant change must rebuild it from source.
+    function diagramsStale() {
+      return mermaidTheme !== null && mermaidTheme !== wantedMermaidTheme();
     }
 
     function renderMermaid() {
@@ -558,15 +598,7 @@
               if (msg.rev && msg.rev === shownRev) break;
               if (msg.rev) docRev = msg.rev;
               shownRev = msg.rev || null;
-              mdBody.innerHTML = msg.html;
-              if (msg.source) sourceView.innerHTML = msg.source;
-              if (msg.file_stats) {
-                var statsEl = document.getElementById('file-stats');
-                if (statsEl) statsEl.textContent = msg.file_stats;
-              }
-              renderMath();
-              renderMermaid();
-              enableCheckboxes();
+              applyContent(msg.html, msg.source, msg.file_stats);
               break;
 
             case 'theme_update':
@@ -599,11 +631,7 @@
                 }).then(function(freshHtml) {
                   if (!freshHtml) return;
                   shownRev = null;
-                  mdBody.innerHTML = freshHtml;
-                  renderMath();
-                  mermaidReady = false;
-                  renderMermaid();
-                  enableCheckboxes();
+                  applyContent(freshHtml);
                 });
                 fetch('/render/' + CURRENT_PATH + '?mode=source').then(function(r) {
                   if (!r.ok) return;
@@ -614,12 +642,7 @@
               } else {
                 if (msg.rev) docRev = msg.rev;
                 shownRev = msg.rev || null;
-                mdBody.innerHTML = msg.html;
-                if (msg.source) sourceView.innerHTML = msg.source;
-                renderMath();
-                mermaidReady = false;
-                renderMermaid();
-                enableCheckboxes();
+                applyContent(msg.html, msg.source);
               }
               break;
 

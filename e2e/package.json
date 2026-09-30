@@ -1,5 +1,8 @@
 {
   "private": true,
+  "scripts": {
+    "unit": "node --test 'unit/*.test.mjs'"
+  },
   "devDependencies": {
     "@playwright/test": "^1.58.0"
   }

@@ -79,14 +79,17 @@ test("markdown body has correct class", async ({ page }) => {
 });
 
 test.describe("visual regression", () => {
+  // The frame's box, padding included, is what the baselines capture
   test("light theme rendering", async ({ page }) => {
     await page.goto("/");
     await page.evaluate(() => {
       document.documentElement.setAttribute("data-theme", "light");
       document.getElementById("content")!.setAttribute("data-theme", "light");
       document.querySelector<HTMLElement>(".header")!.style.display = "none";
+      // A sticky file header would paint over the frame while the capture scrolls
+      document.querySelector<HTMLElement>(".file-header")!.style.position = "static";
     });
-    await expect(page.locator(".markdown-body")).toHaveScreenshot(
+    await expect(page.locator("#lane-frame")).toHaveScreenshot(
       "markdown-body-light.png",
       { maxDiffPixelRatio: 0.01 }
     );
@@ -98,8 +101,10 @@ test.describe("visual regression", () => {
       document.documentElement.setAttribute("data-theme", "dark");
       document.getElementById("content")!.setAttribute("data-theme", "dark");
       document.querySelector<HTMLElement>(".header")!.style.display = "none";
+      // A sticky file header would paint over the frame while the capture scrolls
+      document.querySelector<HTMLElement>(".file-header")!.style.position = "static";
     });
-    await expect(page.locator(".markdown-body")).toHaveScreenshot(
+    await expect(page.locator("#lane-frame")).toHaveScreenshot(
       "markdown-body-dark.png",
       { maxDiffPixelRatio: 0.01 }
     );

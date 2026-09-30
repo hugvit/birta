@@ -8,6 +8,7 @@ use crate::security::{html_escape_attr, json_for_script};
 use crate::theme::ResolvedTheme;
 
 const VIEWER_HTML: &str = include_str!("../assets/viewer.html");
+const PATCH_JS: &str = include_str!("../assets/patch.js");
 const GITHUB_CSS: &str = include_str!("../assets/github-markdown.css");
 const PAGE_CSS: &str = include_str!("../assets/page.css");
 const SYNTAX_CSS: &str = include_str!("../assets/syntax.css");
@@ -33,17 +34,20 @@ fn static_csp() -> &'static str {
     })
 }
 
-/// Body of the viewer's inline script, which holds no placeholders and so is also its filled form.
+/// Body of the viewer's inline script with the patcher filled in, byte for byte as served.
 fn viewer_script() -> &'static str {
-    let open = "<script nonce=\"{{NONCE}}\">";
-    let start = VIEWER_HTML
-        .find(open)
-        .expect("viewer.html has no inline script")
-        + open.len();
-    let len = VIEWER_HTML[start..]
-        .find("</script>")
-        .expect("unclosed inline script");
-    &VIEWER_HTML[start..start + len]
+    static SCRIPT: OnceLock<String> = OnceLock::new();
+    SCRIPT.get_or_init(|| {
+        let open = "<script nonce=\"{{NONCE}}\">";
+        let start = VIEWER_HTML
+            .find(open)
+            .expect("viewer.html has no inline script")
+            + open.len();
+        let len = VIEWER_HTML[start..]
+            .find("</script>")
+            .expect("unclosed inline script");
+        fill_template(&VIEWER_HTML[start..start + len], &[("PATCH_JS", PATCH_JS)])
+    })
 }
 
 pub struct PageOptions<'a> {
@@ -189,6 +193,7 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
             ("FILE_STATS", &html_escape_attr(opts.file_stats)),
             ("BOOT_JSON", &boot_json),
             ("NONCE", opts.nonce),
+            ("PATCH_JS", PATCH_JS),
             ("SOURCE_HTML", opts.source_html.unwrap_or("")),
             ("CONTENT", content_html),
         ],
@@ -1126,6 +1131,23 @@ mod tests {
             ..base_opts(&theme)
         });
         assert_eq!(executable_inline(&page), [viewer_script()]);
+    }
+
+    #[test]
+    fn viewer_script_inlines_the_patcher() {
+        let theme = github_theme();
+        for static_mode in [false, true] {
+            let page = render_page(&PageOptions {
+                static_mode,
+                ..base_opts(&theme)
+            });
+            let inline = executable_inline(&page);
+            assert_eq!(inline.len(), 1, "static_mode={static_mode}");
+            assert!(
+                inline[0].contains(PATCH_JS.trim()),
+                "patcher not in the viewer script (static_mode={static_mode})"
+            );
+        }
     }
 
     #[test]

@@ -568,6 +568,12 @@ fn publish(state: &AppState, rt: &tokio::runtime::Handle, events: Vec<FsEvent>) 
             let _ = state.hub.send(WsEvent::Gone(event.rel));
             continue;
         }
+        // Nobody would be sent it, and a page that asks later reads the disk.
+        if !state.viewers.wants(&event.rel)
+            && state.initial_relpath.as_deref() != Some(event.rel.as_str())
+        {
+            continue;
+        }
         let doc = docs
             .entry(event.canonical.clone())
             .or_insert_with(|| read_doc(&event.canonical, &event.rel));

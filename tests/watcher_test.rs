@@ -568,3 +568,63 @@ async fn reading_a_doc_sends_nothing() {
     let echo = next_frame(&mut ws, Duration::from_secs(1)).await;
     assert!(echo.is_none(), "{echo:?}");
 }
+
+async fn hello(ws: &mut Client, path: &str) {
+    let frame = serde_json::json!({"type": "hello", "path": path, "tab": "t1"});
+    ws.send(Message::Text(frame.to_string().into()))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn hello_after_reconnect_delivers_the_changed_doc() {
+    let site = Site::new(&[("r/sub/page.md", "# Page\n")]);
+    let (port, mut ws) = site.serve().await;
+    hello(&mut ws, "sub/page.md").await;
+    let seen = frames_until(&mut ws, |seen| has(seen, "content", "sub/page.md")).await;
+    assert!(has(&seen, "content", "sub/page.md"), "{:?}", summary(&seen));
+    drop(ws);
+
+    // Nobody views the page while it changes.
+    site.write("r/sub/page.md", "# Page changed\n");
+    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws"))
+        .await
+        .unwrap();
+    hello(&mut ws, "sub/page.md").await;
+    let seen = frames_until(&mut ws, |seen| has(seen, "content", "sub/page.md")).await;
+
+    let frame = seen.iter().find(|f| is(f, "content", "sub/page.md"));
+    let frame = frame.unwrap_or_else(|| panic!("no content: {:?}", summary(&seen)));
+    assert!(
+        frame["html"].as_str().unwrap().contains("Page changed"),
+        "{frame}"
+    );
+    assert_eq!(frame["rev"], git_rev(b"# Page changed\n"));
+}
+
+#[tokio::test]
+async fn a_viewer_gets_only_its_own_doc() {
+    let site = Site::new(&[("r/a.md", "# A\n"), ("r/b.md", "# B\n")]);
+    let (_, mut ws) = site.serve().await;
+    hello(&mut ws, "a.md").await;
+    frames_until(&mut ws, |seen| has(seen, "content", "a.md")).await;
+
+    site.write("r/b.md", "# B edited\n");
+    site.write("r/index.md", "# Index edited\n");
+    // The viewed doc is the sentinel: the entry doc no longer reaches this socket.
+    site.write("r/a.md", "# A edited\n");
+    let seen = frames_until(&mut ws, |seen| {
+        seen.iter()
+            .any(|f| is(f, "content", "a.md") && f["html"].as_str().unwrap().contains("edited"))
+    })
+    .await;
+    // A batch need not publish in write order.
+    let mut seen = seen;
+    while let Some(frame) = next_frame(&mut ws, Duration::from_millis(500)).await {
+        seen.push(frame);
+    }
+
+    assert!(has(&seen, "content", "a.md"), "{:?}", summary(&seen));
+    assert!(!has(&seen, "content", "b.md"), "{:?}", summary(&seen));
+    assert!(!has(&seen, "content", "index.md"), "{:?}", summary(&seen));
+}

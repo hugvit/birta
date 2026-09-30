@@ -57,6 +57,77 @@ pub(crate) enum WsEvent {
     Gone(String),
 }
 
+/// How many connections view each doc, by lexical path.
+#[derive(Debug, Default)]
+pub(crate) struct Viewers {
+    counts: std::sync::Mutex<std::collections::HashMap<String, usize>>,
+    /// Connections that have not said hello, and so still get every doc.
+    everything: AtomicUsize,
+}
+
+impl Viewers {
+    /// Counts one more viewer of `path` until the guard drops.
+    pub(crate) fn view(self: &Arc<Self>, path: &str) -> ViewGuard {
+        *self.lock().entry(path.to_string()).or_default() += 1;
+        ViewGuard {
+            viewers: Arc::clone(self),
+            path: Some(path.to_string()),
+        }
+    }
+
+    /// Counts a viewer of every doc until the guard drops.
+    pub(crate) fn view_all(self: &Arc<Self>) -> ViewGuard {
+        self.everything.fetch_add(1, Ordering::SeqCst);
+        ViewGuard {
+            viewers: Arc::clone(self),
+            path: None,
+        }
+    }
+
+    pub(crate) fn count(&self, path: &str) -> usize {
+        self.lock().get(path).copied().unwrap_or(0)
+    }
+
+    /// Whether some connection would be sent an update to `path`.
+    pub(crate) fn wants(&self, path: &str) -> bool {
+        self.everything.load(Ordering::SeqCst) > 0 || self.count(path) > 0
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, usize>> {
+        self.counts.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// One connection's view of a doc, or of every doc; dropping it uncounts the viewer.
+#[derive(Debug)]
+pub(crate) struct ViewGuard {
+    viewers: Arc<Viewers>,
+    path: Option<String>,
+}
+
+impl ViewGuard {
+    /// Whether an update to `path` goes to this viewer.
+    fn sees(&self, path: &str) -> bool {
+        self.path.as_deref().is_none_or(|p| p == path)
+    }
+}
+
+impl Drop for ViewGuard {
+    fn drop(&mut self) {
+        let Some(path) = &self.path else {
+            self.viewers.everything.fetch_sub(1, Ordering::SeqCst);
+            return;
+        };
+        let mut counts = self.viewers.lock();
+        if let Some(n) = counts.get_mut(path) {
+            *n -= 1;
+            if *n == 0 {
+                counts.remove(path);
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
     Stdin,
@@ -101,6 +172,7 @@ pub(crate) struct AppState {
     pub(crate) roots: Arc<Roots>,
     pub(crate) hub: broadcast::Sender<WsEvent>,
     pub(crate) connections: AtomicUsize,
+    pub(crate) viewers: Arc<Viewers>,
     pub(crate) all_disconnected: Notify,
     pub(crate) registry: RwLock<ThemeRegistry>,
     pub(crate) enable_toggle: bool,
@@ -299,6 +371,7 @@ impl AppState {
             }),
             hub,
             connections: AtomicUsize::new(0),
+            viewers: Arc::default(),
             all_disconnected: Notify::new(),
             registry: RwLock::new(init.registry),
             enable_toggle: init.enable_toggle,
@@ -659,10 +732,11 @@ async fn render_handler(
 
 /// Handle incoming WebSocket JSON messages from the browser.
 /// Returns the reply for this connection only, if the message has one.
-async fn handle_ws_message(text: &str, state: &AppState) -> Option<String> {
+async fn handle_ws_message(text: &str, state: &AppState, ctx: &mut ConnCtx) -> Option<String> {
     let msg: serde_json::Value = serde_json::from_str(text).ok()?;
 
     match msg.get("type").and_then(|t| t.as_str()) {
+        Some("hello") => return hello(state, ctx, &msg).await,
         Some("checkbox") => {
             let cid = msg.get("cid").cloned().unwrap_or_default();
             let reply = match toggle_checkbox(state, &msg).await {
@@ -723,31 +797,33 @@ async fn broadcast_theme_update(state: &AppState) {
         state.current.read().await.clone()
     };
 
-    let (css_vars, theme_attr) = if theme.is_github() {
-        (String::new(), String::new())
-    } else {
-        (active.css_vars.clone(), theme.name.clone())
-    };
-
-    let has_toggle = theme.has_toggle() && state.enable_toggle;
-
-    let msg = serde_json::json!({
-        "type": "theme_update",
-        "css_vars": css_vars,
-        "html": rendered.html,
-        "source": rendered.source_html,
-        "path": state.initial_relpath.as_deref().unwrap_or(""),
-        "theme_name": theme.name,
-        "theme_attr": theme_attr,
-        "variants": theme.variant_names(),
-        "active_variant": theme.active_variant.as_str(),
-        "has_toggle": has_toggle,
-        "rev": rendered.rev.as_ref().map(Rev::as_str),
-    });
+    let mut msg = theme_update(theme, state.enable_toggle);
+    msg["html"] = rendered.html.clone().into();
+    msg["source"] = rendered.source_html.clone().into();
+    msg["path"] = state.initial_relpath.as_deref().unwrap_or("").into();
+    msg["rev"] = rendered.rev.as_ref().map(Rev::as_str).into();
 
     *state.current.write().await = rendered;
 
     let _ = state.hub.send(WsEvent::Raw(msg.to_string().into()));
+}
+
+/// A `theme_update` carrying only the theme; the page keeps its content.
+fn theme_update(theme: &ResolvedTheme, enable_toggle: bool) -> serde_json::Value {
+    let (css_vars, theme_attr) = if theme.is_github() {
+        (String::new(), String::new())
+    } else {
+        (theme.active_data().css_vars.clone(), theme.name.clone())
+    };
+    serde_json::json!({
+        "type": "theme_update",
+        "css_vars": css_vars,
+        "theme_name": theme.name,
+        "theme_attr": theme_attr,
+        "variants": theme.variant_names(),
+        "active_variant": theme.active_variant.as_str(),
+        "has_toggle": theme.has_toggle() && enable_toggle,
+    })
 }
 
 async fn handle_theme_change(state: &AppState, theme_name: &str) {
@@ -903,53 +979,153 @@ async fn cached_content_frame(state: &AppState) -> String {
     )
 }
 
+fn gone_frame(path: &str) -> String {
+    serde_json::json!({"type": "gone", "path": path}).to_string()
+}
+
+/// What one connection views: every doc until it says hello, then the doc it named.
+struct ConnCtx {
+    /// `None` once a hello names a doc the page can't view.
+    viewing: Option<ViewGuard>,
+    tab: Option<String>,
+}
+
+/// A hello's tab id, when it fits `[A-Za-z0-9_-]{1,64}`.
+fn tab_id(msg: &serde_json::Value) -> Option<String> {
+    let tab = msg.get("tab")?.as_str()?;
+    let fits = (1..=64).contains(&tab.len())
+        && tab
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    fits.then(|| tab.to_string())
+}
+
+fn viewable(state: &AppState, rel: &str) -> bool {
+    match state.mode {
+        Mode::Stdin => rel.is_empty(),
+        Mode::Serve => state.roots.resolve_file(rel, FileKind::Markdown).is_ok(),
+    }
+}
+
+/// A fresh `content` frame for `rel`, rendered from one read of the disk.
+async fn doc_frame(state: &AppState, rel: &str) -> Option<String> {
+    if state.mode == Mode::Stdin {
+        return if rel.is_empty() {
+            Some(cached_content_frame(state).await)
+        } else {
+            None
+        };
+    }
+    let syntax = {
+        let reg = state.registry.read().await;
+        reg.active().active_data().syntax.clone()
+    };
+    let canonical = state.roots.resolve_file(rel, FileKind::Markdown).ok()?;
+    let bytes = tokio::fs::read(&canonical).await.ok()?;
+    let rev = Rev::of(&bytes);
+    let markdown = String::from_utf8(bytes).ok()?;
+    Some(content_frame(
+        rel,
+        &render::render_dir(&markdown, syntax.as_ref(), StdPath::new(rel)),
+        &render::render_source(&markdown, syntax.as_ref()),
+        &render::format_file_stats(&markdown),
+        Some(&rev),
+    ))
+}
+
+/// Points the connection at the doc it names and replies with that doc, or with `gone`
+/// when the page can't view it, missing or refused alike.
+async fn hello(state: &AppState, ctx: &mut ConnCtx, msg: &serde_json::Value) -> Option<String> {
+    let rel = msg.get("path")?.as_str()?;
+    ctx.tab = tab_id(msg);
+    // Counted before the read, so a write landing in between is rendered for this page.
+    ctx.viewing = viewable(state, rel).then(|| state.viewers.view(rel));
+    if ctx.viewing.is_some()
+        && let Some(frame) = doc_frame(state, rel).await
+    {
+        return Some(frame);
+    }
+    ctx.viewing = None;
+    Some(gone_frame(rel))
+}
+
+/// Frames that bring a connection that missed hub events back up to date.
+async fn resync_frames(state: &AppState, ctx: &ConnCtx) -> Vec<String> {
+    let theme = {
+        let registry = state.registry.read().await;
+        theme_update(registry.active(), state.enable_toggle).to_string()
+    };
+    let content = match ctx.viewing.as_ref().map(|v| v.path.as_deref()) {
+        None => return vec![theme],
+        Some(None) => cached_content_frame(state).await,
+        Some(Some(rel)) => match doc_frame(state, rel).await {
+            Some(frame) => frame,
+            None => gone_frame(rel),
+        },
+    };
+    vec![theme, content]
+}
+
 async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
     state.connections.fetch_add(1, Ordering::Relaxed);
+    let mut ctx = ConnCtx {
+        viewing: Some(state.viewers.view_all()),
+        tab: None,
+    };
 
     // Subscribe first: an update landing between the two is then sent after the snapshot.
     let mut rx = state.hub.subscribe();
     let init_msg = cached_content_frame(&state).await;
     if socket.send(Message::Text(init_msg.into())).await.is_err() {
+        drop(ctx);
         state.connections.fetch_sub(1, Ordering::Relaxed);
         state.all_disconnected.notify_one();
         return;
     }
 
-    loop {
-        let frame = tokio::select! {
+    'conn: loop {
+        let sees = |path: &str| ctx.viewing.as_ref().is_some_and(|v| v.sees(path));
+        let frames = tokio::select! {
+            // Pending broadcasts go out before a slow request, such as a hello, is handled.
+            biased;
             result = rx.recv() => match result {
-                Ok(WsEvent::Content(update)) => content_frame(
+                Ok(WsEvent::Content(update)) if sees(&update.relpath) => vec![content_frame(
                     &update.relpath,
                     &update.rendered_html,
                     &update.source_html,
                     &update.file_stats,
                     Some(&update.rev),
-                ),
-                Ok(WsEvent::Raw(json)) => json.to_string(),
+                )],
+                Ok(WsEvent::Gone(path)) if sees(&path) => vec![gone_frame(&path)],
+                Ok(WsEvent::Content(_) | WsEvent::Gone(_)) => continue,
+                Ok(WsEvent::Raw(json)) => vec![json.to_string()],
                 Ok(WsEvent::Scroll(line)) => {
-                    serde_json::json!({"type": "scroll", "line": line}).to_string()
+                    vec![serde_json::json!({"type": "scroll", "line": line}).to_string()]
                 }
-                Ok(WsEvent::Gone(path)) => {
-                    serde_json::json!({"type": "gone", "path": path}).to_string()
-                }
-                // Dropped events may include content, so resync this connection from the cache.
-                Err(broadcast::error::RecvError::Lagged(_)) => cached_content_frame(&state).await,
+                // Dropped events may include content or a theme, so resync this connection.
+                Err(broadcast::error::RecvError::Lagged(_)) => resync_frames(&state, &ctx).await,
                 Err(broadcast::error::RecvError::Closed) => break,
             },
             msg = socket.recv() => match msg {
-                Some(Ok(Message::Text(text))) => match handle_ws_message(&text, &state).await {
-                    Some(reply) => reply,
-                    None => continue,
-                },
+                Some(Ok(Message::Text(text))) => {
+                    match handle_ws_message(&text, &state, &mut ctx).await {
+                        Some(reply) => vec![reply],
+                        None => continue,
+                    }
+                }
                 Some(Ok(_)) => continue,
                 _ => break,
             },
         };
-        if socket.send(Message::Text(frame.into())).await.is_err() {
-            break;
+        for frame in frames {
+            if socket.send(Message::Text(frame.into())).await.is_err() {
+                break 'conn;
+            }
         }
     }
 
+    // Uncounted before the connection, so a caller seeing the drop sees the view gone too.
+    drop(ctx);
     state.connections.fetch_sub(1, Ordering::Relaxed);
     state.all_disconnected.notify_one();
 }
@@ -3070,5 +3246,863 @@ mod tests {
         }
         assert_eq!(policies[0], policies[1], "serve and stdin pages differ");
         insta::assert_snapshot!(policies[0].split("; ").collect::<Vec<_>>().join("\n"));
+    }
+
+    async fn send_json(ws: &mut Client, frame: serde_json::Value) {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message as TMessage;
+        ws.send(TMessage::Text(frame.to_string().into()))
+            .await
+            .unwrap();
+    }
+
+    /// Sends `hello` for `path`, then a checkbox probe, and returns the frames that arrive
+    /// before the probe's reply. One socket's messages are handled in order.
+    async fn hello_frames(ws: &mut Client, path: &str) -> Vec<serde_json::Value> {
+        send_json(
+            ws,
+            serde_json::json!({"type": "hello", "path": path, "tab": "t1"}),
+        )
+        .await;
+        send_json(ws, serde_json::json!({"type": "checkbox", "cid": "probe"})).await;
+        let mut frames = Vec::new();
+        loop {
+            let msg = next_json(ws).await;
+            if msg["cid"] == "probe" {
+                return frames;
+            }
+            frames.push(msg);
+        }
+    }
+
+    fn contents(frames: &[serde_json::Value]) -> Vec<&serde_json::Value> {
+        frames.iter().filter(|f| f["type"] == "content").collect()
+    }
+
+    fn paths(frames: &[serde_json::Value]) -> Vec<String> {
+        contents(frames)
+            .iter()
+            .map(|f| f["path"].as_str().unwrap_or("?").to_string())
+            .collect()
+    }
+
+    /// An update for `path` whose html is the path itself.
+    fn update_for(path: &str) -> ContentUpdate {
+        ContentUpdate {
+            relpath: path.to_string(),
+            rendered_html: path.to_string(),
+            source_html: String::new(),
+            file_stats: String::new(),
+            rev: Rev::of(path.as_bytes()),
+        }
+    }
+
+    /// Reads until scroll `line` arrives, returning every frame seen on the way.
+    async fn frames_until(ws: &mut Client, line: u32) -> Vec<serde_json::Value> {
+        let mut frames = Vec::new();
+        loop {
+            let msg = next_json(ws).await;
+            if msg["type"] == "scroll" && msg["line"] == line {
+                return frames;
+            }
+            frames.push(msg);
+        }
+    }
+
+    async fn eventually(what: &str, check: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !check() {
+            assert!(std::time::Instant::now() < deadline, "never: {what}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    const PAGE: &[u8] = b"# Page\n\n[next](next.md)\n";
+
+    #[tokio::test]
+    async fn hello_returns_content_for_requested_path() {
+        let site = Site::new(&[("root/doc.md", b"# Doc\n"), ("root/sub/page.md", PAGE)]);
+        let state = site.state();
+        let port = serve(&state).await;
+        let md = std::str::from_utf8(PAGE).unwrap();
+        let want = render::render_dir(md, None, StdPath::new("sub/page.md"));
+        assert_ne!(
+            want,
+            render::render_dir(md, None, StdPath::new("page.md")),
+            "the fixture must render differently per path"
+        );
+
+        within(async {
+            let mut ws = connect(port).await;
+            let frames = hello_frames(&mut ws, "sub/page.md").await;
+            let got = contents(&frames);
+            assert_eq!(got.len(), 1, "{frames:?}");
+            assert_eq!(got[0]["path"], "sub/page.md");
+            assert_eq!(got[0]["html"], want.as_str());
+            assert_eq!(got[0]["source"], render::render_source(md, None).as_str());
+            assert_eq!(got[0]["file_stats"], render::format_file_stats(md).as_str());
+            assert_eq!(got[0]["rev"], git_rev(PAGE));
+        })
+        .await;
+    }
+
+    /// Highlighted `<pre>` attributes come out in no fixed order, so `lang` is set aside.
+    fn unordered(html: &str) -> String {
+        html.replace(r#" lang="rust""#, "")
+    }
+
+    #[tokio::test]
+    async fn hello_renders_with_the_active_syntax_theme() {
+        let text: &[u8] = b"# Code\n\n```rust\nfn main() { let x = 1; }\n```\n";
+        let site = Site::new(&[("root/doc.md", b"# Doc\n"), ("root/code.md", text)]);
+        let root = site.root.clone();
+        let catppuccin = theme::resolve_by_name("catppuccin").unwrap();
+        let syntax = catppuccin.active_data().syntax.clone();
+        assert!(syntax.is_some(), "catppuccin ships a tmTheme");
+        let state = test_state(|init| {
+            init.mode = Mode::Serve;
+            init.source_file = Some(root.join("doc.md"));
+            init.initial_relpath = Some("doc.md".to_string());
+            init.base_dir = root;
+            init.registry = ThemeRegistry::new(catppuccin);
+        });
+        let port = serve(&state).await;
+        let md = std::str::from_utf8(text).unwrap();
+        let want = render::render_dir(md, syntax.as_ref(), StdPath::new("code.md"));
+        assert_ne!(want, render::render_dir(md, None, StdPath::new("code.md")));
+        assert!(want.contains("style=\"color:"), "{want}");
+
+        within(async {
+            let mut ws = connect(port).await;
+            let frames = hello_frames(&mut ws, "code.md").await;
+            let got = contents(&frames);
+            assert_eq!(got.len(), 1, "{frames:?}");
+            assert_eq!(
+                unordered(got[0]["html"].as_str().unwrap()),
+                unordered(&want)
+            );
+            assert_eq!(
+                got[0]["source"],
+                render::render_source(md, syntax.as_ref()).as_str()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hello_reads_the_doc_from_disk() {
+        let site = Site::new(&[("root/doc.md", b"# Old\n")]);
+        let state = site.state();
+        let port = serve(&state).await;
+        let text: &[u8] = b"# New\n";
+        std::fs::write(site.root.join("doc.md"), text).unwrap();
+
+        within(async {
+            let mut ws = connect(port).await;
+            let frames = hello_frames(&mut ws, "doc.md").await;
+            let got = contents(&frames);
+            assert_eq!(got.len(), 1, "{frames:?}");
+            assert!(
+                got[0]["html"].as_str().unwrap().contains("New"),
+                "{frames:?}"
+            );
+            assert_eq!(got[0]["rev"], git_rev(text));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hello_for_a_doc_the_page_cannot_view_is_gone() {
+        let site = Site::new(&[
+            ("root/doc.md", b"# Doc\n"),
+            ("secret.md", b"# Secret\n"),
+            ("root/.git/x.md", b"# Git\n"),
+            ("root/x.birta.jsonl", b"{}\n"),
+            ("root/a.txt", b"# Text\n"),
+        ]);
+        let state = site.state();
+        let port = serve(&state).await;
+        let absolute = site.base.join("secret.md").display().to_string();
+        let rows = [
+            "../secret.md",
+            ".git/x.md",
+            "x.birta.jsonl",
+            "a.txt",
+            absolute.as_str(),
+            "missing.md",
+        ];
+
+        within(async {
+            let mut ws = connect(port).await;
+            let mut bad = Vec::new();
+            for row in rows {
+                // Identical to a missing doc's reply, so a refusal never confirms a file.
+                let frames = hello_frames(&mut ws, row).await;
+                if frames != [serde_json::json!({"type": "gone", "path": row})] {
+                    bad.push(format!("{row}: {frames:?}"));
+                }
+                if state.viewers.count(row) != 0 {
+                    bad.push(format!("{row}: counted as a viewer"));
+                }
+            }
+            assert!(bad.is_empty(), "{bad:#?}");
+            assert_eq!(paths(&hello_frames(&mut ws, "doc.md").await), ["doc.md"]);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hello_in_stdin_mode_gets_only_the_piped_doc() {
+        let site = Site::new(&[("root/doc.md", b"# Doc\n")]);
+        let state = site.stdin_state();
+        let port = serve(&state).await;
+
+        within(async {
+            let mut ws = connect(port).await;
+            let frames = hello_frames(&mut ws, "doc.md").await;
+            assert_eq!(
+                frames,
+                [serde_json::json!({"type": "gone", "path": "doc.md"})]
+            );
+            let frames = hello_frames(&mut ws, "").await;
+            let got = contents(&frames);
+            assert_eq!(got.len(), 1, "{frames:?}");
+            assert_eq!(got[0]["html"], "<p>hello</p>");
+            assert_eq!(got[0]["path"], "");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn content_goes_only_to_its_viewers() {
+        let site = Site::new(&[
+            ("root/doc.md", b"# Doc\n"),
+            ("root/a.md", b"# A\n"),
+            ("root/b.md", b"# B\n"),
+        ]);
+        let state = site.state();
+        let port = serve(&state).await;
+
+        within(async {
+            let mut a = connect(port).await;
+            let mut b = connect(port).await;
+            let mut legacy = connect(port).await;
+            hello_frames(&mut a, "a.md").await;
+            hello_frames(&mut b, "b.md").await;
+
+            for path in ["a.md", "b.md", "doc.md"] {
+                state.publish_content(update_for(path)).await;
+            }
+            state.hub.send(WsEvent::Scroll(SENTINEL)).unwrap();
+            assert_eq!(paths(&frames_until(&mut a, SENTINEL).await), ["a.md"]);
+            assert_eq!(paths(&frames_until(&mut b, SENTINEL).await), ["b.md"]);
+            assert_eq!(
+                paths(&frames_until(&mut legacy, SENTINEL).await),
+                ["a.md", "b.md", "doc.md"],
+                "a connection that never says hello gets every doc"
+            );
+        })
+        .await;
+    }
+
+    #[test]
+    fn viewers_refcount() {
+        let viewers = Arc::new(Viewers::default());
+        let a1 = viewers.view("a.md");
+        let a2 = viewers.view("a.md");
+        let b = viewers.view("b.md");
+        assert_eq!(viewers.count("a.md"), 2);
+        assert_eq!(viewers.count("b.md"), 1);
+        assert_eq!(viewers.count("c.md"), 0);
+
+        drop(a1);
+        assert_eq!(viewers.count("a.md"), 1);
+        drop(b);
+        assert_eq!(viewers.count("b.md"), 0);
+        drop(a2);
+        assert_eq!(viewers.count("a.md"), 0);
+        assert!(
+            viewers.counts.lock().unwrap().is_empty(),
+            "no empty entries"
+        );
+    }
+
+    #[tokio::test]
+    async fn viewers_follow_hello_and_disconnect() {
+        let site = Site::new(&[("root/doc.md", b"# Doc\n"), ("root/a.md", b"# A\n")]);
+        let state = site.state();
+        let port = serve(&state).await;
+        let count = |path: &str| state.viewers.count(path);
+
+        within(async {
+            let mut a = connect(port).await;
+            let mut b = connect(port).await;
+            assert_eq!(count("doc.md"), 0, "connecting alone views nothing");
+
+            hello_frames(&mut a, "a.md").await;
+            hello_frames(&mut a, "a.md").await;
+            assert_eq!(count("a.md"), 1, "a repeated hello counts once");
+            hello_frames(&mut b, "a.md").await;
+            assert_eq!(count("a.md"), 2);
+
+            hello_frames(&mut a, "doc.md").await;
+            assert_eq!((count("a.md"), count("doc.md")), (1, 1), "path change");
+
+            drop(b);
+            eventually("b's disconnect uncounts a.md", || count("a.md") == 0).await;
+            drop(a);
+            eventually("a's disconnect uncounts doc.md", || count("doc.md") == 0).await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn lag_resend_uses_viewed_path() {
+        let site = Site::new(&[("root/doc.md", b"# Doc\n"), ("root/b.md", b"# B\n")]);
+        let state = site.state();
+        let port = serve(&state).await;
+
+        within(async {
+            let mut ws = connect(port).await;
+            hello_frames(&mut ws, "b.md").await;
+            sync(&state, &mut ws, BARRIER).await;
+
+            // The dropped update exists only on disk.
+            let text: &[u8] = b"# B after lag\n\n[x](x.md)\n";
+            std::fs::write(site.root.join("b.md"), text).unwrap();
+            flood(&state, 256);
+
+            let resent = sync(&state, &mut ws, SENTINEL).await;
+            assert_eq!(resent.len(), 1, "{resent:?}");
+            let md = std::str::from_utf8(text).unwrap();
+            assert_eq!(resent[0]["path"], "b.md");
+            assert_eq!(
+                resent[0]["html"],
+                render::render_dir(md, None, StdPath::new("b.md")).as_str()
+            );
+            assert_eq!(resent[0]["rev"], git_rev(text));
+        })
+        .await;
+    }
+
+    fn two_tone_theme() -> theme::ResolvedTheme {
+        let variant = |css: &str| {
+            Box::new(VariantData {
+                css_vars: css.to_string(),
+                syntax: None,
+            })
+        };
+        theme::ResolvedTheme {
+            name: "two-tone".to_string(),
+            variants: ThemeVariants::Both {
+                light: variant("--x: light"),
+                dark: variant("--x: dark"),
+            },
+            active_variant: Variant::Dark,
+        }
+    }
+
+    #[tokio::test]
+    async fn lag_resend_restores_theme_state() {
+        let site = Site::new(&[("root/doc.md", b"# Doc\n")]);
+        let root = site.root.clone();
+        let state = test_state(|init| {
+            init.mode = Mode::Serve;
+            init.source_file = Some(root.join("doc.md"));
+            init.initial_relpath = Some("doc.md".to_string());
+            init.base_dir = root;
+            init.registry = ThemeRegistry::new(two_tone_theme());
+        });
+        let port = serve(&state).await;
+
+        within(async {
+            let mut legacy = connect(port).await;
+            let mut viewer = connect(port).await;
+            hello_frames(&mut viewer, "doc.md").await;
+            state.hub.send(WsEvent::Scroll(BARRIER)).unwrap();
+            frames_until(&mut legacy, BARRIER).await;
+            frames_until(&mut viewer, BARRIER).await;
+
+            handle_variant_change(&state, Variant::Light).await;
+            flood(&state, 256);
+            state.hub.send(WsEvent::Scroll(SENTINEL)).unwrap();
+
+            for (name, ws) in [("legacy", &mut legacy), ("viewer", &mut viewer)] {
+                let frames = frames_until(ws, SENTINEL).await;
+                let restored = frames.iter().any(|f| {
+                    f["theme_name"] == "two-tone"
+                        && f["css_vars"] == "--x: light"
+                        && f["active_variant"] == "light"
+                });
+                assert!(
+                    restored,
+                    "{name} never got the light theme back: {frames:?}"
+                );
+            }
+        })
+        .await;
+    }
+
+    /// Writes each `(rel, text)` under `root` in order, then returns the relpaths the hub
+    /// renders until every doc in `want` has been, plus a 500 ms drain.
+    async fn rendered_after(
+        spy: &mut broadcast::Receiver<WsEvent>,
+        root: &StdPath,
+        writes: &[(&str, &str)],
+        want: &[&str],
+    ) -> Vec<String> {
+        for (rel, text) in writes {
+            std::fs::write(root.join(rel), text).unwrap();
+        }
+        let mut rendered = Vec::new();
+        let waited = tokio::time::timeout(Duration::from_secs(10), async {
+            while !want.iter().all(|w| rendered.iter().any(|r| r == w)) {
+                if let Ok(WsEvent::Content(update)) = spy.recv().await {
+                    rendered.push(update.relpath);
+                }
+            }
+        })
+        .await;
+        // A batch need not publish in write order.
+        while let Ok(Ok(event)) = tokio::time::timeout(Duration::from_millis(500), spy.recv()).await
+        {
+            if let WsEvent::Content(update) = event {
+                rendered.push(update.relpath);
+            }
+        }
+        assert!(waited.is_ok(), "{want:?} not all rendered: {rendered:?}");
+        rendered
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watcher_renders_only_viewed_and_entry_docs() {
+        let site = Site::new(&[
+            ("root/doc.md", b"# Doc\n"),
+            ("root/a.md", b"# A\n"),
+            ("root/b.md", b"# B\n"),
+        ]);
+        let state = site.state();
+        let _watch = watcher::watch(state.clone()).unwrap();
+        let mut spy = state.hub.subscribe();
+        let port = serve(&state).await;
+        let root = site.root.as_path();
+        let b = "b.md".to_string();
+
+        let mut viewer = connect(port).await;
+        hello_frames(&mut viewer, "a.md").await;
+        // `b.md` goes first in each round, so its event is never in a later batch.
+        let writes = [
+            ("b.md", "# B2\n"),
+            ("a.md", "# A2\n"),
+            ("doc.md", "# Doc2\n"),
+        ];
+        let rendered = rendered_after(&mut spy, root, &writes, &["a.md", "doc.md"]).await;
+        assert!(!rendered.contains(&b), "only hello'd sockets: {rendered:?}");
+
+        let mut legacy = connect(port).await;
+        let writes = [("b.md", "# B3\n"), ("a.md", "# A3\n")];
+        let rendered = rendered_after(&mut spy, root, &writes, &["a.md", "b.md"]).await;
+        assert!(rendered.contains(&b), "a no-hello socket views everything");
+
+        hello_frames(&mut legacy, "a.md").await;
+        let writes = [("b.md", "# B4\n"), ("a.md", "# A4\n")];
+        let rendered = rendered_after(&mut spy, root, &writes, &["a.md"]).await;
+        assert!(!rendered.contains(&b), "after its hello: {rendered:?}");
+
+        let legacy = connect(port).await;
+        let writes = [("b.md", "# B5\n"), ("a.md", "# A5\n")];
+        rendered_after(&mut spy, root, &writes, &["a.md", "b.md"]).await;
+        drop(legacy);
+        eventually("the no-hello socket disconnects", || {
+            state.connections.load(Ordering::Relaxed) == 2
+        })
+        .await;
+        let writes = [("b.md", "# B6\n"), ("a.md", "# A6\n")];
+        let rendered = rendered_after(&mut spy, root, &writes, &["a.md"]).await;
+        assert!(!rendered.contains(&b), "after it disconnects: {rendered:?}");
+    }
+
+    #[test]
+    fn hello_tab_ids_outside_the_grammar_are_absent() {
+        let long = "x".repeat(65);
+        let max = "x".repeat(64);
+        let huge = "x".repeat(100 * 1024);
+        let tab = |v: serde_json::Value| tab_id(&serde_json::json!({"type": "hello", "tab": v}));
+        assert_eq!(tab("aZ09-_".into()).as_deref(), Some("aZ09-_"));
+        assert_eq!(tab(max.clone().into()), Some(max));
+        for bad in [
+            serde_json::json!(""),
+            serde_json::json!(long),
+            serde_json::json!(huge),
+            serde_json::json!("a b"),
+            serde_json::json!("a/b"),
+            serde_json::json!("é"),
+            serde_json::json!("a\n"),
+            serde_json::json!(7),
+            serde_json::json!(null),
+        ] {
+            assert_eq!(tab(bad.clone()), None, "{bad}");
+        }
+        assert_eq!(tab_id(&serde_json::json!({"type": "hello"})), None);
+    }
+
+    #[tokio::test]
+    async fn malformed_hello_leaves_the_socket_as_it_was() {
+        let site = Site::new(&[("root/doc.md", b"# Doc\n"), ("root/a.md", b"# A\n")]);
+        let state = site.state();
+        let port = serve(&state).await;
+        let huge = "x".repeat(100 * 1024);
+
+        within(async {
+            let mut ws = connect(port).await;
+            hello_frames(&mut ws, "a.md").await;
+            for frame in [
+                serde_json::json!({"type": "hello"}),
+                serde_json::json!({"type": "hello", "path": 7}),
+                serde_json::json!({"type": "hello", "path": null, "tab": "t"}),
+                serde_json::json!({"type": "hello", "path": "a.md", "tab": huge}),
+            ] {
+                send_json(&mut ws, frame).await;
+            }
+            // The probe is still answered, and the socket still views a.md.
+            hello_frames(&mut ws, "a.md").await;
+            assert_eq!(state.viewers.count("a.md"), 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn refused_hello_after_a_valid_one_views_nothing() {
+        let site = Site::new(&[
+            ("root/doc.md", b"# Doc\n"),
+            ("root/a.md", b"# A\n"),
+            ("secret.md", b"# Secret\n"),
+        ]);
+        let state = site.state();
+        let port = serve(&state).await;
+
+        within(async {
+            let mut ws = connect(port).await;
+            assert_eq!(paths(&hello_frames(&mut ws, "a.md").await), ["a.md"]);
+            let frames = hello_frames(&mut ws, "../secret.md").await;
+            assert_eq!(
+                frames,
+                [serde_json::json!({"type": "gone", "path": "../secret.md"})]
+            );
+            assert_eq!(state.viewers.count("a.md"), 0);
+
+            for path in ["a.md", "doc.md", "../secret.md"] {
+                state.publish_content(update_for(path)).await;
+            }
+            state.hub.send(WsEvent::Gone("a.md".to_string())).unwrap();
+            let frames = sync_frames(&state, &mut ws, SENTINEL).await;
+            assert!(frames.is_empty(), "a socket viewing nothing got {frames:?}");
+        })
+        .await;
+    }
+
+    async fn sync_frames(state: &AppState, ws: &mut Client, line: u32) -> Vec<serde_json::Value> {
+        state.hub.send(WsEvent::Scroll(line)).unwrap();
+        frames_until(ws, line).await
+    }
+
+    #[tokio::test]
+    async fn gone_goes_only_to_its_viewers() {
+        let site = Site::new(&[("root/doc.md", b"# Doc\n"), ("root/a.md", b"# A\n")]);
+        let state = site.state();
+        let port = serve(&state).await;
+
+        within(async {
+            let mut viewer = connect(port).await;
+            let mut legacy = connect(port).await;
+            hello_frames(&mut viewer, "a.md").await;
+            for path in ["b.md", "a.md"] {
+                state.hub.send(WsEvent::Gone(path.to_string())).unwrap();
+            }
+            let gone = |frames: Vec<serde_json::Value>| -> Vec<String> {
+                frames
+                    .iter()
+                    .filter(|f| f["type"] == "gone")
+                    .map(|f| f["path"].as_str().unwrap().to_string())
+                    .collect()
+            };
+            assert_eq!(
+                gone(sync_frames(&state, &mut viewer, SENTINEL).await),
+                ["a.md"]
+            );
+            assert_eq!(
+                gone(frames_until(&mut legacy, SENTINEL).await),
+                ["b.md", "a.md"]
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn lag_resend_for_a_removed_viewed_doc_is_gone() {
+        let site = Site::new(&[("root/doc.md", b"# Doc\n"), ("root/b.md", b"# B\n")]);
+        let state = site.state();
+        let port = serve(&state).await;
+
+        within(async {
+            let mut ws = connect(port).await;
+            hello_frames(&mut ws, "b.md").await;
+            sync(&state, &mut ws, BARRIER).await;
+            std::fs::remove_file(site.root.join("b.md")).unwrap();
+            flood(&state, 256);
+
+            let frames = sync_frames(&state, &mut ws, SENTINEL).await;
+            assert!(contents(&frames).is_empty(), "{frames:?}");
+            let gone = serde_json::json!({"type": "gone", "path": "b.md"});
+            assert!(frames.contains(&gone), "{frames:?}");
+        })
+        .await;
+    }
+
+    const CODE: &[u8] = b"# Code\n\n```rust\nfn main() { let x = 1; }\n```\n";
+
+    #[tokio::test]
+    async fn hello_uses_the_theme_after_a_switch() {
+        let site = Site::new(&[("root/doc.md", b"# Doc\n"), ("root/code.md", CODE)]);
+        let root = site.root.clone();
+        let catppuccin = theme::resolve_by_name("catppuccin").unwrap();
+        let ThemeVariants::Both { light, .. } = &catppuccin.variants else {
+            panic!("catppuccin has two variants");
+        };
+        let light = light.syntax.clone();
+        let dark = catppuccin.active_data().syntax.clone();
+        let state = test_state(|init| {
+            init.mode = Mode::Serve;
+            init.source_file = Some(root.join("doc.md"));
+            init.initial_relpath = Some("doc.md".to_string());
+            init.base_dir = root;
+            init.registry = ThemeRegistry::new(catppuccin);
+        });
+        let port = serve(&state).await;
+        let md = std::str::from_utf8(CODE).unwrap();
+        let want = render::render_dir(md, light.as_ref(), StdPath::new("code.md"));
+        assert_ne!(
+            want,
+            render::render_dir(md, dark.as_ref(), StdPath::new("code.md"))
+        );
+
+        handle_variant_change(&state, Variant::Light).await;
+        within(async {
+            let mut ws = connect(port).await;
+            let frames = hello_frames(&mut ws, "code.md").await;
+            let got = contents(&frames);
+            assert_eq!(got.len(), 1, "{frames:?}");
+            assert_eq!(
+                unordered(got[0]["html"].as_str().unwrap()),
+                unordered(&want)
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn hello_rev_matches_its_html_under_writes() {
+        use std::sync::atomic::AtomicBool;
+        let site = Site::new(&[("root/doc.md", b"# Doc\n"), ("root/code.md", b"# V0\n")]);
+        let state = site.state();
+        let port = serve(&state).await;
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (stop, file) = (stop.clone(), site.root.join("code.md"));
+            std::thread::spawn(move || {
+                let mut n = 0u32;
+                while !stop.load(Ordering::Relaxed) {
+                    n += 1;
+                    std::fs::write(&file, format!("# V{n}\n")).unwrap();
+                }
+            })
+        };
+
+        let mut revs = std::collections::HashMap::new();
+        let mut checked = 0;
+        let mut ws = connect(port).await;
+        for _ in 0..200 {
+            let frames = hello_frames(&mut ws, "code.md").await;
+            let Some(frame) = contents(&frames).first().copied() else {
+                continue;
+            };
+            let html = frame["html"].as_str().unwrap();
+            let Some(k) = html
+                .split_once("</a>V")
+                .and_then(|(_, rest)| rest.split_once("</h1>"))
+                .map(|(k, _)| k.to_string())
+            else {
+                continue;
+            };
+            let want = revs
+                .entry(k.clone())
+                .or_insert_with(|| git_rev(format!("# V{k}\n").as_bytes()));
+            assert_eq!(frame["rev"], want.as_str(), "html says V{k}");
+            checked += 1;
+        }
+        stop.store(true, Ordering::Relaxed);
+        writer.join().unwrap();
+        assert!(checked > 100, "only {checked} replies carried a version");
+        assert!(revs.len() > 1, "the writer never raced the reads");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn render_filter_survives_repeat_hello_and_hello_disconnect() {
+        let site = Site::new(&[
+            ("root/doc.md", b"# Doc\n"),
+            ("root/a.md", b"# A\n"),
+            ("root/b.md", b"# B\n"),
+        ]);
+        let state = site.state();
+        let _watch = watcher::watch(state.clone()).unwrap();
+        let mut spy = state.hub.subscribe();
+        let port = serve(&state).await;
+
+        let mut x = connect(port).await;
+        let mut y = connect(port).await;
+        hello_frames(&mut x, "a.md").await;
+        hello_frames(&mut x, "a.md").await;
+        hello_frames(&mut y, "a.md").await;
+        drop(y);
+        eventually("y disconnects", || {
+            state.connections.load(Ordering::Relaxed) == 1
+        })
+        .await;
+
+        let writes = [("b.md", "# B2\n"), ("a.md", "# A2\n")];
+        let rendered = rendered_after(&mut spy, &site.root, &writes, &["a.md"]).await;
+        assert!(!rendered.iter().any(|r| r == "b.md"), "{rendered:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watcher_renders_a_change_once_however_many_view_it() {
+        let site = Site::new(&[("root/doc.md", b"# Doc\n"), ("root/a.md", b"# A\n")]);
+        let state = site.state();
+        let _watch = watcher::watch(state.clone()).unwrap();
+        let mut spy = state.hub.subscribe();
+        let port = serve(&state).await;
+        let mut x = connect(port).await;
+        let mut y = connect(port).await;
+        hello_frames(&mut x, "a.md").await;
+        hello_frames(&mut y, "a.md").await;
+
+        let writes = [("a.md", "# A2\n")];
+        let rendered = rendered_after(&mut spy, &site.root, &writes, &["a.md"]).await;
+        assert_eq!(rendered, ["a.md"]);
+    }
+
+    /// The race below rarely lands in the gap, so this pins the order directly: the reply
+    /// waits on the registry, before its disk read, and the viewer must already count.
+    #[tokio::test]
+    async fn hello_counts_the_viewer_before_it_reads() {
+        let site = Site::new(&[("root/doc.md", b"# Doc\n"), ("root/b.md", b"# B\n")]);
+        let state = site.state();
+        let port = serve(&state).await;
+
+        within(async {
+            let mut ws = connect(port).await;
+            let registry = state.registry.write().await;
+            send_json(
+                &mut ws,
+                serde_json::json!({"type": "hello", "path": "b.md"}),
+            )
+            .await;
+            eventually("b.md is counted while its render waits", || {
+                state.viewers.count("b.md") == 1
+            })
+            .await;
+            drop(registry);
+            loop {
+                let frame = next_json(&mut ws).await;
+                if frame["type"] == "content" && frame["path"] == "b.md" {
+                    break;
+                }
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hello_racing_a_write_converges() {
+        let site = Site::new(&[("root/doc.md", b"# Doc\n"), ("root/b.md", b"# B\n")]);
+        let state = site.state();
+        let _watch = watcher::watch(state.clone()).unwrap();
+        let port = serve(&state).await;
+        let file = site.root.join("b.md");
+
+        for round in 0..50 {
+            let text = format!("# Round {round}\n");
+            let want = git_rev(text.as_bytes());
+            let mut ws = connect(port).await;
+            // Views another doc first, so only this hello makes b.md wanted.
+            hello_frames(&mut ws, "doc.md").await;
+            let writer = {
+                let (file, text) = (file.clone(), text.clone());
+                std::thread::spawn(move || std::fs::write(file, text).unwrap())
+            };
+            send_json(
+                &mut ws,
+                serde_json::json!({"type": "hello", "path": "b.md"}),
+            )
+            .await;
+            writer.join().unwrap();
+
+            let mut last = None;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            let quiet = Duration::from_millis(200);
+            loop {
+                let wait = if last.as_ref() == Some(&want) {
+                    quiet
+                } else {
+                    deadline.saturating_duration_since(tokio::time::Instant::now())
+                };
+                match tokio::time::timeout(wait, next_json(&mut ws)).await {
+                    Ok(frame) if frame["type"] == "content" && frame["path"] == "b.md" => {
+                        last = frame["rev"].as_str().map(str::to_string);
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            assert_eq!(last, Some(want), "round {round}");
+            drop(ws);
+            eventually("the round's socket closes", || {
+                state.connections.load(Ordering::Relaxed) == 0
+            })
+            .await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn alias_viewer_gets_change_made_through_target() {
+        let site = Site::new(&[("root/doc.md", b"# Doc\n"), ("root/real.md", b"# Real\n")]);
+        site.link("root/alias.md", "real.md");
+        let state = site.state();
+        let _watch = watcher::watch(state.clone()).unwrap();
+        let port = serve(&state).await;
+
+        let mut ws = connect(port).await;
+        assert_eq!(
+            paths(&hello_frames(&mut ws, "alias.md").await),
+            ["alias.md"]
+        );
+        let text = "# Real edited\n\n[x](x.md)\n";
+        std::fs::write(site.root.join("real.md"), text).unwrap();
+
+        let frame = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let frame = next_json(&mut ws).await;
+                if frame["type"] == "content" {
+                    return frame;
+                }
+            }
+        })
+        .await
+        .expect("no content for the alias");
+        assert_eq!(frame["path"], "alias.md");
+        assert_eq!(
+            frame["html"],
+            render::render_dir(text, None, StdPath::new("alias.md")).as_str()
+        );
     }
 }

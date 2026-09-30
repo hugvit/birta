@@ -360,13 +360,21 @@ fn write_bundled_themes(dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir.join("syntax"))?;
     for bundled in BUNDLED_THEMES {
         let toml_path = dir.join(format!("{}.toml", bundled.name));
-        std::fs::write(&toml_path, bundled.toml)?;
+        install_file(&toml_path, bundled.toml.as_bytes())?;
         for &(rel_path, data) in bundled.syntax_files {
-            let dest = dir.join(rel_path);
-            std::fs::write(&dest, data)?;
+            install_file(&dir.join(rel_path), data)?;
         }
     }
     Ok(())
+}
+
+/// Other birta processes may be reading the themes dir, so a file is replaced whole and
+/// only when its bytes differ.
+fn install_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if std::fs::read(path).is_ok_and(|current| current == bytes) {
+        return Ok(());
+    }
+    crate::atomic_write::write_atomic(path, bytes)
 }
 
 // ---------------------------------------------------------------------------
@@ -918,5 +926,78 @@ mod tests {
             Variant::Light,
             "switching back should still preserve variant preference"
         );
+    }
+
+    /// Every bundled file with the bytes it should hold, relative to the themes dir.
+    fn bundled_files() -> Vec<(String, &'static [u8])> {
+        let mut files = Vec::new();
+        for bundled in BUNDLED_THEMES {
+            files.push((format!("{}.toml", bundled.name), bundled.toml.as_bytes()));
+            for &(rel, data) in bundled.syntax_files {
+                files.push((rel.to_string(), data));
+            }
+        }
+        files
+    }
+
+    #[test]
+    fn concurrent_installs_never_expose_a_partial_file() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        write_bundled_themes(dir.path()).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (stop, path) = (stop.clone(), dir.path().to_path_buf());
+            std::thread::spawn(move || {
+                let mut rounds = 0;
+                while !stop.load(Ordering::Relaxed) || rounds < 50 {
+                    write_bundled_themes(&path).unwrap();
+                    rounds += 1;
+                }
+            })
+        };
+
+        let files = bundled_files();
+        let mut torn = Vec::new();
+        let started = std::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_millis(500) && torn.is_empty() {
+            for (rel, want) in &files {
+                let got = std::fs::read(dir.path().join(rel)).unwrap();
+                if got != *want {
+                    torn.push(format!("{rel}: {} of {} bytes", got.len(), want.len()));
+                }
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        writer.join().unwrap();
+        assert!(torn.is_empty(), "{torn:?}");
+    }
+
+    #[test]
+    fn install_leaves_identical_files_alone_and_repairs_others() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        write_bundled_themes(dir.path()).unwrap();
+        let files = bundled_files();
+        let (stale, _) = &files[1];
+        std::fs::write(dir.path().join(stale), "stale").unwrap();
+        let identity = |rel: &str| {
+            let meta = std::fs::metadata(dir.path().join(rel)).unwrap();
+            (meta.ino(), meta.mtime_nsec(), meta.mtime())
+        };
+        let before: Vec<_> = files.iter().map(|(rel, _)| identity(rel)).collect();
+
+        write_bundled_themes(dir.path()).unwrap();
+
+        for ((rel, want), was) in files.iter().zip(&before) {
+            assert_eq!(std::fs::read(dir.path().join(rel)).unwrap(), *want, "{rel}");
+            if rel != stale {
+                assert_eq!(identity(rel), *was, "{rel} was rewritten");
+            } else {
+                // A new inode means it was renamed into place, never truncated in place.
+                assert_ne!(identity(rel).0, was.0, "{rel} was rewritten in place");
+            }
+        }
     }
 }

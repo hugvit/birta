@@ -5,10 +5,6 @@ use std::path::Path;
 
 /// Writes `bytes` to a temp file beside `canonical`, copies its mode bits, syncs, then
 /// renames it over `canonical`. Pass the canonical path so a symlink is kept, not replaced.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "callers need the checked variant for now")
-)]
 pub(crate) fn write_atomic(canonical: &Path, bytes: &[u8]) -> io::Result<()> {
     write_atomic_if(canonical, bytes, || true).map(|_| ())
 }

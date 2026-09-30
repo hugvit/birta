@@ -433,10 +433,17 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
             .iter()
             .filter_map(|note| Some((note.n, note.anchor()?))),
     );
+    // A bound `covers` settles its note, so the carry below must already see it
+    let bound = changes::covers_bound(&parsed.lines, &turns, &texts);
     let mut facts: Vec<Facts> = notes
         .notes
         .iter()
         .map(|note| {
+            let covered = |held_by: &[u32]| {
+                bound
+                    .get(&note.n)
+                    .is_some_and(|turns| turns.iter().any(|t| held_by.contains(t)))
+            };
             let round = (note.human() && !note.retracted)
                 .then(|| cover(&turns.rounds, note.n, None))
                 .flatten();
@@ -455,11 +462,13 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
             } else {
                 items::outcome(note, &held_by, &turns, &mut texts)
             };
+            out.covered = covered(&held_by);
             let mut status = items::status(note, round, holder, &turns, &out);
             while let Some(next) = items::carried_to(&turns, holder, status) {
                 held_by.push(next);
                 holder = Some(next);
                 out = items::outcome(note, &held_by, &turns, &mut texts);
+                out.covered = covered(&held_by);
                 status = items::status(note, round, holder, &turns, &out);
             }
             Facts {
@@ -516,22 +525,6 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
         },
         &mut texts,
     );
-    // Only the changes tell whether a `covers` bound, so its note settles after them
-    for (note, f) in notes.notes.iter().zip(&mut facts) {
-        let covered = built.changes.iter().any(|c| {
-            c.asked.kind == AskedKind::Cited
-                && c.asked.notes.contains(&note.n)
-                && c.turn.is_some_and(|t| f.held_by.contains(&t))
-        });
-        if covered {
-            f.out.covered = true;
-            let round = f
-                .sent_by
-                .and_then(|n| turns.rounds.iter().find(|r| r.n == n));
-            f.status = items::status(note, round, f.turn, &turns, &f.out);
-        }
-    }
-
     let locator = anchor::Locator::new(&doc.text);
     let items: Vec<Item> = notes
         .notes

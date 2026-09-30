@@ -3,7 +3,7 @@ use std::path::Path;
 use birta::rev::Rev;
 use birta::review::fold::hand_off;
 use birta::review::ops::{ByKind, Scope, To, Verdict};
-use birta::review::state::{AtKind, HoldKind, Item, ItemStatus, ReviewState, Stage};
+use birta::review::state::{AskedKind, AtKind, HoldKind, Item, ItemStatus, ReviewState, Stage};
 use serde_json::json;
 
 mod support {
@@ -1624,4 +1624,137 @@ fn a_carried_note_left_open_again_moves_on_once_more() {
     let state = s.fold();
     assert_eq!(status(&state, x), ItemStatus::Handled);
     assert_eq!(item(&state, x).turn, Some(third));
+}
+
+#[test]
+fn a_note_settled_only_by_a_covers_stays_with_its_turn() {
+    let mut s = Scenario::drafted_by(DOC, CLAUDE);
+    let doc = s.note("say how retries back off");
+    s.submit();
+    let first = s.claim(CLAUDE);
+    let text = s.replaced(
+        "- third item",
+        "- third item\n\nRetries back off with jitter.",
+    );
+    s.external(&text);
+    s.covers(CLAUDE, doc, "Retries back off with jitter", first);
+    s.yield_turn(CLAUDE, first);
+    let settled = item(&s.fold(), doc).clone();
+    assert_eq!(
+        (settled.status, settled.turn),
+        (ItemStatus::Handled, Some(first))
+    );
+
+    let round_two = s.note("round two");
+    s.submit();
+    let second = s.claim(CLAUDE);
+    let picked_up = item(&s.fold(), doc).clone();
+    assert_eq!(
+        (picked_up.status, picked_up.turn),
+        (ItemStatus::Handled, Some(first)),
+        "not carried to the next claim"
+    );
+    s.done(CLAUDE, round_two, second);
+    s.yield_turn(CLAUDE, second);
+    let state = s.fold();
+    assert_eq!(
+        (status(&state, doc), item(&state, doc).turn),
+        (ItemStatus::Handled, Some(first))
+    );
+    assert_eq!(state.counts.not_handled, 0);
+    let replied = state.phrase.replied.as_ref().unwrap();
+    assert_eq!(
+        (replied.turn, replied.done, replied.not_handled),
+        (second, 1, 0),
+        "round two's tally counts only its own note"
+    );
+}
+
+#[test]
+fn a_covers_quote_inside_another_notes_hunk_still_handles_the_doc_note() {
+    let mut s = Scenario::drafted_by(DOC, CLAUDE);
+    let at = s.quote("second item");
+    let spot = s.comment(at, None, Some("reword this"));
+    let doc = s.note("say how retries back off");
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    let text = s.replaced("- second item", "- second item, retried with jitter");
+    s.external(&text);
+    s.done(CLAUDE, spot, turn);
+    s.covers(CLAUDE, doc, "retried with jitter", turn);
+    s.yield_turn(CLAUDE, turn);
+    let state = s.fold();
+    assert_eq!(
+        (status(&state, spot), status(&state, doc)),
+        (ItemStatus::Handled, ItemStatus::Handled)
+    );
+    assert_eq!(state.counts.not_handled, 0);
+}
+
+#[test]
+fn covers_binds_to_the_later_hunk_that_wrote_its_quote() {
+    let mut s = Scenario::drafted_by(DOC, CLAUDE);
+    let doc = s.note("add a closing line");
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    let text = s
+        .replaced("Intro paragraph here,", "Intro paragraph, reworded,")
+        .replacen(
+            "- appendix item\n",
+            "- appendix item\n\nShips behind a flag.\n",
+            1,
+        );
+    let ext = s.external(&text);
+    s.covers(CLAUDE, doc, "Ships behind a flag", turn);
+    s.yield_turn(CLAUDE, turn);
+    let state = s.fold();
+    let cited: Vec<_> = state
+        .changes
+        .iter()
+        .filter(|c| c.asked.kind == AskedKind::Cited)
+        .collect();
+    assert_eq!(cited.len(), 1, "{cited:#?}");
+    assert_eq!(cited[0].id, format!("{ext}.1"));
+    assert!(
+        s.text()[cited[0].range.bytes.0..cited[0].range.bytes.1].contains("Ships behind a flag")
+    );
+    assert_eq!(status(&state, doc), ItemStatus::Handled);
+}
+
+#[test]
+fn covers_on_an_outside_save_does_not_handle_the_note() {
+    let mut s = Scenario::drafted_by(DOC, CLAUDE);
+    let doc = s.note("link the issue");
+    s.submit();
+    let text = format!("{}\nCloses #408.\n", s.text());
+    s.external(&text);
+    let turn = s.claim(CLAUDE);
+    s.covers(CLAUDE, doc, "Closes #408", turn);
+    s.yield_turn(CLAUDE, turn);
+    let state = s.fold();
+    assert_eq!(status(&state, doc), ItemStatus::NotHandled);
+    assert!(
+        state
+            .changes
+            .iter()
+            .all(|c| c.asked.kind != AskedKind::Cited)
+    );
+}
+
+#[test]
+fn an_omitted_quote_note_is_not_handled() {
+    let mut s = Scenario::drafted_by(DOC, CLAUDE);
+    let at = s.quote("detail two");
+    let left = s.comment(at, None, Some("why two?"));
+    let other = s.note("tighten the intro");
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    let text = s.replaced("Intro paragraph here,", "Intro, tightened,");
+    s.external(&text);
+    s.covers(CLAUDE, other, "Intro, tightened", turn);
+    s.yield_turn(CLAUDE, turn);
+    let state = s.fold();
+    assert_eq!(status(&state, left), ItemStatus::NotHandled);
+    assert_eq!(status(&state, other), ItemStatus::Handled);
+    assert_eq!(state.counts.not_handled, 1);
 }

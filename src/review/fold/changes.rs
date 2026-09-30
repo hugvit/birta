@@ -396,6 +396,47 @@ fn asked_for(input: &Input, texts: &mut Texts, turn: Option<u32>, step: &Step, h
     }
 }
 
+/// The turns in which a `covers` of each note bound: its quote is in text a write of that
+/// turn put in, whatever the hunk is asked for.
+pub(super) fn covers_bound(
+    lines: &[Line],
+    turns: &Turns,
+    texts: &Texts,
+) -> HashMap<u32, BTreeSet<u32>> {
+    let mut bound: HashMap<u32, BTreeSet<u32>> = HashMap::new();
+    for line in lines {
+        if !matches!(
+            line.op,
+            Op::Snap { .. } | Op::Edit { .. } | Op::External { .. }
+        ) {
+            continue;
+        }
+        let Some((_, step)) = texts.step_at(line.n) else {
+            continue;
+        };
+        let Some(hunks) = &step.hunks else {
+            continue;
+        };
+        let who = Who::of(line, step, turns);
+        let (Attr::Agent, Some(turn)) = (who.attr, who.turn) else {
+            continue;
+        };
+        let Some(covers) = turns.covers.get(&turn) else {
+            continue;
+        };
+        for h in hunks {
+            let wrote = collapse(&h.i.concat());
+            for (to, q) in covers {
+                let q = collapse(q);
+                if !q.is_empty() && wrote.contains(&q) {
+                    bound.entry(*to).or_default().insert(turn);
+                }
+            }
+        }
+    }
+    bound
+}
+
 /// Sent stet notes whose block hunk `h`, written on line `n`, changes.
 fn breaks_stet(input: &Input, texts: &mut Texts, n: u32, step: &Step, h: &Hunk) -> Vec<u32> {
     input

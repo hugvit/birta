@@ -21,7 +21,8 @@ use crate::review::doc::Doc;
 use crate::review::fold::{self, RoundKind, TurnIndex};
 use crate::review::log::{AppendCtx, AppendError, Held, Log};
 use crate::review::ops::{Act, By, ByKind, Line, Op, Scope, Via};
-use crate::review::state::{AtKind, AtState, Attr, Change, Item, ItemStatus, ReviewState};
+use crate::review::state::{AtKind, AtState, Attr, Change, Item, ReviewState};
+use crate::review::sync::sync_external;
 use crate::review::{FOLDER_REVIEW, review_path_for};
 use crate::scan::{self, ScanBudget};
 
@@ -275,7 +276,7 @@ fn claim_held(
     now_ms: u64,
 ) -> anyhow::Result<Option<(u32, u32)>> {
     if let Some(doc) = doc {
-        sync_external(held, doc);
+        sync_external(held, doc, now_ms);
     }
     let mut round = None;
     let ctx = AppendCtx {
@@ -295,11 +296,6 @@ fn claim_held(
             }
         })?;
     Ok(landed.first().copied().zip(round))
-}
-
-/// Records a write to the doc that isn't in the log yet. Nothing records one yet.
-fn sync_external(_held: &mut Held, _doc: &Path) -> Option<u32> {
-    None
 }
 
 // --- looking ---
@@ -614,17 +610,11 @@ fn block(entry: &Entry, pick: Pick, opts: &Opts, now: u64) -> anyhow::Result<Blo
         .find(|r| r.n == round)
         .map_or(0, |r| r.upto);
     let pending = pending_through(&index, round);
+    let pending: Vec<u32> = pending.into_iter().collect();
     let shown: Vec<Item> = state
         .items
         .iter()
-        .filter(|i| i.by.kind == ByKind::Human && i.status != ItemStatus::Retracted)
-        .filter(|i| {
-            let held = match claim {
-                Some(c) => i.turn == Some(c),
-                None => i.sent_in.is_some_and(|s| pending.contains(&s)),
-            };
-            held || (!read_only && i.status == ItemStatus::NotHandled)
-        })
+        .filter(|i| fold::listed(i, claim, &pending, read_only))
         .map(|i| as_sent(i, &lines, upto))
         .collect();
     let you = match (&doc, read_only) {

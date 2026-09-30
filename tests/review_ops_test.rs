@@ -81,7 +81,14 @@ fn a_hand_appended_line_without_envelope_parses_with_unknown_author() {
     assert_eq!(line.by.name, None);
     assert_eq!(line.ts, None);
     assert_eq!(line.cid, None);
-    assert!(matches!(line.op, Op::Done { to: 3, turn: 2 }));
+    assert!(matches!(
+        line.op,
+        Op::Done {
+            to: 3,
+            turn: 2,
+            late: false
+        }
+    ));
 }
 
 #[test]
@@ -173,11 +180,11 @@ fn turn_ops_parse_to_their_fields() {
     assert_eq!(kind, Some(ReplyKind::Answer));
     assert!(matches!(
         ok(3, r#"{"op":"covers","to":1,"quote":"Cut to 9","turn":33}"#).op,
-        Op::Covers { to: 1, ref quote, turn: 33 } if quote == "Cut to 9"
+        Op::Covers { to: 1, ref quote, turn: 33, late: false } if quote == "Cut to 9"
     ));
     assert!(matches!(
         ok(3, r#"{"op":"turn_note","body":"Kept the diagram.","turn":33}"#).op,
-        Op::TurnNote { ref body, turn: 33 } if body == "Kept the diagram."
+        Op::TurnNote { ref body, turn: 33, late: false } if body == "Kept the diagram."
     ));
     assert!(matches!(
         ok(3, r#"{"op":"amend","to":12,"body":"say why, briefly"}"#).op,
@@ -1066,4 +1073,31 @@ fn a_hunk_whose_lines_run_past_u32_is_bad() {
         r#"{{"op":"external","rev":"{REV_A}","to_rev":"{REV_B}","patch":[{{"a":0,"d":["x\n"],"i":[]}},{{"a":0,"d":[],"i":["y\n"]}}]}}"#
     );
     assert!(is_bad(4, &unordered), "{unordered}");
+}
+
+#[test]
+fn agent_outcomes_take_an_optional_late_flag() {
+    let late = |raw: &str| match ok(3, raw).op {
+        Op::Done { late, .. }
+        | Op::Covers { late, .. }
+        | Op::Unasked { late, .. }
+        | Op::TurnNote { late, .. } => late,
+        other => panic!("{other:?}"),
+    };
+    assert!(late(r#"{"op":"done","to":1,"turn":2,"late":true}"#));
+    assert!(late(
+        r#"{"op":"covers","to":1,"quote":"q","turn":2,"late":true}"#
+    ));
+    assert!(late(r#"{"op":"unasked","quote":"q","turn":2,"late":true}"#));
+    assert!(late(
+        r#"{"op":"turn_note","body":"b","turn":2,"late":true}"#
+    ));
+    assert!(!late(r#"{"op":"done","to":1,"turn":2}"#));
+    // Absent when false, so older readers see the line as before
+    let op = Op::Done {
+        to: 1,
+        turn: 2,
+        late: false,
+    };
+    assert!(!serde_json::to_string(&op).unwrap().contains("late"));
 }

@@ -3,6 +3,8 @@
 
 pub mod identity;
 pub mod render;
+pub mod respond;
+pub mod respond_apply;
 pub mod review_cmd;
 pub mod wait;
 
@@ -143,8 +145,10 @@ pub fn run(cmd: Cmd, config: &Config) -> ExitCode {
         eprintln!("error: {e}");
         return ExitCode::Usage;
     }
-    if let Cmd::Review(args) = &cmd {
-        return review_cmd::run(args, config);
+    match &cmd {
+        Cmd::Review(args) => return review_cmd::run(args, config),
+        Cmd::Respond(args) => return respond_apply::run(args),
+        _ => {}
     }
     eprintln!("birta: `{}` is not available in this build", cmd.verb());
     ExitCode::Error

@@ -192,6 +192,8 @@ pub(super) struct Outcome {
     pub answered: bool,
     pub didnt: bool,
     pub noted: bool,
+    /// A `covers` of the note bound to text a holding turn wrote.
+    pub covered: bool,
     /// Ids of changes on the note's block.
     pub changes: Vec<String>,
     pub no_change: bool,
@@ -280,10 +282,12 @@ pub(super) fn same_text(note: &Note, (from, to): &(Rev, Rev), texts: &mut Texts)
     before.is_some() && before == read(to)
 }
 
-/// Where a human note stands, given the round that sent it and what was done about it.
+/// Where a human note stands, given the round that sent it, the claim holding it now,
+/// and what was done about it.
 pub(super) fn status(
     note: &Note,
     round: Option<&RoundRec>,
+    holder: Option<u32>,
     turns: &Turns,
     out: &Outcome,
 ) -> ItemStatus {
@@ -317,7 +321,7 @@ pub(super) fn status(
             ItemStatus::Handled
         };
     }
-    match round.taker.and_then(|t| turns.turn(t)) {
+    match holder.and_then(|t| turns.turn(t)) {
         Some(turn) if turn.open() => ItemStatus::PickedUp,
         Some(_) => settled(),
         // Taken back from a claim: only a late respond settles it
@@ -327,7 +331,7 @@ pub(super) fn status(
 }
 
 fn has_outcome(out: &Outcome) -> bool {
-    out.done || out.answered || out.didnt || out.noted || !out.changes.is_empty()
+    out.done || out.answered || out.didnt || out.noted || out.covered || !out.changes.is_empty()
 }
 
 /// Which verdicts need something from the agent, and what counts.
@@ -337,4 +341,20 @@ fn satisfied(note: &Note, out: &Outcome) -> bool {
         Some(Verdict::Ask) => out.answered,
         _ => has_outcome(out),
     }
+}
+
+/// The claim a note its holder left open is carried to: the first turn opened after the
+/// holder's ended. The round view lists such a note for that claim, by [`carries`].
+pub(super) fn carried_to(turns: &Turns, holder: Option<u32>, status: ItemStatus) -> Option<u32> {
+    if !carries(status) {
+        return None;
+    }
+    let held = turns.turn(holder?)?;
+    let ended = held.end.or(held.released)?;
+    turns.turns.iter().find(|t| t.n > ended).map(|t| t.n)
+}
+
+/// Whether a note is still owed an outcome by whichever claim comes next.
+pub fn carries(status: ItemStatus) -> bool {
+    status == ItemStatus::NotHandled
 }

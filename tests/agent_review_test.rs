@@ -2253,3 +2253,27 @@ fn a_directory_json_is_always_a_list_of_docs() {
     assert_eq!(docs.len(), 1, "{out}");
     assert_eq!(docs[0]["doc"], "docs/a.md");
 }
+
+#[test]
+fn a_doc_edit_before_the_pickup_is_recorded_before_the_claim_as_outside() {
+    let mut s = Scenario::new(DOC);
+    s.note("EDITED-FIRST");
+    s.submit();
+    let tmp = Tmp::new();
+    tmp.put(&s);
+    let edited = s.replaced("- second item", "- second item, edited before the pickup");
+    tmp.write("pr.md", &edited);
+    let (code, out) = tmp.run(&["review", "pr.md", "--as", "claude"], &[]);
+    assert_eq!(code, 0, "{out}");
+
+    let parsed = ops::parse(tmp.read(LOG));
+    let at = |pick: fn(&Op) -> bool| parsed.lines.iter().find(|l| pick(&l.op)).map(|l| l.n);
+    let external = at(|op| matches!(op, Op::External { .. })).expect("the edit is recorded");
+    let claim = at(|op| matches!(op, Op::Claim { .. })).expect("claimed");
+    assert!(external < claim, "external {external}, claim {claim}");
+    let chain = Chain::build(&parsed);
+    let doc = Doc::new(&edited);
+    let state = fold::fold(&parsed, &chain, &doc).state;
+    assert_eq!(state.changes.len(), 1);
+    assert_eq!(state.changes[0].attr, birta::review::state::Attr::Outside);
+}

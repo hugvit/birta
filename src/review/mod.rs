@@ -8,6 +8,7 @@ pub mod ladder;
 pub mod log;
 pub mod ops;
 pub mod state;
+pub mod sync;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

@@ -475,10 +475,15 @@ fn one_append_lands_all_its_ops_in_order_on_consecutive_lines() {
                 cid: Some("batch".to_string()),
             },
             vec![
-                Op::Done { to: 4, turn: 9 },
+                Op::Done {
+                    to: 4,
+                    turn: 9,
+                    late: false,
+                },
                 Op::TurnNote {
                     body: "did it".to_string(),
                     turn: 9,
+                    late: false,
                 },
                 Op::Yield {
                     turn: Some(9),
@@ -498,7 +503,14 @@ fn one_append_lands_all_its_ops_in_order_on_consecutive_lines() {
         assert_eq!(line.by, agent("claude"));
         assert_eq!(line.cid.as_deref(), Some("batch"));
     }
-    assert_eq!(tail[0].op, Op::Done { to: 4, turn: 9 });
+    assert_eq!(
+        tail[0].op,
+        Op::Done {
+            to: 4,
+            turn: 9,
+            late: false
+        }
+    );
     assert!(matches!(tail[2].op, Op::Yield { turn: Some(9), .. }));
     let raw = raw_lines(log.path());
     assert_eq!(

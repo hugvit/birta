@@ -162,7 +162,7 @@ pub enum Op {
         body: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         kind: Option<ReplyKind>,
-        /// Written by a released claim after the human took the round back.
+        /// Written after the turn ended, by a released or yielded claim.
         #[serde(default, skip_serializing_if = "is_false")]
         late: bool,
     },
@@ -197,21 +197,30 @@ pub enum Op {
     Done {
         to: u32,
         turn: u32,
+        /// Written after the turn ended, by a released or yielded claim.
+        #[serde(default, skip_serializing_if = "is_false")]
+        late: bool,
     },
     Covers {
         to: u32,
         quote: String,
         turn: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        late: bool,
     },
     Unasked {
         quote: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         body: Option<String>,
         turn: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        late: bool,
     },
     TurnNote {
         body: String,
         turn: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        late: bool,
     },
     /// Ends an agent turn, or with `release` a human takes a stalled round back.
     Yield {

@@ -235,9 +235,29 @@ fn scenario_8_a_whole_doc_note_does_not_make_a_change_asked() {
 }
 
 #[test]
-fn a_note_from_an_earlier_turn_does_not_ask_for_a_change() {
+fn a_note_an_earlier_turn_settled_does_not_ask_for_a_change() {
     let mut s = Scenario::new(DOC);
-    s.verdict("- first item", "no");
+    let x = s.verdict("- first item", "no");
+    s.submit();
+    let first = s.claim(CLAUDE);
+    s.done(CLAUDE, x, first);
+    s.yield_turn(CLAUDE, first);
+    s.note("anything else?");
+    s.submit();
+    let second = s.claim(CLAUDE);
+    let ext = s.replace_line("- first item", "- first item, late fix");
+    s.yield_turn(CLAUDE, second);
+    let state = s.fold();
+    let c = change(&state, &id(ext, 0));
+    assert_eq!(c.turn, Some(second));
+    assert_eq!(c.asked.kind, AskedKind::Unasked);
+}
+
+/// A note its turn left open is carried to the next claim, which it then asks.
+#[test]
+fn a_note_carried_from_an_earlier_turn_asks_for_its_change() {
+    let mut s = Scenario::new(DOC);
+    let x = s.verdict("- first item", "no");
     s.submit();
     let first = s.claim(CLAUDE);
     s.yield_turn(CLAUDE, first);
@@ -249,7 +269,10 @@ fn a_note_from_an_earlier_turn_does_not_ask_for_a_change() {
     let state = s.fold();
     let c = change(&state, &id(ext, 0));
     assert_eq!(c.turn, Some(second));
-    assert_eq!(c.asked.kind, AskedKind::Unasked);
+    assert_eq!(
+        (c.asked.kind, c.asked.notes.clone()),
+        (AskedKind::Location, vec![x])
+    );
 }
 
 // --- attribution (scenario 9) ---

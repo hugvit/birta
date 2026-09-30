@@ -659,8 +659,10 @@ fn a_change_is_matched_where_the_note_is_when_the_turn_starts() {
     assert_eq!(status(&s.fold(), x), ItemStatus::NotHandled);
 }
 
+/// A note its turn left open is carried to the next claim, so that turn's outcomes
+/// settle it: the fold agrees with the round view, which lists it again.
 #[test]
-fn an_outcome_from_another_turn_does_not_count() {
+fn an_outcome_in_the_turn_a_note_was_carried_to_counts() {
     let mut s = Scenario::new(DOC);
     let x = s.verdict("- first item", "no");
     s.submit();
@@ -676,18 +678,18 @@ fn an_outcome_from_another_turn_does_not_count() {
     s.yield_turn(CLAUDE, second);
     let state = s.fold();
 
-    assert_eq!(status(&state, x), ItemStatus::NotHandled);
-    assert_eq!(item(&state, x).turn, Some(first));
+    assert_eq!(status(&state, x), ItemStatus::Handled);
+    assert_eq!(item(&state, x).turn, Some(second));
     assert_eq!(status(&state, z), ItemStatus::Handled);
     assert_eq!(item(&state, z).turn, Some(second));
-    // The reply facts count the turn's own items, not its ops
+    // The reply facts count the turn's own items, carried ones included
     let replied = state.phrase.replied.as_ref().expect("replied facts");
     assert_eq!(replied.turn, second);
     assert_eq!(
         (replied.done, replied.answered, replied.not_handled),
-        (1, 0, 0)
+        (2, 1, 0)
     );
-    assert_eq!(state.counts.not_handled, 1);
+    assert_eq!(state.counts.not_handled, 0);
 }
 
 #[test]
@@ -1289,15 +1291,7 @@ fn a_verdict_amend_after_the_hand_back_is_ignored() {
 }
 
 #[test]
-fn a_late_reply_without_a_release_does_not_count() {
-    let mut s = Scenario::new(DOC);
-    let x = s.verdict("- first item", "no");
-    s.submit();
-    let turn = s.claim(CLAUDE);
-    s.yield_turn(CLAUDE, turn);
-    s.late_reply(CLAUDE, x, "answer", "late anyway");
-    assert_eq!(status(&s.fold(), x), ItemStatus::NotHandled);
-
+fn another_agents_late_reply_after_a_release_settles_nothing() {
     // After a release, only the released claim's agent may answer late
     let (mut s, x, _, _, _) = released();
     s.late_reply("other", x, "answer", "never claimed");
@@ -1492,4 +1486,142 @@ fn a_hunk_over_several_blocks_handles_the_note_on_its_last_one() {
         outcome_of(&state, x),
         outcome(false, false, &[change_id(ext)])
     );
+}
+
+#[test]
+fn a_late_reply_after_the_agents_own_yield_settles_without_reopening_the_turn() {
+    let mut s = Scenario::new(DOC);
+    let ask = s.comment(s.quote("detail one"), Some("ask"), Some("right?"));
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    let yielded = s.yield_turn(CLAUDE, turn);
+    let before = s.fold();
+    assert_eq!(status(&before, ask), ItemStatus::NotHandled);
+
+    let late = s.late_reply(CLAUDE, ask, "answer", "forgot this one");
+    let after = s.fold();
+    assert_eq!(status(&after, ask), ItemStatus::Handled);
+    assert_eq!(item(&after, ask).replies[0].n, late);
+    assert_eq!(after.phrase.stage, before.phrase.stage);
+    assert_eq!(
+        (after.rounds[0].claim, after.rounds[0].r#yield),
+        (Some(turn), Some(yielded)),
+        "still the same ended turn"
+    );
+    assert_eq!(s.scan(ts(99)).claimable_round(ts(99)), None);
+
+    // Only the late flag lets it in, and only from the turn's own agent.
+    let mut s = Scenario::new(DOC);
+    let ask = s.comment(s.quote("detail one"), Some("ask"), Some("right?"));
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    s.yield_turn(CLAUDE, turn);
+    s.agent_reply(CLAUDE, ask, "answer", "not flagged late");
+    s.late_reply("other", ask, "answer", "never claimed");
+    assert_eq!(status(&s.fold(), ask), ItemStatus::NotHandled);
+}
+
+/// A doc note with a `covers` citing text the turn wrote.
+fn covered(quote: &str) -> (ReviewState, u32) {
+    let mut s = Scenario::new(DOC);
+    let doc = s.note("say what the retries do");
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    let text = format!("{}\nRetries now use jitter.\n", s.text());
+    s.external(&text);
+    s.covers(CLAUDE, doc, quote, turn);
+    s.yield_turn(CLAUDE, turn);
+    (s.fold(), doc)
+}
+
+#[test]
+fn a_covers_that_binds_handles_its_doc_note() {
+    let (state, doc) = covered("Retries now use jitter");
+    assert_eq!(status(&state, doc), ItemStatus::Handled);
+    assert_eq!(state.counts.not_handled, 0);
+}
+
+#[test]
+fn a_covers_citing_text_the_turn_did_not_write_is_no_outcome() {
+    let (state, doc) = covered("Intro paragraph here");
+    assert_eq!(status(&state, doc), ItemStatus::NotHandled);
+    let (state, doc) = covered("jitter everywhere");
+    assert_eq!(status(&state, doc), ItemStatus::NotHandled);
+}
+
+#[test]
+fn a_late_done_after_the_agents_own_yield_counts_and_an_unflagged_one_does_not() {
+    for late in [true, false] {
+        let mut s = Scenario::new(DOC);
+        let x = s.verdict("- first item", "no");
+        s.submit();
+        let turn = s.claim(CLAUDE);
+        s.yield_turn(CLAUDE, turn);
+        let stage = s.fold().phrase.stage;
+        s.push(
+            support::scenario::agent(CLAUDE),
+            json!({"op": "done", "to": x, "turn": turn, "late": late}),
+        );
+        let state = s.fold();
+        let want = if late {
+            ItemStatus::Handled
+        } else {
+            ItemStatus::NotHandled
+        };
+        assert_eq!(status(&state, x), want, "late: {late}");
+        assert_eq!(state.phrase.stage, stage, "late: {late}");
+    }
+}
+
+#[test]
+fn a_note_its_turn_left_open_is_carried_to_the_next_claim() {
+    let mut s = Scenario::new(DOC);
+    let x = s.verdict("- first item", "no");
+    s.submit();
+    let first = s.claim(CLAUDE);
+    s.yield_turn(CLAUDE, first);
+    let state = s.fold();
+    assert_eq!(status(&state, x), ItemStatus::NotHandled);
+    assert_eq!(
+        item(&state, x).turn,
+        Some(first),
+        "no later claim to carry it to"
+    );
+
+    let y = s.note("round two");
+    s.submit();
+    let second = s.claim("other");
+    let state = s.fold();
+    assert_eq!(status(&state, x), ItemStatus::PickedUp);
+    assert_eq!(item(&state, x).turn, Some(second));
+    assert_eq!(status(&state, y), ItemStatus::PickedUp);
+
+    s.done("other", x, second);
+    s.done("other", y, second);
+    s.yield_turn("other", second);
+    let state = s.fold();
+    assert_eq!(status(&state, x), ItemStatus::Handled);
+    assert_eq!(state.counts.not_handled, 0);
+}
+
+#[test]
+fn a_carried_note_left_open_again_moves_on_once_more() {
+    let mut s = Scenario::new(DOC);
+    let x = s.verdict("- first item", "no");
+    s.submit();
+    let first = s.claim(CLAUDE);
+    s.yield_turn(CLAUDE, first);
+    s.note("round two");
+    s.submit();
+    let second = s.claim(CLAUDE);
+    s.yield_turn(CLAUDE, second);
+    assert_eq!(status(&s.fold(), x), ItemStatus::NotHandled);
+    s.note("round three");
+    s.submit();
+    let third = s.claim(CLAUDE);
+    s.done(CLAUDE, x, third);
+    s.yield_turn(CLAUDE, third);
+    let state = s.fold();
+    assert_eq!(status(&state, x), ItemStatus::Handled);
+    assert_eq!(item(&state, x).turn, Some(third));
 }

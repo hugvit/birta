@@ -27,6 +27,20 @@ use items::{Notes, Outcome, cover};
 use texts::{Texts, span_of};
 use turns::{RoundRec, Turns};
 
+/// Whether a round view lists `item`: the claim `claim` holds it, or with no claim yet
+/// it was sent in one of `rounds`; and, but for a read-only view, a note an earlier turn
+/// left open, which the fold carries to the next claim.
+pub fn listed(item: &Item, claim: Option<u32>, rounds: &[u32], read_only: bool) -> bool {
+    if item.by.kind != ByKind::Human || item.status == ItemStatus::Retracted {
+        return false;
+    }
+    let held = match claim {
+        Some(c) => item.turn == Some(c),
+        None => item.sent_in.is_some_and(|s| rounds.contains(&s)),
+    };
+    held || (!read_only && items::carries(item.status))
+}
+
 /// Minutes of agent silence after which the human may release a claim, in ms.
 const SILENCE_MS: u64 = 900_000;
 /// Creation writes the doc's owner on this line; later owner lines count only from the human.
@@ -427,7 +441,7 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
                 .then(|| cover(&turns.rounds, note.n, None))
                 .flatten();
             let submit = round.filter(|r| r.kind == RoundKind::Submit);
-            let held_by: Vec<u32> = submit
+            let mut held_by: Vec<u32> = submit
                 .map(|r| {
                     r.taker
                         .into_iter()
@@ -435,15 +449,23 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
                         .collect()
                 })
                 .unwrap_or_default();
-            let out = if held_by.is_empty() {
+            let mut holder = submit.and_then(|r| r.taker);
+            let mut out = if held_by.is_empty() {
                 Outcome::default()
             } else {
                 items::outcome(note, &held_by, &turns, &mut texts)
             };
+            let mut status = items::status(note, round, holder, &turns, &out);
+            while let Some(next) = items::carried_to(&turns, holder, status) {
+                held_by.push(next);
+                holder = Some(next);
+                out = items::outcome(note, &held_by, &turns, &mut texts);
+                status = items::status(note, round, holder, &turns, &out);
+            }
             Facts {
-                status: items::status(note, round, &turns, &out),
+                status,
                 sent_in: submit.map(|r| r.n),
-                turn: submit.and_then(|r| r.taker),
+                turn: holder,
                 sent_by: round.map(|r| r.n),
                 held_by,
                 out,
@@ -494,6 +516,21 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
         },
         &mut texts,
     );
+    // Only the changes tell whether a `covers` bound, so its note settles after them
+    for (note, f) in notes.notes.iter().zip(&mut facts) {
+        let covered = built.changes.iter().any(|c| {
+            c.asked.kind == AskedKind::Cited
+                && c.asked.notes.contains(&note.n)
+                && c.turn.is_some_and(|t| f.held_by.contains(&t))
+        });
+        if covered {
+            f.out.covered = true;
+            let round = f
+                .sent_by
+                .and_then(|n| turns.rounds.iter().find(|r| r.n == n));
+            f.status = items::status(note, round, f.turn, &turns, &f.out);
+        }
+    }
 
     let locator = anchor::Locator::new(&doc.text);
     let items: Vec<Item> = notes

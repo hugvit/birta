@@ -141,26 +141,33 @@ impl Turns {
                     self.replies.insert(line.n, t);
                 }
             }
-            Op::Done { to, turn } if line.by.kind == ByKind::Agent => {
-                if self.counts_for(*turn, name) {
+            Op::Done { to, turn, late } if line.by.kind == ByKind::Agent => {
+                if self.counts_for(*turn, name, *late) {
                     self.dones.entry(*to).or_default().push(*turn);
                 }
             }
             Op::Comment { turn, .. } if line.by.kind == ByKind::Agent => {
                 let turn = turn
-                    .filter(|t| self.counts_for(*t, name))
+                    .filter(|t| self.counts_for(*t, name, false))
                     .or_else(|| self.author_turn(name, false));
                 if let Some(t) = turn {
                     self.comments.insert(line.n, t);
                 }
             }
-            Op::TurnNote { body, turn } if self.counts_for(*turn, name) => {
+            Op::TurnNote { body, turn, late } if self.counts_for(*turn, name, *late) => {
                 self.notes.insert(*turn, body.clone());
             }
-            Op::Unasked { turn, quote, .. } if self.counts_for(*turn, name) => {
+            Op::Unasked {
+                turn, quote, late, ..
+            } if self.counts_for(*turn, name, *late) => {
                 self.unasked.entry(*turn).or_default().push(quote.clone());
             }
-            Op::Covers { to, quote, turn } if self.counts_for(*turn, name) => {
+            Op::Covers {
+                to,
+                quote,
+                turn,
+                late,
+            } if self.counts_for(*turn, name, *late) => {
                 self.covers
                     .entry(*turn)
                     .or_default()
@@ -262,19 +269,21 @@ impl Turns {
         }
     }
 
-    /// Turn `turn` is `name`'s and still takes its ops.
-    fn counts_for(&self, turn: u32, name: &Option<String>) -> bool {
-        self.turn(turn)
-            .is_some_and(|t| t.agent == *name && (t.open() || t.late()))
+    /// Turn `turn` is `name`'s and still takes its ops. Once the agent yielded, only
+    /// ops flagged `late` count, and they never re-open it.
+    fn counts_for(&self, turn: u32, name: &Option<String>, late: bool) -> bool {
+        self.turn(turn).is_some_and(|t| {
+            t.agent == *name && (t.open() || t.late() || (late && t.end.is_some()))
+        })
     }
 
     /// The turn an op by `name` belongs to: its latest open one, or with `late` its
-    /// released one.
+    /// latest released or yielded one.
     fn author_turn(&self, name: &Option<String>, late: bool) -> Option<u32> {
         let mine = || self.turns.iter().rev().filter(|t| t.agent == *name);
         mine()
             .find(|t| t.open())
-            .or_else(|| mine().find(|t| late && t.late()))
+            .or_else(|| mine().find(|t| late && (t.late() || t.end.is_some())))
             .map(|t| t.n)
     }
 }

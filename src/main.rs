@@ -130,7 +130,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::from_arg_matches(&command.get_matches()).unwrap_or_else(|e| e.exit());
     if let Some(cmd) = cli.cmd {
         let code = if review_on {
-            birta::agent::run(cmd)
+            birta::agent::run(cmd, &config)
         } else {
             birta::agent::gate_off()
         };

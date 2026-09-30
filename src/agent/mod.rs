@@ -2,10 +2,15 @@
 //! install, and only while the review gate is on.
 
 pub mod identity;
+pub mod render;
+pub mod review_cmd;
+pub mod wait;
 
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
+
+use crate::config::Config;
 
 pub const GATE_OFF: &str =
     "review is off: set [review] enabled = true in ~/.config/birta/config.toml";
@@ -47,14 +52,20 @@ pub struct ReviewArgs {
     #[arg(long)]
     pub wait: bool,
     /// Seconds to wait; 0 waits forever
-    #[arg(long, value_name = "SECS")]
+    #[arg(long, value_name = "SECS", requires = "wait")]
     pub timeout: Option<u64>,
     /// Look without picking up
     #[arg(long)]
     pub peek: bool,
     /// Name the doc's drafter if waiting creates its review file
-    #[arg(long, value_name = "NAME", requires = "wait")]
+    #[arg(long, value_name = "NAME", requires = "wait", conflicts_with = "peek")]
     pub drafted_by: Option<String>,
+    /// Show every item, not only the first 20
+    #[arg(long)]
+    pub all: bool,
+    /// Print the round as one JSON object
+    #[arg(long)]
+    pub json: bool,
     /// Agent name to record
     #[arg(long = "as", value_name = "NAME")]
     pub as_name: Option<String>,
@@ -125,12 +136,15 @@ pub fn gate_off() -> ExitCode {
     ExitCode::Error
 }
 
-pub fn run(cmd: Cmd) -> ExitCode {
+pub fn run(cmd: Cmd, config: &Config) -> ExitCode {
     if let Some(raw) = cmd.as_name()
         && let Err(e) = identity::parse_as(raw)
     {
         eprintln!("error: {e}");
         return ExitCode::Usage;
+    }
+    if let Cmd::Review(args) = &cmd {
+        return review_cmd::run(args, config);
     }
     eprintln!("birta: `{}` is not available in this build", cmd.verb());
     ExitCode::Error

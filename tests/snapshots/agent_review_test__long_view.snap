@@ -1,0 +1,51 @@
+---
+source: tests/agent_review_test.rs
+expression: out
+---
+pr.md · handed back 14:13 by andres · 25 items
+#4    note  "detail one" — note 01
+#5    note  "more item" — note 02
+#6    note  "appendix item" — note 03
+#7    note  "third item" — note 04
+#8    note  "second item" — note 05
+#9    note  "detail one" — note 06
+#10   note  "more item" — note 07
+#11   note  "appendix item" — note 08
+#12   note  "third item" — note 09
+#13   note  "second item" — note 10
+#14   note  "detail one" — note 11
+#15   note  "more item" — note 12
+#16   note  "appendix item" — note 13
+#17   note  "third item" — note 14
+#18   note  "second item" — note 15
+#19   note  "detail one" — note 16
+#20   note  "more item" — note 17
+#21   note  "appendix item" — note 18
+#22   note  "third item" — note 19
+#23   note  "second item" — note 20
++5 more · birta review pr.md --all
+next: Edit (not Write) pr.md. For any change outside the quoted spots, cite the note it serves. Then:
+  birta respond pr.md <<'EOF'
+  #4 done
+  #5 done
+  #6 done
+  #7 done
+  #8 done
+  #9 done
+  #10 done
+  #11 done
+  #12 done
+  #13 done
+  #14 done
+  #15 done
+  #16 done
+  #17 done
+  #18 done
+  #19 done
+  #20 done
+  #21 done
+  #22 done
+  #23 done
+  @: <two lines: what you did, didn't, ask>
+  EOF
+  birta review pr.md --wait     # background it if your host supports that

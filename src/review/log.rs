@@ -93,50 +93,23 @@ impl Log {
         ctx: AppendCtx,
         build: impl FnOnce(&Parsed, u64) -> Result<Vec<Op>, Reject>,
     ) -> Result<Vec<u32>, AppendError> {
-        let (mut file, bytes) = self.lock()?;
-        if ops::is_unfinished(&bytes) {
-            return Err(io::Error::from(io::ErrorKind::NotFound).into());
-        }
-        let parsed = ops::parse(&bytes);
-        if parsed.read_only {
-            return Err(AppendError::Rejected(Reject::ReadOnly));
-        }
-        let ops = build(&parsed, ctx.now_ms).map_err(AppendError::Rejected)?;
-        let first = physical_lines(&bytes) + 1;
-        let mut out = Vec::new();
-        // Close a line left without its newline, so ours starts on a line of its own.
-        if !bytes.ends_with(b"\n") {
-            out.push(b'\n');
-        }
-        let mut landed = Vec::with_capacity(ops.len());
-        let durable = ops.iter().any(|op| {
-            matches!(
-                op,
-                Op::Submit { .. } | Op::Approve { .. } | Op::Claim { .. } | Op::Withdraw { .. }
-            )
-        });
-        for (n, op) in (first..).zip(ops) {
-            let line = Line {
-                n,
-                ts: Some(ctx.now_ms),
-                by: ctx.by.clone(),
-                cid: ctx.cid.clone(),
-                op,
-            };
-            serde_json::to_writer(&mut out, &line).map_err(io::Error::other)?;
-            out.push(b'\n');
-            landed.push(n);
-        }
-        if landed.is_empty() {
-            return Ok(landed);
-        }
-        file.write_all(&out)?;
-        if durable {
-            file.sync_data()?;
-        }
-        Ok(landed)
+        self.hold()?.append_with(ctx, build)
     }
 
+    /// Takes the file's exclusive lock until the [`Held`] is dropped, so a write can
+    /// span several files. `NotFound` when there is no finished file.
+    pub fn hold(&self) -> io::Result<Held> {
+        let (file, bytes) = self.lock()?;
+        if ops::is_unfinished(&bytes) {
+            return Err(io::Error::from(io::ErrorKind::NotFound));
+        }
+        let parsed = ops::parse(&bytes);
+        Ok(Held {
+            file,
+            bytes,
+            parsed,
+        })
+    }
     /// Creates the file with its header, baseline snap and owner, all or nothing.
     /// Returns whether this call created it; the first creator's owner stands.
     pub fn create_if_missing(
@@ -201,6 +174,67 @@ impl Log {
             return Ok((file, bytes));
         }
         Err(io::Error::other("review file kept being replaced"))
+    }
+}
+
+/// A review file under its exclusive lock, read as it was when locked.
+#[derive(Debug)]
+pub struct Held {
+    file: File,
+    bytes: Vec<u8>,
+    parsed: Parsed,
+}
+
+impl Held {
+    pub fn parsed(&self) -> &Parsed {
+        &self.parsed
+    }
+
+    /// [`Log::append_with`] on the file this holds.
+    pub fn append_with(
+        &mut self,
+        ctx: AppendCtx,
+        build: impl FnOnce(&Parsed, u64) -> Result<Vec<Op>, Reject>,
+    ) -> Result<Vec<u32>, AppendError> {
+        if self.parsed.read_only {
+            return Err(AppendError::Rejected(Reject::ReadOnly));
+        }
+        let ops = build(&self.parsed, ctx.now_ms).map_err(AppendError::Rejected)?;
+        let first = physical_lines(&self.bytes) + 1;
+        let mut out = Vec::new();
+        // Close a line left without its newline, so ours starts on a line of its own.
+        if !self.bytes.ends_with(b"\n") {
+            out.push(b'\n');
+        }
+        let mut landed = Vec::with_capacity(ops.len());
+        let durable = ops.iter().any(|op| {
+            matches!(
+                op,
+                Op::Submit { .. } | Op::Approve { .. } | Op::Claim { .. } | Op::Withdraw { .. }
+            )
+        });
+        for (n, op) in (first..).zip(ops) {
+            let line = Line {
+                n,
+                ts: Some(ctx.now_ms),
+                by: ctx.by.clone(),
+                cid: ctx.cid.clone(),
+                op,
+            };
+            serde_json::to_writer(&mut out, &line).map_err(io::Error::other)?;
+            out.push(b'\n');
+            landed.push(n);
+        }
+        if landed.is_empty() {
+            return Ok(landed);
+        }
+        self.file.write_all(&out)?;
+        if durable {
+            self.file.sync_data()?;
+        }
+        self.bytes.extend_from_slice(&out);
+        self.parsed = ops::parse(&self.bytes);
+        Ok(landed)
     }
 }
 

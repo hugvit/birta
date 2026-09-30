@@ -1,0 +1,12 @@
+{
+  "not_handled": 0,
+  "notes": {
+    "#4": "no action",
+    "#5": "remove finding 2",
+    "#6": "no action",
+    "#7": "agent decides: edit, or didnt with a reason",
+    "#8": "rewrite finding 5",
+    "#9": "edit the recommendation"
+  },
+  "unasked": 0
+}

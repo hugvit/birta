@@ -1,0 +1,18 @@
+---
+source: tests/round_trip_test.rs
+expression: stable
+---
+pr.md · handed back HH:MM by andres · 4 items · drafted by claude
+DOC   #4 "too long overall; say how the retries back off"
+#5    note  "we just fail" — say why: flaky S3 503s
+#6    no    ## Stacked on (whole section)
+#7    ask   "Ran the integration suite" — is 5 retries enough?   (answer only; don't edit)
+next: Edit (not Write) pr.md. For any change outside the quoted spots, cite the note it serves. Then:
+  birta respond pr.md <<'EOF'
+  #5 done
+  #6 done
+  #7 answer: <your answer>
+  #4 covers "<new text you wrote for the whole-doc note>"
+  @: <two lines: what you did, didn't, ask>
+  EOF
+  birta review pr.md --wait     # background it if your host supports that

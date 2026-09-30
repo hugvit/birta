@@ -8,6 +8,7 @@ use super::fold;
 use super::hunk;
 use super::log::Log;
 use super::ops::{Act, Hunk, Op, Parsed};
+use super::sync::read_doc;
 use crate::doc_write::{self, Recording, Stage, Via, WriteErr, WriteTarget, Written};
 use crate::paths::DocRef;
 use crate::rev::Rev;
@@ -58,12 +59,12 @@ fn reverse_change_with(
     let Some(mut held) = Log::open(&doc.review_path).hold_for_edit()? else {
         return Err(UndoErr::NotReversible);
     };
-    let before = std::fs::read(&doc.canonical).map_err(UndoErr::Io)?;
+    let before = read_doc(&doc.canonical).map_err(UndoErr::Io)?;
     stage(Stage::Read);
     if Rev::of(&before) != *client_rev {
         return Err(UndoErr::ChangedSince);
     }
-    held.sync(&doc.canonical, &before);
+    held.sync(&doc.canonical, &before).map_err(UndoErr::Io)?;
     let text = std::str::from_utf8(&before).map_err(|_| UndoErr::NotReversible)?;
     let reverses = reverses(held.parsed(), text, change, confirm).ok_or(UndoErr::NotReversible)?;
     let after = apply_reverse(&before, &reverses).ok_or(UndoErr::NotReversible)?;

@@ -587,3 +587,27 @@ fn head_moving_inside_a_claim_labels_no_claimed_write() {
     // The claimed write recorded `second`, so HEAD has not moved since
     assert_eq!(head_and_cause(&p.line(n)), (Some(second), None));
 }
+
+#[test]
+fn a_fifo_in_place_of_the_doc_is_skipped_without_blocking_the_lock() {
+    let (s, _) = handed(false);
+    let p = Placed::new(&s);
+    let before = p.bytes();
+    fs::remove_file(&p.doc).unwrap();
+    let path = std::ffi::CString::new(p.doc.to_str().unwrap()).unwrap();
+    // SAFETY: a valid C string for the call.
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o644) }, 0);
+    let (log, doc) = (p.log(), p.doc.clone());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut held = log.hold().unwrap();
+        let _ = tx.send(sync_external(&mut held, &doc, later()));
+    });
+    let synced = rx.recv_timeout(Duration::from_secs(1));
+    if synced.is_err() {
+        // Unblocks the stuck open so the thread can end
+        let _ = fs::OpenOptions::new().write(true).open(&p.doc);
+    }
+    assert_eq!(synced, Ok(None), "sync blocked on the FIFO");
+    assert_eq!(p.bytes(), before);
+}

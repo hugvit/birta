@@ -96,8 +96,18 @@ pub fn hhmm(ms: u64) -> String {
     format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
 }
 
+/// A character no view prints: C0 and C1 controls, and the bidi controls and marks that
+/// reorder what a terminal shows.
+pub fn is_hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{200e}' | '\u{200f}' | '\u{061c}'
+        )
+}
+
 /// `text` on one line: each run of whitespace holding a break becomes one space, and
-/// other control characters are dropped, so no body can forge a line or reach a terminal.
+/// other hidden characters are dropped, so no text can forge a line or reach a terminal.
 pub fn one_line(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut broke = false;
@@ -105,7 +115,7 @@ pub fn one_line(text: &str) -> String {
         if matches!(c, '\n' | '\r' | '\t' | '\u{2028}' | '\u{2029}') {
             out.truncate(out.trim_end().len());
             broke = true;
-        } else if !(c.is_control() || broke && c.is_whitespace()) {
+        } else if !(is_hidden(c) || broke && c.is_whitespace()) {
             if broke && !out.is_empty() {
                 out.push(' ');
             }
@@ -114,6 +124,20 @@ pub fn one_line(text: &str) -> String {
         }
     }
     out
+}
+
+/// `text` with every hidden or line-breaking character written as `\u{..}`, so a name
+/// that can't be printed as it is can still be told apart.
+pub fn escaped(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if is_hidden(c) || matches!(c, '\u{2028}' | '\u{2029}') {
+                format!("\\u{{{:x}}}", u32::from(c))
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 /// `text` on one line, cut to 160 characters.
@@ -227,13 +251,13 @@ pub fn round(v: &RoundView) -> String {
 
     let mut header = format!(
         "{} · handed back {} by {} · {}",
-        v.name,
+        one_line(&v.name),
         hhmm(v.handed_at),
-        v.handed_by.as_deref().unwrap_or("someone"),
+        one_line(v.handed_by.as_deref().unwrap_or("someone")),
         count(levels.len() + notes.len())
     );
     if let Some(drafter) = &v.drafted_by {
-        header.push_str(&format!(" · drafted by {drafter}"));
+        header.push_str(&format!(" · drafted by {}", one_line(drafter)));
     }
     match &v.stance {
         Stance::Mine => {}
@@ -242,7 +266,11 @@ pub fn round(v: &RoundView) -> String {
         }
         Stance::Peek { tty: false } => header.push_str(" · peek"),
         Stance::ReadOnly { by, at } => {
-            header.push_str(&format!(" · picked up by {by} {} · read only", hhmm(*at)));
+            header.push_str(&format!(
+                " · picked up by {} {} · read only",
+                one_line(by),
+                hhmm(*at)
+            ));
         }
     }
 
@@ -307,12 +335,12 @@ pub fn approved(v: &ApprovedView) -> String {
     let short = |rev: &str| rev.chars().take(8).collect::<String>();
     let mut header = format!(
         "{} · approved {} by {}",
-        v.name,
+        one_line(&v.name),
         hhmm(v.at),
-        v.by.as_deref().unwrap_or("someone")
+        one_line(v.by.as_deref().unwrap_or("someone"))
     );
     if let Some(drafter) = &v.drafted_by {
-        header.push_str(&format!(" · drafted by {drafter}"));
+        header.push_str(&format!(" · drafted by {}", one_line(drafter)));
     }
     let rev = short(&v.rev);
     let current = match &v.changed_to {
@@ -333,7 +361,7 @@ pub fn approved(v: &ApprovedView) -> String {
 /// `None` when no target was given.
 pub fn nothing(name: &str, path: Option<&str>) -> String {
     lines(vec![
-        format!("{name} · nothing handed back yet"),
+        format!("{} · nothing handed back yet", one_line(name)),
         format!("next: {}", rerun(path)),
     ])
 }

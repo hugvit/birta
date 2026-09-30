@@ -28,7 +28,8 @@ pub fn now_ms() -> u64 {
 
 /// Calls `poll` with the time every tick until it returns something, or `None` once
 /// `limit` has passed. SIGINT and SIGTERM end the process at once, silently: a waiter
-/// writes nothing while it waits, so there is nothing to clean up.
+/// writes nothing while it waits, so there is nothing to clean up. A poll blocked on a
+/// lock is interrupted too, and only a poll that found nothing ends this way.
 pub fn until<T>(
     limit: Option<Duration>,
     mut poll: impl FnMut(u64) -> anyhow::Result<Option<T>>,
@@ -36,12 +37,14 @@ pub fn until<T>(
     catch_signals();
     let started = Instant::now();
     loop {
-        let signal = SIGNAL.load(Ordering::Relaxed);
-        if signal != 0 {
-            std::process::exit(128 + signal);
-        }
-        if let Some(done) = poll(now_ms())? {
-            return Ok(Some(done));
+        exit_if_signalled();
+        match poll(now_ms()) {
+            Ok(Some(done)) => return Ok(Some(done)),
+            Ok(None) => exit_if_signalled(),
+            Err(e) => {
+                exit_if_signalled();
+                return Err(e);
+            }
         }
         let left = limit.map(|limit| limit.saturating_sub(started.elapsed()));
         if left == Some(Duration::ZERO) {
@@ -51,16 +54,29 @@ pub fn until<T>(
     }
 }
 
+fn exit_if_signalled() {
+    let signal = SIGNAL.load(Ordering::Relaxed);
+    if signal != 0 {
+        std::process::exit(128 + signal);
+    }
+}
+
 extern "C" fn on_signal(signal: libc::c_int) {
     SIGNAL.store(signal, Ordering::Relaxed);
 }
 
+/// Installs the handlers without `SA_RESTART`, so a blocked `flock` returns `EINTR`
+/// instead of waiting on.
 fn catch_signals() {
     let handler = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
     for signal in [libc::SIGINT, libc::SIGTERM] {
-        // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+        // SAFETY: `action` is plain data, for which all zeroes is a valid value; the
+        // handler only stores to an atomic, which is async-signal-safe.
         unsafe {
-            libc::signal(signal, handler);
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = handler;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(signal, &action, std::ptr::null_mut());
         }
     }
 }

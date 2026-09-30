@@ -485,7 +485,10 @@ pub fn resolve(markdown: &str, req: &ResolveReq) -> Resolved {
                     let items = top
                         .into_iter()
                         .take(MAX_CANDIDATES)
-                        .map(|a| text.cand(node, kind, &req.sp, markdown, a, q.len()))
+                        .map(|a| {
+                            let heading = text.heading(node, kind, markdown);
+                            text.cand(&t, heading, &req.sp, markdown, a, q.len())
+                        })
                         .collect();
                     return Resolved::Candidates {
                         items,
@@ -536,8 +539,10 @@ fn search_up_to(markdown: &str, text: &str, max: usize) -> Vec<Cand> {
             continue;
         }
         let sp = sp_of(node);
-        for a in occurrences(&owned.chars(), q) {
-            found.push(owned.cand(node, kind, &sp, markdown, a, q.len()));
+        let chars = owned.chars();
+        let heading = owned.heading(node, kind, markdown);
+        for a in occurrences(&chars, q) {
+            found.push(owned.cand(&chars, heading, &sp, markdown, a, q.len()));
             if found.len() == max {
                 return found;
             }
@@ -749,10 +754,60 @@ struct Wrap {
     text: Option<(usize, usize)>,
 }
 
+/// The wraps that have text, by where it starts, over a max tree of where it ends, so a
+/// range finds the wraps it overlaps without walking them all.
+#[derive(Default)]
+struct Overlaps {
+    /// `(first, last, wrap)`, sorted.
+    spans: Vec<(usize, usize, usize)>,
+    /// `tree[size + i]` is `spans[i]`'s `last`; each parent is the max of its children.
+    tree: Vec<usize>,
+    size: usize,
+}
+
+impl Overlaps {
+    fn new(wraps: &[Wrap]) -> Self {
+        let mut spans: Vec<(usize, usize, usize)> = wraps
+            .iter()
+            .enumerate()
+            .filter_map(|(i, w)| w.text.map(|(first, last)| (first, last, i)))
+            .collect();
+        spans.sort_unstable();
+        let size = spans.len().next_power_of_two();
+        let mut tree = vec![0; 2 * size];
+        for (i, span) in spans.iter().enumerate() {
+            tree[size + i] = span.1;
+        }
+        for i in (1..size).rev() {
+            tree[i] = tree[2 * i].max(tree[2 * i + 1]);
+        }
+        Self { spans, tree, size }
+    }
+
+    /// Calls `f` with every wrap whose text overlaps `start..end`.
+    fn each(&self, start: usize, end: usize, mut f: impl FnMut(usize)) {
+        let before = self.spans.partition_point(|s| s.0 < end);
+        let mut stack = vec![(1, 0, self.size)];
+        while let Some((node, lo, hi)) = stack.pop() {
+            if lo >= before || self.tree.get(node).is_none_or(|&last| last <= start) {
+                continue;
+            }
+            if hi - lo == 1 {
+                f(self.spans[lo].2);
+                continue;
+            }
+            let mid = (lo + hi) / 2;
+            stack.push((2 * node + 1, mid, hi));
+            stack.push((2 * node, lo, mid));
+        }
+    }
+}
+
 /// An owner's text as units, whitespace collapsed like the page's.
 struct OwnerText<'m> {
     units: Vec<Unit>,
     wraps: Vec<Wrap>,
+    overlaps: Overlaps,
     code: bool,
     /// Mermaid or math: drawn as a picture, so nothing in it is selectable.
     diagram: bool,
@@ -768,6 +823,7 @@ impl<'m> OwnerText<'m> {
         let mut text = Self {
             units: Vec::new(),
             wraps: Vec::new(),
+            overlaps: Overlaps::default(),
             code: false,
             diagram: false,
             mapped: true,
@@ -826,6 +882,7 @@ impl<'m> OwnerText<'m> {
                     ..wrap
                 })
                 .collect();
+            text.overlaps = Overlaps::new(&text.wraps);
         }
         text
     }
@@ -976,16 +1033,15 @@ impl<'m> OwnerText<'m> {
         let mut start = picked.iter().map(|u| u.s).min().unwrap_or(0);
         let mut end = picked.iter().map(|u| u.e).max().unwrap_or(start);
         let mut widened = picked.iter().any(|u| u.atomic);
-        // Containers nest, so each pass can only reach one level further out
+        // Containers nest, so each pass can only reach one level further out. The range
+        // only grows, so which wraps a pass sees first can't change where it ends.
         loop {
             let mut grew = false;
-            for wrap in &self.wraps {
+            self.overlaps.each(start, end, |i| {
+                let wrap = &self.wraps[i];
                 let Some((first, last)) = wrap.text else {
-                    continue;
+                    return;
                 };
-                if start >= last || end <= first {
-                    continue;
-                }
                 // A link moves as a whole; emphasis only when a range reaches its edge
                 if wrap.link || start <= first || end >= last {
                     widened = true;
@@ -995,7 +1051,7 @@ impl<'m> OwnerText<'m> {
                         grew = true;
                     }
                 }
-            }
+            });
             if !grew {
                 return (start..end, widened);
             }
@@ -1013,23 +1069,21 @@ impl<'m> OwnerText<'m> {
         Some((first.s, last.e))
     }
 
-    fn cand<'a>(
+    /// The hit at units `a..a + len`. `chars` is [`OwnerText::chars`] and `heading` the
+    /// owner's first source line when it is a heading, both made once per owner.
+    fn cand(
         &self,
-        node: &'a AstNode<'a>,
-        kind: OwnerKind,
+        chars: &[char],
+        heading: Option<&str>,
         sp: &str,
         markdown: &str,
         a: usize,
         len: usize,
     ) -> Cand {
         let (bytes, _) = self.span(a, a + len);
-        let preview = if kind == OwnerKind::Heading {
-            let heading = markdown
-                .get(self.lines.bytes(node.data.borrow().sourcepos))
-                .unwrap_or("");
-            format!("→ {}", heading.lines().next().unwrap_or("").trim())
-        } else {
-            format!("→ \"{}\"", self.excerpt(a, a + len))
+        let preview = match heading {
+            Some(heading) => format!("→ {heading}"),
+            None => format!("→ \"{}\"", excerpt(chars, a, a + len)),
         };
         Cand {
             sp: Some(sp.to_string()),
@@ -1040,21 +1094,38 @@ impl<'m> OwnerText<'m> {
         }
     }
 
-    /// Units `a..b` with a little text either side, cut with `…`.
-    fn excerpt(&self, a: usize, b: usize) -> String {
-        const SIDE: usize = 16;
-        let chars = self.chars();
-        let (from, to) = (a.saturating_sub(SIDE), (b + SIDE).min(chars.len()));
-        let mut out = String::new();
-        if from > 0 {
-            out.push('…');
-        }
-        out.extend(&chars[from..to]);
-        if to < chars.len() {
-            out.push('…');
-        }
-        out
+    /// A heading owner's first source line, trimmed.
+    fn heading<'s, 'a>(
+        &self,
+        node: &'a AstNode<'a>,
+        kind: OwnerKind,
+        markdown: &'s str,
+    ) -> Option<&'s str> {
+        (kind == OwnerKind::Heading).then(|| {
+            markdown
+                .get(self.lines.bytes(node.data.borrow().sourcepos))
+                .unwrap_or("")
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+        })
     }
+}
+
+/// Units `a..b` of `chars` with a little text either side, cut with `…`.
+fn excerpt(chars: &[char], a: usize, b: usize) -> String {
+    const SIDE: usize = 16;
+    let (from, to) = (a.saturating_sub(SIDE), (b + SIDE).min(chars.len()));
+    let mut out = String::new();
+    if from > 0 {
+        out.push('…');
+    }
+    out.extend(&chars[from..to]);
+    if to < chars.len() {
+        out.push('…');
+    }
+    out
 }
 
 /// Every start of `q` in `t`, overlapping ones included, in linear time (Knuth–Morris–Pratt).

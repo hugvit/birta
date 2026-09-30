@@ -1,15 +1,16 @@
 //! Records a doc write nobody logged, under the review file's lock. The server's watcher
 //! and every CLI verb call it before their own ops, so a write lands once, in order.
 
-use std::fs;
-use std::io::Read;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Read};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use super::chain::Chain;
 use super::fold::{self, RoundKind};
-use super::log::{AppendCtx, Held};
+use super::log::{AppendCtx, AppendError, Held};
 use super::ops::{By, ByKind, Op, Parsed};
 
 /// How long `git rev-parse HEAD` may take before the write is recorded without it.
@@ -19,7 +20,7 @@ const GIT_POLL: Duration = Duration::from_millis(10);
 /// Reads the doc and records it if its rev isn't the log's head. Returns the line of
 /// the `external`; `None` when there is nothing to record or the doc can't be read.
 pub fn sync_external(held: &mut Held, doc: &Path, now_ms: u64) -> Option<u32> {
-    let bytes = read_file(doc)?;
+    let bytes = read_doc(doc).ok()?;
     sync_bytes(held, doc, &bytes, now_ms)
 }
 
@@ -37,8 +38,38 @@ pub fn sync_bytes_with(
     now_ms: u64,
     git_timeout: Duration,
 ) -> Option<u32> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    let recorded = Chain::build(held.parsed()).record(text)?;
+    record_with(held, doc, bytes, now_ms, git_timeout)
+        .ok()
+        .flatten()
+}
+
+/// [`sync_bytes`] for a caller that must not write on past a write it couldn't record:
+/// `Err` when the `external` failed to land.
+pub fn try_sync_bytes(
+    held: &mut Held,
+    doc: &Path,
+    bytes: &[u8],
+    now_ms: u64,
+) -> io::Result<Option<u32>> {
+    record_with(held, doc, bytes, now_ms, GIT_TIMEOUT).map_err(|e| match e {
+        AppendError::Io(e) => e,
+        AppendError::Rejected(why) => io::Error::other(format!("{why:?}")),
+    })
+}
+
+fn record_with(
+    held: &mut Held,
+    doc: &Path,
+    bytes: &[u8],
+    now_ms: u64,
+    git_timeout: Duration,
+) -> Result<Option<u32>, AppendError> {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return Ok(None);
+    };
+    let Some(recorded) = Chain::build(held.parsed()).record(text) else {
+        return Ok(None);
+    };
     let head = doc.parent().and_then(|dir| git_head(dir, git_timeout));
     let claimed = claim_open(held.parsed());
     let last = last_head(held.parsed());
@@ -66,18 +97,26 @@ pub fn sync_bytes_with(
         },
         cid: None,
     };
-    held.append_with(ctx, |_, _| Ok(ops)).ok()?.first().copied()
+    Ok(held.append_with(ctx, |_, _| Ok(ops))?.first().copied())
 }
 
-/// A regular file's bytes; anything else, or a read error, is nothing to record.
-fn read_file(path: &Path) -> Option<Vec<u8>> {
-    let mut file = fs::File::open(path).ok()?;
-    if !file.metadata().ok()?.is_file() {
-        return None;
+/// A doc's bytes, only from a regular file. Anything else is refused before it is opened,
+/// and the open doesn't block, so a FIFO swapped in can't stall a caller holding a lock.
+pub fn read_doc(path: &Path) -> io::Result<Vec<u8>> {
+    let not_regular = || io::Error::new(io::ErrorKind::InvalidInput, "not a regular file");
+    if !fs::metadata(path)?.is_file() {
+        return Err(not_regular());
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(not_regular());
     }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
-    Some(bytes)
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Whether an agent holds a hand-back it hasn't yielded, so a write now is its.

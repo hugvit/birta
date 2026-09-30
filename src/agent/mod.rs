@@ -10,7 +10,8 @@ pub mod review_cmd;
 pub mod show;
 pub mod wait;
 
-use std::path::PathBuf;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use clap::{Args, Subcommand};
 
@@ -125,17 +126,37 @@ impl Cmd {
     }
 }
 
+pub const CONTROL_PATH: &str = "path has control characters";
+
 /// What a verb run with the gate off does, whatever its arguments.
 pub fn gate_off() -> ExitCode {
-    eprintln!("{GATE_OFF}");
+    warn(GATE_OFF);
     ExitCode::Error
+}
+
+/// Prints `line` to stdout. A reader that went away is no error: what the verb wrote has
+/// landed, and an error exit would only invite a retry that lands it twice.
+pub(crate) fn say(line: &str) {
+    let _ = writeln!(io::stdout().lock(), "{line}");
+}
+
+/// [`say`] for stderr.
+pub(crate) fn warn(line: &str) {
+    let _ = writeln!(io::stderr().lock(), "{line}");
+}
+
+/// Whether a view could print `path` only with a control, bidi or line-break character.
+pub(crate) fn hidden_in(path: &Path) -> bool {
+    path.to_string_lossy()
+        .chars()
+        .any(|c| render::is_hidden(c) || matches!(c, '\u{2028}' | '\u{2029}'))
 }
 
 pub fn run(cmd: Cmd, config: &Config) -> ExitCode {
     if let Some(raw) = cmd.as_name()
         && let Err(e) = identity::parse_as(raw)
     {
-        eprintln!("error: {e}");
+        warn(&format!("error: {e}"));
         return ExitCode::Usage;
     }
     match &cmd {

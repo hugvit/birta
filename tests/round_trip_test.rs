@@ -991,6 +991,71 @@ impl Eval {
         out
     }
 
+    /// `run.sh args…` on a terminal of its own, with `typed` sent once the prompt is up
+    /// and the terminal kept open until it exits. Returns what it wrote there.
+    fn type_on_a_terminal(&self, args: &[&str], typed: &str) -> String {
+        use std::io::{Read, Write};
+        let line = format!("bash '{}' {}", self.script.display(), args.join(" "));
+        let script: Vec<&str> = if cfg!(target_os = "macos") {
+            vec!["-q", "/dev/null", "bash", "-c", &line]
+        } else {
+            vec!["-q", "-e", "-c", &line, "/dev/null"]
+        };
+        let mut child = std::process::Command::new("script")
+            .args(&script)
+            .env_clear()
+            .env("PATH", &self.path)
+            .env("HOME", self.base.join("home"))
+            .env("TMPDIR", &self.tmpdir)
+            .env("BIRTA_BIN", env!("CARGO_BIN_EXE_birta"))
+            .env("BIRTA_EVAL_OUT", &self.out_dir)
+            .current_dir(&self.base)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut out = String::new();
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = stdout.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                out.push_str(&String::from_utf8_lossy(&buf[..n]));
+                let _ = tx.send(out.clone());
+            }
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut seen = String::new();
+        while !seen.contains("Type run to go on") {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match rx.recv_timeout(left) {
+                Ok(out) => seen = out,
+                Err(_) => {
+                    let _ = child.kill();
+                    panic!("no prompt:\n{seen}");
+                }
+            }
+        }
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(typed.as_bytes()).unwrap();
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                panic!("run.sh was still running:\n{seen}");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        drop(stdin);
+        while let Ok(out) = rx.recv_timeout(Duration::from_millis(200)) {
+            seen = out;
+        }
+        seen
+    }
+
     /// Nothing was called, written or left behind.
     fn untouched(&self, what: &str) {
         // A spawn left running in the background would write its marker late
@@ -1147,6 +1212,29 @@ fn a_run_under_ci_or_an_agent_never_calls_claude_even_on_a_terminal() {
         assert!(out.contains(reason), "{key}={value:?} refuses: {out}");
         eval.untouched(&format!("a run with {key}={value:?}"));
     }
+}
+
+/// The positive control for every refusal above: the same harness, typed `run` on a
+/// terminal, does reach the fake `claude`, so "nothing was called" can fail.
+#[test]
+fn a_typed_run_on_a_terminal_calls_the_fake_claude_once_per_fixture() {
+    let eval = Eval::new(true);
+    let fake = eval.base.join("bin/claude");
+    let (code, stdout, stderr) = eval.run(&["--dry-run"], &[]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stdout.contains(&format!("claude: {}", fake.display())),
+        "the fake is the claude it resolves:\n{stdout}"
+    );
+
+    let out = eval.type_on_a_terminal(&["--runs", "1"], "run\n");
+    let called = fs::read_to_string(&eval.called).unwrap_or_default();
+    let calls: Vec<&str> = called.lines().collect();
+    assert_eq!(calls.len(), FIXTURES.len(), "{out}\n{called}");
+    assert!(
+        calls.iter().all(|c| *c == fake.to_str().unwrap()),
+        "{called}"
+    );
 }
 
 #[test]

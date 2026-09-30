@@ -1,18 +1,20 @@
 //! `birta comment`: an agent's note or question on a doc, placed on the text on disk by
-//! the one anchor constructor. Every check runs before the review file is made, and the
-//! doc's unlogged writes are recorded ahead of the note, under the file's lock.
+//! the one anchor constructor. Every check runs before the review file is made. Under the
+//! file's lock the doc is read once, and those bytes are both what the note is placed on
+//! and what is recorded ahead of it.
 
 use std::io::{self, IsTerminal, Read};
 
 use super::identity;
+use super::render::one_line;
 use super::respond_apply::replay;
-use super::{CommentArgs, ExitCode, wait};
+use super::{CONTROL_PATH, CommentArgs, ExitCode, hidden_in, say, wait, warn};
 use crate::anchor::{self, Cand};
 use crate::config::Config;
 use crate::review::doc::Doc;
 use crate::review::log::{AppendCtx, AppendError, Log};
 use crate::review::ops::{AnchorReq, At, BlockScope, By, ByKind, Line, Op, Verdict, Via};
-use crate::review::sync::sync_bytes;
+use crate::review::sync::{read_doc, try_sync_bytes};
 use crate::review::{anchor_from_req, review_path_for};
 
 /// Bytes a note may hold once its control characters are dropped.
@@ -61,11 +63,11 @@ enum Target {
 pub fn run(args: &CommentArgs, config: &Config) -> ExitCode {
     match comment(args, config) {
         Ok(n) => {
-            println!("commented: #{n}");
+            say(&format!("commented: #{n}"));
             ExitCode::Ok
         }
         Err(Refusal { code, msg }) => {
-            eprintln!("comment: {msg}");
+            warn(&format!("comment: {msg}"));
             code
         }
     }
@@ -90,6 +92,9 @@ fn comment(args: &CommentArgs, config: &Config) -> Result<u32, Refusal> {
     let to = args.to.as_deref().map(parse_to).transpose()?;
 
     let file = &args.file;
+    if hidden_in(file) {
+        return Err(failed(CONTROL_PATH));
+    }
     if file.as_os_str() == "-" || file.is_dir() {
         return Err(usage("comment needs a file"));
     }
@@ -99,24 +104,27 @@ fn comment(args: &CommentArgs, config: &Config) -> Result<u32, Refusal> {
     let body = read_body(args.body.as_deref())?;
 
     let name = file.to_string_lossy().into_owned();
-    let bytes = std::fs::read(&doc_path).map_err(|e| failed(format!("reading {name}: {e}")))?;
-    let text = std::str::from_utf8(&bytes).map_err(|_| failed(format!("{name} is not UTF-8")))?;
-    let doc = Doc::new(text);
-    let at = place(&doc, &target, &name)?;
+    let read = || {
+        let bytes = read_doc(&doc_path).map_err(|e| failed(format!("reading {name}: {e}")))?;
+        String::from_utf8(bytes).map_err(|_| failed(format!("{name} is not UTF-8")))
+    };
 
     let log = Log::open(&review_path_for(&doc_path)).git_exclude(config.review.git_exclude);
-    // A note can only answer one already in the file, so this never makes the file
-    if let Some(n) = to
-        && log.read().ok().flatten().is_none()
-    {
-        return Err(usage(format!("#{n} is not a note in {name}")));
+    if log.read().ok().flatten().is_none() {
+        // A note can only answer one already in the file, so this never makes the file
+        if let Some(n) = to {
+            return Err(usage(format!("#{n} is not a note in {name}")));
+        }
+        // Placed once here only so a refused note makes no file
+        let text = read()?;
+        place(&Doc::new(&text), &target, &name)?;
+        let doc_name = doc_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        log.create_if_missing(&doc_name, &text, None)
+            .map_err(|e| failed(format!("creating the review file: {e}")))?;
     }
-    let doc_name = doc_path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    log.create_if_missing(&doc_name, text, None)
-        .map_err(|e| failed(format!("creating the review file: {e}")))?;
     let mut held = log
         .hold()
         .map_err(|e| failed(format!("locking the review file: {e}")))?;
@@ -131,8 +139,12 @@ fn comment(args: &CommentArgs, config: &Config) -> Result<u32, Refusal> {
         return Err(usage(format!("#{n} is not a note in {name}")));
     }
 
+    let text = read()?;
+    let doc = Doc::new(&text);
+    let at = place(&doc, &target, &name)?;
     let now = wait::now_ms();
-    sync_bytes(&mut held, &doc_path, &bytes, now);
+    try_sync_bytes(&mut held, &doc_path, text.as_bytes(), now)
+        .map_err(|e| failed(format!("recording the doc's last write: {e}")))?;
     let env = |key: &str| std::env::var(key).ok();
     let by = By {
         kind: ByKind::Agent,
@@ -344,10 +356,10 @@ fn ambiguous(doc: &Doc, q: &str, hits: &[Cand], name: &str) -> Refusal {
     quote_err(lines.join("\n"))
 }
 
-/// Line `line`'s text, trimmed and cut short.
+/// Line `line`'s text, trimmed, cut short and fit for a terminal.
 fn excerpt(doc: &Doc, line: u32) -> String {
     doc.lines
         .range(line)
-        .map(|r| doc.text[r].trim().chars().take(EXCERPT).collect())
+        .map(|r| one_line(&doc.text[r].trim().chars().take(EXCERPT).collect::<String>()))
         .unwrap_or_default()
 }

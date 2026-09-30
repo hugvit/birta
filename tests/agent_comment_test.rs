@@ -12,8 +12,10 @@ use birta::rev::Rev;
 use birta::review::chain::Chain;
 use birta::review::doc::Doc;
 use birta::review::fold;
+use birta::review::log::Log;
 use birta::review::ops::{self, At, ByKind, Line, Op, Scope, Verdict, Via};
 use birta::review::state::ItemStatus;
+use birta::review::sync::sync_external;
 use serde_json::Value;
 
 mod support {
@@ -978,4 +980,210 @@ fn a_line_hint_places_rendered_markup_in_the_paragraph_it_picks() {
             anchor.quote
         );
     }
+}
+
+// --- races, hostile input and broken pipes ---
+
+/// `birta comment pr.md args…` started in the background, its output kept.
+fn spawn_comment(tmp: &Tmp, args: &[&str]) -> std::process::Child {
+    StdCommand::new(assert_cmd::cargo::cargo_bin("birta"))
+        .args(["comment", "pr.md"])
+        .args(args)
+        .current_dir(&tmp.base)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", tmp.path("home"))
+        .env("BIRTA_REVIEW", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+/// Waits for `child`, killing it past `limit`: exit code and stderr, `None` if killed.
+fn finish_within(mut child: std::process::Child, limit: Duration) -> (Option<i32>, String) {
+    let deadline = Instant::now() + limit;
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let out = child.wait_with_output().unwrap();
+    let killed = Instant::now() >= deadline;
+    (
+        (!killed).then(|| out.status.code()).flatten(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn a_save_while_the_comment_waits_for_the_lock_is_never_reverted() {
+    let mut s = Scenario::new(DOC);
+    s.note("human draft");
+    let tmp = Tmp::with(&s);
+    let saved = format!("{DOC}\nSaved while the agent waited.\n");
+    let log = Log::open(&tmp.path(LOG));
+    let mut held = log.hold().unwrap();
+    let child = spawn_comment(&tmp, &["--quote", "second item", "x", "--as", "claude"]);
+    // Long enough for the comment to read the doc and block on the lock
+    std::thread::sleep(Duration::from_millis(500));
+    fs::write(tmp.path("pr.md"), &saved).unwrap();
+    let recorded = sync_external(&mut held, &tmp.path("pr.md"), 1).expect("the save is recorded");
+    drop(held);
+    let (code, stderr) = finish_within(child, Duration::from_secs(10));
+    assert_eq!(code, Some(0), "{stderr}");
+
+    let lines = tmp.lines();
+    let after: Vec<&Line> = lines.iter().filter(|l| l.n > recorded).collect();
+    let reverts = after
+        .iter()
+        .filter(
+            |l| matches!(&l.op, Op::External { to_rev, .. } if *to_rev == Rev::of(DOC.as_bytes())),
+        )
+        .count();
+    assert_eq!(reverts, 0, "a revert that never happened: {after:#?}");
+    let parsed = ops::parse(tmp.log_bytes().unwrap());
+    assert_eq!(
+        Chain::build(&parsed).head(),
+        Some(&Rev::of(saved.as_bytes()))
+    );
+    let Op::Comment {
+        at: At::Anchor(anchor),
+        ..
+    } = &tmp.last().op
+    else {
+        panic!("a quote anchor: {:?}", tmp.last().op);
+    };
+    assert_eq!(
+        anchor.rev,
+        Rev::of(saved.as_bytes()),
+        "anchored on the saved text"
+    );
+}
+
+/// One 200 KB paragraph holding `word` 20 000 times.
+fn crowded() -> String {
+    format!("{}\n", "word abcd ".repeat(20_000).trim_end())
+}
+
+#[test]
+fn a_quote_found_20k_times_in_one_paragraph_is_counted_in_under_1_s() {
+    let text = crowded();
+    let tmp = Tmp::new(&text, Some(&Scenario::new(&text).log()));
+    for args in [
+        &["--quote", "word"][..],
+        &["--quote", "word", "--line", "1"],
+    ] {
+        let started = Instant::now();
+        let out = tmp
+            .cmd(&[])
+            .args(["comment", "pr.md"])
+            .args(args)
+            .args(["x", "--as", "claude"])
+            .timeout(Duration::from_secs(10))
+            .output()
+            .unwrap();
+        let took = started.elapsed();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(65), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("matches 20000 places"),
+            "{args:?}: {stderr}"
+        );
+        assert!(took < Duration::from_secs(1), "{args:?} took {took:?}");
+    }
+}
+
+#[test]
+fn a_name_with_control_characters_is_a_usage_error() {
+    for name in ["cl\x1baude", "claude\nnext", "cl\u{202e}aude"] {
+        let tmp = Tmp::bare();
+        let (code, stderr) = refused_as(&tmp, name);
+        assert_eq!(code, 2, "{name:?}: {stderr}");
+    }
+}
+
+/// A comment run with `--as name`, which must write nothing.
+fn refused_as(tmp: &Tmp, name: &str) -> (i32, String) {
+    let (code, stdout, stderr) = tmp.comment(&["--doc", "hi", "--as", name], "");
+    assert_ne!(code, 0, "{name:?} was accepted:\n{stdout}");
+    assert!(tmp.log_bytes().is_none(), "{name:?} made the review file");
+    (code, stderr)
+}
+
+#[test]
+fn a_path_with_control_characters_is_refused() {
+    let tmp = Tmp::bare();
+    for name in ["odd\nnext.md", "odd\x1b[31m.md", "odd\u{202e}dm.md"] {
+        fs::write(tmp.path(name), DOC).unwrap();
+        let out = tmp
+            .cmd(&[])
+            .args(["comment", name, "--doc", "hi", "--as", "claude"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{name:?}: {stderr}");
+        assert!(stderr.contains("path has control characters"), "{stderr}");
+        assert!(!tmp.path(&format!("{name}.birta.jsonl")).exists());
+    }
+}
+
+#[test]
+fn an_ambiguous_quote_lists_its_lines_without_control_characters() {
+    let text = "twin \x1b[31mred\u{202e} one\n\ntwin \x1b[31mred\u{202e} two\n";
+    let tmp = Tmp::new(text, None);
+    let (code, stdout, stderr) = tmp.comment(&["--quote", "twin", "x", "--as", "claude"], "");
+    assert_eq!(code, 65, "{stdout}{stderr}");
+    assert!(stderr.contains("matches 2 places"), "{stderr}");
+    assert!(
+        !stderr.contains('\x1b') && !stderr.contains('\u{202e}'),
+        "{stderr:?}"
+    );
+}
+
+#[test]
+fn a_fifo_in_place_of_the_doc_is_refused_without_hanging() {
+    let mut s = Scenario::new(DOC);
+    s.note("human draft");
+    let tmp = Tmp::with(&s);
+    let before = tmp.log_bytes();
+    fs::remove_file(tmp.path("pr.md")).unwrap();
+    let path = std::ffi::CString::new(tmp.path("pr.md").to_str().unwrap()).unwrap();
+    // SAFETY: a valid C string for the call.
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o644) }, 0);
+    let child = spawn_comment(&tmp, &["--doc", "hi", "--as", "claude"]);
+    let (code, stderr) = finish_within(child, Duration::from_secs(5));
+    assert_eq!(code, Some(1), "{stderr}");
+    assert_eq!(tmp.log_bytes(), before);
+}
+
+#[test]
+fn a_reader_that_went_away_leaves_one_landed_note_and_exit_0() {
+    let tmp = Tmp::bare();
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let out = StdCommand::new(assert_cmd::cargo::cargo_bin("birta"))
+        .args(["comment", "pr.md", "--doc", "hi", "--as", "claude"])
+        .current_dir(&tmp.base)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", tmp.path("home"))
+        .env("BIRTA_REVIEW", "1")
+        .stdin(Stdio::null())
+        .stdout(writer)
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    let notes = tmp
+        .lines()
+        .iter()
+        .filter(|l| matches!(l.op, Op::Comment { .. }))
+        .count();
+    assert_eq!(notes, 1);
 }

@@ -2,14 +2,16 @@
 //! doc as it is on disk, then records it. All of it runs under the review file's lock,
 //! and a refusal writes nothing.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{self, IsTerminal, Read};
 use std::path::Path;
 
+use anyhow::Context;
+
 use super::identity;
-use super::render;
+use super::render::{self, one_line};
 use super::respond::{self, Entry};
-use super::{ExitCode, RespondArgs, wait};
+use super::{CONTROL_PATH, ExitCode, RespondArgs, hidden_in, say, wait, warn};
 use crate::anchor;
 use crate::review::chain::Chain;
 use crate::review::doc::Doc;
@@ -17,7 +19,7 @@ use crate::review::fold::{self, RoundKind, TurnIndex};
 use crate::review::log::{AppendCtx, AppendError, Held, Log};
 use crate::review::ops::{AnchorReq, At, By, ByKind, Line, Op, ReplyKind, Verdict, Via};
 use crate::review::state::{ItemStatus, ReviewState};
-use crate::review::sync::sync_bytes;
+use crate::review::sync::{read_doc, try_sync_bytes};
 use crate::review::{Reject, anchor_from_req, review_path_for};
 
 /// Places an ambiguous quote's error lists.
@@ -27,23 +29,23 @@ const EXCERPT: usize = 60;
 
 pub fn run(args: &RespondArgs) -> ExitCode {
     if io::stdin().is_terminal() {
-        eprintln!("respond reads stdin; use the heredoc from `birta review`");
+        warn("respond reads stdin; use the heredoc from `birta review`");
         return ExitCode::Usage;
     }
     let mut input = Vec::new();
     if let Err(e) = io::stdin().read_to_end(&mut input) {
-        eprintln!("error: reading stdin: {e}");
+        warn(&format!("error: reading stdin: {e}"));
         return ExitCode::Error;
     }
     let Ok(input) = String::from_utf8(input) else {
-        eprintln!("respond: stdin is not UTF-8");
+        warn("respond: stdin is not UTF-8");
         return ExitCode::Usage;
     };
     let entries = match respond::parse(&input) {
         Ok(entries) => entries,
         Err(errors) => {
             for e in errors {
-                eprintln!("respond: {e}");
+                warn(&format!("respond: {e}"));
             }
             return ExitCode::Usage;
         }
@@ -57,15 +59,15 @@ pub fn run(args: &RespondArgs) -> ExitCode {
     match apply(&args.file, &entries, &by, wait::now_ms()) {
         Ok(Finish { code, out, err }) => {
             for line in err {
-                eprintln!("{line}");
+                warn(&line);
             }
             if let Some(out) = out {
-                println!("{out}");
+                say(&out);
             }
             code
         }
         Err(e) => {
-            eprintln!("error: {e:#}");
+            warn(&format!("error: {e:#}"));
             ExitCode::Error
         }
     }
@@ -113,6 +115,9 @@ enum Mode {
 }
 
 fn apply(file: &Path, entries: &[(usize, Entry)], by: &By, now: u64) -> anyhow::Result<Finish> {
+    if hidden_in(file) {
+        anyhow::bail!(CONTROL_PATH);
+    }
     let doc_path = file
         .canonicalize()
         .map_err(|_| anyhow::anyhow!("not found: {}", file.display()))?;
@@ -128,7 +133,7 @@ fn apply(file: &Path, entries: &[(usize, Entry)], by: &By, now: u64) -> anyhow::
         Err(e) => return Err(anyhow::Error::new(e).context("locking the review file")),
     };
     // Read once under the lock: the quotes are checked against the bytes recorded
-    let bytes = std::fs::read(&doc_path)?;
+    let bytes = read_doc(&doc_path).map_err(|e| anyhow::anyhow!("reading {name}: {e}"))?;
     let text = std::str::from_utf8(&bytes).map_err(|_| anyhow::anyhow!("{name} is not UTF-8"))?;
     let doc = Doc::new(text);
 
@@ -174,7 +179,7 @@ fn apply(file: &Path, entries: &[(usize, Entry)], by: &By, now: u64) -> anyhow::
         return Ok(Finish::refused(code, err));
     }
 
-    sync_bytes(&mut held, &doc_path, &bytes, now);
+    try_sync_bytes(&mut held, &doc_path, &bytes, now).context("recording the doc's last write")?;
     let ctx = AppendCtx {
         now_ms: now,
         by: by.clone(),
@@ -282,7 +287,7 @@ fn pick(
         return Ok(late(c));
     }
     if let Some(other) = claims.iter().rev().find(|c| c.end.is_none()) {
-        let name = other.name.as_deref().unwrap_or("someone");
+        let name = one_line(other.name.as_deref().unwrap_or("someone"));
         return refuse(ExitCode::Stale, format!("{name} holds this round"));
     }
     let msg = if index.rounds.is_empty() {
@@ -294,26 +299,36 @@ fn pick(
 }
 
 /// Every claim that opened a turn, with the submits it took and how it ended, the way
-/// the fold reads them.
+/// the fold reads them. Linear in the log, so a hostile one can't stall the lock.
 pub(super) fn replay(lines: &[Line]) -> Vec<ClaimRec> {
     let mut index = TurnIndex::default();
     let mut claims: Vec<ClaimRec> = Vec::new();
-    // Submit line to the claim holding it
-    let mut taker: HashMap<u32, u32> = HashMap::new();
+    // Claim line to its place in `claims`
+    let mut at: HashMap<u32, usize> = HashMap::new();
+    // Per agent name, the claims whose turn is still open
+    let mut open: HashMap<Option<String>, BTreeSet<u32>> = HashMap::new();
+    // Standing submits no claim holds
+    let mut untaken: BTreeSet<u32> = BTreeSet::new();
     for line in lines {
         index.step(line);
         match &line.op {
-            Op::Claim { round } if index.opens_turn(*round, line.n) => {
-                let rounds: Vec<u32> = index
+            Op::Submit { .. } => {
+                untaken.insert(line.n);
+            }
+            Op::Withdraw { to } => {
+                let withdrawn = index
                     .rounds
-                    .iter()
-                    .filter(|r| r.kind == RoundKind::Submit && r.n <= *round)
-                    .filter(|r| r.withdrawn.is_none() && !taker.contains_key(&r.n))
-                    .map(|r| r.n)
-                    .collect();
-                for &r in &rounds {
-                    taker.insert(r, line.n);
+                    .binary_search_by_key(to, |r| r.n)
+                    .is_ok_and(|i| index.rounds[i].withdrawn == Some(line.n));
+                if withdrawn {
+                    untaken.remove(to);
                 }
+            }
+            Op::Claim { round } if index.opens_turn(*round, line.n) => {
+                let later = untaken.split_off(&(round + 1));
+                let rounds: Vec<u32> = std::mem::replace(&mut untaken, later).into_iter().collect();
+                at.insert(line.n, claims.len());
+                open.entry(line.by.name.clone()).or_default().insert(line.n);
                 claims.push(ClaimRec {
                     n: line.n,
                     name: line.by.name.clone(),
@@ -325,19 +340,36 @@ pub(super) fn replay(lines: &[Line]) -> Vec<ClaimRec> {
                 turn: Some(turn),
                 release: true,
             } if line.by.kind == ByKind::Human => {
-                if let Some(c) = claims.iter_mut().find(|c| c.n == *turn && c.end.is_none()) {
+                if let Some(c) = at.get(turn).map(|&i| &mut claims[i])
+                    && c.end.is_none()
+                {
                     c.end = Some(End::Released {
                         at: line.ts.unwrap_or(0),
                     });
-                    taker.retain(|_, holder| *holder != *turn);
+                    // A submit swept into the claim may have been withdrawn since
+                    let standing = |r: &u32| {
+                        index
+                            .rounds
+                            .binary_search_by_key(r, |round| round.n)
+                            .is_ok_and(|i| index.rounds[i].withdrawn.is_none())
+                    };
+                    untaken.extend(c.rounds.iter().copied().filter(standing));
+                    if let Some(mine) = open.get_mut(&c.name) {
+                        mine.remove(turn);
+                    }
                 }
             }
             Op::Yield { turn, .. } if line.by.kind != ByKind::Human => {
-                let ended = claims.iter_mut().rev().find(|c| {
-                    c.end.is_none() && c.name == line.by.name && turn.is_none_or(|turn| c.n == turn)
-                });
-                if let Some(c) = ended {
-                    c.end = Some(End::Yielded);
+                let Some(mine) = open.get_mut(&line.by.name) else {
+                    continue;
+                };
+                let ended = match turn {
+                    Some(turn) => mine.contains(turn).then_some(*turn),
+                    None => mine.last().copied(),
+                };
+                if let Some(n) = ended {
+                    mine.remove(&n);
+                    claims[at[&n]].end = Some(End::Yielded);
                 }
             }
             _ => {}
@@ -348,7 +380,7 @@ pub(super) fn replay(lines: &[Line]) -> Vec<ClaimRec> {
 
 /// The submits a claim of `round` would take: up to it, standing, and held by nobody.
 fn pending_through(index: &TurnIndex, claims: &[ClaimRec], round: u32) -> Vec<u32> {
-    let held: Vec<u32> = claims
+    let held: HashSet<u32> = claims
         .iter()
         .filter(|c| !matches!(c.end, Some(End::Released { .. })))
         .flat_map(|c| c.rounds.iter().copied())
@@ -437,7 +469,7 @@ fn check(entries: &[(usize, Entry)], valid: &BTreeSet<u32>, doc: &Doc, name: &st
 
 /// A quote found exactly once in the current text, the way `comment` finds one.
 fn unique(doc: &Doc, quote: &str, name: &str) -> Result<(), String> {
-    let hits = anchor::search(&doc.text, quote);
+    let hits = anchor::search_all(&doc.text, quote);
     match hits.len() {
         1 => Ok(()),
         0 => Err(format!("quote not found in the current text: {quote:?}")),
@@ -451,7 +483,9 @@ fn unique(doc: &Doc, quote: &str, name: &str) -> Result<(), String> {
                     let excerpt = doc
                         .lines
                         .range(line)
-                        .map(|r| doc.text[r].trim().chars().take(EXCERPT).collect::<String>())
+                        .map(|r| {
+                            one_line(&doc.text[r].trim().chars().take(EXCERPT).collect::<String>())
+                        })
                         .unwrap_or_default();
                     format!("{}) line {line} {excerpt}", i + 1)
                 })
@@ -561,4 +595,60 @@ fn tally(entries: &[(usize, Entry)]) -> String {
         .map(|(n, what)| format!("{n} {what}"))
         .collect::<Vec<_>>()
         .join(" · ")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::review::ops::Parsed;
+
+    fn line(n: u32, kind: ByKind, op: Op) -> Line {
+        Line {
+            n,
+            ts: Some(u64::from(n)),
+            by: By {
+                kind,
+                name: (kind == ByKind::Agent).then(|| "claude".to_string()),
+                via: None,
+            },
+            cid: None,
+            op,
+        }
+    }
+
+    #[test]
+    fn replaying_30k_turns_takes_under_2_s() {
+        let mut lines = Vec::new();
+        for i in 0..30_000u32 {
+            let n = 4 + i * 3;
+            let submit = Op::Submit {
+                upto: n - 1,
+                not_before: 0,
+                hold_ms: 0,
+                to: None,
+                batch: None,
+            };
+            lines.push(line(n, ByKind::Human, submit));
+            lines.push(line(n + 1, ByKind::Agent, Op::Claim { round: n }));
+            let end = Op::Yield {
+                turn: Some(n + 1),
+                release: false,
+            };
+            lines.push(line(n + 2, ByKind::Agent, end));
+        }
+        let parsed = Parsed {
+            lines,
+            ..Parsed::default()
+        };
+        let started = Instant::now();
+        let index = fold::scan(&parsed, u64::MAX);
+        let claims = replay(&parsed.lines);
+        let pending = pending_through(&index, &claims, u32::MAX);
+        let took = started.elapsed();
+        assert_eq!(claims.len(), 30_000);
+        assert!(pending.is_empty());
+        assert!(took < Duration::from_secs(2), "took {took:?}");
+    }
 }

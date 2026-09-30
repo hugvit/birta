@@ -1,6 +1,8 @@
 //! Who is running an agent verb, for the `by` on the ops it writes. It never names a
 //! doc's drafter; only `--drafted-by` does.
 
+use super::render;
+
 /// Names only the person reviewing may carry.
 const HUMAN_NAMES: [&str; 2] = ["human", "you"];
 
@@ -34,6 +36,8 @@ pub fn parse_as(raw: &str) -> Result<String, String> {
     agent_name(raw).ok_or_else(|| {
         let why = if raw.trim().is_empty() {
             "a name is required"
+        } else if raw.chars().any(render::is_hidden) {
+            "a name has no control characters"
         } else {
             "that name is the reviewer's"
         };
@@ -45,6 +49,7 @@ fn agent_name(raw: &str) -> Option<String> {
     let name = raw.trim().to_lowercase();
     match name.as_str() {
         "" => None,
+        n if n.chars().any(render::is_hidden) => None,
         "claude-code" => Some("claude".to_string()),
         n if HUMAN_NAMES.contains(&n) => None,
         _ => Some(name),

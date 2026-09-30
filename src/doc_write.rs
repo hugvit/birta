@@ -7,6 +7,7 @@ use comrak::nodes::NodeValue;
 use comrak::{Arena, parse_document};
 
 use crate::rev::Rev;
+use crate::review::sync::read_doc;
 use crate::{anchor, atomic_write, paths};
 
 /// A document already resolved and authorised by `Roots::resolve_doc(.., Access::Write)`.
@@ -60,8 +61,9 @@ pub(crate) trait EditRecorder {
 
 /// A recorder under its lock.
 pub(crate) trait Recording {
-    /// Records `bytes`, read under the lock, unless they are what it already has.
-    fn sync(&mut self, doc: &Path, bytes: &[u8]);
+    /// Records `bytes`, read under the lock, unless they are what it already has. `Err`
+    /// when they couldn't be recorded, so no write lands on top of them.
+    fn sync(&mut self, doc: &Path, bytes: &[u8]) -> io::Result<()>;
     /// Records the write that turned `from` into `to`.
     fn record(&mut self, via: &Via, from: &[u8], to: &[u8]) -> io::Result<()>;
 }
@@ -89,7 +91,7 @@ pub(crate) fn write_doc(
         Some(rec) => rec.begin()?,
         None => None,
     };
-    let before = std::fs::read(&t.canonical).map_err(WriteErr::Io)?;
+    let before = read_doc(&t.canonical).map_err(WriteErr::Io)?;
     let from = Rev::of(&before);
     if let Expect::Rev(expected) = expect
         && expected != from
@@ -97,7 +99,7 @@ pub(crate) fn write_doc(
         return Err(WriteErr::ChangedSince);
     }
     if let Some(held) = held.as_mut() {
-        held.sync(&t.canonical, &before);
+        held.sync(&t.canonical, &before).map_err(WriteErr::Io)?;
     }
     let after = edit(&before)?;
     if after == before {
@@ -120,7 +122,7 @@ pub(crate) fn replace(
         return Err(WriteErr::ReadOnly);
     }
     // Narrows the window for an editor that saves without taking any lock.
-    let unchanged = || std::fs::read(&t.canonical).is_ok_and(|now| now == before);
+    let unchanged = || read_doc(&t.canonical).is_ok_and(|now| now == before);
     if !atomic_write::write_atomic_if(&t.canonical, after, unchanged).map_err(WriteErr::Io)? {
         return Err(WriteErr::ChangedSince);
     }
@@ -431,7 +433,9 @@ mod tests {
     }
 
     impl Recording for SpyHeld<'_> {
-        fn sync(&mut self, _: &Path, _: &[u8]) {}
+        fn sync(&mut self, _: &Path, _: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
 
         fn record(&mut self, _: &Via, from: &[u8], to: &[u8]) -> io::Result<()> {
             self.0.0.borrow_mut().push((Rev::of(from), Rev::of(to)));

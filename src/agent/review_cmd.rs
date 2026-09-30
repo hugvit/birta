@@ -1,5 +1,6 @@
 //! `birta review`: the round handed back on a doc or a folder, and the claim that picks
-//! it up. A claim runs under the review file's lock, and the view prints after it's let go.
+//! it up. A claim runs under the review file's lock, with the doc read and checked before
+//! anything is written, and the view prints after the lock is let go.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -13,17 +14,17 @@ use serde_json::{Value, json};
 
 use super::identity::{self, Identity};
 use super::render::{self, ApprovedView, ItemLine, RoundView, Stance, Target};
-use super::{ExitCode, ReviewArgs, wait};
+use super::{CONTROL_PATH, ExitCode, ReviewArgs, hidden_in, wait, warn};
 use crate::config::Config;
 use crate::paths::{self, Roots};
 use crate::review::chain::Chain;
 use crate::review::doc::Doc;
 use crate::review::fold::{self, RoundKind, TurnIndex};
 use crate::review::log::{AppendCtx, AppendError, Held, Log};
-use crate::review::ops::{Act, By, ByKind, Line, Op, Scope, Via};
+use crate::review::ops::{Act, By, ByKind, Line, Op, Parsed, Scope, Via};
 use crate::review::state::{AtKind, AtState, Attr, Change, Item, ReviewState};
-use crate::review::sync::sync_external;
-use crate::review::{FOLDER_REVIEW, review_path_for};
+use crate::review::sync::{read_doc, try_sync_bytes};
+use crate::review::{FOLDER_REVIEW, Reject, review_path_for};
 use crate::scan::{self, ScanBudget};
 
 /// How often a folder waiter lists its review files again.
@@ -40,15 +41,20 @@ pub fn should_claim(peek: bool, identity: Option<&Identity>, stdout_tty: bool) -
 
 /// Claims the latest due round on `doc` for `by`, if nobody has. Returns the claim's line.
 pub fn claim(doc: &Path, by: &By, now_ms: u64) -> anyhow::Result<Option<u32>> {
-    let claimed = claim_log(&Log::open(&review_path_for(doc)), Some(doc), by, now_ms)?;
-    Ok(claimed.map(|(line, _)| line))
+    let entry = Entry {
+        log: review_path_for(doc),
+        doc: Some(doc.to_path_buf()),
+        name: doc.display().to_string(),
+        path: String::new(),
+    };
+    Ok(claim_file(&entry, by, now_ms)?.map(|(line, ..)| line))
 }
 
 pub fn run(args: &ReviewArgs, config: &Config) -> ExitCode {
     match review(args, config) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("error: {e:#}");
+            warn(&format!("error: {e:#}"));
             ExitCode::Error
         }
     }
@@ -92,6 +98,13 @@ enum Pick {
     Approved { round: u32 },
 }
 
+/// What a view is built from: the review file, and the doc's text read once.
+struct Inputs {
+    parsed: Parsed,
+    /// `None` for a folder's own review file.
+    text: Option<String>,
+}
+
 /// One doc's part of the output.
 struct Block {
     text: String,
@@ -103,6 +116,12 @@ struct Block {
 type Stamp = Option<(u64, u64, u64, i64, i64)>;
 
 fn review(args: &ReviewArgs, config: &Config) -> anyhow::Result<ExitCode> {
+    if let Some(drafter) = &args.drafted_by
+        && (drafter.trim().is_empty() || drafter.chars().any(render::is_hidden))
+    {
+        warn("error: --drafted-by takes a name with no control characters");
+        return Ok(ExitCode::Usage);
+    }
     let env = |key: &str| std::env::var(key).ok();
     let who = identity::detect(args.as_name.as_deref(), &env);
     let opts = Opts {
@@ -140,7 +159,7 @@ fn review(args: &ReviewArgs, config: &Config) -> anyhow::Result<ExitCode> {
             let found = if args.wait {
                 wait::until(limit, dir_poll(root, name, path.as_deref(), &opts))?
             } else {
-                let list = entries(root, name, path.as_deref());
+                let list = entries(root, name, path.as_deref(), &mut HashSet::new());
                 let now = wait::now_ms();
                 match look_dir(&list, &opts, now)?.0 {
                     Some(blocks) => Some(blocks),
@@ -207,12 +226,18 @@ fn json_line(value: &Value) -> String {
 fn resolve(target: Option<&Path>) -> anyhow::Result<Place> {
     let Some(target) = target else {
         let root = std::env::current_dir()?.canonicalize()?;
+        if hidden_in(&root) {
+            anyhow::bail!(CONTROL_PATH);
+        }
         return Ok(Place::Dir {
             root,
             name: ".".to_string(),
             path: None,
         });
     };
+    if hidden_in(target) {
+        anyhow::bail!(CONTROL_PATH);
+    }
     let meta = fs::metadata(target).with_context(|| format!("not found: {}", target.display()))?;
     let typed = target.to_string_lossy();
     let typed = match typed.trim_end_matches('/') {
@@ -253,49 +278,153 @@ fn create_drafted(entry: &Entry, doc: &Path, drafter: &str, config: &Config) -> 
 
 // --- the claim ---
 
-fn claim_log(
-    log: &Log,
-    doc: Option<&Path>,
-    by: &By,
-    now_ms: u64,
-) -> anyhow::Result<Option<(u32, u32)>> {
-    let mut held = match log.hold() {
-        Ok(held) => held,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e).context("locking the review file"),
-    };
-    claim_held(&mut held, doc, by, now_ms)
+/// A review file under its lock, with its doc read under that lock.
+struct Locked<'a> {
+    entry: &'a Entry,
+    held: Held,
+    text: Option<String>,
 }
 
-/// Under `held`'s lock: records any doc write nobody logged, then claims the latest due
-/// round. Returns the claim's line and the round.
-fn claim_held(
-    held: &mut Held,
-    doc: Option<&Path>,
+impl Locked<'_> {
+    /// Whether `round` is still the one to claim, checked before anything is written.
+    fn claimable(&self, round: u32, now: u64) -> bool {
+        let parsed = self.held.parsed();
+        !parsed.read_only && fold::scan(parsed, now).claimable_round(now) == Some(round)
+    }
+
+    /// Records any doc write nobody logged, then claims `round`. Returns the claim's line.
+    fn claim(&mut self, round: u32, by: &By, now_ms: u64) -> anyhow::Result<u32> {
+        if let (Some(doc), Some(text)) = (&self.entry.doc, &self.text) {
+            try_sync_bytes(&mut self.held, doc, text.as_bytes(), now_ms)
+                .with_context(|| format!("recording the last write to {}", self.entry.name))?;
+        }
+        let ctx = AppendCtx {
+            now_ms,
+            by: by.clone(),
+            cid: None,
+        };
+        let landed = self
+            .held
+            .append_with(ctx, |parsed, now| {
+                match fold::scan(parsed, now).claimable_round(now) {
+                    Some(r) if r == round => Ok(vec![Op::Claim { round }]),
+                    _ => Err(Reject::AlreadyClaimed),
+                }
+            })
+            .map_err(|e| match e {
+                AppendError::Io(e) => anyhow::Error::new(e).context("writing the claim"),
+                AppendError::Rejected(why) => {
+                    anyhow::anyhow!("the review file refused the claim: {why:?}")
+                }
+            })?;
+        landed.first().copied().context("the claim was not written")
+    }
+
+    /// What the view needs, as the lock leaves it; the lock goes with it.
+    fn into_inputs(self) -> Inputs {
+        Inputs {
+            parsed: self.held.parsed().clone(),
+            text: self.text,
+        }
+    }
+}
+
+/// Locks `entry`'s review file and reads its doc. `None` when there is no finished file.
+fn lock(entry: &Entry) -> anyhow::Result<Option<Locked<'_>>> {
+    let held = match Log::open(&entry.log).hold() {
+        Ok(held) => held,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(e).with_context(|| format!("locking the review file of {}", entry.name));
+        }
+    };
+    let text = entry
+        .doc
+        .as_deref()
+        .map(|doc| read_text(doc, &entry.name))
+        .transpose()?;
+    Ok(Some(Locked { entry, held, text }))
+}
+
+/// A doc's text, which a view can be built from only when it is a regular UTF-8 file.
+fn read_text(doc: &Path, name: &str) -> anyhow::Result<String> {
+    let bytes = read_doc(doc).with_context(|| format!("reading {name}"))?;
+    String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("{name} is not UTF-8"))
+}
+
+/// A claim's line, its round, and the view's inputs as of the claim.
+type Claimed = (u32, u32, Inputs);
+
+/// Claims the latest due round on `entry`, if nobody has.
+fn claim_file(entry: &Entry, by: &By, now_ms: u64) -> anyhow::Result<Option<Claimed>> {
+    let Some(mut locked) = lock(entry)? else {
+        return Ok(None);
+    };
+    let Some(round) = fold::scan(locked.held.parsed(), now_ms).claimable_round(now_ms) else {
+        return Ok(None);
+    };
+    let claim = locked.claim(round, by, now_ms)?;
+    Ok(Some((claim, round, locked.into_inputs())))
+}
+
+/// Claims every file of a batch, or none of them. Each review file is locked once, even
+/// under two names, in `(dev, ino)` order, so waiters from any root lock alike. `None`
+/// when a file is no longer claimable as found.
+fn claim_batch(
+    group: &[(&Entry, u32)],
     by: &By,
     now_ms: u64,
-) -> anyhow::Result<Option<(u32, u32)>> {
-    if let Some(doc) = doc {
-        sync_external(held, doc, now_ms);
+) -> anyhow::Result<Option<HashMap<PathBuf, Claimed>>> {
+    let mut keyed = Vec::new();
+    for &(entry, round) in group {
+        let Ok(meta) = fs::metadata(&entry.log) else {
+            return Ok(None);
+        };
+        keyed.push(((meta.dev(), meta.ino()), entry, round));
     }
-    let mut round = None;
-    let ctx = AppendCtx {
-        now_ms,
-        by: by.clone(),
-        cid: None,
-    };
-    let landed = held
-        .append_with(ctx, |parsed, now| {
-            round = fold::scan(parsed, now).claimable_round(now);
-            Ok(round.map(|round| Op::Claim { round }).into_iter().collect())
-        })
-        .map_err(|e| match e {
-            AppendError::Io(e) => anyhow::Error::new(e).context("writing the claim"),
-            AppendError::Rejected(why) => {
-                anyhow::anyhow!("the review file refused the claim: {why:?}")
+    keyed.sort_by_key(|k| k.0);
+    keyed.dedup_by_key(|k| k.0);
+    let mut locked = Vec::new();
+    for (_, entry, round) in keyed {
+        match lock(entry)? {
+            Some(l) => locked.push((l, round)),
+            None => return Ok(None),
+        }
+    }
+    if !locked.iter().all(|(l, round)| l.claimable(*round, now_ms)) {
+        return Ok(None);
+    }
+    // Only a failed write can stop it now; what landed stays, and the error names it
+    let mut claims = Vec::new();
+    for i in 0..locked.len() {
+        let (l, round) = &mut locked[i];
+        match l.claim(*round, by, now_ms) {
+            Ok(claim) => claims.push(claim),
+            Err(e) => {
+                let names = |ls: &[(Locked, u32)]| {
+                    ls.iter()
+                        .map(|(l, _)| l.entry.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let done = match names(&locked[..i]) {
+                    none if none.is_empty() => "none".to_string(),
+                    done => done,
+                };
+                return Err(e.context(format!(
+                    "claiming {}; claimed before it failed: {done}",
+                    locked[i].0.entry.name
+                )));
             }
-        })?;
-    Ok(landed.first().copied().zip(round))
+        }
+    }
+    Ok(Some(
+        locked
+            .into_iter()
+            .zip(claims)
+            .map(|((l, round), claim)| (l.entry.log.clone(), (claim, round, l.into_inputs())))
+            .collect(),
+    ))
 }
 
 // --- looking ---
@@ -345,8 +474,11 @@ fn look_file(entry: &Entry, opts: &Opts, now: u64, waiting: bool) -> anyhow::Res
             Some(Pick::Approved { round })
         }
         Some(round) if !opts.claims => Some(Pick::Peek { round }),
-        Some(_) => match claim_log(&log, entry.doc.as_deref(), &opts.by, now)? {
-            Some((claim, round)) => Some(picked(&index, claim, round)),
+        Some(_) => match claim_file(entry, &opts.by, now)? {
+            Some((claim, round, inputs)) => {
+                let pick = picked(&fold::scan(&inputs.parsed, now), claim, round);
+                return Ok(Some(block(entry, pick, opts, now, &inputs)));
+            }
             None if waiting => None,
             None => match log.read()? {
                 Some(parsed) => settled(&fold::scan(&parsed, now), now, &opts.by),
@@ -356,7 +488,21 @@ fn look_file(entry: &Entry, opts: &Opts, now: u64, waiting: bool) -> anyhow::Res
         None if waiting => None,
         None => settled(&index, now, &opts.by),
     };
-    pick.map(|pick| block(entry, pick, opts, now)).transpose()
+    pick.map(|pick| Ok(block(entry, pick, opts, now, &inputs(entry)?)))
+        .transpose()
+}
+
+/// The view's inputs for a look that claims nothing.
+fn inputs(entry: &Entry) -> anyhow::Result<Inputs> {
+    let parsed = Log::open(&entry.log)
+        .read()?
+        .context("the review file went away")?;
+    let text = entry
+        .doc
+        .as_deref()
+        .map(|doc| read_text(doc, &entry.name))
+        .transpose()?;
+    Ok(Inputs { parsed, text })
 }
 
 fn picked(index: &TurnIndex, claim: u32, round: u32) -> Pick {
@@ -366,8 +512,15 @@ fn picked(index: &TurnIndex, claim: u32, round: u32) -> Pick {
     }
 }
 
-/// The review files under `root`, the folder's own first.
-fn entries(root: &Path, name: &str, path: Option<&str>) -> Vec<Entry> {
+/// The review files under `root`, the folder's own first. One whose path a view would
+/// print with a control character is left out, and said so on stderr once per path:
+/// `warned` holds the paths already named.
+fn entries(
+    root: &Path,
+    name: &str,
+    path: Option<&str>,
+    warned: &mut HashSet<String>,
+) -> Vec<Entry> {
     let roots = Roots::new(root.to_path_buf(), dirs::home_dir());
     let found = scan::walk(root, &roots, ScanBudget::default());
     let shown = |rel: &str| match path {
@@ -389,6 +542,15 @@ fn entries(root: &Path, name: &str, path: Option<&str>) -> Vec<Entry> {
         };
         let doc = root.join(doc_rel);
         if !doc.is_file() || !paths::is_md(&doc) {
+            continue;
+        }
+        if hidden_in(Path::new(doc_rel)) {
+            if warned.insert(doc_rel.to_string()) {
+                warn(&format!(
+                    "warning: skipped {}: {CONTROL_PATH}",
+                    render::escaped(&shown(doc_rel))
+                ));
+            }
             continue;
         }
         out.push(Entry {
@@ -440,51 +602,38 @@ fn look_dir(
         None => vec![&found[0]],
     };
 
-    let picks: Vec<(&Entry, Pick)> = if opts.claims {
-        // Path order everywhere, so two waiters locking one batch can't deadlock.
-        let mut order: Vec<&Entry> = group.iter().map(|f| f.0).collect();
-        order.sort_by(|a, b| a.log.cmp(&b.log));
-        let mut held = Vec::new();
-        for entry in order {
-            match Log::open(&entry.log).hold() {
-                Ok(h) => held.push((entry, h)),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e).context("locking a review file"),
-            }
-        }
-        let mut claimed = HashMap::new();
-        for (entry, h) in &mut held {
-            if let Some((claim, round)) = claim_held(h, entry.doc.as_deref(), &opts.by, now)? {
-                claimed.insert(entry.log.clone(), (claim, round));
-            }
-        }
-        drop(held);
+    let blocks: Vec<Block> = if opts.claims {
+        let rounds: Vec<(&Entry, u32)> = group.iter().map(|f| (f.0, f.1)).collect();
+        let Some(mut claimed) = claim_batch(&rounds, &opts.by, now)? else {
+            return Ok((None, due));
+        };
+        // An entry sharing its review file with an earlier one was claimed as that one
         group
             .iter()
             .filter_map(|&&(entry, _, _, kind)| {
-                let &(claim, round) = claimed.get(&entry.log)?;
-                Some(match kind {
-                    RoundKind::Approve => (entry, Pick::Approved { round }),
-                    RoundKind::Submit => (entry, Pick::Mine { claim, round }),
-                })
+                let (claim, round, inputs) = claimed.remove(&entry.log)?;
+                let pick = match kind {
+                    RoundKind::Approve => Pick::Approved { round },
+                    RoundKind::Submit => Pick::Mine { claim, round },
+                };
+                Some(block(entry, pick, opts, now, &inputs))
             })
             .collect()
     } else {
         group
             .iter()
-            .map(|&&(entry, round, _, kind)| match kind {
-                RoundKind::Approve => (entry, Pick::Approved { round }),
-                RoundKind::Submit => (entry, Pick::Peek { round }),
+            .map(|&&(entry, round, _, kind)| {
+                let pick = match kind {
+                    RoundKind::Approve => Pick::Approved { round },
+                    RoundKind::Submit => Pick::Peek { round },
+                };
+                Ok(block(entry, pick, opts, now, &inputs(entry)?))
             })
-            .collect()
+            .collect::<anyhow::Result<_>>()?
     };
-    if picks.is_empty() {
+    if blocks.is_empty() {
         return Ok((None, due));
     }
-    let blocks = picks
-        .into_iter()
-        .map(|(entry, pick)| block(entry, pick, opts, now))
-        .collect::<anyhow::Result<_>>()?;
     Ok((Some(blocks), due))
 }
 
@@ -497,7 +646,7 @@ fn settled_dir(list: &[Entry], opts: &Opts, now: u64) -> anyhow::Result<Option<V
             continue;
         };
         if let Some(pick) = settled(&fold::scan(&parsed, now), now, &opts.by) {
-            blocks.push(block(entry, pick, opts, now)?);
+            blocks.push(block(entry, pick, opts, now, &inputs(entry)?));
         }
     }
     Ok((!blocks.is_empty()).then_some(blocks))
@@ -536,13 +685,14 @@ fn dir_poll<'a>(
     path: Option<&'a str>,
     opts: &'a Opts,
 ) -> impl FnMut(u64) -> anyhow::Result<Option<Vec<Block>>> + 'a {
-    let mut list = entries(root, name, path);
+    let mut warned = HashSet::new();
+    let mut list = entries(root, name, path, &mut warned);
     let mut listed = Instant::now();
     let mut seen: Option<Vec<(PathBuf, Stamp)>> = None;
     let mut due: Option<u64> = None;
     move |now| {
         if listed.elapsed() >= RELIST {
-            list = entries(root, name, path);
+            list = entries(root, name, path, &mut warned);
             listed = Instant::now();
         }
         let stamps: Vec<(PathBuf, Stamp)> = list
@@ -567,29 +717,25 @@ fn stamp(path: &Path) -> Stamp {
 
 // --- the view ---
 
-/// The view of `pick` on `entry`, from the review file as it is now.
-fn block(entry: &Entry, pick: Pick, opts: &Opts, now: u64) -> anyhow::Result<Block> {
-    let parsed = Log::open(&entry.log)
-        .read()?
-        .context("the review file went away")?;
-    let index = fold::scan(&parsed, now);
+/// The view of `pick` on `entry`, from `inputs`. Nothing here can fail, so a claim is
+/// never left with nothing printed.
+fn block(entry: &Entry, pick: Pick, opts: &Opts, now: u64, inputs: &Inputs) -> Block {
+    let parsed = &inputs.parsed;
+    let index = fold::scan(parsed, now);
     let lines: HashMap<u32, &Line> = parsed.lines.iter().map(|l| (l.n, l)).collect();
-    let (state, doc) = match &entry.doc {
-        Some(path) => {
-            let text =
-                fs::read_to_string(path).with_context(|| format!("reading {}", entry.name))?;
-            let chain = Chain::build(&parsed);
-            let doc = Doc::new(&text);
-            let state = fold::fold(&parsed, &chain, &doc).state;
+    let (state, doc) = match &inputs.text {
+        Some(text) => {
+            let doc = Doc::new(text);
+            let state = fold::fold(parsed, &Chain::build(parsed), &doc).state;
             (state, Some(doc))
         }
-        None => (fold::fold_dir(&parsed), None),
+        None => (fold::fold_dir(parsed), None),
     };
     let line = |n: u32| lines.get(&n).copied();
     let drafted_by = state.owner.drafted_by.clone();
 
     let (round, claim, stance) = match pick {
-        Pick::Approved { round } => return Ok(approved(entry, &state, line(round), drafted_by)),
+        Pick::Approved { round } => return approved(entry, &state, line(round), drafted_by),
         Pick::Mine { claim, round } => (round, Some(claim), Stance::Mine),
         Pick::Peek { round } => (round, None, Stance::Peek { tty: !opts.peek }),
         Pick::ReadOnly { claim, round } => {
@@ -644,11 +790,11 @@ fn block(entry: &Entry, pick: Pick, opts: &Opts, now: u64) -> anyhow::Result<Blo
         "items": shown,
         "you": you,
     });
-    Ok(Block {
+    Block {
         text: render::round(&view),
         json,
         changed: false,
-    })
+    }
 }
 
 fn approved(
@@ -699,15 +845,18 @@ fn pending_through(index: &TurnIndex, round: u32) -> HashSet<u32> {
         .collect()
 }
 
-/// `item` with the verdict and body it was handed back with: amends kept after the
-/// hand-back are drafts, and drafts never show.
+/// `item` as it was handed back, which both the text and the JSON show: amends and human
+/// replies kept after the hand-back are drafts, and drafts never show.
 fn as_sent(item: &Item, lines: &HashMap<u32, &Line>, upto: u32) -> Item {
     let mut sent = item.clone();
+    sent.amended.retain(|&n| n <= upto);
+    sent.replies
+        .retain(|r| r.by.kind != ByKind::Human || r.n <= upto);
     if let Some(Op::Comment { verdict, body, .. }) = lines.get(&item.n).map(|l| &l.op) {
         sent.verdict = *verdict;
         sent.body.clone_from(body);
     }
-    for &n in item.amended.iter().filter(|&&n| n <= upto) {
+    for &n in &sent.amended {
         if let Some(Op::Amend { body, verdict, .. }) = lines.get(&n).map(|l| &l.op) {
             if body.is_some() {
                 sent.body.clone_from(body);

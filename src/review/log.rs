@@ -110,6 +110,7 @@ impl Log {
             file,
             bytes,
             parsed,
+            poisoned: false,
         })
     }
     /// Creates the file with its header, baseline snap and owner, all or nothing.
@@ -202,8 +203,8 @@ impl EditRecorder for Log {
 }
 
 impl Recording for Held {
-    fn sync(&mut self, doc: &Path, bytes: &[u8]) {
-        sync::sync_bytes(self, doc, bytes, epoch_ms());
+    fn sync(&mut self, doc: &Path, bytes: &[u8]) -> io::Result<()> {
+        sync::try_sync_bytes(self, doc, bytes, epoch_ms()).map(drop)
     }
 
     fn record(&mut self, via: &Via, _from: &[u8], to: &[u8]) -> io::Result<()> {
@@ -255,6 +256,8 @@ pub struct Held {
     file: File,
     bytes: Vec<u8>,
     parsed: Parsed,
+    /// Set by a failed write, after which the file's tail and line count are unknown.
+    poisoned: bool,
 }
 
 impl Held {
@@ -270,6 +273,11 @@ impl Held {
     ) -> Result<Vec<u32>, AppendError> {
         if self.parsed.read_only {
             return Err(AppendError::Rejected(Reject::ReadOnly));
+        }
+        if self.poisoned {
+            return Err(AppendError::Io(io::Error::other(
+                "an earlier write to the review file failed",
+            )));
         }
         let ops = build(&self.parsed, ctx.now_ms).map_err(AppendError::Rejected)?;
         let first = physical_lines(&self.bytes) + 1;
@@ -300,9 +308,16 @@ impl Held {
         if landed.is_empty() {
             return Ok(landed);
         }
-        self.file.write_all(&out)?;
-        if durable {
-            self.file.sync_data()?;
+        let written = self.file.write_all(&out).and_then(|()| {
+            if durable {
+                self.file.sync_data()
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(e) = written {
+            self.poisoned = true;
+            return Err(AppendError::Io(e));
         }
         self.bytes.extend_from_slice(&out);
         self.parsed = ops::parse(&self.bytes);
@@ -546,4 +561,90 @@ impl Tailer {
 
 fn digest(bytes: &[u8]) -> [u8; 20] {
     sha1_smol::Sha1::from(bytes).digest().bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::doc_write::{self, Expect, WriteTarget};
+
+    const TASKS: &[u8] = b"- [ ] a\n";
+
+    /// `pr.md` holding `text`, and its review file.
+    fn logged(dir: &Path, text: &[u8]) -> (PathBuf, Log) {
+        let doc = dir.join("pr.md");
+        fs::write(&doc, text).unwrap();
+        let log = Log::open(&dir.join("pr.md.birta.jsonl"));
+        log.create_if_missing("pr.md", std::str::from_utf8(text).unwrap(), None)
+            .unwrap();
+        (doc, log)
+    }
+
+    /// Makes every write through `held` fail, as a full disk would.
+    fn break_writes(held: &mut Held, path: &Path) {
+        held.file = File::open(path).unwrap();
+    }
+
+    fn ctx() -> AppendCtx {
+        AppendCtx {
+            now_ms: 1,
+            by: By::default(),
+            cid: None,
+        }
+    }
+
+    fn owner() -> Vec<Op> {
+        vec![Op::Owner { drafted_by: None }]
+    }
+
+    #[test]
+    fn a_held_file_whose_write_failed_takes_no_more_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, log) = logged(dir.path(), TASKS);
+        let mut held = log.hold().unwrap();
+        break_writes(&mut held, log.path());
+        assert!(held.append_with(ctx(), |_, _| Ok(owner())).is_err());
+
+        held.file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(log.path())
+            .unwrap();
+        let before = fs::read(log.path()).unwrap();
+        let again = held.append_with(ctx(), |_, _| Ok(owner()));
+        assert!(again.is_err(), "wrote after a failed write: {again:?}");
+        assert_eq!(fs::read(log.path()).unwrap(), before);
+    }
+
+    /// A review file whose every write fails once it is held.
+    struct Full(Log);
+
+    impl EditRecorder for Full {
+        fn begin(&self) -> Result<Option<Box<dyn Recording + '_>>, WriteErr> {
+            let mut held = self.0.hold_for_edit()?.expect("a review file");
+            break_writes(&mut held, self.0.path());
+            Ok(Some(Box::new(held)))
+        }
+    }
+
+    #[test]
+    fn an_outside_write_that_cannot_be_recorded_stops_the_doc_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let (doc, log) = logged(dir.path(), TASKS);
+        let outside = b"- [ ] a\n- [ ] b\n";
+        fs::write(&doc, outside).unwrap();
+        let t = WriteTarget {
+            canonical: doc.clone(),
+            rel: "pr.md".to_string(),
+        };
+        let result = doc_write::write_doc(
+            &t,
+            Some(&Full(log)),
+            Expect::Fresh,
+            Via::Checkbox { line: 1 },
+            |b| doc_write::toggle_task_line(b, 1, true).ok_or(WriteErr::NotApplicable),
+        );
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(fs::read(&doc).unwrap(), outside, "the doc was replaced");
+    }
 }

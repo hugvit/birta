@@ -1997,3 +1997,60 @@ fn every_window_resolves_back_to_itself() {
 fn every_window_resolves_back_to_itself_full() {
     sweep(&(1..=40).collect::<Vec<_>>());
 }
+
+const SP_RAW_BR: &str = "121:2-121:9";
+const SP_RAW_IMG: &str = "123:1-123:65";
+const T_RAW_IMG: &str = "Raw \u{fffc} image and upper break.";
+
+#[test]
+fn raw_inline_breaks_and_images_read_as_the_page_shows_them() {
+    assert_eq!(anchor::owner_text(A, SP_RAW_BR).as_deref(), Some("a b"));
+    assert_eq!(
+        anchor::owner_text(A, SP_RAW_IMG).as_deref(),
+        Some(T_RAW_IMG)
+    );
+    for (md, t) in [
+        ("x <br/> y\n", "x y"),
+        ("a<BR class=\"q\">b\n", "a b"),
+        ("a<br\n  />b\n", "a b"),
+        ("x <img src=y> z\n", "x \u{fffc} z"),
+        ("x <IMG\tsrc=\"y\"/>z\n", "x \u{fffc}z"),
+        // Only the tag names themselves; other raw tags keep just their text
+        ("a<bra>b</bra>c\n", "abc"),
+        ("a<imgx>b</imgx>c\n", "abc"),
+        ("a <span hidden>b</span> c\n", "a b c"),
+    ] {
+        let sp = sole_owner(md, OwnerKind::Paragraph);
+        assert_eq!(anchor::owner_text(md, &sp).as_deref(), Some(t), "{md:?}");
+    }
+}
+
+#[test]
+fn raw_inline_breaks_and_images_resolve_to_their_tags() {
+    // (sp, T, quote, source, unique context of the source, widened)
+    #[rustfmt::skip]
+    let cases: &[(&str, &str, &str, &str, &str, bool)] = &[
+        (SP_RAW_BR, "a b", "a b", "a<br>b", "| a<br>b |", true),
+        (SP_RAW_BR, "a b", "b", "b", "b | raw break", false),
+        (SP_RAW_IMG, T_RAW_IMG, "Raw \u{fffc} image", "Raw <img src=\"nowhere.png\" alt=\"pic\"> image", "Raw <img", true),
+        (SP_RAW_IMG, T_RAW_IMG, "\u{fffc}", "<img src=\"nowhere.png\" alt=\"pic\">", "Raw <img", true),
+        (SP_RAW_IMG, T_RAW_IMG, "and upper", "and <BR/>upper", "and <BR/>upper", false),
+    ];
+    let mut bad = Vec::new();
+    for &(sp, t, quote, source, context, widened) in cases {
+        let at = A.find(context).expect("context")
+            + context.find(source.get(..4).unwrap_or(source)).unwrap();
+        let want = at..at + source.len();
+        assert_eq!(&A[want.clone()], source);
+        let sel = select_in(t, t, quote);
+        for r in [sel.with_off(sp), sel.by_context(sp)] {
+            match exact(anchor::resolve(A, &r)) {
+                Ok(hit) if hit.bytes == want && hit.source == source && hit.widened == widened => {}
+                other => bad.push(format!(
+                    "{sp} {quote:?}: {other:?}, want {source:?} widened {widened}"
+                )),
+            }
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}

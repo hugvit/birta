@@ -1,0 +1,5 @@
+1:1-1:54 | "Bold text and italic text and bold italic."
+3:1-3:36 | "Strikethrough text is supported."
+5:1-5:40 | "This is an autolink: https://example.com"
+7:1-7:52 | "And a regular link."
+9:1-9:22 | "￼"

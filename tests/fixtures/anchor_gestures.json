@@ -1,0 +1,369 @@
+{
+  "fixture": "anchor.md",
+  "engines": {
+    "chromium": {
+      "01-dblclick-emphasis": {
+        "sp": "3:1-3:213",
+        "quote": "jittered",
+        "pre": "This PR adds retry with ",
+        "suf": " backoff to the upload() client ",
+        "off": 24,
+        "tl": 162,
+        "crossBlock": false
+      },
+      "02-triple-click-paragraph": {
+        "sp": "3:1-3:213",
+        "quote": "This PR adds retry with jittered backoff to the upload() client – because S3 returns 503 & drops events… See the docs 🎉. He said “we just fail” and don’t *panic*.",
+        "pre": "",
+        "suf": "",
+        "off": 0,
+        "tl": 162,
+        "crossBlock": true
+      },
+      "03-triple-click-heading": {
+        "sp": "1:1-1:26",
+        "quote": "Retry “layer” — design",
+        "pre": "",
+        "suf": "",
+        "off": 0,
+        "tl": 22,
+        "crossBlock": true
+      },
+      "04-triple-click-item-with-nested-list": {
+        "sp": "10:1-11:22",
+        "quote": "Checked idempotency on every POST",
+        "pre": "",
+        "suf": "",
+        "off": 0,
+        "tl": 33,
+        "crossBlock": true
+      },
+      "05-triple-click-cell": {
+        "sp": "16:2-16:10",
+        "quote": "retries",
+        "pre": "",
+        "suf": "",
+        "off": 0,
+        "tl": 7,
+        "crossBlock": false
+      },
+      "06-triple-click-task-item": {
+        "sp": "9:1-9:31",
+        "quote": "Ran the integration suite",
+        "pre": "",
+        "suf": "",
+        "off": 0,
+        "tl": 25,
+        "crossBlock": true
+      },
+      "07-drag-strong-to-link-end": {
+        "sp": "3:1-3:213",
+        "quote": "adds retry with jittered backoff to the upload() client – because S3 returns 503 & drops events… See the docs",
+        "pre": "This PR ",
+        "suf": " 🎉. He said “we just fail” and d",
+        "off": 8,
+        "tl": 162,
+        "crossBlock": false
+      },
+      "08-drag-into-next-paragraph": {
+        "sp": "3:1-3:213",
+        "quote": "adds retry with jittered backoff to the upload() client – because S3 returns 503 & drops events… See the docs 🎉. He said “we just fail” and don’t *panic*.",
+        "pre": "This PR ",
+        "suf": "",
+        "off": 8,
+        "tl": 162,
+        "crossBlock": true
+      },
+      "09-drag-across-inline-math": {
+        "sp": "5:1-7:70",
+        "quote": "three Ctrl and math ￼ end",
+        "pre": "two with spaces hard break line ",
+        "suf": "￼.",
+        "off": 96,
+        "tl": 123,
+        "crossBlock": false
+      },
+      "10-drag-across-footnote-ref": {
+        "sp": "99:1-99:39",
+        "quote": "Second ref￼ with",
+        "pre": "",
+        "suf": " blocks in its note.",
+        "off": 0,
+        "tl": 36,
+        "crossBlock": false
+      },
+      "11-dblclick-after-emoji": {
+        "sp": "3:1-3:213",
+        "quote": "panic",
+        "pre": " said “we just fail” and don’t *",
+        "suf": "*.",
+        "off": 155,
+        "tl": 162,
+        "crossBlock": false
+      },
+      "12-drag-to-emoji-at-end": {
+        "sp": "74:5-74:35",
+        "quote": "café and 🎉",
+        "pre": "inner quote with ",
+        "suf": "",
+        "off": 17,
+        "tl": 27,
+        "crossBlock": false
+      },
+      "13-dblclick-repeated-word": {
+        "sp": "5:1-7:70",
+        "quote": "just",
+        "pre": "We just fail hard here, and we ",
+        "suf": " fail again. Soft break line two",
+        "off": 31,
+        "tl": 123,
+        "crossBlock": false
+      },
+      "14-dblclick-in-code": {
+        "sp": "43:1-47:3",
+        "quote": "retry",
+        "pre": "fn ",
+        "suf": "() {\n\tlet n = 5;\n}\n",
+        "off": 3,
+        "tl": 27,
+        "crossBlock": false
+      },
+      "15-drag-in-raw-html": {
+        "sp": null,
+        "quote": "More",
+        "pre": "",
+        "suf": "",
+        "off": null,
+        "tl": null,
+        "crossBlock": false
+      },
+      "16-triple-click-hidden-span-paragraph": {
+        "sp": "89:1-89:46",
+        "quote": "Hidden inline text.",
+        "pre": "",
+        "suf": "",
+        "off": 0,
+        "tl": 19,
+        "crossBlock": true
+      },
+      "17-dblclick-nested-item": {
+        "sp": "11:3-11:22",
+        "quote": "nested",
+        "pre": "",
+        "suf": " item – one",
+        "off": 0,
+        "tl": 17,
+        "crossBlock": false
+      },
+      "18-dblclick-after-graphemes": {
+        "sp": "125:1-125:34",
+        "quote": "ok",
+        "pre": "Graphemes 👍🏽 é 🇮🇸 ",
+        "suf": "",
+        "off": 19,
+        "tl": 21,
+        "crossBlock": false
+      },
+      "19-range-inside-footnote-ref": {
+        "sp": "5:1-7:70",
+        "quote": "￼",
+        "pre": "k line three Ctrl and math ￼ end",
+        "suf": ".",
+        "off": 121,
+        "tl": 123,
+        "crossBlock": false
+      },
+      "20-range-from-inside-math": {
+        "sp": "5:1-7:70",
+        "quote": "￼ end",
+        "pre": " break line three Ctrl and math ",
+        "suf": "￼.",
+        "off": 116,
+        "tl": 123,
+        "crossBlock": false
+      }
+    },
+    "webkit": {
+      "01-dblclick-emphasis": {
+        "sp": "3:1-3:213",
+        "quote": "jittered",
+        "pre": "This PR adds retry with ",
+        "suf": " backoff to the upload() client ",
+        "off": 24,
+        "tl": 162,
+        "crossBlock": false
+      },
+      "02-triple-click-paragraph": {
+        "sp": "3:1-3:213",
+        "quote": "This PR adds retry with jittered backoff to the upload() client – because S3 returns 503 & drops events… See the docs 🎉. He said “we just fail” and don’t *panic*.",
+        "pre": "",
+        "suf": "",
+        "off": 0,
+        "tl": 162,
+        "crossBlock": true
+      },
+      "03-triple-click-heading": {
+        "sp": "1:1-1:26",
+        "quote": "Retry “layer” — design",
+        "pre": "",
+        "suf": "",
+        "off": 0,
+        "tl": 22,
+        "crossBlock": true
+      },
+      "04-triple-click-item-with-nested-list": {
+        "sp": "10:1-11:22",
+        "quote": "Checked idempotency on every POST",
+        "pre": "",
+        "suf": "",
+        "off": 0,
+        "tl": 33,
+        "crossBlock": true
+      },
+      "05-triple-click-cell": {
+        "sp": "16:2-16:10",
+        "quote": "retries",
+        "pre": "",
+        "suf": "",
+        "off": 0,
+        "tl": 7,
+        "crossBlock": true
+      },
+      "06-triple-click-task-item": {
+        "sp": "9:1-9:31",
+        "quote": "Ran the integration suite",
+        "pre": "",
+        "suf": "",
+        "off": 0,
+        "tl": 25,
+        "crossBlock": true
+      },
+      "07-drag-strong-to-link-end": {
+        "sp": "3:1-3:213",
+        "quote": "adds retry with jittered backoff to the upload() client – because S3 returns 503 & drops events… See the docs",
+        "pre": "This PR ",
+        "suf": " 🎉. He said “we just fail” and d",
+        "off": 8,
+        "tl": 162,
+        "crossBlock": false
+      },
+      "08-drag-into-next-paragraph": {
+        "sp": "3:1-3:213",
+        "quote": "adds retry with jittered backoff to the upload() client – because S3 returns 503 & drops events… See the docs 🎉. He said “we just fail” and don’t *panic*.",
+        "pre": "This PR ",
+        "suf": "",
+        "off": 8,
+        "tl": 162,
+        "crossBlock": true
+      },
+      "09-drag-across-inline-math": {
+        "sp": "5:1-7:70",
+        "quote": "three Ctrl and math ￼ end",
+        "pre": "two with spaces hard break line ",
+        "suf": "￼.",
+        "off": 96,
+        "tl": 123,
+        "crossBlock": false
+      },
+      "10-drag-across-footnote-ref": {
+        "sp": "99:1-99:39",
+        "quote": "Second ref￼ with",
+        "pre": "",
+        "suf": " blocks in its note.",
+        "off": 0,
+        "tl": 36,
+        "crossBlock": false
+      },
+      "11-dblclick-after-emoji": {
+        "sp": "3:1-3:213",
+        "quote": "panic",
+        "pre": " said “we just fail” and don’t *",
+        "suf": "*.",
+        "off": 155,
+        "tl": 162,
+        "crossBlock": false
+      },
+      "12-drag-to-emoji-at-end": {
+        "sp": "74:5-74:35",
+        "quote": "café and 🎉",
+        "pre": "inner quote with ",
+        "suf": "",
+        "off": 17,
+        "tl": 27,
+        "crossBlock": false
+      },
+      "13-dblclick-repeated-word": {
+        "sp": "5:1-7:70",
+        "quote": "just",
+        "pre": "We just fail hard here, and we ",
+        "suf": " fail again. Soft break line two",
+        "off": 31,
+        "tl": 123,
+        "crossBlock": false
+      },
+      "14-dblclick-in-code": {
+        "sp": "43:1-47:3",
+        "quote": "retry",
+        "pre": "fn ",
+        "suf": "() {\n\tlet n = 5;\n}\n",
+        "off": 3,
+        "tl": 27,
+        "crossBlock": false
+      },
+      "15-drag-in-raw-html": {
+        "sp": null,
+        "quote": "More",
+        "pre": "",
+        "suf": "",
+        "off": null,
+        "tl": null,
+        "crossBlock": false
+      },
+      "16-triple-click-hidden-span-paragraph": {
+        "sp": "89:1-89:46",
+        "quote": "Hidden inline text.",
+        "pre": "",
+        "suf": "",
+        "off": 0,
+        "tl": 19,
+        "crossBlock": true
+      },
+      "17-dblclick-nested-item": {
+        "sp": "11:3-11:22",
+        "quote": "nested",
+        "pre": "",
+        "suf": " item – one",
+        "off": 0,
+        "tl": 17,
+        "crossBlock": false
+      },
+      "18-dblclick-after-graphemes": {
+        "sp": "125:1-125:34",
+        "quote": "ok",
+        "pre": "Graphemes 👍🏽 é 🇮🇸 ",
+        "suf": "",
+        "off": 19,
+        "tl": 21,
+        "crossBlock": false
+      },
+      "19-range-inside-footnote-ref": {
+        "sp": "5:1-7:70",
+        "quote": "￼",
+        "pre": "k line three Ctrl and math ￼ end",
+        "suf": ".",
+        "off": 121,
+        "tl": 123,
+        "crossBlock": false
+      },
+      "20-range-from-inside-math": {
+        "sp": "5:1-7:70",
+        "quote": "￼ end",
+        "pre": " break line three Ctrl and math ",
+        "suf": "￼.",
+        "off": 116,
+        "tl": 123,
+        "crossBlock": false
+      }
+    }
+  }
+}

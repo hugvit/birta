@@ -714,7 +714,12 @@ impl<'m> OwnerText<'m> {
                 NodeValue::Math(_) | NodeValue::Image(_) | NodeValue::FootnoteReference(_) => {
                     out.push(Unit::atomic('\u{fffc}', bytes.start, bytes.end))
                 }
-                NodeValue::HtmlInline(_) => {}
+                // The browser shows a raw <br> as a break and a raw <img> as a picture
+                NodeValue::HtmlInline(tag) => match raw_tag_name(tag).as_deref() {
+                    Some("br") => out.push(Unit::atomic(' ', bytes.start, bytes.end)),
+                    Some("img") => out.push(Unit::atomic('\u{fffc}', bytes.start, bytes.end)),
+                    _ => {}
+                },
                 NodeValue::Link(_)
                 | NodeValue::Emph
                 | NodeValue::Strong
@@ -985,6 +990,17 @@ fn entity_at(src: &str) -> Option<(usize, String)> {
             .collect()
     });
     named.get(token).map(|text| (token.len(), text.to_string()))
+}
+
+/// The lowercased name of an opening tag like `<BR/>` or `<img src=x>`.
+fn raw_tag_name(tag: &str) -> Option<String> {
+    let rest = tag.strip_prefix('<')?;
+    let end = rest
+        .find(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>')
+        .unwrap_or(rest.len());
+    let name = &rest[..end];
+    (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric()))
+        .then(|| name.to_ascii_lowercase())
 }
 
 /// A code span maps char for char when its literal is its source, less one padding space.

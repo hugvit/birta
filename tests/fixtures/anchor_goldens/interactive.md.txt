@@ -1,0 +1,4 @@
+4:1-4:34 | "This content is hidden by default."
+6:1-6:10 | "Item one"
+7:1-8:0 | "Item two"
+14:1-14:29 | "This section starts expanded."

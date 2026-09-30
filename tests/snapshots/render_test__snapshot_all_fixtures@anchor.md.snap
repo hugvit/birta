@@ -137,7 +137,24 @@ second line
 </tr>
 </tbody>
 </table>
-<p data-sourcepos="119:1-119:14">Last line here</p>
+<table data-sourcepos="119:1-121:22">
+<thead>
+<tr data-sourcepos="119:1-119:14">
+<th data-sourcepos="119:2-119:6">Raw</th>
+<th data-sourcepos="119:8-119:13">Note</th>
+</tr>
+</thead>
+<tbody>
+<tr data-sourcepos="121:1-121:22">
+<td data-sourcepos="121:2-121:9">a<br>b</td>
+<td data-sourcepos="121:11-121:21">raw break</td>
+</tr>
+</tbody>
+</table>
+<p data-sourcepos="123:1-123:65">Raw <img src="/local/nowhere.png" alt="pic"> image and <BR/>upper break.</p>
+<p data-sourcepos="125:1-125:34">Graphemes 👍🏽 é 🇮🇸 ok</p>
+<p data-sourcepos="127:1-127:33">Spaces a  b　c﻿d end</p>
+<p data-sourcepos="129:1-129:14">Last line here</p>
 <section data-sourcepos="24:1-24:24" class="footnotes" data-footnotes>
 <ol>
 <li data-sourcepos="24:1-24:24" id="fn-1">

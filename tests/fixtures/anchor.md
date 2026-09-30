@@ -116,4 +116,14 @@ Second ref[^2] with blocks in its note.
 |------|------|
 | a \| b | escaped |
 
+| Raw | Note |
+|-----|------|
+| a<br>b | raw break |
+
+Raw <img src="nowhere.png" alt="pic"> image and <BR/>upper break.
+
+Graphemes 👍🏽 é 🇮🇸 ok
+
+Spaces a&nbsp;&nbsp;b　c﻿d end
+
 Last line here

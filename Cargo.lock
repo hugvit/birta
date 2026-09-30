@@ -181,6 +181,7 @@ dependencies = [
  "clap",
  "comrak",
  "dirs",
+ "entities",
  "futures-util",
  "getrandom 0.3.4",
  "http-body-util",

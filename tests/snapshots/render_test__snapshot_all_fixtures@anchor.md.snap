@@ -123,7 +123,21 @@ second line
 </li>
 </ul>
 <p data-sourcepos="99:1-99:39">Second ref<sup data-sourcepos="99:11-99:14" class="footnote-ref"><a href="#fn-2" id="fnref-2" data-footnote-ref>2</a></sup> with blocks in its note.</p>
-<p data-sourcepos="115:1-115:14">Last line here</p>
+<table data-sourcepos="115:1-117:20">
+<thead>
+<tr data-sourcepos="115:1-115:15">
+<th data-sourcepos="115:2-115:7">Pipe</th>
+<th data-sourcepos="115:9-115:14">Note</th>
+</tr>
+</thead>
+<tbody>
+<tr data-sourcepos="117:1-117:20">
+<td data-sourcepos="117:2-117:9">a | b</td>
+<td data-sourcepos="117:11-117:19">escaped</td>
+</tr>
+</tbody>
+</table>
+<p data-sourcepos="119:1-119:14">Last line here</p>
 <section data-sourcepos="24:1-24:24" class="footnotes" data-footnotes>
 <ol>
 <li data-sourcepos="24:1-24:24" id="fn-1">

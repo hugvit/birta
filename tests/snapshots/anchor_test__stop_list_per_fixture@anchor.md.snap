@@ -3,7 +3,7 @@ source: tests/anchor_test.rs
 expression: "lines.join(\"\\n\")"
 input_file: tests/fixtures/anchor.md
 ---
-0 heading 1:1-1:26 1-1 h1 section 1-115
+0 heading 1:1-1:26 1-1 h1 section 1-119
 1 paragraph 3:1-3:213 3-3
 2 paragraph 5:1-7:70 5-7
 3 list_item 9:1-9:31 9-9
@@ -19,14 +19,14 @@ input_file: tests/fixtures/anchor.md
 13 heading 33:1-34:14 33-34 h2 section 33-40
 14 list_item 36:1-38:21 36-38
 15 list_item 39:1-40:0 39-39
-16 heading 41:1-41:7 41-41 h2 section 41-115
+16 heading 41:1-41:7 41-41 h2 section 41-119
 17 code_block 43:1-47:3 43-47
 18 code_block 49:3-52:5 49-52
 19 code_block 54:5-56:0 54-55
 20 code_block 57:1-59:3 57-59
 21 code_block 61:1-64:3 61-64
 22 code_block 66:1-68:3 66-68
-23 heading 70:1-70:22 70-70 h3 section 70-115
+23 heading 70:1-70:22 70-70 h3 section 70-119
 24 paragraph 72:3-72:13 72-72
 25 paragraph 74:5-74:35 74-74
 26 heading 76:3-76:20 76-76 h3
@@ -38,4 +38,5 @@ input_file: tests/fixtures/anchor.md
 32 list_item 96:1-97:14 96-97
 33 list_item 97:3-97:14 97-97
 34 paragraph 99:1-99:39 99-99
-35 paragraph 115:1-115:14 115-115
+35 table_row 117:1-117:20 117-117
+36 paragraph 119:1-119:14 119-119

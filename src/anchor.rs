@@ -1,10 +1,13 @@
-//! Where rendered blocks come from in the source: focus stops and text owners.
+//! Where rendered blocks come from in the source: focus stops and text owners, and the
+//! mapping between a selection's rendered text and the source bytes behind it.
 
+use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::OnceLock;
 
-use comrak::Options;
 use comrak::arena_tree::NodeEdge;
-use comrak::nodes::{AstNode, LineColumn, NodeValue, Sourcepos};
+use comrak::nodes::{AstNode, LineColumn, NodeCode, NodeCodeBlock, NodeValue, Sourcepos};
+use comrak::{Arena, Options, parse_document};
 use serde::Serialize;
 
 /// The comrak options every parse of a doc uses, so sourcepos agree with the page.
@@ -74,7 +77,7 @@ pub struct Owner {
     pub bytes: Range<usize>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OwnerKind {
     Paragraph,
@@ -111,42 +114,16 @@ pub fn index<'a>(root: &'a AstNode<'a>, markdown: &str) -> BlockIndex {
                 continue;
             }
         };
+        if matches!(node.data.borrow().value, NodeValue::FootnoteDefinition(_)) {
+            footnote_depth += 1;
+            continue;
+        }
+        let Some((stop, owner)) = roles(node) else {
+            continue;
+        };
         let ast = node.data.borrow();
         let parent_ast = node.parent().map(|p| p.data.borrow());
         let parent = parent_ast.as_deref().map(|p| &p.value);
-        let (stop, owner) = match &ast.value {
-            NodeValue::FootnoteDefinition(_) => {
-                footnote_depth += 1;
-                continue;
-            }
-            NodeValue::Item(_) | NodeValue::TaskItem(_) => {
-                let tight = matches!(parent, Some(NodeValue::List(list)) if list.tight);
-                (Some(StopKind::ListItem), tight.then_some(OwnerKind::Item))
-            }
-            NodeValue::TableRow(header) => ((!header).then_some(StopKind::TableRow), None),
-            NodeValue::TableCell => (None, Some(OwnerKind::Cell)),
-            NodeValue::Heading(_) => (Some(StopKind::Heading), Some(OwnerKind::Heading)),
-            NodeValue::CodeBlock(_) => (Some(StopKind::CodeBlock), Some(OwnerKind::Code)),
-            NodeValue::DescriptionTerm => (None, Some(OwnerKind::Term)),
-            NodeValue::DescriptionDetails => {
-                let tight = matches!(parent, Some(NodeValue::DescriptionItem(item)) if item.tight);
-                (None, tight.then_some(OwnerKind::Detail))
-            }
-            NodeValue::Paragraph => {
-                let in_item = matches!(
-                    parent,
-                    Some(
-                        NodeValue::Item(_)
-                            | NodeValue::TaskItem(_)
-                            | NodeValue::DescriptionTerm
-                            | NodeValue::DescriptionDetails
-                    )
-                );
-                let stop = (!in_item).then_some(StopKind::Paragraph);
-                (stop, (!renders_bare(node)).then_some(OwnerKind::Paragraph))
-            }
-            _ => continue,
-        };
 
         let sp = ast.sourcepos.to_string();
         let span = line_span(ast.sourcepos);
@@ -179,6 +156,42 @@ pub fn index<'a>(root: &'a AstNode<'a>, markdown: &str) -> BlockIndex {
 
     set_sections(&mut idx.stops, &headings, lines.count());
     idx
+}
+
+/// What `node` is on the page: a focus stop, a text owner, both, or `None` for neither.
+fn roles<'a>(node: &'a AstNode<'a>) -> Option<(Option<StopKind>, Option<OwnerKind>)> {
+    let ast = node.data.borrow();
+    let parent_ast = node.parent().map(|p| p.data.borrow());
+    let parent = parent_ast.as_deref().map(|p| &p.value);
+    Some(match &ast.value {
+        NodeValue::Item(_) | NodeValue::TaskItem(_) => {
+            let tight = matches!(parent, Some(NodeValue::List(list)) if list.tight);
+            (Some(StopKind::ListItem), tight.then_some(OwnerKind::Item))
+        }
+        NodeValue::TableRow(header) => ((!header).then_some(StopKind::TableRow), None),
+        NodeValue::TableCell => (None, Some(OwnerKind::Cell)),
+        NodeValue::Heading(_) => (Some(StopKind::Heading), Some(OwnerKind::Heading)),
+        NodeValue::CodeBlock(_) => (Some(StopKind::CodeBlock), Some(OwnerKind::Code)),
+        NodeValue::DescriptionTerm => (None, Some(OwnerKind::Term)),
+        NodeValue::DescriptionDetails => {
+            let tight = matches!(parent, Some(NodeValue::DescriptionItem(item)) if item.tight);
+            (None, tight.then_some(OwnerKind::Detail))
+        }
+        NodeValue::Paragraph => {
+            let in_item = matches!(
+                parent,
+                Some(
+                    NodeValue::Item(_)
+                        | NodeValue::TaskItem(_)
+                        | NodeValue::DescriptionTerm
+                        | NodeValue::DescriptionDetails
+                )
+            );
+            let stop = (!in_item).then_some(StopKind::Paragraph);
+            (stop, (!renders_bare(node)).then_some(OwnerKind::Paragraph))
+        }
+        _ => return None,
+    })
 }
 
 /// Whether comrak renders `paragraph` without its own `<p>`, as the text of its parent.
@@ -280,6 +293,22 @@ impl<'t> LineMap<'t> {
         .min(self.len)
     }
 
+    /// Start, end before the terminator, and start of the next line, for 1-based `line`.
+    fn line(&self, line: usize) -> Option<(usize, usize, usize)> {
+        let i = line.checked_sub(1)?;
+        let (start, end) = (*self.starts.get(i)?, *self.ends.get(i)?);
+        Some((
+            start,
+            end,
+            self.starts.get(i + 1).copied().unwrap_or(self.len),
+        ))
+    }
+
+    /// 1-based line holding `byte`.
+    fn line_of(&self, byte: usize) -> u32 {
+        self.starts.partition_point(|&s| s <= byte) as u32
+    }
+
     /// Lines as `str::lines` counts them: a final terminator starts no new line.
     fn count(&self) -> u32 {
         let ends_open = self.starts.last() == Some(&self.len) && self.len > 0;
@@ -300,4 +329,728 @@ impl<'t> LineMap<'t> {
         }
         start..end
     }
+}
+
+/// A selection on the page: the text owner it starts in and its rendered text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolveReq {
+    /// The owner's `data-sourcepos`.
+    pub sp: String,
+    pub quote: String,
+    /// Up to 32 code points of the owner's text before and after the quote.
+    pub pre: String,
+    pub suf: String,
+    /// Code-point offset of the quote in the owner's text, as the page counted it.
+    pub off: Option<usize>,
+    /// Code-point length of the owner's text on the page.
+    pub tl: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Resolved {
+    Exact {
+        lines: (u32, u32),
+        bytes: Range<usize>,
+        /// `markdown[bytes]`, what an agent reads.
+        source: String,
+        /// The quote as the user saw it.
+        shown: String,
+        /// The range grew to a whole token, link or emphasis.
+        widened: bool,
+        text_len: usize,
+    },
+    /// The quote occurs more than once and nothing tells the occurrences apart.
+    Candidates { items: Vec<Cand>, text_len: usize },
+    Block {
+        reason: Reason,
+        kept_quote: String,
+        text_len: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reason {
+    /// `sp` names no text owner; the caller rejects the anchor.
+    BadSp,
+    /// The owner is fine but the quote can't be placed in it.
+    NoMatch,
+}
+
+/// One place a quote could point at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cand {
+    /// The owner, or `None` for a hit in raw HTML.
+    pub sp: Option<String>,
+    /// Code-point offset in the owner's text.
+    pub off: Option<usize>,
+    pub bytes: Range<usize>,
+    pub source: String,
+    /// What the hit points at, for a pick list: `→ ## Heading` or `→ "…text…"`.
+    pub preview: String,
+}
+
+/// Where source bytes sit on the page: an owner and a code-point range of its text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Loc {
+    pub sp: String,
+    pub off: (usize, usize),
+    pub tl: usize,
+}
+
+const MAX_CANDIDATES: usize = 5;
+
+/// Places a selection's rendered text in `markdown`.
+pub fn resolve(markdown: &str, req: &ResolveReq) -> Resolved {
+    let arena = Arena::new();
+    let root = parse_document(&arena, markdown, &parse_options());
+    let lines = LineMap::new(markdown);
+    let block = |reason, text_len| Resolved::Block {
+        reason,
+        kept_quote: req.quote.clone(),
+        text_len,
+    };
+    let Some((node, kind)) = owners(root).find(|(n, _)| sp_of(n) == req.sp) else {
+        return block(Reason::BadSp, 0);
+    };
+    let text = OwnerText::new(node, kind, &lines);
+    let t = text.chars();
+    if !text.mapped || text.diagram {
+        return block(Reason::NoMatch, t.len());
+    }
+    let norm = |s: &str| {
+        if text.code {
+            s.chars().collect()
+        } else {
+            collapse_str(s)
+        }
+    };
+    let q: Vec<char> = norm(&req.quote);
+    if q.iter().all(|&c| is_js_space(c)) {
+        return block(Reason::NoMatch, t.len());
+    }
+
+    let at_off = req.off.filter(|_| req.tl == Some(t.len())).filter(|&a| {
+        a.checked_add(q.len())
+            .is_some_and(|b| t.get(a..b) == Some(&q[..]))
+    });
+    let a = match at_off {
+        Some(a) => a,
+        None => {
+            let hits = occurrences(&t, &q);
+            let (pre, suf) = (norm(&req.pre), norm(&req.suf));
+            let score = |a: usize| {
+                let before = t[..a].iter().rev().zip(pre.iter().rev());
+                let after = t[a + q.len()..].iter().zip(suf.iter());
+                before.take_while(|(x, y)| x == y).count()
+                    + after.take_while(|(x, y)| x == y).count()
+            };
+            let best = hits.iter().map(|&a| score(a)).max().unwrap_or(0);
+            let top: Vec<usize> = hits.into_iter().filter(|&a| score(a) == best).collect();
+            match top[..] {
+                [] => return block(Reason::NoMatch, t.len()),
+                [a] => a,
+                _ => {
+                    let items = top
+                        .into_iter()
+                        .take(MAX_CANDIDATES)
+                        .map(|a| text.cand(node, kind, &req.sp, markdown, a, q.len()))
+                        .collect();
+                    return Resolved::Candidates {
+                        items,
+                        text_len: t.len(),
+                    };
+                }
+            }
+        }
+    };
+    let (bytes, widened) = text.span(a, a + q.len());
+    let last = bytes.end.max(bytes.start + 1) - 1;
+    Resolved::Exact {
+        lines: (lines.line_of(bytes.start), lines.line_of(last)),
+        source: markdown[bytes.clone()].to_string(),
+        bytes,
+        shown: req.quote.clone(),
+        widened,
+        text_len: t.len(),
+    }
+}
+
+/// Places typed text: every hit in any owner's rendered text, else in raw source.
+pub fn search(markdown: &str, text: &str) -> Vec<Cand> {
+    let typed = collapse_str(text);
+    let q = trim_spaces(&typed);
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let arena = Arena::new();
+    let root = parse_document(&arena, markdown, &parse_options());
+    let lines = LineMap::new(markdown);
+    let mut found = Vec::new();
+    for (node, kind) in owners(root) {
+        let owned = OwnerText::new(node, kind, &lines);
+        if !owned.mapped || owned.diagram {
+            continue;
+        }
+        let sp = sp_of(node);
+        for a in occurrences(&owned.chars(), q) {
+            found.push(owned.cand(node, kind, &sp, markdown, a, q.len()));
+            if found.len() == MAX_CANDIDATES {
+                return found;
+            }
+        }
+    }
+    if found.is_empty() {
+        // Text inside raw HTML has no owner, so only the source knows it
+        let needle: String = q.iter().collect();
+        found = markdown
+            .match_indices(&needle)
+            .take(MAX_CANDIDATES)
+            .map(|(i, hit)| Cand {
+                sp: None,
+                off: None,
+                bytes: i..i + hit.len(),
+                source: hit.to_string(),
+                preview: format!("→ \"{hit}\""),
+            })
+            .collect();
+    }
+    found
+}
+
+/// Where `bytes` show on the page, if they fall in one owner's text.
+pub fn locate(markdown: &str, bytes: Range<usize>) -> Option<Loc> {
+    if bytes.start >= bytes.end || bytes.end > markdown.len() {
+        return None;
+    }
+    let arena = Arena::new();
+    let root = parse_document(&arena, markdown, &parse_options());
+    let lines = LineMap::new(markdown);
+    let mut found = None;
+    for (node, kind) in owners(root) {
+        let owned = OwnerText::new(node, kind, &lines);
+        if !owned.mapped || owned.diagram {
+            continue;
+        }
+        let touched: Vec<usize> = (0..owned.units.len())
+            .filter(|&i| {
+                let u = &owned.units[i];
+                u.s < u.e && u.s < bytes.end && u.e > bytes.start
+            })
+            .collect();
+        let (Some(&first), Some(&last)) = (touched.first(), touched.last()) else {
+            continue;
+        };
+        let node_bytes = lines.bytes(node.data.borrow().sourcepos);
+        let text_bytes = owned
+            .units
+            .iter()
+            .map(|u| u.s)
+            .min()
+            .unwrap_or(node_bytes.start)
+            ..owned
+                .units
+                .iter()
+                .map(|u| u.e)
+                .max()
+                .unwrap_or(node_bytes.end);
+        let inside = bytes.start >= node_bytes.start.min(text_bytes.start)
+            && bytes.end <= node_bytes.end.max(text_bytes.end);
+        if found.is_some() || !inside {
+            return None;
+        }
+        found = Some(Loc {
+            sp: sp_of(node),
+            off: (first, last + 1),
+            tl: owned.units.len(),
+        });
+    }
+    found
+}
+
+/// The rendered text of the owner at `sp`, whitespace collapsed as the page does.
+pub fn owner_text(markdown: &str, sp: &str) -> Option<String> {
+    let arena = Arena::new();
+    let root = parse_document(&arena, markdown, &parse_options());
+    let lines = LineMap::new(markdown);
+    let (node, kind) = owners(root).find(|(n, _)| sp_of(n) == sp)?;
+    Some(
+        OwnerText::new(node, kind, &lines)
+            .chars()
+            .into_iter()
+            .collect(),
+    )
+}
+
+fn owners<'a>(root: &'a AstNode<'a>) -> impl Iterator<Item = (&'a AstNode<'a>, OwnerKind)> {
+    root.descendants().filter_map(|node| {
+        roles(node)
+            .and_then(|(_, owner)| owner)
+            .map(|kind| (node, kind))
+    })
+}
+
+fn sp_of<'a>(node: &'a AstNode<'a>) -> String {
+    node.data.borrow().sourcepos.to_string()
+}
+
+/// One code point of rendered text and the source bytes it came from.
+#[derive(Clone, Copy, Debug)]
+struct Unit {
+    ch: char,
+    s: usize,
+    e: usize,
+    /// Part of a token (`&amp;`, `--`, `:tada:`, math) no range may split.
+    atomic: bool,
+}
+
+impl Unit {
+    fn new(ch: char, s: usize, e: usize) -> Self {
+        Self {
+            ch,
+            s,
+            e,
+            atomic: false,
+        }
+    }
+
+    fn atomic(ch: char, s: usize, e: usize) -> Self {
+        Self {
+            ch,
+            s,
+            e,
+            atomic: true,
+        }
+    }
+}
+
+/// An inline container a range must not cut in half.
+struct Wrap {
+    link: bool,
+    bytes: Range<usize>,
+}
+
+/// An owner's text as units, whitespace collapsed like the page's.
+struct OwnerText<'m> {
+    units: Vec<Unit>,
+    wraps: Vec<Wrap>,
+    code: bool,
+    /// Mermaid or math: drawn as a picture, so nothing in it is selectable.
+    diagram: bool,
+    /// False when a code line didn't match its source line, so bytes are unknown.
+    mapped: bool,
+    lines: &'m LineMap<'m>,
+}
+
+impl<'m> OwnerText<'m> {
+    fn new<'a>(node: &'a AstNode<'a>, kind: OwnerKind, lines: &'m LineMap<'m>) -> Self {
+        let mut text = Self {
+            units: Vec::new(),
+            wraps: Vec::new(),
+            code: false,
+            diagram: false,
+            mapped: true,
+            lines,
+        };
+        match kind {
+            OwnerKind::Code => {
+                if let NodeValue::CodeBlock(block) = &node.data.borrow().value {
+                    text.code = true;
+                    let info = block.info.split_whitespace().next().unwrap_or("");
+                    text.diagram = matches!(info, "mermaid" | "math");
+                    let start = node.data.borrow().sourcepos.start.line;
+                    match code_units(block, start, lines) {
+                        Some(units) => text.units = units,
+                        None => {
+                            text.mapped = false;
+                            let literal = block.literal.replace("\r\n", "\n");
+                            text.units = literal.chars().map(|c| Unit::new(c, 0, 0)).collect();
+                        }
+                    }
+                }
+            }
+            // These render their paragraphs' inlines without a <p>
+            OwnerKind::Item | OwnerKind::Term | OwnerKind::Detail => {
+                let mut units = Vec::new();
+                for child in node.children() {
+                    if matches!(child.data.borrow().value, NodeValue::Paragraph) {
+                        let at = lines.bytes(child.data.borrow().sourcepos).start;
+                        units.push(Unit::new(' ', at, at));
+                        text.collect(child, &mut units);
+                    }
+                }
+                text.units = collapse(units);
+            }
+            _ => {
+                let mut units = Vec::new();
+                text.collect(node, &mut units);
+                text.units = collapse(units);
+            }
+        }
+        text
+    }
+
+    fn chars(&self) -> Vec<char> {
+        self.units.iter().map(|u| u.ch).collect()
+    }
+
+    fn collect<'a>(&mut self, node: &'a AstNode<'a>, out: &mut Vec<Unit>) {
+        for child in node.children() {
+            let ast = child.data.borrow();
+            let bytes = self.lines.bytes(ast.sourcepos);
+            match &ast.value {
+                NodeValue::Text(literal) => self.text_units(child, literal, bytes, out),
+                NodeValue::Code(code) => code_span_units(code, bytes, self.lines.text, out),
+                NodeValue::ShortCode(short) => out.extend(
+                    short
+                        .emoji
+                        .chars()
+                        .map(|c| Unit::atomic(c, bytes.start, bytes.end)),
+                ),
+                NodeValue::SoftBreak | NodeValue::LineBreak => {
+                    out.push(Unit::new(' ', bytes.start, bytes.end))
+                }
+                // The page shows these as one object: a formula, a picture, a footnote mark
+                NodeValue::Math(_) | NodeValue::Image(_) | NodeValue::FootnoteReference(_) => {
+                    out.push(Unit::atomic('\u{fffc}', bytes.start, bytes.end))
+                }
+                NodeValue::HtmlInline(_) => {}
+                NodeValue::Link(_)
+                | NodeValue::Emph
+                | NodeValue::Strong
+                | NodeValue::Strikethrough => {
+                    let link = matches!(ast.value, NodeValue::Link(_));
+                    self.wraps.push(Wrap { link, bytes });
+                    self.collect(child, out);
+                }
+                _ => self.collect(child, out),
+            }
+        }
+    }
+
+    fn text_units<'a>(
+        &self,
+        node: &'a AstNode<'a>,
+        literal: &str,
+        bytes: Range<usize>,
+        out: &mut Vec<Unit>,
+    ) {
+        let src = self.lines.text;
+        if let Some(units) = align_text(literal, &src[bytes.clone()], bytes.start, true) {
+            out.extend(units);
+            return;
+        }
+        // comrak can end a text's sourcepos early (one byte per `\|` in a cell)
+        let limit = match node.next_sibling() {
+            Some(next) => self.lines.bytes(next.data.borrow().sourcepos).start,
+            None => node.parent().map_or(bytes.end, |p| {
+                self.lines.bytes(p.data.borrow().sourcepos).end
+            }),
+        };
+        if limit > bytes.end
+            && let Some(units) = align_text(literal, &src[bytes.start..limit], bytes.start, false)
+        {
+            out.extend(units);
+            return;
+        }
+        out.extend(
+            literal
+                .chars()
+                .map(|c| Unit::atomic(c, bytes.start, bytes.end)),
+        );
+    }
+
+    /// Source bytes of units `a..b`, grown to whole tokens and balanced markup.
+    fn span(&self, a: usize, b: usize) -> (Range<usize>, bool) {
+        let picked = &self.units[a..b];
+        let mut start = picked.iter().map(|u| u.s).min().unwrap_or(0);
+        let mut end = picked.iter().map(|u| u.e).max().unwrap_or(start);
+        let mut widened = picked.iter().any(|u| u.atomic);
+        loop {
+            let mut grew = false;
+            for wrap in &self.wraps {
+                let Some((first, last)) = self.text_span(&wrap.bytes) else {
+                    continue;
+                };
+                if start >= last || end <= first {
+                    continue;
+                }
+                // A link moves as a whole; emphasis only when a range reaches its edge
+                if wrap.link || start <= first || end >= last {
+                    widened = true;
+                    if start > wrap.bytes.start || end < wrap.bytes.end {
+                        start = start.min(wrap.bytes.start);
+                        end = end.max(wrap.bytes.end);
+                        grew = true;
+                    }
+                }
+            }
+            if !grew {
+                return (start..end, widened);
+            }
+        }
+    }
+
+    /// Bytes from the first to the last unit inside `bytes`.
+    fn text_span(&self, bytes: &Range<usize>) -> Option<(usize, usize)> {
+        let mut inside = self
+            .units
+            .iter()
+            .filter(|u| u.s < u.e && u.s >= bytes.start && u.e <= bytes.end);
+        let first = inside.next()?;
+        let last = inside.next_back().unwrap_or(first);
+        Some((first.s, last.e))
+    }
+
+    fn cand<'a>(
+        &self,
+        node: &'a AstNode<'a>,
+        kind: OwnerKind,
+        sp: &str,
+        markdown: &str,
+        a: usize,
+        len: usize,
+    ) -> Cand {
+        let (bytes, _) = self.span(a, a + len);
+        let preview = if kind == OwnerKind::Heading {
+            let heading = &markdown[self.lines.bytes(node.data.borrow().sourcepos)];
+            format!("→ {}", heading.lines().next().unwrap_or("").trim())
+        } else {
+            format!("→ \"{}\"", self.excerpt(a, a + len))
+        };
+        Cand {
+            sp: Some(sp.to_string()),
+            off: Some(a),
+            source: markdown[bytes.clone()].to_string(),
+            bytes,
+            preview,
+        }
+    }
+
+    /// Units `a..b` with a little text either side, cut with `…`.
+    fn excerpt(&self, a: usize, b: usize) -> String {
+        const SIDE: usize = 16;
+        let chars = self.chars();
+        let (from, to) = (a.saturating_sub(SIDE), (b + SIDE).min(chars.len()));
+        let mut out = String::new();
+        if from > 0 {
+            out.push('…');
+        }
+        out.extend(&chars[from..to]);
+        if to < chars.len() {
+            out.push('…');
+        }
+        out
+    }
+}
+
+/// Every start of `q` in `t`, overlapping ones included.
+fn occurrences(t: &[char], q: &[char]) -> Vec<usize> {
+    if q.is_empty() || q.len() > t.len() {
+        return Vec::new();
+    }
+    (0..=t.len() - q.len())
+        .filter(|&a| t[a..a + q.len()] == *q)
+        .collect()
+}
+
+/// Whitespace as JavaScript's `\s` sees it, which the page uses: no U+0085, plus U+FEFF.
+fn is_js_space(c: char) -> bool {
+    (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}'
+}
+
+/// Runs of whitespace become one space, which keeps the first one's bytes; the ends are trimmed.
+fn collapse(units: Vec<Unit>) -> Vec<Unit> {
+    let mut out: Vec<Unit> = Vec::with_capacity(units.len());
+    for unit in units {
+        if !is_js_space(unit.ch) {
+            out.push(unit);
+        } else if out.last().is_some_and(|last| last.ch != ' ') {
+            out.push(Unit { ch: ' ', ..unit });
+        }
+    }
+    if out.last().is_some_and(|last| last.ch == ' ') {
+        out.pop();
+    }
+    out
+}
+
+/// Typed or quoted text with whitespace runs as single spaces, ends kept.
+fn collapse_str(s: &str) -> Vec<char> {
+    let mut out: Vec<char> = Vec::with_capacity(s.len());
+    for c in s.chars() {
+        if !is_js_space(c) {
+            out.push(c);
+        } else if out.last() != Some(&' ') {
+            out.push(' ');
+        }
+    }
+    out
+}
+
+fn trim_spaces(chars: &[char]) -> &[char] {
+    let start = chars.iter().position(|&c| c != ' ').unwrap_or(chars.len());
+    let end = chars
+        .iter()
+        .rposition(|&c| c != ' ')
+        .map_or(start, |i| i + 1);
+    &chars[start..end]
+}
+
+/// Maps each char of a text node's `literal` to the bytes of `src` (at `base`) it came from.
+/// Escapes, entities, smart punctuation and skipped whitespace are the only differences.
+/// `strict` also requires nothing but whitespace to be left over in `src`.
+fn align_text(literal: &str, src: &str, base: usize, strict: bool) -> Option<Vec<Unit>> {
+    let sc: Vec<(usize, char)> = src.char_indices().collect();
+    let lc: Vec<char> = literal.chars().collect();
+    let at = |k: usize| base + sc.get(k).map_or(src.len(), |&(b, _)| b);
+    let mut out = Vec::with_capacity(lc.len());
+    let (mut i, mut j) = (0, 0);
+    while j < lc.len() {
+        let &(b, c) = sc.get(i)?;
+        let l = lc[j];
+        let escaped = sc.get(i + 1).map(|&(_, n)| n);
+        if c == '\\' && escaped.is_some_and(|n| n.is_ascii_punctuation() && n == l) {
+            out.push(Unit::new(l, at(i), at(i + 2)));
+            i += 2;
+            j += 1;
+        } else if let Some((len, decoded)) = (c == '&').then(|| entity_at(&src[b..])).flatten()
+            && lc[j..].starts_with(&decoded.chars().collect::<Vec<_>>())
+        {
+            let end = base + b + len;
+            out.extend(decoded.chars().map(|d| Unit::atomic(d, base + b, end)));
+            j += decoded.chars().count();
+            while sc.get(i).is_some_and(|&(k, _)| k < b + len) {
+                i += 1;
+            }
+        } else if matches!(c, '-' | '.') && l != c && matches!(l, '–' | '—' | '…') {
+            // Maximal runs on both sides, so cmark's run-splitting rules needn't be redone
+            let mut ie = i;
+            while sc.get(ie).is_some_and(|&(_, x)| x == c) {
+                ie += 1;
+            }
+            let mut je = j;
+            while lc
+                .get(je)
+                .is_some_and(|&x| x == c || matches!(x, '–' | '—' | '…'))
+            {
+                je += 1;
+            }
+            let (s, e) = (at(i), at(ie));
+            out.extend(lc[j..je].iter().map(|&x| Unit::atomic(x, s, e)));
+            i = ie;
+            j = je;
+        } else if (matches!(c, '"' | '\'') && matches!(l, '“' | '”' | '‘' | '’')) || c == l
+        {
+            out.push(Unit::new(l, at(i), at(i + 1)));
+            i += 1;
+            j += 1;
+        } else if c.is_whitespace() {
+            i += 1;
+        } else {
+            return None;
+        }
+    }
+    let rest_blank = sc[i.min(sc.len())..]
+        .iter()
+        .all(|&(_, c)| c.is_whitespace());
+    (!strict || rest_blank).then_some(out)
+}
+
+/// The entity at the start of `src` (`&amp;`, `&#35;`, `&#x1F389;`): its byte length and text.
+fn entity_at(src: &str) -> Option<(usize, String)> {
+    let end = src.find(';').filter(|&e| e < 40)?;
+    let token = &src[..=end];
+    let body = &token[1..end];
+    if let Some(num) = body.strip_prefix('#') {
+        let (digits, radix, max) = match num.strip_prefix(['x', 'X']) {
+            Some(hex) => (hex, 16, 6),
+            None => (num, 10, 7),
+        };
+        if digits.is_empty() || digits.len() > max {
+            return None;
+        }
+        let code = u32::from_str_radix(digits, radix).ok()?;
+        let ch = char::from_u32(code)
+            .filter(|&c| c != '\0')
+            .unwrap_or('\u{fffd}');
+        return Some((token.len(), ch.to_string()));
+    }
+    static NAMED: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+    let named = NAMED.get_or_init(|| {
+        entities::ENTITIES
+            .iter()
+            .filter(|e| e.entity.ends_with(';'))
+            .map(|e| (e.entity, e.characters))
+            .collect()
+    });
+    named.get(token).map(|text| (token.len(), text.to_string()))
+}
+
+/// A code span maps char for char when its literal is its source, less one padding space.
+fn code_span_units(code: &NodeCode, bytes: Range<usize>, src: &str, out: &mut Vec<Unit>) {
+    let ticks = code.num_backticks;
+    let inner = (bytes.len() >= 2 * ticks).then(|| {
+        (
+            bytes.start + ticks,
+            &src[bytes.start + ticks..bytes.end - ticks],
+        )
+    });
+    let exact = inner.and_then(|(at, inner)| {
+        if inner == code.literal {
+            return Some(at);
+        }
+        let padded = inner.len() >= 2 && inner.starts_with(' ') && inner.ends_with(' ');
+        (padded && inner[1..inner.len() - 1] == code.literal).then_some(at + 1)
+    });
+    match exact {
+        Some(at) => out.extend(
+            code.literal
+                .char_indices()
+                .map(|(k, c)| Unit::new(c, at + k, at + k + c.len_utf8())),
+        ),
+        None => out.extend(
+            code.literal
+                .chars()
+                .map(|c| Unit::atomic(c, bytes.start, bytes.end)),
+        ),
+    }
+}
+
+/// Maps a code block's literal line by line onto its source lines, `None` if one doesn't match.
+fn code_units(block: &NodeCodeBlock, start: usize, lines: &LineMap) -> Option<Vec<Unit>> {
+    let first = if block.fenced { start + 1 } else { start };
+    let src = lines.text;
+    let mut out = Vec::with_capacity(block.literal.len());
+    let mut pieces = block.literal.split('\n').peekable();
+    let mut n = first;
+    while let Some(piece) = pieces.next() {
+        let terminated = pieces.peek().is_some();
+        if !terminated && piece.is_empty() {
+            break;
+        }
+        let line = piece.strip_suffix('\r').unwrap_or(piece);
+        let (line_start, line_end, next) = lines.line(n)?;
+        let source = &src[line_start..line_end];
+        // The literal is the line less its container prefix and indent; an indent that
+        // ends inside a tab leaves that tab's remaining columns as spaces
+        let spaces = line.len() - line.trim_start_matches(' ').len();
+        let (split, rest) = (0..=spaces).find_map(|k| {
+            let rest = &line[k..];
+            let at = source.len().checked_sub(rest.len())?;
+            let fits = source.ends_with(rest) && (k == 0 || source[..at].ends_with('\t'));
+            fits.then_some((k, rest))
+        })?;
+        let at = line_end - rest.len();
+        out.extend((0..split).map(|_| Unit::atomic(' ', at - 1, at)));
+        out.extend(
+            rest.char_indices()
+                .map(|(k, c)| Unit::new(c, at + k, at + k + c.len_utf8())),
+        );
+        if terminated {
+            out.push(Unit::new('\n', line_end, next));
+        }
+        n += 1;
+    }
+    Some(out)
 }

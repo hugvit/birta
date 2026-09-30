@@ -112,4 +112,8 @@ Second ref[^2] with blocks in its note.
     |---|
     | 1 |
 
+| Pipe | Note |
+|------|------|
+| a \| b | escaped |
+
 Last line here

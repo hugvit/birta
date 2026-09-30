@@ -1,8 +1,11 @@
 use std::collections::BTreeSet;
 use std::fs;
+use std::ops::Range;
 use std::path::Path;
 
-use birta::anchor::{self, BlockIndex, Owner, OwnerKind, Stop, StopKind};
+use birta::anchor::{
+    self, BlockIndex, Cand, Loc, Owner, OwnerKind, Reason, ResolveReq, Resolved, Stop, StopKind,
+};
 use comrak::nodes::NodeValue;
 use comrak::{Arena, parse_document};
 
@@ -445,7 +448,7 @@ fn a_column_zero_end_stops_on_the_line_before() {
     );
     assert_eq!(code.lines, (1, 2));
     let owner = &idx.owners[0];
-    assert_eq!((owner.kind.clone(), owner.lines), (OwnerKind::Code, (1, 2)));
+    assert_eq!((owner.kind, owner.lines), (OwnerKind::Code, (1, 2)));
     assert_eq!(md[owner.bytes.clone()].trim_end(), "x\n    y");
 }
 
@@ -785,4 +788,1212 @@ fn owner_bytes_never_split_a_character() {
             );
         }
     }
+}
+
+// Resolver: a selection's rendered text back to source, and source back to a location.
+
+const A: &str = include_str!("fixtures/anchor.md");
+
+// Owner texts of the anchor fixture, written out by hand from the rendered page.
+const SP_H1: &str = "1:1-1:26";
+const T_H1: &str = "Retry “layer” — design";
+const SP_PR: &str = "3:1-3:213";
+const T_PR: &str = "This PR adds retry with jittered backoff to the upload() client – because S3 returns 503 & drops events… See the docs 🎉. He said “we just fail” and don’t *panic*.";
+const SP_RETRY: &str = "5:1-7:70";
+const T_RETRY: &str = "We just fail hard here, and we just fail again. Soft break line two with spaces hard break line three Ctrl and math \u{fffc} end\u{fffc}.";
+const SP_TASK: &str = "9:1-9:31";
+const T_TASK: &str = "Ran the integration suite";
+const SP_CHECKED: &str = "10:1-11:22";
+const T_CHECKED: &str = "Checked idempotency on every POST";
+const SP_NESTED: &str = "11:3-11:22";
+const T_NESTED: &str = "nested item – one";
+const SP_PLAIN: &str = "12:1-12:37";
+const T_PLAIN: &str = "plain item with code and gone";
+const SP_KNOB: &str = "14:2-14:7";
+const T_KNOB: &str = "Knob";
+const SP_RETRIES: &str = "16:2-16:10";
+const T_RETRIES: &str = "retries";
+const SP_TIMES: &str = "16:16-16:30";
+const T_TIMES: &str = "5 × 8s = 40s";
+const SP_ALERT: &str = "20:3-20:56";
+const T_ALERT: &str = "Retries are capped at 5 to fit the 60s job budget.";
+const SP_AUTO: &str = "22:1-22:52";
+const T_AUTO: &str = "https://example.com/auto and www.example.org bare.";
+const SP_TERM: &str = "30:1-30:1";
+const T_TERM: &str = "Term one";
+const SP_DETAIL: &str = "31:1-31:32";
+const T_DETAIL: &str = "Definition with emph – dash";
+const SP_SETEXT: &str = "33:1-34:14";
+const T_SETEXT: &str = "Setext Heading";
+const SP_RUST: &str = "43:1-47:3";
+const T_RUST: &str = "fn retry() {\n\tlet n = 5;\n}\n";
+const SP_FENCE: &str = "49:3-52:5";
+const T_FENCE: &str = "indented fence\n  kept indent\n";
+const SP_INDENTED: &str = "54:5-56:0";
+const T_INDENTED: &str = "indented code block\nsecond line\n";
+const SP_MERMAID: &str = "61:1-64:3";
+const SP_MATH: &str = "66:1-68:3";
+const SP_INNER: &str = "74:5-74:35";
+const T_INNER: &str = "inner quote with café and 🎉";
+const SP_QHEAD: &str = "76:3-76:20";
+const T_QHEAD: &str = "Quoted heading";
+const SP_BODY: &str = "81:1-81:30";
+const T_BODY: &str = "Body paragraph inside details.";
+const SP_TADA: &str = "87:2-87:9";
+const T_TADA: &str = "🎉";
+const SP_NAIVE: &str = "87:11-87:23";
+const T_NAIVE: &str = "naïve 🎉";
+const SP_FOOT: &str = "24:7-24:24";
+const T_FOOT: &str = "The footnote body.";
+const SP_PIPE: &str = "117:2-117:9";
+const T_PIPE: &str = "a | b";
+const SP_FOOT_CODE: &str = "107:5-109:7";
+const T_FOOT_CODE: &str = "foot code\n";
+
+fn crlf(md: &str) -> String {
+    md.replace('\n', "\r\n")
+}
+
+fn req(
+    sp: &str,
+    quote: &str,
+    pre: &str,
+    suf: &str,
+    off: Option<usize>,
+    tl: Option<usize>,
+) -> ResolveReq {
+    ResolveReq {
+        sp: sp.to_string(),
+        quote: quote.to_string(),
+        pre: pre.to_string(),
+        suf: suf.to_string(),
+        off,
+        tl,
+    }
+}
+
+/// Byte range of `needle` inside the one occurrence of `context` in `text`.
+fn span(text: &str, context: &str, needle: &str) -> Range<usize> {
+    let at: Vec<usize> = text.match_indices(context).map(|(i, _)| i).collect();
+    assert_eq!(at.len(), 1, "{context:?} occurs {} times", at.len());
+    let inner: Vec<usize> = context.match_indices(needle).map(|(i, _)| i).collect();
+    assert_eq!(inner.len(), 1, "{needle:?} in {context:?}");
+    let start = at[0] + inner[0];
+    start..start + needle.len()
+}
+
+/// [`span`] in code points.
+fn cp_span(text: &str, context: &str, needle: &str) -> Range<usize> {
+    let bytes = span(text, context, needle);
+    let start = text[..bytes.start].chars().count();
+    start..start + needle.chars().count()
+}
+
+fn cp_len(t: &str) -> usize {
+    t.chars().count()
+}
+
+fn line_of(md: &str, byte: usize) -> u32 {
+    md.as_bytes()[..byte]
+        .iter()
+        .filter(|&&b| b == b'\n')
+        .count() as u32
+        + 1
+}
+
+/// Bytes from the start of line `a` to the end of line `b`.
+fn line_range(md: &str, (a, b): (u32, u32)) -> Range<usize> {
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(md.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+    let start = starts[a as usize - 1];
+    start..starts.get(b as usize).copied().unwrap_or(md.len())
+}
+
+fn contains(outer: &Range<usize>, inner: &Range<usize>) -> bool {
+    outer.start <= inner.start && inner.end <= outer.end
+}
+
+/// The one owner of `kind` in `md`.
+fn sole_owner(md: &str, kind: OwnerKind) -> String {
+    let sps: Vec<String> = index_of(md)
+        .owners
+        .into_iter()
+        .filter(|o| o.kind == kind)
+        .map(|o| o.sp)
+        .collect();
+    assert_eq!(sps.len(), 1, "{kind:?} owners in {md:?}: {sps:?}");
+    sps[0].clone()
+}
+
+/// A selection as the client sends it: `len` code points at `off` in owner text `t`.
+struct Sel {
+    quote: String,
+    pre: String,
+    suf: String,
+    off: usize,
+    tl: usize,
+}
+
+fn select(t: &str, off: usize, len: usize) -> Sel {
+    let chars: Vec<char> = t.chars().collect();
+    let end = off + len;
+    Sel {
+        quote: chars[off..end].iter().collect(),
+        pre: chars[off.saturating_sub(32)..off].iter().collect(),
+        suf: chars[end..(end + 32).min(chars.len())].iter().collect(),
+        off,
+        tl: chars.len(),
+    }
+}
+
+fn select_in(t: &str, context: &str, quote: &str) -> Sel {
+    let at = cp_span(t, context, quote);
+    select(t, at.start, at.len())
+}
+
+impl Sel {
+    fn with_off(&self, sp: &str) -> ResolveReq {
+        let (off, tl) = (Some(self.off), Some(self.tl));
+        req(sp, &self.quote, &self.pre, &self.suf, off, tl)
+    }
+
+    fn by_context(&self, sp: &str) -> ResolveReq {
+        req(sp, &self.quote, &self.pre, &self.suf, None, None)
+    }
+}
+
+#[derive(Debug)]
+struct Hit {
+    lines: (u32, u32),
+    bytes: Range<usize>,
+    source: String,
+    shown: String,
+    widened: bool,
+    text_len: usize,
+}
+
+fn exact(r: Resolved) -> Result<Hit, String> {
+    match r {
+        Resolved::Exact {
+            lines,
+            bytes,
+            source,
+            shown,
+            widened,
+            text_len,
+            ..
+        } => Ok(Hit {
+            lines,
+            bytes,
+            source,
+            shown,
+            widened,
+            text_len,
+        }),
+        other => Err(format!("not exact: {other:?}")),
+    }
+}
+
+fn candidates(r: Resolved) -> (Vec<Cand>, usize) {
+    match r {
+        Resolved::Candidates {
+            items, text_len, ..
+        } => (items, text_len),
+        other => panic!("not candidates: {other:?}"),
+    }
+}
+
+fn block(r: Resolved) -> (Reason, String, usize) {
+    match r {
+        Resolved::Block {
+            reason,
+            kept_quote,
+            text_len,
+            ..
+        } => (reason, kept_quote, text_len),
+        other => panic!("not a block: {other:?}"),
+    }
+}
+
+fn loc_parts(loc: Option<Loc>) -> Option<(String, (usize, usize), usize)> {
+    loc.map(|l| (l.sp, l.off, l.tl))
+}
+
+/// `(sp, owner text, context in text, quote, expected source, context in doc, widened)`.
+/// The quote is cut from its context in the owner text, the source from its context in the doc.
+type Case<'a> = (
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a str,
+    Option<bool>,
+);
+
+/// Resolves every case with its offset and by context only; both must give the exact source.
+fn check_cases(md: &str, cases: &[Case]) -> Vec<String> {
+    let mut bad = Vec::new();
+    for &(sp, t, in_t, quote, source, in_md, widened) in cases {
+        let sel = select_in(t, in_t, quote);
+        let want = span(md, in_md, source);
+        let want_lines = (line_of(md, want.start), line_of(md, want.end - 1));
+        for (mode, r) in [
+            ("off", anchor::resolve(md, &sel.with_off(sp))),
+            ("context", anchor::resolve(md, &sel.by_context(sp))),
+        ] {
+            let what = format!("{sp} {quote:?} by {mode}");
+            let hit = match exact(r) {
+                Ok(hit) => hit,
+                Err(e) => {
+                    bad.push(format!("{what}: {e}"));
+                    continue;
+                }
+            };
+            if hit.source != source || hit.bytes != want {
+                bad.push(format!(
+                    "{what}: {:?} at {:?}, want {source:?} at {want:?}",
+                    hit.source, hit.bytes
+                ));
+                continue;
+            }
+            if hit.lines != want_lines {
+                bad.push(format!(
+                    "{what}: lines {:?}, want {want_lines:?}",
+                    hit.lines
+                ));
+            }
+            if hit.shown != quote {
+                bad.push(format!("{what}: shown {:?}", hit.shown));
+            }
+            if hit.text_len != sel.tl {
+                bad.push(format!(
+                    "{what}: text_len {}, want {}",
+                    hit.text_len, sel.tl
+                ));
+            }
+            if widened.is_some_and(|w| w != hit.widened) {
+                bad.push(format!("{what}: widened {}", hit.widened));
+            }
+            let quoted = (sel.off, sel.off + cp_len(quote));
+            match loc_parts(anchor::locate(md, hit.bytes.clone())) {
+                Some((loc_sp, off, tl))
+                    if loc_sp == sp
+                        && tl == sel.tl
+                        && off.0 <= quoted.0
+                        && off.1 >= quoted.1
+                        && (hit.widened || off == quoted) => {}
+                other => bad.push(format!("{what}: locate gave {other:?}, want {quoted:?}")),
+            }
+        }
+    }
+    bad
+}
+
+#[test]
+fn a_selection_resolves_to_its_exact_source() {
+    #[rustfmt::skip]
+    let cases: &[Case] = &[
+        (SP_PR, T_PR, "“we just fail”", "we just fail", "we just fail", "\"we just fail\"", Some(false)),
+        (SP_PR, T_PR, "client – because S3", "client – because S3", "client -- because S3", "client -- because S3", Some(true)),
+        (SP_PR, T_PR, "503 & drops events… See", "503 & drops events… See", "503 &amp; drops events... See", "503 &amp; drops events... See", Some(true)),
+        (SP_PR, T_PR, "the docs 🎉", "the docs 🎉", "[the docs](https://example.com/retry) :tada:", "[the docs](https://example.com/retry) :tada:", Some(true)),
+        (SP_PR, T_PR, "don’t *panic*", "don’t *panic*", "don't \\*panic\\*", "don't \\*panic\\*", Some(false)),
+        (SP_PR, T_PR, "adds retry", "adds retry", "**adds retry**", "**adds retry**", Some(true)),
+        (SP_PR, T_PR, "adds retry", "adds", "**adds retry**", "**adds retry**", Some(true)),
+        (SP_PR, T_PR, "the docs", "docs", "[the docs](https://example.com/retry)", "[the docs](https://example.com/retry)", Some(true)),
+        (SP_PR, T_PR, " jittered ", "jittered", "*jittered*", "*jittered*", Some(true)),
+        (SP_PR, T_PR, "jittered", "itter", "itter", "*jittered*", Some(false)),
+        (SP_PR, T_PR, "the upload() client", "the upload() client", "the `upload()` client", "the `upload()` client", Some(false)),
+        (SP_PR, T_PR, "upload()", "upload", "upload", "`upload()`", Some(false)),
+        (SP_RETRY, T_RETRY, "and we just fail again", "just fail", "just fail", "we just fail again", Some(false)),
+        (SP_RETRY, T_RETRY, "We just fail hard", "just fail", "just **fail**", "We just **fail** hard", Some(true)),
+        (SP_RETRY, T_RETRY, "line two with spaces", "line two with spaces", "line two  with  spaces", "line two  with  spaces", Some(false)),
+        (SP_RETRY, T_RETRY, "line two with", "two ", "two ", "line two  with", Some(false)),
+        (SP_RETRY, T_RETRY, "spaces hard break", "spaces hard break", "spaces  \nhard break", "spaces  \nhard break", Some(false)),
+        (SP_RETRY, T_RETRY, "again. Soft", "again. Soft", "again.\nSoft", "again.\nSoft", Some(false)),
+        (SP_RETRY, T_RETRY, "three Ctrl and", "three Ctrl and", "three <kbd>Ctrl</kbd> and", "three <kbd>Ctrl</kbd> and", Some(false)),
+        (SP_RETRY, T_RETRY, "math \u{fffc} end", "math \u{fffc} end", "math $e^{i\\pi}+1=0$ end", "math $e^{i\\pi}+1=0$ end", Some(true)),
+        (SP_RETRY, T_RETRY, "end\u{fffc}.", "end\u{fffc}", "end[^1]", "end[^1].", Some(true)),
+        (SP_TASK, T_TASK, "Ran the", "Ran the", "Ran the", "Ran the", Some(false)),
+        (SP_CHECKED, T_CHECKED, "every POST", "every POST", "every POST", "every POST", Some(false)),
+        (SP_NESTED, T_NESTED, "nested item", "nested item", "nested item", "nested item", Some(false)),
+        (SP_NESTED, T_NESTED, "– one", "– one", "-- one", "-- one", Some(true)),
+        (SP_PLAIN, T_PLAIN, "and gone", "and gone", "and ~~gone~~", "and ~~gone~~", Some(true)),
+        (SP_PLAIN, T_PLAIN, "with code and", "with code and", "with `code` and", "with `code` and", Some(false)),
+        (SP_KNOB, T_KNOB, "Knob", "Knob", "Knob", "| Knob |", Some(false)),
+        (SP_RETRIES, T_RETRIES, "retries", "retries", "retries", "| retries |", Some(false)),
+        (SP_TIMES, T_TIMES, "8s = 40s", "8s = 40s", "8s = 40s", "8s = 40s", Some(false)),
+        (SP_ALERT, T_ALERT, "at 5 to", "at 5 to", "at **5** to", "at **5** to", Some(true)),
+        (SP_AUTO, T_AUTO, "example.com/auto and", "example.com/auto and", "<https://example.com/auto> and", "<https://example.com/auto> and", Some(true)),
+        (SP_AUTO, T_AUTO, "example.com/auto", "example", "<https://example.com/auto>", "<https://example.com/auto>", Some(true)),
+        (SP_AUTO, T_AUTO, "www.example.org bare", "www.example.org bare", "www.example.org bare", "www.example.org bare", None),
+        (SP_H1, T_H1, "“layer” — design", "“layer” — design", "\"layer\" — design", "\"layer\" — design", Some(false)),
+        (SP_SETEXT, T_SETEXT, "Setext Heading", "Setext Heading", "Setext Heading", "Setext Heading\n-", Some(false)),
+        (SP_TERM, T_TERM, "Term one", "Term one", "Term one", "Term one\n: Definition", Some(false)),
+        (SP_TERM, T_TERM, "Term one", "one", "one", "Term one\n: Definition", Some(false)),
+        (SP_DETAIL, T_DETAIL, "emph – dash", "emph – dash", "*emph* -- dash", "*emph* -- dash", Some(true)),
+        (SP_INNER, T_INNER, "café and 🎉", "café and 🎉", "café and 🎉", "café and 🎉", Some(false)),
+        (SP_QHEAD, T_QHEAD, "Quoted heading", "Quoted heading", "Quoted heading", "### Quoted heading", Some(false)),
+        (SP_BODY, T_BODY, "inside details", "inside details", "inside details", "inside details", Some(false)),
+        (SP_TADA, T_TADA, "🎉", "🎉", ":tada:", "| :tada: |", Some(true)),
+        (SP_NAIVE, T_NAIVE, "naïve 🎉", "naïve 🎉", "naïve 🎉", "naïve 🎉", Some(false)),
+        (SP_FOOT, T_FOOT, "footnote body", "footnote body", "footnote body", "footnote body", Some(false)),
+        (SP_PIPE, T_PIPE, "a | b", "a | b", "a \\| b", "a \\| b", Some(false)),
+        (SP_PIPE, T_PIPE, "| b", "b", "b", "\\| b |", Some(false)),
+    ];
+    let bad = check_cases(A, cases);
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+#[test]
+fn a_code_selection_maps_line_by_line_without_collapsing() {
+    #[rustfmt::skip]
+    let cases: &[Case] = &[
+        (SP_RUST, T_RUST, "\tlet n = 5;", "let n = 5;", "let n = 5;", "\tlet n = 5;", Some(false)),
+        (SP_RUST, T_RUST, "\tlet n = 5;", "\tlet n = 5;", "\tlet n = 5;", "{\n\tlet n = 5;", Some(false)),
+        (SP_RUST, T_RUST, "fn retry() {\n\tlet n", "fn retry() {\n\tlet n", "fn retry() {\n\tlet n", "fn retry() {\n\tlet n", Some(false)),
+        (SP_FENCE, T_FENCE, "  kept indent", "  kept indent", "  kept indent", "    kept indent", Some(false)),
+        (SP_FENCE, T_FENCE, "fence\n  kept", "fence\n  kept", "fence\n    kept", "fence\n    kept", Some(false)),
+        (SP_INDENTED, T_INDENTED, "second line", "second line", "second line", "second line", Some(false)),
+        (SP_FOOT_CODE, T_FOOT_CODE, "foot code", "foot code", "foot code", "    foot code\n", Some(false)),
+    ];
+    let mut bad = check_cases(A, cases);
+
+    // A tab the fence indent cuts into renders as the columns it has left
+    let tab = "  ```\n\tx = 1\n x\n  ```\n";
+    let sp = sole_owner(tab, OwnerKind::Code);
+    let t = "  x = 1\nx\n";
+    #[rustfmt::skip]
+    let cases: &[Case] = &[
+        (&sp, t, "  x = 1", "x = 1", "x = 1", "\tx = 1", Some(false)),
+        (&sp, t, "  x = 1", "  x = 1", "\tx = 1", "\tx = 1", None),
+        (&sp, t, "1\nx", "1\nx", "1\n x", "1\n x\n", Some(false)),
+    ];
+    bad.extend(check_cases(tab, cases));
+
+    // Indented code drops four columns, tabs included
+    let tabbed = "\t\tcode\n  \tcode2\n";
+    let sp = sole_owner(tabbed, OwnerKind::Code);
+    let t = "\tcode\ncode2\n";
+    #[rustfmt::skip]
+    let cases: &[Case] = &[
+        (&sp, t, "\tcode\n", "\tcode", "\tcode", "\t\tcode\n", Some(false)),
+        (&sp, t, "code2", "code2", "code2", "code2", Some(false)),
+        (&sp, t, "code\ncode2", "code\ncode2", "code\n  \tcode2", "code\n  \tcode2", Some(false)),
+    ];
+    bad.extend(check_cases(tabbed, cases));
+
+    // Container prefixes are not part of the code text
+    let quoted = "> ```\n> quoted code\n>  two\n> ```\n";
+    let sp = sole_owner(quoted, OwnerKind::Code);
+    #[rustfmt::skip]
+    let cases: &[Case] = &[
+        (&sp, "quoted code\n two\n", "code\n two", "code\n two", "code\n>  two", "code\n>  two", Some(false)),
+    ];
+    bad.extend(check_cases(quoted, cases));
+    let indented_in_quote = ">   ```\n>  x\n>   ```\n";
+    let sp = sole_owner(indented_in_quote, OwnerKind::Code);
+    let cases: &[Case] = &[(&sp, "x\n", "x\n", "x", "x", ">  x\n", Some(false))];
+    bad.extend(check_cases(indented_in_quote, cases));
+    let in_item = "- item\n\n  ```\n  code in item\n  ```\n";
+    let sp = sole_owner(in_item, OwnerKind::Code);
+    #[rustfmt::skip]
+    let cases: &[Case] = &[
+        (&sp, "code in item\n", "in item", "in item", "in item", "code in item", Some(false)),
+    ];
+    bad.extend(check_cases(in_item, cases));
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+
+    // Code text is not whitespace-collapsed, so the collapsed form is not in it
+    let collapsed = req(SP_RUST, "{ let n", "", "", None, None);
+    let (reason, kept, _) = block(anchor::resolve(A, &collapsed));
+    assert_eq!((reason, kept.as_str()), (Reason::NoMatch, "{ let n"));
+}
+
+#[test]
+fn diagram_and_math_fences_stay_block_level() {
+    for (sp, quote) in [(SP_MERMAID, "graph TD"), (SP_MATH, "x^2")] {
+        let r = anchor::resolve(A, &req(sp, quote, "", "", None, None));
+        let (_, kept, _) = block(r);
+        assert_eq!(kept, quote, "{sp}");
+    }
+}
+
+#[test]
+fn a_crlf_doc_resolves_to_its_crlf_source() {
+    let md = crlf(A);
+    #[rustfmt::skip]
+    let cases: &[Case] = &[
+        (SP_RETRY, T_RETRY, "again. Soft", "again. Soft", "again.\r\nSoft", "again.\r\nSoft", Some(false)),
+        (SP_RETRY, T_RETRY, "spaces hard break", "spaces hard break", "spaces  \r\nhard break", "spaces  \r\nhard break", Some(false)),
+        (SP_PR, T_PR, "client – because S3", "client – because S3", "client -- because S3", "client -- because S3", Some(true)),
+        (SP_TERM, T_TERM, "Term one", "Term one", "Term one", "Term one\r\n:", Some(false)),
+        (SP_RUST, T_RUST, "fn retry() {\n\tlet n", "fn retry() {\n\tlet n", "fn retry() {\r\n\tlet n", "fn retry() {\r\n\tlet n", Some(false)),
+        (SP_FENCE, T_FENCE, "fence\n  kept", "fence\n  kept", "fence\r\n    kept", "fence\r\n    kept", Some(false)),
+    ];
+    let bad = check_cases(&md, cases);
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+#[test]
+fn smart_punctuation_runs_widen_to_the_whole_source_run() {
+    let md = "a -- b --- c ---- d ----- e ...... f .... g .. h\n";
+    let sp = sole_owner(md, OwnerKind::Paragraph);
+    let t = "a – b — c –– d —– e …… f …. g .. h";
+    assert_eq!(anchor::owner_text(md, &sp).as_deref(), Some(t));
+    #[rustfmt::skip]
+    let cases: &[Case] = &[
+        (&sp, t, "b — c", "b — c", "b --- c", "b --- c", Some(true)),
+        (&sp, t, "c –", "–", "----", "c ---- d", Some(true)),
+        (&sp, t, "– d", "–", "----", "c ---- d", Some(true)),
+        (&sp, t, "d —", "—", "-----", "d ----- e", Some(true)),
+        (&sp, t, "e …", "…", "......", "e ...... f", Some(true)),
+        (&sp, t, "f …", "…", "....", "f .... g", Some(true)),
+        (&sp, t, "…. g", ".", "....", "f .... g", Some(true)),
+        (&sp, t, ".. h", ".. h", ".. h", ".. h", Some(false)),
+    ];
+    let bad = check_cases(md, cases);
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+#[test]
+fn entities_escapes_and_unicode_whitespace_map_to_their_source() {
+    let entities = "a&nbsp;&nbsp;b &#x1F389; &bogus; &ngE; x\n";
+    let sp = sole_owner(entities, OwnerKind::Paragraph);
+    // Two no-break spaces collapse like any whitespace run
+    let t = "a b 🎉 &bogus; ≧\u{338} x";
+    assert_eq!(anchor::owner_text(entities, &sp).as_deref(), Some(t));
+    #[rustfmt::skip]
+    let cases: &[Case] = &[
+        (&sp, t, "a b", "a b", "a&nbsp;&nbsp;b", "a&nbsp;&nbsp;b", Some(true)),
+        (&sp, t, "🎉", "🎉", "&#x1F389;", "&#x1F389;", Some(true)),
+        (&sp, t, "&bogus;", "&bogus;", "&bogus;", "&bogus;", Some(false)),
+        (&sp, t, "≧\u{338}", "≧", "&ngE;", "&ngE;", Some(true)),
+    ];
+    let mut bad = check_cases(entities, cases);
+
+    // JS `\s` keeps U+0085 and collapses U+FEFF, unlike `char::is_whitespace`
+    let spaces = "a\u{85}b a\u{feff}b c\n";
+    let sp = sole_owner(spaces, OwnerKind::Paragraph);
+    let t = "a\u{85}b a b c";
+    assert_eq!(anchor::owner_text(spaces, &sp).as_deref(), Some(t));
+    #[rustfmt::skip]
+    let cases: &[Case] = &[
+        (&sp, t, "a b c", "a b", "a\u{feff}b", "a\u{feff}b", Some(false)),
+        (&sp, t, "a\u{85}b", "a\u{85}b", "a\u{85}b", "a\u{85}b", Some(false)),
+    ];
+    bad.extend(check_cases(spaces, cases));
+    match exact(anchor::resolve(
+        spaces,
+        &req(&sp, "a b", "", "", None, None),
+    )) {
+        Ok(hit) if hit.source == "a\u{feff}b" => {}
+        other => bad.push(format!("\"a b\" without context: {other:?}")),
+    }
+
+    let escapes = "a \\\\ b \\# c\n";
+    let sp = sole_owner(escapes, OwnerKind::Paragraph);
+    #[rustfmt::skip]
+    let cases: &[Case] = &[
+        (&sp, "a \\ b # c", "\\ b #", "\\ b #", "\\\\ b \\#", "\\\\ b \\#", Some(false)),
+    ];
+    bad.extend(check_cases(escapes, cases));
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+#[test]
+fn a_repeated_quote_without_position_or_context_gives_both_candidates() {
+    let r = anchor::resolve(A, &req(SP_RETRY, "just fail", "", "", None, None));
+    let (mut items, text_len) = candidates(r);
+    assert_eq!(text_len, cp_len(T_RETRY));
+    items.sort_by_key(|c| c.bytes.start);
+    let got: Vec<_> = items
+        .iter()
+        .map(|c| (c.sp.as_deref(), c.off, c.source.as_str(), c.bytes.clone()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (
+                Some(SP_RETRY),
+                Some(cp_span(T_RETRY, "We just fail", "just fail").start),
+                "just **fail**",
+                span(A, "We just **fail** hard", "just **fail**"),
+            ),
+            (
+                Some(SP_RETRY),
+                Some(cp_span(T_RETRY, "we just fail again", "just fail").start),
+                "just fail",
+                span(A, "we just fail again", "just fail"),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn the_offset_picks_the_occurrence_when_the_text_length_matches() {
+    let tl = Some(cp_len(T_RETRY));
+    let first = cp_span(T_RETRY, "We just fail", "just fail").start;
+    let second = cp_span(T_RETRY, "we just fail again", "just fail").start;
+
+    let r = anchor::resolve(A, &req(SP_RETRY, "just fail", "", "", Some(second), tl));
+    let hit = exact(r).unwrap();
+    assert_eq!(hit.source, "just fail");
+    assert_eq!(hit.bytes, span(A, "we just fail again", "just fail"));
+
+    let r = anchor::resolve(A, &req(SP_RETRY, "just fail", "", "", Some(first), tl));
+    let hit = exact(r).unwrap();
+    assert_eq!(hit.source, "just **fail**");
+    assert_eq!(hit.bytes, span(A, "We just **fail** hard", "just **fail**"));
+}
+
+#[test]
+fn a_wrong_text_length_or_a_stale_offset_falls_back_to_context() {
+    let tl = cp_len(T_RETRY);
+    let first = cp_span(T_RETRY, "We just fail", "just fail").start;
+    let second = cp_span(T_RETRY, "we just fail again", "just fail").start;
+    let second_bytes = span(A, "we just fail again", "just fail");
+
+    // The page's text differs, so its offset can't be trusted and context decides
+    let wrong_tl = req(
+        SP_RETRY,
+        "just fail",
+        "and we ",
+        " again",
+        Some(first),
+        Some(tl + 1),
+    );
+    assert_eq!(
+        exact(anchor::resolve(A, &wrong_tl)).unwrap().bytes,
+        second_bytes
+    );
+
+    // An offset where the quote isn't is ignored
+    let r = anchor::resolve(A, &req(SP_RETRY, "just fail", "", "", Some(0), Some(tl)));
+    assert_eq!(candidates(r).0.len(), 2);
+
+    // The fast path needs both the offset and the text length
+    let r = anchor::resolve(A, &req(SP_RETRY, "just fail", "", "", Some(second), None));
+    assert_eq!(candidates(r).0.len(), 2);
+    let r = anchor::resolve(A, &req(SP_RETRY, "just fail", "", "", None, Some(tl)));
+    assert_eq!(candidates(r).0.len(), 2);
+}
+
+#[test]
+fn context_alone_picks_the_occurrence_it_matches() {
+    let first = span(A, "We just **fail** hard", "just **fail**");
+    let second = span(A, "we just fail again", "just fail");
+    let cases = [
+        ("We ", "", &first),
+        ("", " hard", &first),
+        ("and we ", "", &second),
+        ("", " again. Soft", &second),
+        // Context scores by how much matches, not by an exact match
+        ("Xand we ", "", &second),
+    ];
+    for (pre, suf, want) in cases {
+        let r = anchor::resolve(A, &req(SP_RETRY, "just fail", pre, suf, None, None));
+        let hit = exact(r).unwrap_or_else(|e| panic!("{pre:?} {suf:?}: {e}"));
+        assert_eq!(&hit.bytes, want, "{pre:?} {suf:?}");
+    }
+
+    // Both score 3, so neither wins
+    let r = anchor::resolve(A, &req(SP_RETRY, "just fail", "e ", " ", None, None));
+    assert_eq!(candidates(r).0.len(), 2);
+}
+
+#[test]
+fn offsets_count_code_points_not_bytes() {
+    let md = "é x é x\n";
+    let sp = sole_owner(md, OwnerKind::Paragraph);
+    assert_eq!(anchor::owner_text(md, &sp).as_deref(), Some("é x é x"));
+
+    let r = anchor::resolve(md, &req(&sp, "x", "", "", Some(6), Some(7)));
+    assert_eq!(exact(r).unwrap().bytes, 8..9);
+    let r = anchor::resolve(md, &req(&sp, "x", "", "", Some(2), Some(7)));
+    assert_eq!(exact(r).unwrap().bytes, 3..4);
+    let r = anchor::resolve(md, &req(&sp, "é x", "", "", Some(4), Some(7)));
+    assert_eq!(exact(r).unwrap().bytes, 5..9);
+
+    let r = anchor::resolve(md, &req(&sp, "x", "", "", None, None));
+    let (items, text_len) = candidates(r);
+    assert_eq!(text_len, 7);
+    let mut got: Vec<(Option<usize>, Range<usize>)> =
+        items.into_iter().map(|c| (c.off, c.bytes)).collect();
+    got.sort_by_key(|(_, b)| b.start);
+    assert_eq!(got, [(Some(2), 3..4), (Some(6), 8..9)]);
+}
+
+#[test]
+fn every_candidate_resolves_exactly_from_its_own_offset() {
+    for quote in ["just fail", "fail"] {
+        let r = anchor::resolve(A, &req(SP_RETRY, quote, "", "", None, None));
+        let (items, text_len) = candidates(r);
+        assert!(items.len() >= 2, "{quote:?}: {items:?}");
+        for c in items {
+            let at = req(
+                c.sp.as_deref().unwrap(),
+                quote,
+                "",
+                "",
+                c.off,
+                Some(text_len),
+            );
+            let hit = exact(anchor::resolve(A, &at)).unwrap();
+            assert_eq!(hit.bytes, c.bytes, "{quote:?}");
+            assert_eq!(A[c.bytes.clone()], c.source, "{quote:?}");
+        }
+    }
+}
+
+#[test]
+fn a_sourcepos_that_is_not_a_text_owner_is_bad_sp() {
+    let not_owners = [
+        "500:1-500:9", // past the end
+        "garbage",
+        "",
+        "3:1-3:212",  // a paragraph's sp, one column short
+        "36:1-38:21", // loose list item: its paragraphs own the text
+        "9:1-12:37",  // list
+        "16:1-16:31", // table row
+        "14:1-17:31", // table
+        "26:1-28:20", // blockquote
+        "19:1-20:56", // alert
+        "78:1-79:23", // raw HTML block
+        "30:1-31:32", // description item
+        // Paragraphs rendered bare inside a tight item or dd
+        "9:7-9:31",
+        "12:3-12:37",
+        "11:5-11:22",
+        "31:3-31:32",
+    ];
+    for sp in not_owners {
+        let r = anchor::resolve(A, &req(sp, "we just fail", "", "", Some(0), Some(3)));
+        let (reason, kept, _) = block(r);
+        assert_eq!(
+            (reason, kept.as_str()),
+            (Reason::BadSp, "we just fail"),
+            "{sp:?}"
+        );
+    }
+}
+
+#[test]
+fn a_quote_missing_from_the_text_keeps_the_quote_as_no_match() {
+    let r = anchor::resolve(A, &req(SP_PR, "not there", "", "", None, None));
+    assert_eq!(
+        block(r),
+        (Reason::NoMatch, "not there".to_string(), cp_len(T_PR))
+    );
+
+    // Text in another block is not a match for this one
+    let r = anchor::resolve(A, &req(SP_PR, "We just", "", "", None, None));
+    assert_eq!(
+        block(r),
+        (Reason::NoMatch, "We just".to_string(), cp_len(T_PR))
+    );
+
+    // Markup the page doesn't show is not in the text
+    let r = anchor::resolve(A, &req(SP_PR, "**adds retry**", "", "", None, None));
+    assert_eq!(block(r).0, Reason::NoMatch);
+
+    let r = anchor::resolve(A, &req(SP_PR, "", "", "", Some(0), Some(cp_len(T_PR))));
+    assert_eq!(block(r).1, "");
+    let r = anchor::resolve(A, &req(SP_PR, "", "", "", None, None));
+    assert_eq!(block(r).1, "");
+}
+
+#[test]
+fn an_offset_out_of_range_falls_back_without_panicking() {
+    let tl = cp_len(T_RETRY);
+    for off in [tl, tl - 1, usize::MAX] {
+        let r = anchor::resolve(A, &req(SP_RETRY, "just fail", "", "", Some(off), Some(tl)));
+        assert!(
+            matches!(r, Resolved::Candidates { .. } | Resolved::Block { .. }),
+            "{off}: {r:?}"
+        );
+    }
+}
+
+#[test]
+fn resolve_lists_at_most_five_candidates() {
+    let md = "x x x x x x x\n";
+    let sp = sole_owner(md, OwnerKind::Paragraph);
+    let (items, text_len) = candidates(anchor::resolve(md, &req(&sp, "x", "", "", None, None)));
+    assert_eq!((items.len(), text_len), (5, 13));
+}
+
+#[test]
+fn an_escaped_pipe_in_a_cell_maps_to_its_source() {
+    // comrak's text sourcepos in a cell ends one byte short per escaped pipe
+    let md = "| a \\| b |\n|---|\n| x |\n";
+    let sp = index_of(md).owners[0].sp.clone();
+    #[rustfmt::skip]
+    let cases: &[Case] = &[
+        (&sp, "a | b", "| b", "b", "b", "\\| b |", Some(false)),
+        (&sp, "a | b", "a | b", "a | b", "a \\| b", "a \\| b", Some(false)),
+    ];
+    let bad = check_cases(md, cases);
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+#[test]
+fn an_image_is_one_object_replacement_character() {
+    let md = "a ![alt text](i.png) w\n";
+    let sp = sole_owner(md, OwnerKind::Paragraph);
+    assert_eq!(anchor::owner_text(md, &sp).as_deref(), Some("a \u{fffc} w"));
+    let r = anchor::resolve(md, &req(&sp, "alt", "", "", None, None));
+    assert_eq!(block(r).0, Reason::NoMatch);
+    let hit = exact(anchor::resolve(
+        md,
+        &req(&sp, "\u{fffc}", "", "", None, None),
+    ))
+    .unwrap();
+    assert_eq!(
+        (hit.source.as_str(), hit.widened),
+        ("![alt text](i.png)", true)
+    );
+}
+
+#[test]
+fn nested_emphasis_balances_every_level() {
+    let md = "a ***b*** c\n";
+    let sp = sole_owner(md, OwnerKind::Paragraph);
+    let hit = exact(anchor::resolve(md, &req(&sp, "b", "", "", None, None))).unwrap();
+    assert_eq!((hit.source.as_str(), hit.widened), ("***b***", true));
+}
+
+#[test]
+fn a_code_span_never_maps_to_a_partial_delimiter() {
+    let md = "x `` a`b `` y\n";
+    let sp = sole_owner(md, OwnerKind::Paragraph);
+    assert_eq!(anchor::owner_text(md, &sp).as_deref(), Some("x a`b y"));
+    let hit = exact(anchor::resolve(md, &req(&sp, "a`b", "", "", None, None))).unwrap();
+    assert!(
+        ["a`b", "`` a`b ``"].contains(&hit.source.as_str()),
+        "{hit:?}"
+    );
+}
+
+#[test]
+fn owner_text_is_the_rendered_text_of_the_owner() {
+    let want = [
+        (SP_H1, T_H1),
+        (SP_PR, T_PR),
+        (SP_RETRY, T_RETRY),
+        (SP_TASK, T_TASK),
+        (SP_CHECKED, T_CHECKED),
+        (SP_NESTED, T_NESTED),
+        (SP_PLAIN, T_PLAIN),
+        (SP_KNOB, T_KNOB),
+        (SP_RETRIES, T_RETRIES),
+        (SP_TIMES, T_TIMES),
+        (SP_ALERT, T_ALERT),
+        (SP_AUTO, T_AUTO),
+        (SP_TERM, T_TERM),
+        (SP_DETAIL, T_DETAIL),
+        (SP_SETEXT, T_SETEXT),
+        (SP_RUST, T_RUST),
+        (SP_FENCE, T_FENCE),
+        (SP_INDENTED, T_INDENTED),
+        (SP_INNER, T_INNER),
+        (SP_QHEAD, T_QHEAD),
+        (SP_BODY, T_BODY),
+        (SP_TADA, T_TADA),
+        (SP_NAIVE, T_NAIVE),
+        (SP_FOOT, T_FOOT),
+        (SP_FOOT_CODE, T_FOOT_CODE),
+        (SP_PIPE, T_PIPE),
+        ("96:1-97:14", "parent item"),
+        ("97:3-97:14", "only child"),
+        ("99:1-99:39", "Second ref\u{fffc} with blocks in its note."),
+        ("101:7-101:22", "Second footnote."),
+    ];
+    let mut bad = Vec::new();
+    for (sp, t) in want {
+        let got = anchor::owner_text(A, sp);
+        if got.as_deref() != Some(t) {
+            bad.push(format!("{sp}: {got:?}, want {t:?}"));
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+#[test]
+fn owner_text_is_none_for_anything_but_an_owner() {
+    for sp in [
+        "36:1-38:21",
+        "16:1-16:31",
+        "26:1-28:20",
+        "78:1-79:23",
+        "",
+        "x",
+    ] {
+        assert_eq!(anchor::owner_text(A, sp), None, "{sp:?}");
+    }
+}
+
+#[test]
+fn a_crlf_doc_has_the_same_owner_texts() {
+    let md = crlf(A);
+    let mut bad = Vec::new();
+    for o in index_of(A).owners {
+        let (lf, cr) = (anchor::owner_text(A, &o.sp), anchor::owner_text(&md, &o.sp));
+        if lf.is_none() || lf != cr {
+            bad.push(format!("{}: {lf:?} vs {cr:?}", o.sp));
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+#[test]
+fn locate_maps_source_bytes_to_the_owner_offset() {
+    let md_crlf = crlf(A);
+    #[rustfmt::skip]
+    let cases = vec![
+        (A, span(A, "\"we just fail\"", "we just fail"), SP_PR, cp_span(T_PR, "“we just fail”", "we just fail"), T_PR),
+        (A, span(A, "client -- because", "--"), SP_PR, cp_span(T_PR, "client – because", "–"), T_PR),
+        (A, span(A, "spaces  \nhard", "spaces  \nhard"), SP_RETRY, cp_span(T_RETRY, "spaces hard", "spaces hard"), T_RETRY),
+        (A, span(A, "nested item", "nested item"), SP_NESTED, 0..11, T_NESTED),
+        (A, span(A, "Term one\n:", "Term one"), SP_TERM, 0..8, T_TERM),
+        (A, span(A, "café and 🎉", "and 🎉"), SP_INNER, cp_span(T_INNER, "and 🎉", "and 🎉"), T_INNER),
+        (A, span(A, "\tlet n = 5;", "let n = 5;"), SP_RUST, cp_span(T_RUST, "let n = 5;", "let n = 5;"), T_RUST),
+        (A, span(A, "    foot code", "foot code"), SP_FOOT_CODE, 0..9, T_FOOT_CODE),
+        (md_crlf.as_str(), span(&md_crlf, "fn retry() {\r\n\tlet", "fn retry() {\r\n\tlet"), SP_RUST, 0..17, T_RUST),
+    ];
+    for (md, bytes, sp, off, t) in cases {
+        let got = loc_parts(anchor::locate(md, bytes.clone()));
+        let want = Some((sp.to_string(), (off.start, off.end), cp_len(t)));
+        assert_eq!(got, want, "{:?}", &md[bytes]);
+    }
+}
+
+#[test]
+fn locate_is_none_when_the_range_leaves_one_owner() {
+    let ranges = [
+        // An item's own text into its nested item
+        span(A, "POST\n  - nested", "POST\n  - nested"),
+        span(A, "\\*panic\\*.\n\nWe just", "\\*panic\\*.\n\nWe just"),
+        span(A, "retries | 5", "retries | 5"),
+        span(A, "<summary>More</summary>", "More"),
+        A.len()..A.len() + 3,
+    ];
+    for bytes in ranges {
+        let got = loc_parts(anchor::locate(A, bytes.clone()));
+        assert_eq!(got, None, "{bytes:?}");
+    }
+}
+
+/// `search` results as `(sp, source, bytes)`, in source order.
+fn found(md: &str, text: &str) -> Vec<(Option<String>, String, Range<usize>)> {
+    let mut v: Vec<_> = anchor::search(md, text)
+        .into_iter()
+        .map(|c| (c.sp, c.source, c.bytes))
+        .collect();
+    v.sort_by_key(|(_, _, b)| b.start);
+    v
+}
+
+fn owner_hit(
+    sp: &str,
+    source: &str,
+    bytes: Range<usize>,
+) -> (Option<String>, String, Range<usize>) {
+    (Some(sp.to_string()), source.to_string(), bytes)
+}
+
+#[test]
+fn search_finds_typed_text_in_every_owner() {
+    assert_eq!(
+        found(A, "loose one"),
+        [
+            owner_hit(
+                "36:3-36:11",
+                "loose one",
+                span(A, "- loose one\n", "loose one")
+            ),
+            owner_hit(
+                "38:3-38:21",
+                "loose one",
+                span(A, "loose one continued", "loose one")
+            ),
+        ]
+    );
+    assert_eq!(
+        found(A, "client – because"),
+        [owner_hit(
+            SP_PR,
+            "client -- because",
+            span(A, "client -- because", "client -- because")
+        )]
+    );
+    // Typed whitespace collapses like the page's
+    assert_eq!(
+        found(A, "line  two   with"),
+        [owner_hit(
+            SP_RETRY,
+            "line two  with",
+            span(A, "line two  with", "line two  with")
+        )]
+    );
+    assert_eq!(
+        found(A, "let n = 5"),
+        [owner_hit(
+            SP_RUST,
+            "let n = 5",
+            span(A, "let n = 5", "let n = 5")
+        )]
+    );
+    assert_eq!(found(A, "zzz nowhere"), []);
+    assert_eq!(found(A, ""), []);
+    assert_eq!(found(A, "   "), []);
+}
+
+#[test]
+fn search_falls_back_to_raw_source_only_when_no_owner_matches() {
+    let more = span(A, "<summary>More</summary>", "More");
+    assert_eq!(found(A, "More"), [(None, "More".to_string(), more)]);
+
+    // `details` is also in the raw `<details>` tags, but owners match first
+    let sps: Vec<Option<String>> = found(A, "details").into_iter().map(|h| h.0).collect();
+    let want = [Some("70:1-70:22".to_string()), Some(SP_BODY.to_string())];
+    assert_eq!(sps, want);
+}
+
+#[test]
+fn search_returns_at_most_five() {
+    let md = "x\n\nx\n\nx\n\nx\n\nx\n\nx\n\nx\n";
+    assert_eq!(anchor::search(md, "x").len(), 5);
+}
+
+#[test]
+fn search_previews_name_the_heading_or_quote_the_text() {
+    let previews = |text: &str| -> Vec<String> {
+        anchor::search(A, text)
+            .into_iter()
+            .map(|c| c.preview)
+            .collect()
+    };
+    assert_eq!(previews("Quotes and"), ["→ ### Quotes and details"]);
+
+    let quote = previews("Body paragraph");
+    assert_eq!(quote.len(), 1);
+    let q = &quote[0];
+    assert!(
+        q.starts_with("→ \"") && q.ends_with('"') && q.contains("Body paragraph"),
+        "{q:?}"
+    );
+}
+
+#[test]
+fn search_hits_resolve_exactly_from_their_offset() {
+    for text in [
+        "loose one",
+        "client – because",
+        "details",
+        "let n = 5",
+        "Term one",
+    ] {
+        let hits = anchor::search(A, text);
+        assert!(!hits.is_empty(), "{text:?}");
+        for c in hits {
+            let sp = c.sp.clone().unwrap();
+            let tl = cp_len(&anchor::owner_text(A, &sp).unwrap());
+            let r = anchor::resolve(A, &req(&sp, text, "", "", c.off, Some(tl)));
+            let hit = exact(r).unwrap_or_else(|e| panic!("{text:?} in {sp}: {e}"));
+            assert_eq!(
+                (hit.bytes, hit.source),
+                (c.bytes, c.source),
+                "{text:?} in {sp}"
+            );
+        }
+    }
+}
+
+// The property sweep: every owner in every fixture, every window of its text.
+
+/// Window lengths the default sweep takes at every start; the ignored sweep takes all of 1..=40.
+const WINDOW_LENS: [usize; 5] = [1, 2, 5, 13, 40];
+
+fn is_js_space(c: char) -> bool {
+    (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}'
+}
+
+/// Drops the delimiters a quote never shows, straightens quotes and collapses whitespace.
+fn unmark(s: &str) -> String {
+    let s: String = s
+        .chars()
+        .filter(|c| !matches!(c, '*' | '_' | '~' | '`'))
+        .map(|c| match c {
+            '“' | '”' => '"',
+            '‘' | '’' => '\'',
+            c => c,
+        })
+        .collect();
+    s.split(is_js_space)
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Source text as the page shows it, minus escapes and inline tags.
+fn plain(source: &str) -> String {
+    let mut out = String::new();
+    let mut chars = source.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.peek().is_some_and(|n| n.is_ascii_punctuation()) => {
+                out.push(chars.next().unwrap())
+            }
+            '<' if chars
+                .peek()
+                .is_some_and(|n| n.is_ascii_alphabetic() || *n == '/') =>
+            {
+                for n in chars.by_ref() {
+                    if n == '>' {
+                        break;
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    unmark(&out)
+}
+
+fn unescape(source: &str) -> String {
+    let mut out = String::new();
+    let mut chars = source.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\\' || !chars.peek().is_some_and(|n| n.is_ascii_punctuation()) {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn alnum_runs(quote: &str) -> impl Iterator<Item = &str> {
+    quote
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|run| !run.is_empty())
+}
+
+/// Mermaid and math fences render as pictures, so they have no selectable text.
+fn is_diagram(md: &str, o: &Owner) -> bool {
+    if o.kind != OwnerKind::Code {
+        return false;
+    }
+    let line = md.lines().nth(o.lines.0 as usize - 1).unwrap_or("");
+    let info = line.trim_start().trim_start_matches(['`', '~']).trim();
+    info.starts_with("mermaid") || info.starts_with("math")
+}
+
+fn sweep(lens: &[usize]) {
+    let mut bad = Vec::new();
+    let mut windows = 0usize;
+    'fixtures: for (name, md) in fixtures() {
+        for o in index_of(&md).owners {
+            if is_diagram(&md, &o) {
+                continue;
+            }
+            let Some(t) = anchor::owner_text(&md, &o.sp) else {
+                bad.push(format!("{name} {}: no owner text", o.sp));
+                continue;
+            };
+            let chars: Vec<char> = t.chars().collect();
+            let lines = line_range(&md, o.lines);
+            for a in 0..chars.len() {
+                for &len in lens {
+                    let b = a + len;
+                    if b > chars.len() {
+                        break;
+                    }
+                    if chars[a].is_whitespace() {
+                        continue;
+                    }
+                    windows += 1;
+                    let sel = select(&t, a, len);
+                    if let Err(e) = check_window(&md, &o, &lines, &sel) {
+                        bad.push(format!("{name} {} [{a},{b}) {:?}: {e}", o.sp, sel.quote));
+                        if bad.len() >= 40 {
+                            break 'fixtures;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(bad.is_empty(), "{}", bad.join("\n"));
+    assert!(windows > 1000, "only {windows} windows");
+}
+
+/// With its offset a window resolves exactly and locates back to itself; by context alone it
+/// resolves to the same bytes or lists them among the candidates.
+fn check_window(md: &str, o: &Owner, lines: &Range<usize>, sel: &Sel) -> Result<(), String> {
+    let hit = exact(anchor::resolve(md, &sel.with_off(&o.sp)))?;
+    let quoted = (sel.off, sel.off + cp_len(&sel.quote));
+    if !md.is_char_boundary(hit.bytes.start) || !md.is_char_boundary(hit.bytes.end) {
+        return Err(format!("bytes {:?} split a character", hit.bytes));
+    }
+    // comrak's dt sourcepos covers one byte, and an indented code block's stops before its
+    // last newline, so those are bounded by their lines
+    let by_lines = matches!(o.kind, OwnerKind::Term | OwnerKind::Code);
+    let inside = contains(lines, &hit.bytes) && (by_lines || contains(&o.bytes, &hit.bytes));
+    if !inside {
+        return Err(format!("bytes {:?} outside owner {:?}", hit.bytes, o.bytes));
+    }
+    if md.get(hit.bytes.clone()) != Some(hit.source.as_str()) {
+        return Err(format!(
+            "source {:?} is not md[{:?}]",
+            hit.source, hit.bytes
+        ));
+    }
+    if hit.shown != sel.quote || hit.text_len != sel.tl {
+        return Err(format!("shown {:?}, text_len {}", hit.shown, hit.text_len));
+    }
+    if !hit.widened && o.kind != OwnerKind::Code && plain(&hit.source) != unmark(&sel.quote) {
+        return Err(format!(
+            "unwidened {:?} doesn't read as the quote",
+            hit.source
+        ));
+    }
+    let source = unescape(&hit.source);
+    if let Some(run) = alnum_runs(&sel.quote).find(|run| !source.contains(run)) {
+        return Err(format!("{:?} is missing {run:?}", hit.source));
+    }
+    match loc_parts(anchor::locate(md, hit.bytes.clone())) {
+        Some((sp, off, tl))
+            if sp == o.sp
+                && tl == sel.tl
+                && off.0 <= quoted.0
+                && off.1 >= quoted.1
+                && (hit.widened || off == quoted) => {}
+        other => return Err(format!("locate({:?}) gave {other:?}", hit.bytes)),
+    }
+
+    match anchor::resolve(md, &sel.by_context(&o.sp)) {
+        Resolved::Exact { bytes, .. } if bytes == hit.bytes => Ok(()),
+        Resolved::Candidates { items, .. }
+            if items.len() == 5
+                || items
+                    .iter()
+                    .any(|c| c.sp.as_deref() == Some(o.sp.as_str()) && c.bytes == hit.bytes) =>
+        {
+            Ok(())
+        }
+        other => Err(format!("by context: {other:?}, want {:?}", hit.bytes)),
+    }
+}
+
+#[test]
+fn every_window_resolves_back_to_itself() {
+    sweep(&WINDOW_LENS);
+}
+
+#[test]
+#[ignore = "every window up to 40 code points; slow in a debug build"]
+fn every_window_resolves_back_to_itself_full() {
+    sweep(&(1..=40).collect::<Vec<_>>());
 }

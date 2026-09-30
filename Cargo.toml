@@ -17,6 +17,7 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 comrak = { version = "0.51", default-features = false, features = ["shortcodes", "syntect"] }
 dirs = "6"
+entities = "1"
 getrandom = "0.3"
 notify = "8"
 notify-debouncer-mini = "0.6"

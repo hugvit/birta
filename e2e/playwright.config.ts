@@ -4,6 +4,9 @@ export default defineConfig({
   testDir: "./tests",
   timeout: 30_000,
   retries: 0,
+  // Holds a socket on the shared server so it never auto-shuts down mid-run
+  globalSetup: "./global-setup.ts",
+  globalTeardown: "./global-teardown.ts",
   // Specs share the webServer and live-reload rewrites its fixture
   workers: process.env.CI ? 1 : undefined,
   use: {

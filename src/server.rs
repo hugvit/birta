@@ -159,6 +159,8 @@ pub struct ServerOptions {
     pub keybindings_json: String,
     /// Variant was explicitly chosen via `--light`/`--dark` or config.
     pub variant_explicit: bool,
+    /// The doc's drafter from `--drafted-by`, for a review file this server creates.
+    pub drafted_by: Option<String>,
 }
 
 pub(crate) struct AppState {
@@ -1192,6 +1194,7 @@ mod tests {
             raw_mode: false,
             keybindings_json: "{}".to_string(),
             variant_explicit: false,
+            drafted_by: None,
         }
     }
 

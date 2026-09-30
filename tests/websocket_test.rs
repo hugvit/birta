@@ -41,6 +41,7 @@ async fn start_server(tmpfile: &NamedTempFile) -> u16 {
             raw_mode: false,
             keybindings_json: "{}".to_string(),
             variant_explicit: false,
+            drafted_by: None,
         };
         birta::server::start(path, listener, opts).await.unwrap();
     });

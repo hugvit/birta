@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod anchor;
 mod atomic_write;
 pub mod config;

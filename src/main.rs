@@ -1,7 +1,7 @@
 use std::io::Read;
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 
 #[derive(Parser)]
 #[command(
@@ -18,9 +18,14 @@ use clap::Parser;
 
 \x1b[1;4mConfig:\x1b[0m
   ~/.config/birta/config.toml            Persistent settings
-  ~/.config/birta/themes/<name>.toml     Custom themes"
+  ~/.config/birta/themes/<name>.toml     Custom themes",
+    args_conflicts_with_subcommands = true,
+    disable_help_subcommand = true
 )]
 struct Cli {
+    #[command(subcommand)]
+    cmd: Option<birta::agent::Cmd>,
+
     /// Markdown file or directory, or "-" for stdin
     file: Option<PathBuf>,
 
@@ -98,12 +103,44 @@ struct Cli {
     /// Override a keybinding (e.g. toggle_reading=Alt+r)
     #[arg(long = "bind", value_name = "ACTION=KEY", help_heading = "Display")]
     bind: Vec<String>,
+
+    // -- Review ---------------------------------------------------------------
+    /// Record NAME as the doc's drafter when its review file is created
+    #[arg(long, value_name = "NAME", hide = true, help_heading = "Review")]
+    drafted_by: Option<String>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+fn main() -> anyhow::Result<()> {
+    let config = birta::config::load();
+    let review_on = birta::review::enabled(&config);
+    let command = Cli::command()
+        .mut_arg("drafted_by", |arg| arg.hide(!review_on))
+        .mut_subcommands(|verb| verb.hide(!review_on));
 
+    // Refused before clap reads the verb's arguments, so no usage error hints at it.
+    let first = std::env::args_os().nth(1);
+    let is_verb = first
+        .as_ref()
+        .and_then(|arg| arg.to_str())
+        .is_some_and(|arg| command.find_subcommand(arg).is_some());
+    if is_verb && !review_on {
+        std::process::exit(birta::agent::gate_off() as i32);
+    }
+
+    let cli = Cli::from_arg_matches(&command.get_matches()).unwrap_or_else(|e| e.exit());
+    if let Some(cmd) = cli.cmd {
+        let code = if review_on {
+            birta::agent::run(cmd)
+        } else {
+            birta::agent::gate_off()
+        };
+        std::process::exit(code as i32);
+    }
+
+    tokio::runtime::Runtime::new()?.block_on(serve(cli, config, review_on))
+}
+
+async fn serve(cli: Cli, config: birta::config::Config, review_on: bool) -> anyhow::Result<()> {
     // Auto-install bundled themes to ~/.local/share/birta/themes/ on first run
     birta::theme::ensure_bundled_themes();
 
@@ -127,8 +164,6 @@ async fn main() -> anyhow::Result<()> {
     let file = cli
         .file
         .ok_or_else(|| anyhow::anyhow!("missing required argument: FILE"))?;
-
-    let config = birta::config::load();
 
     let cli_opts = birta::options::CliOptions {
         port: cli.port,
@@ -201,6 +236,7 @@ async fn main() -> anyhow::Result<()> {
             raw_mode: merged.raw_mode,
             keybindings_json,
             variant_explicit,
+            drafted_by: None,
         };
         return birta::server::run_stdin(&markdown, opts).await;
     }
@@ -251,6 +287,7 @@ async fn main() -> anyhow::Result<()> {
         raw_mode: merged.raw_mode,
         keybindings_json,
         variant_explicit,
+        drafted_by: cli.drafted_by.filter(|_| review_on),
     };
     birta::server::run(file, opts).await
 }

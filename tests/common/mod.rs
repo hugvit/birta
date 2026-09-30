@@ -34,6 +34,7 @@ pub async fn start_server(file: PathBuf) -> u16 {
         raw_mode: false,
         keybindings_json: "{}".to_string(),
         variant_explicit: false,
+        drafted_by: None,
     };
     // The listener is already bound, so connects queue until the server accepts.
     tokio::spawn(birta::server::start(file, listener, opts));

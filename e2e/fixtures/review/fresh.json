@@ -1,0 +1,44 @@
+{
+  "schema": "review-state/1",
+  "doc": "pr.md",
+  "rev": "ce013625030ba8dba906f756967f9e9ca394464a",
+  "server_now": 1790000600000,
+  "writable": true,
+  "log_writable": true,
+  "hand_off": "Take a look at my notes: `birta review /work/pr.md`",
+  "log": {
+    "lines": 3,
+    "bad": 0,
+    "unknown_ops": 0,
+    "read_only": false,
+    "baseline_available": true
+  },
+  "owner": {
+    "drafted_by": "claude"
+  },
+  "phrase": {
+    "stage": "idle"
+  },
+  "phrase_before_hold": null,
+  "hold": null,
+  "counts": {
+    "drafts": 0,
+    "sent_unclaimed": 0,
+    "unseen": 0,
+    "unasked": 0,
+    "not_handled": 0,
+    "open_asks": 0,
+    "later": 0,
+    "lost": 0,
+    "items": 5,
+    "decided": 0,
+    "attention": 0
+  },
+  "items": [],
+  "changes": [],
+  "deletions": [],
+  "later": [],
+  "lost": [],
+  "rounds": [],
+  "warnings": []
+}

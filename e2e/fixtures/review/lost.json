@@ -1,0 +1,257 @@
+{
+  "schema": "review-state/1",
+  "doc": "pr.md",
+  "rev": "ce013625030ba8dba906f756967f9e9ca394464a",
+  "server_now": 1790000600000,
+  "writable": true,
+  "log_writable": true,
+  "hand_off": "Take a look at my notes: `birta review /work/pr.md`",
+  "log": {
+    "lines": 13,
+    "bad": 0,
+    "unknown_ops": 0,
+    "read_only": false,
+    "baseline_available": true
+  },
+  "owner": {
+    "drafted_by": "claude"
+  },
+  "phrase": {
+    "stage": "replied",
+    "sent": {
+      "n": 7,
+      "ts": 1790000012000,
+      "items": 3,
+      "can_withdraw": false
+    },
+    "picked_up": {
+      "n": 8,
+      "ts": 1790000020000,
+      "by": "claude",
+      "silence": {
+        "since_ts": 1790000020000,
+        "threshold_ms": 900000
+      }
+    },
+    "replied": {
+      "turn": 8,
+      "ts": 1790000300000,
+      "by": "claude",
+      "done": 1,
+      "answered": 1,
+      "didnt": 0,
+      "asked": 0,
+      "unasked": 0,
+      "not_handled": 1,
+      "note": "Said why the upload fails."
+    }
+  },
+  "phrase_before_hold": null,
+  "hold": null,
+  "counts": {
+    "drafts": 0,
+    "sent_unclaimed": 0,
+    "unseen": 1,
+    "unasked": 0,
+    "not_handled": 1,
+    "open_asks": 0,
+    "later": 0,
+    "lost": 1,
+    "items": 5,
+    "decided": 1,
+    "attention": 3
+  },
+  "items": [
+    {
+      "n": 4,
+      "op": "comment",
+      "by": {
+        "type": "human",
+        "name": "andres"
+      },
+      "cid": "c-4",
+      "ts": 1790000004000,
+      "at": {
+        "kind": "anchor",
+        "status": "orphaned",
+        "scope": "quote",
+        "quote": "we just fail",
+        "shown": "we just fail",
+        "lines": [
+          5,
+          5
+        ],
+        "block": [
+          5,
+          5
+        ],
+        "section": "Why",
+        "rev": "ce013625030ba8dba906f756967f9e9ca394464a",
+        "loc": null
+      },
+      "verdict": "no",
+      "body": "say why",
+      "status": "handled",
+      "sent_in": 7,
+      "turn": 8,
+      "amended": [],
+      "replies": [],
+      "outcome": {
+        "done": true,
+        "no_change": false,
+        "changes": [
+          "9.0"
+        ]
+      }
+    },
+    {
+      "n": 5,
+      "id": "nh:5",
+      "op": "comment",
+      "by": {
+        "type": "human",
+        "name": "andres"
+      },
+      "cid": "c-5",
+      "ts": 1790000005000,
+      "at": {
+        "kind": "anchor",
+        "status": "ok",
+        "scope": "block",
+        "quote": "- retries on 503",
+        "shown": "- retries on 503",
+        "lines": [
+          9,
+          9
+        ],
+        "block": [
+          9,
+          9
+        ],
+        "section": "Why",
+        "rev": "ce013625030ba8dba906f756967f9e9ca394464a",
+        "loc": {
+          "sp": "9:1-9:17"
+        }
+      },
+      "verdict": "no",
+      "body": "drop this bullet",
+      "status": "not_handled",
+      "sent_in": 7,
+      "turn": 8,
+      "amended": [],
+      "replies": []
+    },
+    {
+      "n": 6,
+      "op": "comment",
+      "by": {
+        "type": "human",
+        "name": "andres"
+      },
+      "cid": "c-6",
+      "ts": 1790000006000,
+      "at": {
+        "kind": "doc",
+        "loc": null
+      },
+      "body": "is the test ladder still needed?",
+      "status": "handled",
+      "sent_in": 7,
+      "turn": 8,
+      "amended": [],
+      "replies": [
+        {
+          "n": 11,
+          "id": "#11",
+          "by": {
+            "type": "agent",
+            "name": "claude"
+          },
+          "kind": "answer",
+          "body": "Yes: CI runs it on every push.",
+          "ts": 1790000300000,
+          "seen": false
+        }
+      ]
+    }
+  ],
+  "changes": [
+    {
+      "id": "9.0",
+      "op": 9,
+      "idx": 0,
+      "turn": 8,
+      "attr": "agent",
+      "by": {
+        "type": "agent",
+        "name": "claude"
+      },
+      "old": [
+        5,
+        5
+      ],
+      "new": [
+        5,
+        5
+      ],
+      "range": {
+        "status": "ok",
+        "lines": [
+          5,
+          5
+        ],
+        "bytes": [
+          200,
+          260
+        ],
+        "sp": "5:1-5:71"
+      },
+      "asked": {
+        "kind": "location",
+        "notes": [
+          4
+        ]
+      },
+      "reverts_your_edit": false,
+      "breaks_stet": [],
+      "seen": false,
+      "settled": false,
+      "what": {
+        "old_lines": 1,
+        "new_lines": 1,
+        "words": 3,
+        "touches_html": false
+      },
+      "is_rewrite": false,
+      "reversible": {
+        "ok": false,
+        "reason": "multi_hunk"
+      },
+      "op_hunks": 1
+    }
+  ],
+  "deletions": [],
+  "later": [],
+  "lost": [
+    4
+  ],
+  "rounds": [
+    {
+      "submit": 7,
+      "ts": 1790000012000,
+      "by": "andres",
+      "to": "*",
+      "items": [
+        4,
+        5,
+        6
+      ],
+      "claim": 8,
+      "claimed_by": "claude",
+      "yield": 13,
+      "released": false
+    }
+  ],
+  "warnings": []
+}

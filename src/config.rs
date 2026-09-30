@@ -16,6 +16,27 @@ pub struct Config {
     pub font: FontConfig,
     #[serde(default)]
     pub keybindings: KeybindingsConfig,
+    #[serde(default)]
+    pub review: ReviewConfig,
+}
+
+/// The `[review]` table. Review stays off unless enabled here or by `BIRTA_REVIEW=1`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ReviewConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Add `*.birta.jsonl` to the repo's `info/exclude` when a review file is created.
+    #[serde(default = "default_true")]
+    pub git_exclude: bool,
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            git_exclude: true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

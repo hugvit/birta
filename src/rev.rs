@@ -2,12 +2,14 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+
 /// Lowercase hex of `sha1("blob <len>\0" + bytes)`, the same as `git hash-object --no-filters`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct Rev(String);
+pub struct Rev(String);
 
 impl Rev {
-    pub(crate) fn of(bytes: &[u8]) -> Self {
+    pub fn of(bytes: &[u8]) -> Self {
         let mut hasher = sha1_smol::Sha1::new();
         hasher.update(format!("blob {}\0", bytes.len()).as_bytes());
         hasher.update(bytes);
@@ -15,12 +17,12 @@ impl Rev {
     }
 
     /// Accepts exactly 40 lowercase hex digits, as [`Rev::of`] produces.
-    pub(crate) fn parse(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         let hex = |b: u8| b.is_ascii_digit() || (b'a'..=b'f').contains(&b);
         (s.len() == 40 && s.bytes().all(hex)).then(|| Self(s.to_string()))
     }
 
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 
@@ -33,6 +35,19 @@ impl Rev {
 impl fmt::Display for Rev {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+impl Serialize for Rev {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Rev {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Self::parse(&s).ok_or_else(|| de::Error::custom(format!("not a rev: {s:?}")))
     }
 }
 

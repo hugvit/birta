@@ -56,11 +56,10 @@ impl RewriteMode {
         let clean = url.strip_prefix("./").unwrap_or(url);
         match self {
             RewriteMode::Server => format!("/local/{clean}"),
-            RewriteMode::Directory { file_dir } => {
-                let resolved = file_dir.join(clean);
-                let normalized = normalize_path(&resolved);
-                format!("/local/{}", normalized.display())
-            }
+            RewriteMode::Directory { file_dir } => match normalize_path(&file_dir.join(clean)) {
+                Some(normalized) => format!("/local/{}", normalized.display()),
+                None => url.to_string(),
+            },
             // Keep the relative URL (query stripped); the asset is copied to the
             // mirrored location in the bundle, so the relative src still resolves.
             RewriteMode::StaticBundle => split_fragment(clean).0.to_string(),
@@ -78,12 +77,12 @@ impl RewriteMode {
         match self {
             RewriteMode::Server => url.to_string(),
             RewriteMode::Directory { file_dir } => {
-                if path_part.ends_with(".md") || path_part.ends_with(".markdown") {
-                    let resolved = file_dir.join(path_part);
-                    let normalized = normalize_path(&resolved);
-                    format!("/view/{}{fragment}", normalized.display())
-                } else {
-                    url.to_string()
+                let normalized = (path_part.ends_with(".md") || path_part.ends_with(".markdown"))
+                    .then(|| normalize_path(&file_dir.join(path_part)))
+                    .flatten();
+                match normalized {
+                    Some(normalized) => format!("/view/{}{fragment}", normalized.display()),
+                    None => url.to_string(),
                 }
             }
             // Mirrored tree: keep the relative link, swap `.md`→`.html`. Non-md
@@ -520,20 +519,21 @@ fn split_fragment(url: &str) -> (&str, &str) {
 }
 
 /// Normalize a relative path by collapsing `.` and `..` segments without filesystem access.
-fn normalize_path(path: &Path) -> PathBuf {
+/// `None` when a `..` climbs above the root, which no served path can name.
+pub(crate) fn normalize_path(path: &Path) -> Option<PathBuf> {
     use std::path::Component;
     let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
     for component in path.components() {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
-                parts.pop();
+                parts.pop()?;
             }
             Component::Normal(seg) => parts.push(seg),
             _ => {}
         }
     }
-    parts.iter().collect()
+    Some(parts.iter().collect())
 }
 
 pub(crate) fn html_escape(s: &str) -> String {
@@ -599,22 +599,44 @@ mod tests {
 
     #[test]
     fn normalize_path_collapses_parent() {
-        assert_eq!(normalize_path(Path::new("a/b/../c")), PathBuf::from("a/c"));
+        assert_eq!(
+            normalize_path(Path::new("a/b/../c")),
+            Some(PathBuf::from("a/c"))
+        );
     }
 
     #[test]
     fn normalize_path_collapses_multiple_parents() {
-        assert_eq!(normalize_path(Path::new("a/b/../../c")), PathBuf::from("c"));
+        assert_eq!(
+            normalize_path(Path::new("a/b/../../c")),
+            Some(PathBuf::from("c"))
+        );
     }
 
     #[test]
     fn normalize_path_strips_current_dir() {
-        assert_eq!(normalize_path(Path::new("./a/./b")), PathBuf::from("a/b"));
+        assert_eq!(
+            normalize_path(Path::new("./a/./b")),
+            Some(PathBuf::from("a/b"))
+        );
+    }
+
+    #[test]
+    fn normalize_path_refuses_to_climb_above_the_root() {
+        for path in [
+            "..",
+            "../x.md",
+            "a/../../x.md",
+            "./../x.md",
+            "a/b/../../../x.md",
+        ] {
+            assert_eq!(normalize_path(Path::new(path)), None, "{path}");
+        }
     }
 
     #[test]
     fn normalize_path_empty_result() {
-        assert_eq!(normalize_path(Path::new("")), PathBuf::from(""));
+        assert_eq!(normalize_path(Path::new("")), Some(PathBuf::from("")));
     }
 
     #[test]
@@ -688,6 +710,56 @@ mod tests {
             html.contains("href=\"/view/README.md\""),
             "../ should resolve relative to file dir, got: {html}"
         );
+    }
+
+    #[test]
+    fn render_dir_leaves_links_escaping_the_root_unrewritten() {
+        let mut bad = Vec::new();
+        for (url, file) in [
+            ("../x.md", "README.md"),
+            ("a/../../x.md", "README.md"),
+            ("../x.md#sec", "README.md"),
+            ("./../x.md", "README.md"),
+            ("../../x.md", "docs/guide.md"),
+            ("../../../x.markdown", "docs/sub/guide.md"),
+        ] {
+            let html = render_dir(&format!("[x]({url})"), None, Path::new(file));
+            if !html.contains(&format!("href=\"{url}\"")) || html.contains("/view/") {
+                bad.push(format!("{url} from {file}: {html}"));
+            }
+        }
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    #[test]
+    fn render_dir_rewrites_parent_links_that_stay_inside_the_root() {
+        for (url, file, want) in [
+            ("sub/../../README.md", "docs/guide.md", "/view/README.md"),
+            ("../docs/../README.md", "docs/guide.md", "/view/README.md"),
+            ("../../a.md#top", "docs/sub/guide.md", "/view/a.md#top"),
+        ] {
+            let html = render_dir(&format!("[x]({url})"), None, Path::new(file));
+            assert!(
+                html.contains(&format!("href=\"{want}\"")),
+                "{url} from {file}: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn render_dir_leaves_images_escaping_the_root_unrewritten() {
+        let mut bad = Vec::new();
+        for (md, file, src) in [
+            ("![p](../p.png)", "README.md", "../p.png"),
+            ("![p](../../p.png)", "docs/guide.md", "../../p.png"),
+            ("<img src=\"../p.png\">", "README.md", "../p.png"),
+        ] {
+            let html = render_dir(md, None, Path::new(file));
+            if !html.contains(&format!("src=\"{src}\"")) || html.contains("/local/") {
+                bad.push(format!("{md} from {file}: {html}"));
+            }
+        }
+        assert!(bad.is_empty(), "{bad:#?}");
     }
 
     #[test]

@@ -43,6 +43,22 @@ pub async fn start_server(file: PathBuf) -> u16 {
 /// Sends one HTTP/1.1 request over raw TCP with exactly `headers`, so Host can be
 /// omitted or forged, and returns the response status.
 pub async fn http_request(port: u16, method: &str, path: &str, headers: &[(&str, &str)]) -> u16 {
+    let response = http_exchange(port, method, path, headers).await;
+    let status_line = response.lines().next().unwrap_or_default();
+    status_line
+        .split(' ')
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("bad status line: {status_line:?}"))
+}
+
+/// Like [`http_request`], returning the whole response as text.
+pub async fn http_exchange(
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
     let mut head = format!("{method} {path} HTTP/1.1\r\nconnection: close\r\n");
     for (name, value) in headers {
@@ -56,13 +72,20 @@ pub async fn http_request(port: u16, method: &str, path: &str, headers: &[(&str,
         .await
         .expect("timed out reading response")
         .unwrap();
-    let response = String::from_utf8_lossy(&response);
-    let status_line = response.lines().next().unwrap_or_default();
-    status_line
-        .split(' ')
-        .nth(1)
-        .and_then(|code| code.parse().ok())
-        .unwrap_or_else(|| panic!("bad status line: {status_line:?}"))
+    String::from_utf8_lossy(&response).into_owned()
+}
+
+/// The value of header `name` in a raw response, matched case-insensitively.
+pub fn header<'a>(response: &'a str, name: &str) -> Option<&'a str> {
+    response
+        .split("\r\n\r\n")
+        .next()?
+        .lines()
+        .skip(1)
+        .find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case(name).then(|| value.trim())
+        })
 }
 
 pub async fn http_get(port: u16, path: &str, headers: &[(&str, &str)]) -> u16 {

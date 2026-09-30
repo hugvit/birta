@@ -2,17 +2,19 @@
 //! file and write a self-contained bundle of `.html` pages plus copied assets,
 //! mirroring the source directory tree.
 //!
-//! Path safety: every source path is validated with `canonicalize` +
-//! `starts_with(base_dir)` (the same model as `server::resolve_safe_path`), so
-//! links/assets that escape the tree via `..` or symlinks are rejected rather
-//! than read or written outside the bundle. Output paths are derived from the
-//! canonicalized source, so writes always stay inside `out_dir`.
+//! Path safety: pages resolve as the server serves them. A link is collapsed
+//! lexically, so `..` never climbs above `base_dir`, then checked by `Roots`, which
+//! follows only allowed symlinks inside the tree. Images resolve the same way, as
+//! the server's `/local` does; other assets are validated with `canonicalize` +
+//! `starts_with(base_dir)`. Output paths are `..`-free relative paths, so writes
+//! always stay inside `out_dir`.
 
 use std::collections::{HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::Context;
 
+use crate::paths::{self, FileKind, PathError, Roots};
 use crate::render;
 use crate::template::{self, PageOptions};
 use crate::theme::ResolvedTheme;
@@ -73,9 +75,15 @@ pub fn export_bundle(
         .with_context(|| format!("entry file not found: {}", entry.display()))?;
     let entry_rel = entry_canonical
         .strip_prefix(&base_dir)
-        .map_err(|_| anyhow::anyhow!("entry is not inside its base directory"))?
+        // A linked entry keeps its place in the tree, wherever its target lives.
+        .or_else(|_| entry.strip_prefix(&base_dir))
+        .ok()
+        .filter(|rel| rel.components().all(|c| matches!(c, Component::Normal(_))))
+        .ok_or_else(|| anyhow::anyhow!("entry is not inside its base directory"))?
         .to_path_buf();
     let entry_out_rel = entry_rel.with_extension("html");
+
+    let roots = Roots::new(base_dir.clone(), dirs::home_dir());
 
     // BFS over base-relative page paths (may contain `..`; resolved on dequeue).
     let mut queue: VecDeque<PathBuf> = VecDeque::new();
@@ -88,28 +96,38 @@ pub fn export_bundle(
     let mut pages = 0usize;
 
     queue.push_back(entry_rel.clone());
-    enqueued.insert(entry_rel);
+    enqueued.insert(entry_rel.clone());
 
     while let Some(rel) = queue.pop_front() {
-        // Resolve + validate against base_dir.
-        let canonical = match std::fs::canonicalize(base_dir.join(&rel)) {
-            Ok(c) => c,
-            Err(_) => {
-                eprintln!(
-                    "birta: warning: skipping missing link target: {}",
-                    rel.display()
-                );
-                continue;
-            }
-        };
-        let Ok(safe_rel) = canonical.strip_prefix(&base_dir) else {
+        // Lexical, as the bundle's relative links resolve in the browser.
+        let Some(safe_rel) = render::normalize_path(&rel) else {
             eprintln!(
                 "birta: warning: skipping link outside source tree: {}",
                 rel.display()
             );
             continue;
         };
-        let safe_rel = safe_rel.to_path_buf();
+        let canonical = if safe_rel == entry_rel {
+            entry_canonical.clone()
+        } else {
+            match resolve_served(&roots, &safe_rel, FileKind::Markdown) {
+                Ok(canonical) => canonical,
+                Err(PathError::NotFound) => {
+                    eprintln!(
+                        "birta: warning: skipping missing link target: {}",
+                        rel.display()
+                    );
+                    continue;
+                }
+                Err(_) => {
+                    eprintln!(
+                        "birta: warning: skipping link outside source tree: {}",
+                        rel.display()
+                    );
+                    continue;
+                }
+            }
+        };
         if !visited.insert(safe_rel.clone()) {
             continue;
         }
@@ -185,23 +203,34 @@ pub fn export_bundle(
         }
     }
 
-    // Copy assets (deduped by canonical path, validated against base_dir).
+    // Copy assets, deduped by their place in the bundle.
     let mut copied: HashSet<PathBuf> = HashSet::new();
     let mut assets = 0usize;
     for rel in asset_candidates {
-        let canonical = match std::fs::canonicalize(base_dir.join(&rel)) {
-            Ok(c) => c,
-            Err(_) => {
+        // Images resolve as the server's `/local` does; other files, which the server
+        // never serves, stay confined to the tree.
+        let resolved = if paths::is_image(&rel) {
+            render::normalize_path(&rel)
+                .ok_or(PathError::Denied)
+                .and_then(|lexical| {
+                    Ok((resolve_served(&roots, &lexical, FileKind::Image)?, lexical))
+                })
+        } else {
+            resolve_in_tree(&base_dir, &rel)
+        };
+        let (canonical, safe_rel) = match resolved {
+            Ok(found) => found,
+            Err(PathError::NotFound) => {
                 eprintln!("birta: warning: skipping missing asset: {}", rel.display());
                 continue;
             }
-        };
-        let Ok(safe_rel) = canonical.strip_prefix(&base_dir) else {
-            eprintln!(
-                "birta: warning: skipping asset outside source tree: {}",
-                rel.display()
-            );
-            continue;
+            Err(_) => {
+                eprintln!(
+                    "birta: warning: skipping asset outside source tree: {}",
+                    rel.display()
+                );
+                continue;
+            }
         };
         // Only copy regular files — a link/image pointing at a directory (e.g.
         // `[x](docs/)`) is not a copyable asset and must not abort the export.
@@ -209,7 +238,6 @@ pub fn export_bundle(
             eprintln!("birta: warning: skipping non-file asset: {}", rel.display());
             continue;
         }
-        let safe_rel = safe_rel.to_path_buf();
         if !copied.insert(safe_rel.clone()) {
             continue;
         }
@@ -235,6 +263,24 @@ pub fn export_bundle(
         pages,
         assets,
     })
+}
+
+/// `rel` (lexical, `..`-free) as the server would serve it: symlinks along it inside the
+/// tree are registered first, as the server's walk does.
+fn resolve_served(roots: &Roots, rel: &Path, kind: FileKind) -> Result<PathBuf, PathError> {
+    let name = rel.to_str().ok_or(PathError::Denied)?;
+    roots.register_path(rel);
+    roots.resolve_file(name, kind)
+}
+
+/// `rel`'s canonical path and its place under `base_dir`, which it must not leave.
+fn resolve_in_tree(base_dir: &Path, rel: &Path) -> Result<(PathBuf, PathBuf), PathError> {
+    let canonical = std::fs::canonicalize(base_dir.join(rel)).map_err(|_| PathError::NotFound)?;
+    let safe_rel = canonical
+        .strip_prefix(base_dir)
+        .map_err(|_| PathError::Denied)?
+        .to_path_buf();
+    Ok((canonical, safe_rel))
 }
 
 fn dir_is_non_empty(dir: &Path) -> bool {

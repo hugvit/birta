@@ -77,3 +77,53 @@ test.describe("symlinked folders", () => {
     });
   });
 });
+
+const DIR_PORT = 3468;
+const DIR_BASE = `http://127.0.0.1:${DIR_PORT}`;
+
+// `birta fixtures/dirmode`: the folder is served and `index.md` is the entry.
+test.describe("serving a folder", () => {
+  let server: ChildProcess;
+
+  test.beforeAll(async () => {
+    server = await startBirta(DIR_PORT, "fixtures/dirmode");
+  });
+
+  test.afterAll(() => {
+    server?.kill("SIGTERM");
+  });
+
+  test("/ opens the folder's index", async ({ page }) => {
+    await page.goto(DIR_BASE);
+    await page.waitForURL(`${DIR_BASE}/view/index.md`);
+    await expect(page.locator("h1")).toHaveText("Dirmode Index");
+    const logo = page.locator('img[alt="logo"]');
+    await expect(logo).toHaveAttribute("src", "/local/img/logo.png");
+    await expect
+      .poll(() => logo.evaluate((img: HTMLImageElement) => img.naturalWidth))
+      .toBeGreaterThan(0);
+  });
+
+  test("nested pages link, load images and keep escaping links raw", async ({
+    page,
+  }) => {
+    await page.goto(`${DIR_BASE}/view/index.md`);
+    await page.locator('a:has-text("Sub Page")').click();
+    await page.waitForURL(`${DIR_BASE}/view/sub/page.md`);
+    await expect(page.locator("h1")).toHaveText("Sub Page");
+
+    const logo = page.locator('img[alt="logo"]');
+    await expect(logo).toHaveAttribute("src", "/local/img/logo.png");
+    await expect
+      .poll(() => logo.evaluate((img: HTMLImageElement) => img.naturalWidth))
+      .toBeGreaterThan(0);
+    await expect(page.locator('a:has-text("Escape")')).toHaveAttribute(
+      "href",
+      "../../outside.md"
+    );
+
+    await page.locator('a:has-text("Index")').click();
+    await page.waitForURL(`${DIR_BASE}/view/index.md`);
+    await expect(page.locator("h1")).toHaveText("Dirmode Index");
+  });
+});

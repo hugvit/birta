@@ -21,7 +21,7 @@ use clap::Parser;
   ~/.config/birta/themes/<name>.toml     Custom themes"
 )]
 struct Cli {
-    /// Markdown file to preview, or "-" for stdin
+    /// Markdown file or directory, or "-" for stdin
     file: Option<PathBuf>,
 
     // -- Server ---------------------------------------------------------------
@@ -209,7 +209,8 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("file not found: {}", file.display());
     }
 
-    if let Some(ext) = file.extension().and_then(|e| e.to_str())
+    if !file.is_dir()
+        && let Some(ext) = file.extension().and_then(|e| e.to_str())
         && ext != "md"
         && ext != "markdown"
     {
@@ -267,17 +268,23 @@ struct StaticOptions<'a> {
     out: Option<&'a std::path::Path>,
 }
 
-fn run_static(file: &std::path::Path, opts: StaticOptions<'_>) -> anyhow::Result<()> {
-    let base_dir = file
-        .parent()
-        .map(|p| {
-            if p.as_os_str().is_empty() {
-                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-            } else {
-                std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
-            }
-        })
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+fn run_static(path: &std::path::Path, opts: StaticOptions<'_>) -> anyhow::Result<()> {
+    let (file, base_dir) = if path.is_dir() {
+        let target = birta::server::Target::resolve(path)?;
+        (target.root.join(&target.entry), target.root)
+    } else {
+        let base_dir = path
+            .parent()
+            .map(|p| {
+                if p.as_os_str().is_empty() {
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                } else {
+                    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+                }
+            })
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        (path.to_path_buf(), base_dir)
+    };
 
     let stem = file
         .file_stem()
@@ -289,7 +296,7 @@ fn run_static(file: &std::path::Path, opts: StaticOptions<'_>) -> anyhow::Result
         .unwrap_or_else(|| std::env::temp_dir().join(format!("birta-{stem}")));
 
     let result = birta::static_export::export_bundle(
-        file,
+        &file,
         &base_dir,
         &out_dir,
         &birta::static_export::BundleOptions {

@@ -132,25 +132,111 @@ fn bundle_rejects_escaping_link() {
 
 #[cfg(unix)]
 #[test]
-fn bundle_rejects_symlink_escape() {
+fn bundle_copies_file_link_images_as_the_server_serves_them() {
     use std::os::unix::fs::symlink;
 
     let root = tempdir().unwrap();
-    write(&root.path().join("secret.png"), "TOPSECRET");
+    write(&root.path().join("outside/pic.png"), "PNGDATA");
+    write(&root.path().join("secret.env"), "TOPSECRET");
+    write(&root.path().join(".ssh/key.png"), "KEY");
     let base = root.path().join("site");
     fs::create_dir_all(&base).unwrap();
-    // Symlink inside the tree pointing outside it.
-    symlink(root.path().join("secret.png"), base.join("link.png")).unwrap();
-    write(&base.join("index.md"), "![x](link.png)\n");
+    // Symlinks inside the tree pointing outside it: an image, a non-image, a denied folder.
+    symlink(root.path().join("outside/pic.png"), base.join("link.png")).unwrap();
+    symlink(root.path().join("secret.env"), base.join("leak.png")).unwrap();
+    symlink(root.path().join(".ssh/key.png"), base.join("key.png")).unwrap();
+    write(
+        &base.join("index.md"),
+        "![a](link.png) ![b](leak.png) ![c](key.png) ![d](../outside/pic.png)\n",
+    );
 
     let out = tempdir().unwrap();
     let theme = test_theme();
     let result = export_bundle(&base.join("index.md"), &base, out.path(), &opts(&theme)).unwrap();
 
-    assert_eq!(result.assets, 0, "symlinked-out asset must not be copied");
-    assert!(!out.path().join("link.png").exists());
-    // The escaped secret never lands in the bundle under any name.
-    assert!(!out.path().join("secret.png").exists());
+    assert_eq!(
+        result.assets, 1,
+        "only the image link the server would serve"
+    );
+    assert_eq!(fs::read(out.path().join("link.png")).unwrap(), b"PNGDATA");
+    for name in ["leak.png", "key.png", "pic.png", "secret.env"] {
+        assert!(!out.path().join(name).exists(), "{name}");
+    }
+    assert!(
+        !out.path()
+            .parent()
+            .unwrap()
+            .join("outside/pic.png")
+            .exists()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bundle_follows_links_inside_linked_folders() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempdir().unwrap();
+    let base = root.path().join("site");
+    write(&base.join("index.md"), "[a](docs/a.md)\n\n[ext](ext.md)\n");
+    write(
+        &root.path().join("outside/a.md"),
+        "[b](b.md)\n\n[home](../index.md)\n",
+    );
+    write(
+        &root.path().join("outside/b.md"),
+        "# B\n\n![pic](img/p.png)\n\n<img src=\"../docs/img/p.png\">\n",
+    );
+    write(&root.path().join("outside/img/p.png"), "PNGDATA");
+    write(&root.path().join("other/doc.md"), "# Ext\n");
+    symlink("../outside", base.join("docs")).unwrap();
+    symlink("../other/doc.md", base.join("ext.md")).unwrap();
+
+    let out = tempdir().unwrap();
+    let theme = test_theme();
+    let result = export_bundle(&base.join("index.md"), &base, out.path(), &opts(&theme)).unwrap();
+
+    assert_eq!(result.pages, 4, "index, docs/a, docs/b, ext");
+    let a = fs::read_to_string(out.path().join("docs/a.html")).unwrap();
+    assert!(a.contains("href=\"../index.html\""), "{a}");
+    assert!(out.path().join("docs/b.html").is_file());
+    assert_eq!(result.assets, 1, "one image, reached two ways");
+    assert_eq!(
+        fs::read(out.path().join("docs/img/p.png")).unwrap(),
+        b"PNGDATA"
+    );
+    let ext = fs::read_to_string(out.path().join("ext.html")).unwrap();
+    assert!(ext.contains("Ext"), "{ext}");
+}
+
+#[cfg(unix)]
+#[test]
+fn bundle_never_follows_links_the_server_refuses() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempdir().unwrap();
+    let base = root.path().join("site");
+    write(
+        &base.join("index.md"),
+        "[k](keys/k.md) [up](up/x.md) [esc](docs/../../x.md) [txt](notes.md)\n",
+    );
+    write(&root.path().join(".ssh/k.md"), "# Key\n");
+    write(&root.path().join("x.md"), "# Above\n");
+    write(&root.path().join("outside/a.md"), "# A\n");
+    write(&root.path().join("notes.txt"), "plain\n");
+    symlink("../.ssh", base.join("keys")).unwrap();
+    symlink("..", base.join("up")).unwrap();
+    symlink("../outside", base.join("docs")).unwrap();
+    symlink("../notes.txt", base.join("notes.md")).unwrap();
+
+    let out = tempdir().unwrap();
+    let theme = test_theme();
+    let result = export_bundle(&base.join("index.md"), &base, out.path(), &opts(&theme)).unwrap();
+
+    assert_eq!(result.pages, 1);
+    for page in ["keys/k.html", "up/x.html", "x.html", "notes.html"] {
+        assert!(!out.path().join(page).exists(), "{page}");
+    }
 }
 
 #[test]

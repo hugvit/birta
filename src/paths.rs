@@ -201,6 +201,19 @@ impl Roots {
         link
     }
 
+    /// Registers every allowed symlink along `lexical`, file links included. For a path the
+    /// user named, such as the entry doc, which the budgeted walk may never reach.
+    pub(crate) fn register_path(&self, lexical: &Path) {
+        let mut rel = PathBuf::new();
+        for component in lexical.components() {
+            rel.push(component);
+            let path = self.root.join(&rel);
+            if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+                self.register_link(&rel);
+            }
+        }
+    }
+
     /// Forgets every link at or below `lexical`, so a removed or moved link stops serving
     /// its old target. Returns what was forgotten.
     pub(crate) fn unregister_links(&self, lexical: &Path) -> Vec<Link> {

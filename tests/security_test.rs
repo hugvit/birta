@@ -1,5 +1,6 @@
 //! Host / Origin / Sec-Fetch guard against a real server.
 
+#[allow(dead_code)]
 mod common;
 
 use std::time::Duration;

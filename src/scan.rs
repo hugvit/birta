@@ -112,6 +112,114 @@ pub(crate) fn walk(root: &Path, roots: &Roots, budget: ScanBudget) -> ScanResult
     result
 }
 
+/// Root-level entry docs, most preferred first, matched case-insensitively.
+const ENTRY_NAMES: [&str; 4] = ["index.md", "readme.md", "index.markdown", "readme.markdown"];
+
+/// Why a folder has no entry doc.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct NoEntry {
+    /// The search hit its budget, so a doc may still exist deeper down.
+    pub(crate) truncated: bool,
+}
+
+/// The doc `birta DIR` opens first, as a lexical path under `root` (canonical).
+pub(crate) fn pick_entry(root: &Path) -> Result<String, NoEntry> {
+    pick_entry_with(root, ScanBudget::default())
+}
+
+/// [`pick_entry`] within `budget`. Below the root the search is breadth-first, so a cut
+/// drops the deepest levels first. Dot-named docs and folders are picked only as a last resort.
+pub(crate) fn pick_entry_with(root: &Path, budget: ScanBudget) -> Result<String, NoEntry> {
+    let roots = Roots::new(root.to_path_buf(), dirs::home_dir());
+    let servable = |rel: &&String| roots.resolve_file(rel, FileKind::Markdown).is_ok();
+    let started = Instant::now();
+    let mut entries = 0;
+    let mut truncated = false;
+    let mut dirs_seen = HashSet::new();
+    if let Ok(meta) = std::fs::metadata(root) {
+        dirs_seen.insert((meta.dev(), meta.ino()));
+    }
+    let mut dotted = None;
+    let mut level = vec![String::new()];
+
+    for depth in 0..budget.depth {
+        let mut docs = Vec::new();
+        let mut next = Vec::new();
+        'dirs: for dir in &level {
+            let Ok(read) = std::fs::read_dir(root.join(dir)) else {
+                continue;
+            };
+            for entry in read.flatten() {
+                entries += 1;
+                if entries > budget.entries || started.elapsed() >= budget.time {
+                    truncated = true;
+                    break 'dirs;
+                }
+                let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+                    continue;
+                };
+                let rel = if dir.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{dir}/{name}")
+                };
+                let Ok(ft) = entry.file_type() else { continue };
+                let path = entry.path();
+                if path.is_dir() {
+                    let allowed = !is_skipped(OsStr::new(&name))
+                        && (!ft.is_symlink() || roots.register_link(Path::new(&rel)).is_some())
+                        && std::fs::metadata(&path)
+                            .is_ok_and(|meta| dirs_seen.insert((meta.dev(), meta.ino())));
+                    if allowed {
+                        next.push(rel);
+                    }
+                } else if paths::is_md(Path::new(&name)) {
+                    if ft.is_symlink() {
+                        roots.register_link(Path::new(&rel));
+                    }
+                    docs.push(rel);
+                }
+            }
+        }
+        docs.sort();
+
+        if depth == 0 {
+            let named = ENTRY_NAMES.iter().find_map(|want| {
+                docs.iter()
+                    .filter(|doc| doc.eq_ignore_ascii_case(want))
+                    .find(servable)
+            });
+            if let Some(doc) = named {
+                return Ok(doc.clone());
+            }
+        }
+        let (plain, dot): (Vec<_>, Vec<_>) = docs.iter().partition(|doc| !is_dotted(doc));
+        if let Some(doc) = plain.into_iter().find(servable) {
+            return Ok(doc.clone());
+        }
+        if dotted.is_none() {
+            dotted = dot.into_iter().find(servable).cloned();
+        }
+        if truncated {
+            break;
+        }
+        next.sort();
+        level = next;
+        if level.is_empty() {
+            break;
+        }
+    }
+    // Folders left in `level` were never read: the depth budget ran out.
+    dotted.ok_or(NoEntry {
+        truncated: truncated || !level.is_empty(),
+    })
+}
+
+/// Whether `rel` or any folder along it is dot-named.
+fn is_dotted(rel: &str) -> bool {
+    rel.split('/').any(|seg| seg.starts_with('.'))
+}
+
 /// Decides before descending: skips the skip set, refused links and folders already seen.
 fn keep(
     entry: &DirEntry,
@@ -462,6 +570,195 @@ mod tests {
 
         assert_eq!(scan.md_files, strs(&["top.md"]));
         assert!(scan.truncated);
+    }
+
+    /// `pick_entry` over a fresh tree per row; `files` are relative to the served root.
+    fn picks(rows: &[(&[&str], Option<&str>)]) {
+        let mut bad = Vec::new();
+        for (files, want) in rows {
+            let paths: Vec<String> = files.iter().map(|f| format!("root/{f}")).collect();
+            let tree = Tree::new(&paths.iter().map(String::as_str).collect::<Vec<_>>());
+            let got = pick_entry(&tree.root).ok();
+            if got.as_deref() != *want {
+                bad.push(format!("{files:?}: got {got:?}, want {want:?}"));
+            }
+        }
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    #[test]
+    fn pick_entry_prefers_index_then_readme_at_the_root() {
+        picks(&[
+            (&["a.md", "README.md", "index.md"], Some("index.md")),
+            (&["a.md", "README.md"], Some("README.md")),
+            (&["readme.md", "INDEX.MD"], Some("INDEX.MD")),
+            (&["Readme.Md", "a.md"], Some("Readme.Md")),
+            (&["index.markdown", "readme.md"], Some("readme.md")),
+            (
+                &["a.md", "readme.markdown", "index.markdown"],
+                Some("index.markdown"),
+            ),
+            (&["a.md", "Readme.Markdown"], Some("Readme.Markdown")),
+            (&["a.md", "sub/index.md"], Some("a.md")),
+        ]);
+    }
+
+    #[test]
+    fn pick_entry_takes_the_first_root_doc_by_name() {
+        picks(&[
+            (&["b.md", "a.md", "0/a.md"], Some("a.md")),
+            (&["z.md", "a/index.md"], Some("z.md")),
+            (&["notes.markdown", "a/a.md"], Some("notes.markdown")),
+            (&["notes.txt", "b.MD"], Some("b.MD")),
+            // Byte order, as the walker sorts.
+            (&["a.md", "B.md"], Some("B.md")),
+            (&["a.md/x.md", "b.md"], Some("b.md")),
+            (&[".draft.md", "a.md"], Some("a.md")),
+        ]);
+    }
+
+    #[test]
+    fn pick_entry_leaves_dot_folders_to_the_last() {
+        picks(&[
+            (&[".github/PR.md", "docs/a.md"], Some("docs/a.md")),
+            (&[".github/PR.md", "docs/sub/a.md"], Some("docs/sub/a.md")),
+            (&["a/.notes/x.md", "b/c/y.md"], Some("b/c/y.md")),
+            (&[".context/plan.md"], Some(".context/plan.md")),
+            (&[".context/z/plan.md", ".b/a.md"], Some(".b/a.md")),
+            (&[".draft.md", "docs/sub/a.md"], Some("docs/sub/a.md")),
+            (&["a/.x.md", "b/c/y.md"], Some("b/c/y.md")),
+            (&[".draft.md", ".context/plan.md"], Some(".draft.md")),
+        ]);
+    }
+
+    #[test]
+    fn pick_entry_budget_cuts_the_deepest_levels_first() {
+        let mut files = vec!["root/z/y.md".to_string(), "root/a/1/2/3/x.md".to_string()];
+        files.extend((0..40).map(|i| format!("root/a/1/f{i:02}.txt")));
+        let tree = Tree::new(&files.iter().map(String::as_str).collect::<Vec<_>>());
+        let budget = ScanBudget {
+            entries: 10,
+            ..ScanBudget::default()
+        };
+        assert_eq!(pick_entry_with(&tree.root, budget), Ok("z/y.md".into()));
+    }
+
+    #[test]
+    fn pick_entry_says_when_it_stopped_early() {
+        let tree = Tree::new(&["root/a/b/c/d/x.md", "root/notes.txt"]);
+        let small = |entries, depth| ScanBudget {
+            entries,
+            depth,
+            ..ScanBudget::default()
+        };
+
+        assert_eq!(
+            pick_entry_with(&tree.root, small(3, 12)),
+            Err(NoEntry { truncated: true }),
+            "entries"
+        );
+        assert_eq!(
+            pick_entry_with(&tree.root, small(50, 3)),
+            Err(NoEntry { truncated: true }),
+            "depth"
+        );
+        assert_eq!(
+            pick_entry_with(&tree.root, small(50, 5)),
+            Ok("a/b/c/d/x.md".into())
+        );
+        let empty = Tree::new(&["root/a/b/notes.txt"]);
+        assert_eq!(pick_entry(&empty.root), Err(NoEntry { truncated: false }));
+    }
+
+    #[test]
+    fn pick_entry_falls_back_to_the_shallowest_then_alphabetical_doc() {
+        picks(&[
+            (&["a/b/c.md", "z/y.md"], Some("z/y.md")),
+            (&["b/x.md", "a/y.md"], Some("a/y.md")),
+            (&["sub/index.md", "a/z.md"], Some("a/z.md")),
+            (&["a/b/c/d/e/f.md"], Some("a/b/c/d/e/f.md")),
+            (&["node_modules/a.md", "z/b.md"], Some("z/b.md")),
+        ]);
+    }
+
+    #[test]
+    fn pick_entry_never_picks_a_folder_named_like_a_doc() {
+        let tree = Tree::new(&["root/index.md/x.md", "root/b.md"]);
+        assert_eq!(pick_entry(&tree.root).ok().as_deref(), Some("b.md"));
+
+        let tree = Tree::new(&["root/readme.md/x.md"]);
+        assert_eq!(
+            pick_entry(&tree.root).ok().as_deref(),
+            Some("readme.md/x.md")
+        );
+    }
+
+    #[test]
+    fn pick_entry_is_none_without_a_servable_doc() {
+        picks(&[
+            (&[], None),
+            (&["notes.txt", "a.md.birta.jsonl", ".birta.jsonl"], None),
+            (
+                &[
+                    "node_modules/x.md",
+                    ".git/y.md",
+                    "target/z.md",
+                    ".ssh/k.md",
+                    "a/Library/l.md",
+                ],
+                None,
+            ),
+        ]);
+    }
+
+    #[test]
+    fn pick_entry_follows_folder_links() {
+        let tree = Tree::new(&["outside/doc.md"]);
+        tree.link("root/docs", "../outside");
+        assert_eq!(pick_entry(&tree.root).ok().as_deref(), Some("docs/doc.md"));
+    }
+
+    #[test]
+    fn pick_entry_skips_entry_links_it_cannot_serve() {
+        let tree = Tree::new(&["root/a.md"]);
+        tree.link("root/index.md", "missing.md");
+        assert_eq!(
+            pick_entry(&tree.root).ok().as_deref(),
+            Some("a.md"),
+            "dangling"
+        );
+
+        let tree = Tree::new(&["root/b.md"]);
+        tree.link("root/a.md", "missing.md");
+        assert_eq!(
+            pick_entry(&tree.root).ok().as_deref(),
+            Some("b.md"),
+            "dangling a.md"
+        );
+
+        let tree = Tree::new(&["root/b.md", ".ssh/k.md"]);
+        tree.link("root/index.md", "../.ssh/k.md");
+        assert_eq!(
+            pick_entry(&tree.root).ok().as_deref(),
+            Some("b.md"),
+            "denied"
+        );
+
+        let tree = Tree::new(&["root/a.md", "outside/notes.txt"]);
+        tree.link("root/index.md", "../outside/notes.txt");
+        assert_eq!(
+            pick_entry(&tree.root).ok().as_deref(),
+            Some("a.md"),
+            "not md"
+        );
+
+        let tree = Tree::new(&["root/a.md", "outside/doc.md"]);
+        tree.link("root/index.md", "../outside/doc.md");
+        assert_eq!(
+            pick_entry(&tree.root).ok().as_deref(),
+            Some("index.md"),
+            "a file link out of the root is served read-only"
+        );
     }
 
     #[test]

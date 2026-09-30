@@ -17,6 +17,7 @@ use tokio::sync::{Notify, RwLock, broadcast};
 use crate::doc_write::{self, Expect, Via, WriteErr, WriteTarget};
 use crate::paths::{Access, FileKind, Roots};
 use crate::rev::Rev;
+use crate::scan::{self, NoEntry};
 use crate::security::{HostGuard, Nonce, base_headers, guard, page_headers, sandbox_headers};
 use crate::theme::{ResolvedTheme, ThemeRegistry, Variant};
 use crate::{render, template, watcher};
@@ -182,53 +183,110 @@ impl AppInit {
         Ok(init)
     }
 
+    /// Serves `path`, a markdown file or a folder.
+    #[cfg(test)]
     pub(crate) fn serve(
-        file: &StdPath,
+        path: &StdPath,
         listener: &TcpListener,
         opts: ServerOptions,
     ) -> anyhow::Result<Self> {
-        let bytes = std::fs::read(file)?;
+        Self::serve_target(&Target::resolve(path)?, listener, opts)
+    }
+
+    fn serve_target(
+        target: &Target,
+        listener: &TcpListener,
+        opts: ServerOptions,
+    ) -> anyhow::Result<Self> {
+        let canonical_file = target.root.join(&target.entry).canonicalize()?;
+        let bytes = std::fs::read(&canonical_file)?;
         let rev = Rev::of(&bytes);
         let markdown = String::from_utf8(bytes)?;
 
-        let canonical_file = file.canonicalize()?;
-        let base_dir = canonical_file
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let initial_relpath = canonical_file
-            .strip_prefix(&base_dir)
-            .ok()
-            .map(|p| p.to_string_lossy().into_owned());
-
         let mut init = Self::from_opts(opts, listener, Mode::Serve)?;
         let syntax = init.registry.active().active_data().syntax.as_ref();
-        init.html = if let Some(ref relpath) = initial_relpath {
-            render::render_dir(&markdown, syntax, StdPath::new(relpath))
-        } else {
-            render::render(&markdown, syntax)
-        };
+        init.html = render::render_dir(&markdown, syntax, StdPath::new(&target.entry));
         init.source_html = render::render_source(&markdown, syntax);
         init.file_stats = render::format_file_stats(&markdown);
         init.rev = Some(rev);
-        init.filename = file
+        init.filename = target.filename.clone();
+        init.base_dir = target.root.clone();
+        init.source_file = Some(canonical_file);
+        init.initial_relpath = Some(target.entry.clone());
+        Ok(init)
+    }
+}
+
+/// What `birta PATH` serves: a folder and the entry doc's place in it.
+pub struct Target {
+    /// The canonical served folder.
+    pub root: PathBuf,
+    /// Lexical, `/`-separated path of the entry doc under `root`.
+    pub entry: String,
+    /// The header's file name.
+    filename: String,
+}
+
+impl Target {
+    /// A file is served from its canonical folder; a folder is entered at its picked doc.
+    pub fn resolve(path: &StdPath) -> anyhow::Result<Self> {
+        Self::resolve_with(path, scan::pick_entry)
+    }
+
+    pub(crate) fn resolve_with(
+        path: &StdPath,
+        pick: impl FnOnce(&StdPath) -> Result<String, NoEntry>,
+    ) -> anyhow::Result<Self> {
+        if path.is_dir() {
+            let root = path.canonicalize()?;
+            let entry = pick(&root).map_err(|none| {
+                let dir = path.display();
+                if none.truncated {
+                    anyhow::anyhow!("no markdown files found under {dir} (search stopped early)")
+                } else {
+                    anyhow::anyhow!("no markdown files under {dir}")
+                }
+            })?;
+            let filename = entry.rsplit('/').next().unwrap_or(&entry).to_string();
+            return Ok(Self {
+                root,
+                entry,
+                filename,
+            });
+        }
+        let canonical = path.canonicalize()?;
+        let root = canonical
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let entry = canonical
+            .strip_prefix(&root)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let filename = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "untitled".to_string());
-        init.base_dir = base_dir;
-        init.source_file = Some(canonical_file);
-        init.initial_relpath = initial_relpath;
-        Ok(init)
+        Ok(Self {
+            root,
+            entry,
+            filename,
+        })
     }
 }
 
 impl AppState {
     pub(crate) fn new(init: AppInit) -> Arc<Self> {
         let (hub, _) = broadcast::channel(HUB_CAPACITY);
+        let roots = Roots::new(init.base_dir, dirs::home_dir());
+        // The entry may sit behind a link the budgeted walk never reaches.
+        if let Some(entry) = &init.initial_relpath {
+            roots.register_path(StdPath::new(entry));
+        }
         Arc::new(Self {
             port: init.port,
             mode: init.mode,
-            roots: Arc::new(Roots::new(init.base_dir, dirs::home_dir())),
+            roots: Arc::new(roots),
             source_file: init.source_file,
             filename: init.filename,
             initial_relpath: init.initial_relpath,
@@ -270,6 +328,8 @@ impl AppState {
 }
 
 pub async fn run(file: PathBuf, opts: ServerOptions) -> anyhow::Result<()> {
+    // Before binding, so a folder without docs never opens a browser.
+    let target = Target::resolve(&file)?;
     let addr = SocketAddr::from(([127, 0, 0, 1], opts.port));
     let listener = TcpListener::bind(addr).await?;
     let actual_addr = listener.local_addr()?;
@@ -277,7 +337,7 @@ pub async fn run(file: PathBuf, opts: ServerOptions) -> anyhow::Result<()> {
     let filename = file
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "untitled".to_string());
+        .unwrap_or_else(|| file.display().to_string());
 
     eprintln!("birta: serving {filename} at http://{actual_addr}");
 
@@ -288,7 +348,7 @@ pub async fn run(file: PathBuf, opts: ServerOptions) -> anyhow::Result<()> {
         }
     }
 
-    start(file, listener, opts).await
+    start_target(&target, listener, opts).await
 }
 
 /// Serve markdown read from stdin (no file watching).
@@ -316,13 +376,21 @@ pub async fn run_stdin(markdown: &str, opts: ServerOptions) -> anyhow::Result<()
     Ok(())
 }
 
-/// Start serving a markdown file on the given listener.
+/// Start serving a markdown file, or a folder, on the given listener.
 pub async fn start(
     file: PathBuf,
     listener: TcpListener,
     opts: ServerOptions,
 ) -> anyhow::Result<()> {
-    let state = AppState::new(AppInit::serve(&file, &listener, opts)?);
+    start_target(&Target::resolve(&file)?, listener, opts).await
+}
+
+async fn start_target(
+    target: &Target,
+    listener: TcpListener,
+    opts: ServerOptions,
+) -> anyhow::Result<()> {
+    let state = AppState::new(AppInit::serve_target(target, &listener, opts)?);
 
     let _watch = watcher::watch(Arc::clone(&state))?;
 
@@ -426,12 +494,25 @@ async fn favicon_handler() -> Response {
     ([(header::CONTENT_TYPE, "image/png")], FAVICON).into_response()
 }
 
+/// `/view/<rel>`, percent-encoded so names with `#`, `?`, `%` or spaces stay in the path.
+fn view_url(rel: &str) -> String {
+    let mut url = String::from("/view/");
+    for b in rel.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) {
+            url.push(char::from(b));
+        } else {
+            url.push_str(&format!("%{b:02X}"));
+        }
+    }
+    url
+}
+
 async fn index_handler(
     State(state): State<Arc<AppState>>,
     Extension(nonce): Extension<Nonce>,
 ) -> Response {
     if let Some(relpath) = &state.initial_relpath {
-        return Redirect::temporary(&format!("/view/{relpath}")).into_response();
+        return Redirect::temporary(&view_url(relpath)).into_response();
     }
 
     // stdin mode — render inline
@@ -880,6 +961,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::scan::ScanBudget;
     use crate::theme::{self, ThemeVariants, VariantData};
 
     fn github_theme() -> theme::ResolvedTheme {
@@ -1811,6 +1893,60 @@ mod tests {
 
         assert_eq!(response.status(), 307);
         assert_eq!(response.headers()["location"], "/view/test.md");
+    }
+
+    #[test]
+    fn view_url_percent_encodes_each_name() {
+        for (rel, want) in [
+            ("notes/a.md", "/view/notes/a.md"),
+            ("a #1.md", "/view/a%20%231.md"),
+            ("q?/100%.md", "/view/q%3F/100%25.md"),
+            ("ü-_.~.md", "/view/%C3%BC-_.~.md"),
+        ] {
+            assert_eq!(view_url(rel), want, "{rel}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_linked_entry_is_served_before_any_walk() {
+        let site = Site::new(&[("root/b.md", b"# B\n"), ("outside/doc.md", b"# Doc\n")]);
+        site.link("root/index.md", "../outside/doc.md");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let state = AppState::new(AppInit::serve(&site.root, &listener, test_opts()).unwrap());
+
+        assert_eq!(state.initial_relpath.as_deref(), Some("index.md"));
+        assert_eq!(state.roots.root(), site.root);
+        let app = router(state);
+        let response = app.clone().oneshot(get("/view/index.md")).await.unwrap();
+        assert_eq!(response.status(), 200);
+        let response = app.oneshot(get("/view/b.md")).await.unwrap();
+        assert_eq!(response.status(), 200);
+    }
+
+    #[test]
+    fn a_folder_without_docs_says_whether_the_search_stopped_early() {
+        let site = Site::new(&[("root/a/b/c/x.md", b"# X\n")]);
+        let small = ScanBudget {
+            entries: 2,
+            ..ScanBudget::default()
+        };
+
+        let stopped = Target::resolve_with(&site.root, |root| scan::pick_entry_with(root, small));
+        assert_eq!(
+            stopped.err().map(|e| e.to_string()),
+            Some(format!(
+                "no markdown files found under {} (search stopped early)",
+                site.root.display()
+            ))
+        );
+
+        let empty = site.root.join("a/b/c");
+        std::fs::remove_file(empty.join("x.md")).unwrap();
+        let none = Target::resolve(&empty);
+        assert_eq!(
+            none.err().map(|e| e.to_string()),
+            Some(format!("no markdown files under {}", empty.display()))
+        );
     }
 
     /// `<tmp>/root` is served; `<tmp>/outside` and `<tmp>/secret.*` are not.

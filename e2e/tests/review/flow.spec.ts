@@ -687,6 +687,64 @@ test.describe("placement", () => {
     expect(host.box.bottom).toBeLessThanOrEqual(first + 1);
   });
 
+  for (const variant of ["light", "dark"]) {
+    test(`${variant}: notes in the doc slot use the page's font, as notes under a block do`, async ({
+      page,
+      birta,
+    }) => {
+      await open(page, birta, FLOW_DOC, { state: fixtureState("flow") });
+      const html = page.locator("html");
+      if ((await html.getAttribute("data-theme")) !== variant) await page.locator("#theme-toggle").click();
+      await expect(html).toHaveAttribute("data-theme", variant);
+      await expect.poll(async () => (await docSlot(page)).length).toBeGreaterThanOrEqual(3);
+      const fonts = await page.evaluate(() =>
+        Array.from(document.querySelectorAll("birta-flow")).map((h) => {
+          const root = h.shadowRoot!;
+          const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+            acceptNode: (n) =>
+              n.parentElement?.closest("style") || !(n.textContent ?? "").trim()
+                ? NodeFilter.FILTER_SKIP
+                : NodeFilter.FILTER_ACCEPT,
+          });
+          const first = walker.nextNode();
+          return {
+            doc: h.parentElement!.id === "lane-frame",
+            font: first ? getComputedStyle(first.parentElement!).fontFamily : null,
+          };
+        }),
+      );
+      const body = await page.evaluate(() => getComputedStyle(document.querySelector("#content p")!).fontFamily);
+      const inBlock = fonts.filter((f) => !f.doc).map((f) => f.font);
+      const doc = fonts.filter((f) => f.doc).map((f) => f.font);
+      expect(inBlock.length).toBeGreaterThan(0);
+      expect(new Set(inBlock)).toEqual(new Set([body]));
+      expect(doc).toEqual(doc.map(() => body));
+    });
+  }
+
+  test("the doc slot leaves the first heading the gap a note group leaves above a heading", async ({
+    page,
+    birta,
+  }) => {
+    await open(page, birta, FLOW_DOC, { state: fixtureState("flow") });
+    await expect.poll(async () => (await docSlot(page)).length).toBeGreaterThanOrEqual(3);
+    const gaps = await page.evaluate(() => {
+      const isHeading = (e: Element | null) => !!e && /^h[1-6]$/.test(e.localName);
+      const flows = Array.from(document.querySelectorAll("birta-flow"));
+      const lastDoc = flows.filter((h) => h.parentElement!.id === "lane-frame").pop()!;
+      const first = document.querySelector("#content > [data-sourcepos]")!;
+      const beforeHeading = flows.find((h) => h.parentElement!.id === "content" && isHeading(h.nextElementSibling))!;
+      return {
+        firstIsHeading: isHeading(first),
+        doc: first.getBoundingClientRect().top - lastDoc.getBoundingClientRect().bottom,
+        inBlock: beforeHeading.nextElementSibling!.getBoundingClientRect().top - beforeHeading.getBoundingClientRect().bottom,
+      };
+    });
+    expect(gaps.firstIsHeading).toBe(true);
+    expect(gaps.inBlock).toBeGreaterThan(8);
+    expect(Math.abs(gaps.doc - gaps.inBlock)).toBeLessThanOrEqual(0.5);
+  });
+
   test("notes follow their paragraph in note order, and a section note follows its heading", async ({
     page,
     birta,

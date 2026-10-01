@@ -177,7 +177,14 @@
   font-size: 16px;
 }
 
+/* The doc pins its first block's top margin to 0, so the doc slot leaves a heading's gap itself */
+:host(birta-flow[data-doc-end]) {
+  margin-bottom: 24px !important;
+}
+
+/* The doc slot sits outside .markdown-body, so the doc's font is named here rather than inherited */
 .flow {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
   font-size: 14px;
   line-height: 1.5;
   color: var(--birta-fg);

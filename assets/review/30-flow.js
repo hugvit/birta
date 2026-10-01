@@ -479,6 +479,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
         // An item's note keeps the item's indent, 12px in at every width
         var inItem = h.host.parentElement && h.host.parentElement.localName === 'li';
         h.box.style.paddingLeft = (inItem ? 12 : pad) + 'px';
+        h.host.toggleAttribute('data-doc-end', h.host.nextElementSibling === content());
       });
     };
     if (typeof birtaPatch !== 'undefined') birtaPatch.withScrollAnchor(apply);

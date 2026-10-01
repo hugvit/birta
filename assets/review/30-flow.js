@@ -67,7 +67,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
 
   // Group order under one anchor: notes with their replies, then what the page added, then facts
   var G_NOTE = 1, G_DRAFT = 2, G_UNSENT = 3, G_COMPOSER = 4, G_RECEIPT = 5, G_FACT = 6, G_BLANK = 7,
-    G_TURN = 8, G_LOST = 9, G_REWRITE = 10;
+    G_TURN = 8, G_LOST = 9, G_REWRITE = 10, G_FOLDER = 11;
 
   var hosts = new Map();
   var state = null;
@@ -78,6 +78,10 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   var unsent = [];
   var comp = null;
   var seq = 0;
+  // Live notes on the served folder, from the listing; drawn only when a folder is served
+  var folderNotes = 0;
+  // Reading mode: every note but the open composer steps aside
+  var hiddenAll = false;
   // Folded notes opened in this page, by n
   var expanded = {};
   var dotList = [];
@@ -174,6 +178,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
 
   function makeHost(id) {
     var host = document.createElement('birta-flow');
+    host.toggleAttribute('data-br-hidden', hiddenAll);
     var root = host.attachShadow({ mode: 'closed' });
     var style = document.createElement('style');
     style.textContent = BR.shadowCss || '';
@@ -231,6 +236,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     h.blank = null;
     if (e.kind === 'blank') return renderBlank(h, e);
     if (e.kind === 'lost') return renderLost(h, e);
+    if (e.kind === 'folder') return renderFolder(h, e);
     if (e.prefix) h.box.appendChild(el('div', 'muted', e.prefix));
     var line = el('div', e.fold ? 'text fold' : 'text');
     if (e.lead) line.append(e.lead);
@@ -284,6 +290,17 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       item.appendChild(isolated(i.body || i.verdict || ''));
       h.box.appendChild(item);
     });
+  }
+
+  function renderFolder(h, e) {
+    var row = el('div', 'muted', e.text + ' ');
+    var open = el('span', 'more', '▸');
+    open.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      BR.chrome.openMenu('folder');
+    });
+    row.appendChild(open);
+    h.box.appendChild(row);
   }
 
   // --- the model ---
@@ -441,6 +458,10 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       var row = rewriteRow(s);
       if (row) add(row, { doc: true }, [G_REWRITE, 0, 0]);
     }
+    if (folderNotes > 0 && BOOT.review.dir) {
+      add({ id: 'folder', kind: 'folder', text: plural(folderNotes, 'note on this folder', 'notes on this folder') },
+        { doc: true }, [G_FOLDER, 0, 0]);
+    }
     drafts.forEach(function (d) {
       if (cids[d.cid]) return;
       add({ id: 'd' + d.cid, kind: 'note', text: d.body, rule: ['dashed', 'you'] }, slotOfAt(d.at), [G_DRAFT, d.seq, 0]);
@@ -571,6 +592,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
         // An item's note keeps the item's indent, 12px in at every width
         var inItem = h.host.parentElement && h.host.parentElement.localName === 'li';
         h.box.style.paddingLeft = (inItem ? 12 : pad) + 'px';
+        h.host.toggleAttribute('data-br-hidden', hiddenAll && !typing(h));
         h.host.toggleAttribute('data-doc-end', h.host.nextElementSibling === content());
       });
     };
@@ -871,8 +893,14 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     answer(slot, n, e.key);
   }
 
+  /** A blank whose written answer is open holds typed words, which reading mode must keep. */
+  function typing(h) {
+    return !!(h.blank && h.blank.slot.querySelector('textarea'));
+  }
+
   /** Opens the blank's written answer holding `text`. */
   function answer(slot, n, text) {
+    hosts.forEach(function (h) { if (h.blank && h.blank.slot === slot) h.host.removeAttribute('data-br-hidden'); });
     var area = document.createElement('textarea');
     area.setAttribute('dir', 'auto');
     area.value = text;
@@ -898,6 +926,13 @@ var BR = typeof BR === 'undefined' ? {} : BR;
 
   function onFrame(msg) {
     switch (msg.type) {
+      case 'dir_state':
+        var n = (msg.folder && msg.folder.summary && msg.folder.summary.notes) || 0;
+        if (n !== folderNotes) {
+          folderNotes = n;
+          reconcile();
+        }
+        break;
       case 'review_state':
         if (msg.path === CURRENT_PATH && msg.state) skew = (msg.state.server_now || Date.now()) - Date.now();
         break;
@@ -1014,6 +1049,11 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       return out;
     },
     dots: function () { return dotList; },
+    /** Reading mode: hides every note but an open composer or a blank being answered. */
+    hide: function (on) {
+      hiddenAll = on;
+      hosts.forEach(function (h) { h.host.toggleAttribute('data-br-hidden', on && !typing(h)); });
+    },
     /** The hand-back or approve still in its hold, by the server's clock, or null. */
     holdActive: function () {
       var s = BR.currentState();

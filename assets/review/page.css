@@ -7,15 +7,16 @@
   --review-quiet: color-mix(in srgb, var(--review-you) 40%, transparent);
 }
 
-[data-theme="dark"] {
+/* On the root alone: .markdown-body carries data-theme too, and must inherit, not reset */
+:root[data-theme="dark"] {
   --review-you: #4493f8;
   --review-new: #bb800926;
   --review-wash: #656c7633;
   --review-quiet: color-mix(in srgb, var(--review-you) 40%, transparent);
 }
 
-/* Custom themes already ship alert slots, so review borrows them */
-html[data-birta-theme] {
+/* Custom themes already ship alert slots, so review borrows them; later, so it beats dark */
+:root[data-birta-theme] {
   --review-you: var(--alert-note);
   --review-new: var(--bgColor-attention-muted);
   --review-quiet: color-mix(in srgb, var(--review-you) 40%, transparent);
@@ -65,4 +66,17 @@ a[data-br-news]::after {
   background: var(--review-agent);
   margin-left: 4px;
   vertical-align: .15em;
+}
+
+/* Dots are marks: m and reading mode hide them with the lane */
+html[data-br-marks="off"] a[data-br-news]::after,
+body.reading-mode a[data-br-news]::after {
+  display: none;
+}
+
+/* The narrow lane needs a glyph, a bar and a gap from the text */
+@media (max-width: 767px) {
+  html[data-review] #lane-frame {
+    padding-left: 24px;
+  }
 }

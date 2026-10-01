@@ -798,6 +798,238 @@ async fn hello_sends_content_then_review_state_then_dir_state() {
     }
 }
 
+/// Every `review_state` for `path` whose rev no earlier content frame carried.
+fn states_before_their_content(path: &str, first: &str, frames: &[Value]) -> Vec<String> {
+    let mut shown: BTreeSet<String> = BTreeSet::from([first.to_string()]);
+    let mut out = Vec::new();
+    for f in frames.iter().filter(|f| f["path"] == path) {
+        let rev = f["rev"].as_str().unwrap_or("").to_string();
+        let carries_doc =
+            f["type"] == "content" || (f["type"] == "theme_update" && !f["html"].is_null());
+        if carries_doc {
+            shown.insert(rev);
+        } else if f["type"] == "review_state" && !shown.contains(&rev) {
+            out.push(rev);
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn a_doc_saved_again_and_again_sends_each_state_after_the_content_of_its_rev() {
+    let site = Site::new();
+    site.write(PR, DOC);
+    let served = site.serve(&[PR], &[GATE_ON]);
+    let (mut ws, _) = served.viewing(PR).await;
+    // A review file, so every save pushes a state as well as the content
+    acked(
+        &mut ws,
+        op(
+            "c1",
+            &rev(DOC),
+            "comment",
+            json!({"at": {"k": "doc"}, "body": "first"}),
+        ),
+    )
+    .await;
+    let mut text = DOC.to_string();
+    for i in 1..=6 {
+        text.push_str(&format!("\nSaved paragraph {i}.\n"));
+        site.write(PR, &text);
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    let last = rev(&text);
+    let (mut frames, end) = until(&mut ws, "the last save's state", |f| {
+        f["type"] == "review_state" && f["rev"] == last
+    })
+    .await;
+    frames.push(end);
+    let early = states_before_their_content(PR, &rev(DOC), &frames);
+    assert!(
+        early.is_empty(),
+        "states before their content {early:?}: {frames:#?}"
+    );
+}
+
+#[tokio::test]
+async fn an_outside_write_recorded_in_the_log_never_sends_its_state_before_the_content() {
+    let site = Site::new();
+    site.write(PR, DOC);
+    let served = site.serve(&[PR], &[GATE_ON]);
+    let (mut ws, _) = served.viewing(PR).await;
+    acked(
+        &mut ws,
+        op(
+            "c1",
+            &rev(DOC),
+            "comment",
+            json!({"at": {"k": "doc"}, "body": "first"}),
+        ),
+    )
+    .await;
+    // One save: the doc event records it in the log, and that log write is its own event
+    let changed = format!("{DOC}\nAn agent's closing line.\n");
+    site.write(PR, &changed);
+    let (mut frames, end) = until(&mut ws, "the save's state", |f| {
+        f["type"] == "review_state" && f["rev"] == rev(&changed)
+    })
+    .await;
+    frames.push(end);
+    frames.extend(drain(&mut ws, Duration::from_millis(500)).await);
+    let early = states_before_their_content(PR, &rev(DOC), &frames);
+    assert!(
+        early.is_empty(),
+        "states before their content {early:?}: {frames:#?}"
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|f| f["type"] == "content" && f["rev"] == rev(&changed)),
+        "{frames:#?}"
+    );
+}
+
+#[tokio::test]
+async fn a_checkbox_write_sends_its_state_after_the_content_of_its_rev() {
+    let site = Site::new();
+    site.write(PR, TASKS);
+    let served = site.serve(&[PR], &[GATE_ON]);
+    let (mut ws, _) = served.viewing(PR).await;
+    acked(
+        &mut ws,
+        op(
+            "c1",
+            &rev(TASKS),
+            "comment",
+            json!({"at": {"k": "doc"}, "body": "first"}),
+        ),
+    )
+    .await;
+    let ticked = TASKS.replace("[ ]", "[x]");
+    send(
+        &mut ws,
+        json!({"type": "checkbox", "cid": "k1", "path": PR, "line": 3, "checked": true, "rev": rev(TASKS)}),
+    )
+    .await;
+    let (mut frames, end) = until(&mut ws, "the tick's state", |f| {
+        f["type"] == "review_state" && f["rev"] == rev(&ticked)
+    })
+    .await;
+    frames.push(end);
+    frames.extend(drain(&mut ws, Duration::from_millis(500)).await);
+    assert_eq!(
+        site.read(PR).unwrap(),
+        ticked,
+        "setup: the tick wrote the doc"
+    );
+    let early = states_before_their_content(PR, &rev(TASKS), &frames);
+    assert!(
+        early.is_empty(),
+        "states before their content {early:?}: {frames:#?}"
+    );
+}
+
+#[tokio::test]
+async fn an_undo_sends_its_state_after_the_content_of_its_rev() {
+    let fixture = committed_fixtures()
+        .into_iter()
+        .find(|(n, _)| n == "undo_change")
+        .unwrap()
+        .1;
+    let doc = fixture["doc"].as_str().unwrap();
+    let site = Site::new();
+    site.write(PR, doc);
+    site.write(LOG, fixture["log"].as_str().unwrap());
+    let served = site.serve(&[PR], &[GATE_ON]);
+    let (mut ws, _) = served.viewing(PR).await;
+    send(&mut ws, fixture["frame"].clone()).await;
+    let (mut frames, end) = until(&mut ws, "the undo's ack", |f| f["type"] == "ack").await;
+    frames.push(end);
+    let undone = site.read(PR).unwrap();
+    assert_ne!(undone, doc, "setup: the undo wrote the doc");
+    let (more, end) = until(&mut ws, "the undo's state", |f| {
+        f["type"] == "review_state" && f["rev"] == rev(&undone)
+    })
+    .await;
+    frames.extend(more);
+    frames.push(end);
+    frames.extend(drain(&mut ws, Duration::from_millis(500)).await);
+    let early = states_before_their_content(PR, &rev(doc), &frames);
+    assert!(
+        early.is_empty(),
+        "states before their content {early:?}: {frames:#?}"
+    );
+}
+
+#[tokio::test]
+async fn a_second_tab_on_the_doc_gets_each_state_after_its_content_too() {
+    let site = Site::new();
+    site.write(PR, DOC);
+    let served = site.serve(&[PR], &[GATE_ON]);
+    let (mut a, _) = served.viewing(PR).await;
+    let (mut b, _) = served.viewing(PR).await;
+    acked(
+        &mut a,
+        op(
+            "c1",
+            &rev(DOC),
+            "comment",
+            json!({"at": {"k": "doc"}, "body": "first"}),
+        ),
+    )
+    .await;
+    let mut text = DOC.to_string();
+    for i in 1..=6 {
+        text.push_str(&format!("\nSaved paragraph {i}.\n"));
+        site.write(PR, &text);
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    let last = rev(&text);
+    let (mut frames, end) = until(&mut b, "the last save's state", |f| {
+        f["type"] == "review_state" && f["rev"] == last
+    })
+    .await;
+    frames.push(end);
+    let early = states_before_their_content(PR, &rev(DOC), &frames);
+    assert!(early.is_empty(), "second tab: {early:?}: {frames:#?}");
+}
+
+#[tokio::test]
+async fn a_doc_deleted_with_a_state_waiting_still_gets_its_states_once_it_is_back() {
+    let site = Site::new();
+    site.write(PR, DOC);
+    let served = site.serve(&[PR], &[GATE_ON]);
+    let (mut ws, _) = served.viewing(PR).await;
+    acked(
+        &mut ws,
+        op(
+            "c1",
+            &rev(DOC),
+            "comment",
+            json!({"at": {"k": "doc"}, "body": "first"}),
+        ),
+    )
+    .await;
+    // A save then a delete in one burst: its state may be waiting when the doc goes
+    site.write(PR, &format!("{DOC}\nGone soon.\n"));
+    std::fs::remove_file(site.path(PR)).unwrap();
+    let (mut frames, end) = until(&mut ws, "gone", |f| f["type"] == "gone").await;
+    frames.push(end);
+    let back = format!("{DOC}\nBack again.\n");
+    site.write(PR, &back);
+    let (more, end) = until(&mut ws, "the state of the doc that came back", |f| {
+        f["type"] == "review_state" && f["rev"] == rev(&back)
+    })
+    .await;
+    frames.extend(more);
+    frames.push(end);
+    let early = states_before_their_content(PR, &rev(DOC), &frames);
+    assert!(
+        early.is_empty(),
+        "states before their content {early:?}: {frames:#?}"
+    );
+}
+
 /// Serves a doc with no review file and returns its hello state.
 async fn state_without_a_file(args: &[&str], envs: &[(&str, &str)], site: &Site) -> Value {
     let served = site.serve(args, envs);

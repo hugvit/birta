@@ -25,7 +25,8 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
+  /* A custom theme sets these itself, at lower specificity */
+  :root:not([data-theme="light"]):not([data-birta-theme]) {
     --birta-fg: #e6edf3;
     --birta-fg-muted: #9198a1;
     --birta-bg: #0d1117;

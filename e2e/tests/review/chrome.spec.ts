@@ -325,6 +325,45 @@ test.describe("when the chrome shows", () => {
 // --- What the turn button and ⌘⏎ send ------------------------------------------------------------
 
 test.describe("turn", () => {
+  // A ⌘⏎ that beats the note's state must hand the note back, never approve past it
+  test("⌘⏎ right after ⏎ hands back the new note once it is acked, and never approves", async ({ page, birta }) => {
+    const { mock, state } = await openFixture(page, birta, "fresh", undefined, { acks: "manual" });
+    await expect.poll(async () => (await turnOf(page))?.text).toBe("Approve");
+    await page.keyboard.press("c");
+    await page.keyboard.type("say why");
+    const pressed = Date.now();
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("ControlOrMeta+Enter");
+    expect(Date.now() - pressed).toBeLessThan(50);
+    // Counted from the page's own note before any state or ack
+    await expect.poll(async () => (await turnOf(page))?.text, { timeout: 400 }).toBe("Hand back · 1");
+    await page.waitForTimeout(200);
+    expect(mock.ops().map((o) => o.op)).toEqual(["comment"]);
+    mock.ack(mock.ops()[0].cid);
+    await expect.poll(() => mock.ops().map((o) => o.op)).toEqual(["comment", "hand_back"]);
+    // The state that shows the note comes 500 ms after the keys
+    const shown = withRev(fixtureState("drafts"), state.rev);
+    shown.log = { ...shown.log, lines: 500 };
+    await page.waitForTimeout(Math.max(0, 500 - (Date.now() - pressed)));
+    mock.pushState(shown);
+    await page.waitForTimeout(SETTLE_MS);
+    expect(mock.ops().map((o) => o.op)).toEqual(["comment", "hand_back"]);
+    expect(mock.ops().some((o) => o.op === "approve")).toBe(false);
+  });
+
+  test("a note refused by the server leaves a quick ⌘⏎ with nothing to approve", async ({ page, birta }) => {
+    const { mock } = await openFixture(page, birta, "fresh", undefined, { acks: "manual" });
+    await expect.poll(async () => (await turnOf(page))?.text).toBe("Approve");
+    await page.keyboard.press("c");
+    await page.keyboard.type("say why");
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("ControlOrMeta+Enter");
+    await expect.poll(() => mock.ops().map((o) => o.op)).toEqual(["comment"]);
+    mock.nack(mock.ops()[0].cid, "changed_since");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(mock.ops().map((o) => o.op)).toEqual(["comment"]);
+  });
+
   test("⌘⏎, Ctrl+Enter and a click each hand back the drafts", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "drafts");
     await expect.poll(async () => (await turnOf(page))?.text).toBe("Hand back · 3");

@@ -425,6 +425,25 @@ pub struct Summary {
     pub stage: Stage,
     pub phrase: Phrase,
     pub counts: Counts,
+    /// Human notes still standing, whether drafts, sent or handled (1.x).
+    pub notes: u32,
+}
+
+impl Summary {
+    pub fn of(state: ReviewState) -> Self {
+        let notes = state
+            .items
+            .iter()
+            .filter(|i| i.by.kind == crate::review::ops::ByKind::Human)
+            .filter(|i| !matches!(i.status, ItemStatus::Retracted | ItemStatus::Withdrawn))
+            .count() as u32;
+        Summary {
+            stage: state.phrase.stage,
+            phrase: state.phrase,
+            counts: state.counts,
+            notes,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]

@@ -630,3 +630,31 @@ test("a refusal reads as words, naming whoever picked the round up", () => {
   assert.equal(text("claimed", bent("sent", (s) => (s.owner.drafted_by = null))), "the agent already picked it up");
   assert.equal(text("claimed", null), "the agent already picked it up");
 });
+
+// --- The page's own notes, before any state shows them -----------------------------------------
+
+test("a note the page kept that no state shows yet makes the button a hand-back, never Approve", () => {
+  const BR = load();
+  const s = state("fresh");
+  assert.equal(plain(BR.pure.turnButton(s, { now: s.server_now })).text, "Approve");
+  assert.equal(plain(BR.pure.turnButton(s, { now: s.server_now, pending: 1, busy: true })).text, "Hand back · 1");
+});
+
+test("the page's pending notes add to the state's drafts", () => {
+  const BR = load();
+  const s = bent("drafts", (x) => (x.counts.drafts = 2));
+  assert.equal(plain(BR.pure.turnButton(s, { now: s.server_now, pending: 1, busy: true })).text, "Hand back · 3");
+});
+
+test("an amend still on its way is a hand-back too, though it adds no note", () => {
+  const BR = load();
+  const s = state("fresh");
+  assert.equal(plain(BR.pure.turnButton(s, { now: s.server_now, pending: 0, busy: true })).text, "Hand back · 1");
+});
+
+test("in a folder the page's pending notes add to the listing's drafts", () => {
+  const BR = load();
+  const dir = { type: "dir_state", root: ".", truncated: false, folder: null, files: [], totals: { drafts: 2, unseen_files: 0, decided: 0, items: 0 } };
+  const s = state("fresh");
+  assert.equal(plain(BR.pure.turnButton(s, { now: s.server_now, dir, pending: 1, busy: true })).text, "Hand back · 3");
+});

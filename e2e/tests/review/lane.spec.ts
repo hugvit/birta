@@ -481,12 +481,15 @@ test.describe("lane overlay", () => {
     expect(near((await inkIn(page, g, bg))!, YOU_DARK, 10)).toBe(true);
   });
 
-  test("under 768px the lane sits at x=8 with 12px glyphs", async ({ page, birta }) => {
+  test("under 768px the lane sits at x=12 with 12px glyphs, clear of the text", async ({ page, birta }) => {
     await open(page, birta, fixtureDoc("unseen"), { state: fixtureState("unseen"), viewport: { width: 375, height: 1400 } });
     await expect.poll(() => markKeys(page)).toEqual(UNSEEN_KEYS);
     expect(await misaligned(page)).toEqual([]);
-    for (const g of (await marks(page)).filter((m) => m.mark === "glyph")) {
-      expect(Math.abs(g.width - 12), `${g.sp} glyph width`).toBeLessThanOrEqual(1);
+    const content = await contentBox(page);
+    for (const m of await marks(page)) {
+      if (m.mark === "glyph") expect(Math.abs(m.width - 12), `${m.sp} glyph width`).toBeLessThanOrEqual(1);
+      if (["bar", "glyph", "tick"].includes(m.mark))
+        expect(m.right, `${m.mark} ${m.sp ?? m.after} keeps 4px from the text`).toBeLessThanOrEqual(content.left - 4);
     }
   });
 });

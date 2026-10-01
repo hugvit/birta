@@ -65,12 +65,7 @@ pub fn summarize(review_path: &Path, doc_path: &Path) -> anyhow::Result<Summary>
     let text = String::from_utf8(bytes).context("the doc is not UTF-8")?;
     let chain = Chain::build(&parsed);
     let doc = Doc::new(&text);
-    let state = fold::fold(&parsed, &chain, &doc).state;
-    Ok(Summary {
-        stage: state.phrase.stage,
-        phrase: state.phrase,
-        counts: state.counts,
-    })
+    Ok(Summary::of(fold::fold(&parsed, &chain, &doc).state))
 }
 
 /// Why a review op was refused. Checked under the log lock, so a refusal writes nothing.

@@ -30,6 +30,7 @@ expression: "serde_json::to_string_pretty(&state).unwrap()"
           "unasked": 0,
           "unseen": 1
         },
+        "notes": 0,
         "phrase": {
           "stage": "replied"
         },
@@ -56,6 +57,7 @@ expression: "serde_json::to_string_pretty(&state).unwrap()"
           "unasked": 0,
           "unseen": 0
         },
+        "notes": 2,
         "phrase": {
           "stage": "drafts"
         },
@@ -78,6 +80,7 @@ expression: "serde_json::to_string_pretty(&state).unwrap()"
         "unasked": 0,
         "unseen": 0
       },
+      "notes": 0,
       "phrase": {
         "stage": "idle"
       },

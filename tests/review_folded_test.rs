@@ -185,7 +185,16 @@ fn summarize_is_the_full_fold_in_brief() {
     let v = serde_json::to_value(&summary).unwrap();
     let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
     keys.sort_unstable();
-    assert_eq!(keys, ["counts", "phrase", "stage"]);
+    assert_eq!(keys, ["counts", "notes", "phrase", "stage"]);
+    // 1.x: every human note still standing, sent and handled ones too
+    let live = state
+        .items
+        .iter()
+        .filter(|i| i.by.kind == birta::review::ops::ByKind::Human)
+        .filter(|i| !matches!(i.status, ItemStatus::Retracted | ItemStatus::Withdrawn))
+        .count();
+    assert!(live > 0);
+    assert_eq!(v["notes"], live);
     assert_eq!(v["phrase"]["stage"], "replied");
 }
 

@@ -170,7 +170,7 @@ export function laneState(doc: string, lane: Lane): State {
 let built = false;
 
 /** Review assets are embedded at compile time, so the binary must match the tree. */
-function ensureBuilt(): void {
+export function ensureBuilt(): void {
   if (built) return;
   const r = spawnSync("cargo", ["build", "--quiet"], { cwd: REPO, stdio: "inherit" });
   if (r.status !== 0) throw new Error("cargo build failed");
@@ -518,27 +518,42 @@ export function frameBox(page: Page): Promise<Box> {
 
 /**
  * Viewport box of the block after `sp`: its next rendered sibling, or its nearest ancestor's,
- * so a tick after a list item sits before the next item.
+ * so a tick after a list item sits before the next item. With `notes`, a note under the
+ * block (or in the doc slot, for the top) counts as what comes next.
  */
-export function nextBlockBox(page: Page, sp: string | null): Promise<Box | null> {
-  return page.evaluate((sp) => {
+export function nextBlockBox(page: Page, sp: string | null, notes = false): Promise<Box | null> {
+  return page.evaluate(({ sp, notes }) => {
     const content = document.getElementById("content")!;
     const skip = (k: Element | null) => {
-      while (k && (k.localName.startsWith("birta-") || k.localName === "style" || !k.getClientRects().length))
+      while (
+        k &&
+        ((k.localName.startsWith("birta-") && !(notes && k.localName === "birta-flow")) ||
+          k.localName === "style" ||
+          !k.getClientRects().length)
+      )
         k = k.nextElementSibling;
       return k;
     };
     let next: Element | null = null;
-    if (sp === null) next = skip(content.firstElementChild);
+    if (sp === null) next = skip(notes ? content.parentElement!.firstElementChild : content.firstElementChild);
     else {
       const all = content.querySelectorAll(`[data-sourcepos="${sp}"]`);
-      for (let at: Element | null = all[all.length - 1] ?? null; at && at !== content && !next; at = at.parentElement)
+      const own = all[all.length - 1] ?? null;
+      // An item's notes are its last children
+      if (notes && own) {
+        let first: Element | null = null;
+        for (let c = own.lastElementChild; c && c.localName === "birta-flow"; c = c.previousElementSibling) first = c;
+        if (first && first.getClientRects().length) next = first;
+      }
+      for (let at: Element | null = own; at && at !== content && !next; at = at.parentElement)
         next = skip(at.nextElementSibling);
     }
+    // The doc itself, when nothing sits in the doc slot above it
+    if (next === content) next = skip(content.firstElementChild);
     if (!next) return null;
     const r = next.getBoundingClientRect();
     return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
-  }, sp);
+  }, { sp, notes });
 }
 
 export function contentBox(page: Page): Promise<Box> {
@@ -551,7 +566,7 @@ export function contentBox(page: Page): Promise<Box> {
 /** Lane centre and glyph size from the frame's left edge, per the viewport width. */
 export async function laneGeometry(page: Page): Promise<{ x: number; glyph: number }> {
   const w = await page.evaluate(() => window.innerWidth);
-  return w < 768 ? { x: 8, glyph: 12 } : { x: 20, glyph: 16 };
+  return w < 768 ? { x: 12, glyph: 12 } : { x: 20, glyph: 16 };
 }
 
 /** Whether two boxes share any area; touching edges don't count. */
@@ -561,7 +576,8 @@ export function overlaps(a: Box, b: Box): boolean {
 
 /**
  * What is out of place in the lane: bars and washes must span their block (±1px), glyphs sit
- * on its first line, ticks sit in the gap after their block, all centred on the lane.
+ * on its first line, ticks sit in the gap after their block and above any note under it, all
+ * centred on the lane.
  */
 export async function misaligned(page: Page): Promise<string[]> {
   const frame = await frameBox(page);
@@ -612,7 +628,7 @@ export async function misaligned(page: Page): Promise<string[]> {
       }
     } else if (m.mark === "tick") {
       const after = m.after ? await blockBox(page, m.after) : null;
-      const next = await nextBlockBox(page, m.after || null);
+      const next = await nextBlockBox(page, m.after || null, true);
       const top = after ? after.bottom : frame.top;
       const bottom = next ? next.top : frame.bottom;
       if (m.top < top - 1 || m.bottom > bottom + 1) out.push(`${what}: ${m.top}-${m.bottom} outside gap ${top}-${bottom}`);

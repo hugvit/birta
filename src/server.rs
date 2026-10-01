@@ -1106,6 +1106,68 @@ struct ConnCtx {
     said_hello: bool,
     /// The canonical doc whose review state the page is sent.
     review_doc: Option<PathBuf>,
+    /// Holds each review state back until the page has the content of its rev.
+    gate: RevGate,
+}
+
+/// The page draws a state only on the content of its rev, so a state never goes out first.
+/// A state for another rev waits, newest only, until that content is sent.
+#[derive(Default)]
+struct RevGate {
+    /// The rev of the last content sent for the viewed doc.
+    shown: Option<String>,
+    /// A state waiting for its content: its rev and frame.
+    parked: Option<(String, String)>,
+}
+
+impl RevGate {
+    /// Content of `rev` went out: a state waiting for it follows at once.
+    fn shown(&mut self, rev: &str, out: &mut Vec<String>) {
+        self.shown = Some(rev.to_string());
+        if self.parked.as_ref().is_some_and(|(r, _)| r == rev) {
+            out.extend(self.parked.take().map(|(_, frame)| frame));
+        }
+    }
+
+    /// A state of `rev`: sent now when its content is out, else it waits.
+    fn state(&mut self, rev: &str, frame: String, out: &mut Vec<String>) {
+        if self.shown.as_deref() == Some(rev) {
+            out.push(frame);
+        } else {
+            self.parked = Some((rev.to_string(), frame));
+        }
+    }
+
+    /// Passes ready-made frames (a hello's, a resync's) through the gate in order.
+    fn frames(&mut self, path: &str, frames: Vec<String>) -> Vec<String> {
+        let mut out = Vec::with_capacity(frames.len());
+        for frame in frames {
+            let msg: serde_json::Value = match serde_json::from_str(&frame) {
+                Ok(msg) => msg,
+                Err(_) => {
+                    out.push(frame);
+                    continue;
+                }
+            };
+            let rev = msg.get("rev").and_then(|r| r.as_str());
+            let mine = msg.get("path").and_then(|p| p.as_str()) == Some(path);
+            let carries_doc = msg["type"] == "content"
+                || (msg["type"] == "theme_update" && msg.get("html").is_some_and(|h| !h.is_null()));
+            match (msg["type"].as_str(), rev) {
+                (_, Some(rev)) if mine && carries_doc => {
+                    out.push(frame);
+                    self.shown(rev, &mut out);
+                }
+                (Some("review_state"), Some(rev)) if mine => self.state(rev, frame, &mut out),
+                (Some("gone"), _) if mine => {
+                    self.parked = None;
+                    out.push(frame);
+                }
+                _ => out.push(frame),
+            }
+        }
+        out
+    }
 }
 
 /// A hello's tab id, when it fits `[A-Za-z0-9_-]{1,64}`.
@@ -1164,6 +1226,8 @@ async fn hello(state: &Arc<AppState>, ctx: &mut ConnCtx, msg: &serde_json::Value
     ctx.tab = tab_id(msg);
     ctx.said_hello = true;
     ctx.review_doc = None;
+    // A new doc starts with nothing shown and nothing waiting
+    ctx.gate = RevGate::default();
     // Counted before the read, so a write landing in between is rendered for this page.
     ctx.viewing = viewable(state, rel).then(|| state.viewers.view(rel));
     let content = match ctx.viewing {
@@ -1237,6 +1301,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
         tab: None,
         said_hello: false,
         review_doc: None,
+        gate: RevGate::default(),
     };
 
     // Subscribe first: an update landing between the two is then sent after the snapshot.
@@ -1251,33 +1316,64 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
 
     'conn: loop {
         let sees = |path: &str| ctx.viewing.as_ref().is_some_and(|v| v.sees(path));
+        let viewed = ctx
+            .viewing
+            .as_ref()
+            .and_then(|v| v.path.clone())
+            .filter(|_| ctx.review_doc.is_some());
         let frames = tokio::select! {
             // Pending broadcasts go out before a slow request, such as a hello, is handled.
             biased;
             result = rx.recv() => match result {
-                Ok(WsEvent::Content(update)) if sees(&update.relpath) => vec![content_frame(
-                    &update.relpath,
-                    &update.rendered_html,
-                    &update.source_html,
-                    &update.file_stats,
-                    Some(&update.rev),
-                    &update.stops,
-                )],
-                Ok(WsEvent::Gone(path)) if sees(&path) => vec![gone_frame(&path)],
+                Ok(WsEvent::Content(update)) if sees(&update.relpath) => {
+                    let mut out = vec![content_frame(
+                        &update.relpath,
+                        &update.rendered_html,
+                        &update.source_html,
+                        &update.file_stats,
+                        Some(&update.rev),
+                        &update.stops,
+                    )];
+                    if viewed.as_deref() == Some(update.relpath.as_str()) {
+                        ctx.gate.shown(update.rev.as_str(), &mut out);
+                    }
+                    out
+                }
+                Ok(WsEvent::Gone(path)) if sees(&path) => {
+                    if viewed.as_deref() == Some(path.as_str()) {
+                        ctx.gate.parked = None;
+                    }
+                    vec![gone_frame(&path)]
+                }
                 Ok(WsEvent::Review(push)) => match (&ctx.review_doc, &ctx.viewing) {
                     (Some(doc), Some(ViewGuard { path: Some(rel), .. })) if *doc == push.canonical => {
-                        vec![review_ws::push_frame(&push, rel)]
+                        let mut out = Vec::new();
+                        ctx.gate.state(&push.state.rev, review_ws::push_frame(&push, rel), &mut out);
+                        if out.is_empty() {
+                            continue;
+                        }
+                        out
                     }
                     _ => continue,
                 },
                 Ok(WsEvent::DirState(json)) if ctx.said_hello => vec![json.to_string()],
                 Ok(WsEvent::Content(_) | WsEvent::Gone(_) | WsEvent::DirState(_)) => continue,
-                Ok(WsEvent::Raw(json)) => vec![json.to_string()],
+                Ok(WsEvent::Raw(json)) => match &viewed {
+                    // A theme update can carry the doc, which the gate must see
+                    Some(rel) => ctx.gate.frames(rel, vec![json.to_string()]),
+                    None => vec![json.to_string()],
+                },
                 Ok(WsEvent::Scroll(line)) => {
                     vec![serde_json::json!({"type": "scroll", "line": line}).to_string()]
                 }
                 // Dropped events may include content or a theme, so resync this connection.
-                Err(broadcast::error::RecvError::Lagged(_)) => resync_frames(&state, &ctx).await,
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let frames = resync_frames(&state, &ctx).await;
+                    match &viewed {
+                        Some(rel) => ctx.gate.frames(rel, frames),
+                        None => frames,
+                    }
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             },
             msg = socket.recv() => match msg {
@@ -1286,7 +1382,11 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
                     if replies.is_empty() {
                         continue;
                     }
-                    replies
+                    // A hello's content and state come from two reads, so they pass the gate too
+                    match ctx.viewing.as_ref().and_then(|v| v.path.clone()).filter(|_| ctx.review_doc.is_some()) {
+                        Some(rel) => ctx.gate.frames(&rel, replies),
+                        None => replies,
+                    }
                 }
                 Some(Ok(_)) => continue,
                 _ => break,
@@ -1314,6 +1414,58 @@ mod tests {
     use super::*;
     use crate::scan::ScanBudget;
     use crate::theme::{self, ThemeVariants, VariantData};
+
+    #[test]
+    fn the_rev_gate_holds_a_state_for_its_content_and_drops_what_never_comes() {
+        let mut gate = RevGate::default();
+        let mut out = Vec::new();
+        gate.shown("r1", &mut out);
+        gate.state("r1", "s1".into(), &mut out);
+        assert_eq!(out, ["s1"], "a state of the shown rev goes at once");
+        out.clear();
+        gate.state("r2", "s2-old".into(), &mut out);
+        gate.state("r2", "s2".into(), &mut out);
+        assert!(out.is_empty(), "a state ahead waits");
+        gate.state("r1", "s1-log".into(), &mut out);
+        assert_eq!(
+            out,
+            ["s1-log"],
+            "a log-only change on the shown rev isn't held up"
+        );
+        out.clear();
+        gate.shown("r2", &mut out);
+        assert_eq!(out, ["s2"], "the newest waiting state follows its content");
+        out.clear();
+        gate.state("r3", "s3".into(), &mut out);
+        gate.parked = None;
+        gate.shown("r3", &mut out);
+        assert!(out.is_empty(), "a dropped state is never sent");
+        gate.state("r3", "s3-again".into(), &mut out);
+        assert_eq!(
+            out,
+            ["s3-again"],
+            "nothing left behind blocks a later state"
+        );
+    }
+
+    #[test]
+    fn the_rev_gate_orders_a_hello_whose_state_is_ahead_of_its_content() {
+        let mut gate = RevGate::default();
+        let frames = vec![
+            serde_json::json!({"type": "content", "path": "a.md", "rev": "r1"}).to_string(),
+            serde_json::json!({"type": "review_state", "path": "a.md", "rev": "r2"}).to_string(),
+            serde_json::json!({"type": "dir_state"}).to_string(),
+        ];
+        let out = gate.frames("a.md", frames);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert!(out[1].contains("dir_state"));
+        let later = gate.frames(
+            "a.md",
+            vec![serde_json::json!({"type": "content", "path": "a.md", "rev": "r2"}).to_string()],
+        );
+        assert_eq!(later.len(), 2);
+        assert!(later[1].contains("review_state"));
+    }
 
     fn github_theme() -> theme::ResolvedTheme {
         theme::ResolvedTheme {

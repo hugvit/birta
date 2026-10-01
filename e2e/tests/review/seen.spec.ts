@@ -753,8 +753,10 @@ test.describe("beacon", () => {
     await page.keyboard.press("n");
     await expect.poll(() => seenIds(mock)).toEqual([["9.0"]]);
     await clickIn(page, "1:1-1:16");
+    // The hand-back waits for the note's ack, which never comes here, so it is never sent at all
     await page.keyboard.press("ControlOrMeta+Enter");
-    await expect.poll(() => mock.ops().map((o) => o.op)).toEqual(["comment", "seen", "hand_back"]);
+    await page.waitForTimeout(SETTLE_MS);
+    expect(mock.ops().map((o) => o.op)).toEqual(["comment", "seen"]);
     await hide(page);
     await expect.poll(async () => (await beacons(page)).length).toBeGreaterThan(0);
     const all = await beacons(page);
@@ -775,10 +777,11 @@ test.describe("beacon", () => {
   test("an unacked approve never rides the beacon", async ({ page, birta }) => {
     const seen = echoSeen(fixtureState("replied"), "9.0");
     const { mock } = await open(page, birta, fixtureDoc("replied"), seen, { acks: "manual" });
-    await noteOnDoc(page, "one more thing");
     await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve");
     await page.keyboard.press("ControlOrMeta+Enter");
     await expect.poll(() => opsNamed(mock, "approve")).toHaveLength(1);
+    // A note kept after the approve: it rides the beacon, the approve doesn't
+    await noteOnDoc(page, "one more thing");
     await hide(page);
     await expect.poll(async () => (await beacons(page)).length).toBeGreaterThan(0);
     for (const b of await beacons(page)) {

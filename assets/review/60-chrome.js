@@ -134,7 +134,10 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     }
     if (v.held && s.hold.kind === 'approve') return approve();
     var t = opts.dir && opts.dir.totals;
-    var total = t ? Math.max(t.drafts, v.drafts) : v.drafts;
+    // Notes the page kept that no state shows yet still count: ⌘⏎ must never approve past them
+    var mine = v.drafts + (opts.pending || 0);
+    var total = t ? Math.max(t.drafts + (opts.pending || 0), mine) : mine;
+    if (opts.busy && total === 0) total = 1;
     if (total > 0) {
       if (t && t.unseen_files) return button('Hand back · ' + total + ' · ' + plural(t.unseen_files, 'file', 'files') + ' unseen');
       return button('Hand back · ' + total, true);
@@ -222,7 +225,10 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   function opts(t) { return { now: t, dir: dir, path: CURRENT_PATH, folder: folderMode() }; }
 
   /** The button's options: only in a folder do its count and hand-back take in every file. */
-  function turnOpts(t) { return { now: t, dir: folderMode() ? dir : null, path: CURRENT_PATH }; }
+  function turnOpts(t) {
+    var p = BR.pending;
+    return { now: t, dir: folderMode() ? dir : null, path: CURRENT_PATH, pending: p ? p.adds() : 0, busy: !!p && p.any() };
+  }
 
   /** The active hand-back of all, from its ack: `{batch, n, count, not_before}`, or null. */
   function batchHold(t) { return batch && t < batch.not_before ? batch : null; }
@@ -400,10 +406,16 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     });
   }
 
-  function openMenu() {
+  /** Opens the menu, on the row with id `at` when there is one. */
+  function openMenu(at) {
     rows = [];
     cur = 0;
     fillMenu();
+    var i = rows.map(function (r) { return r.id; }).indexOf(at);
+    if (i > 0) {
+      cur = i;
+      fillMenu();
+    }
     var r = phrase.getBoundingClientRect();
     menu.style.top = r.bottom + 4 + 'px';
     menu.style.left = r.left + 'px';
@@ -456,6 +468,38 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     }
   }
 
+  // --- Copy ---
+
+  var HOSTS = 'birta-flow, birta-phrase, birta-turn, birta-pop, birta-under, birta-over';
+
+  /**
+   * Native copy serialises review hosts' closed roots too, so a selection that spans one is
+   * copied from a clone with the hosts taken out, laid out offscreen for its line breaks.
+   */
+  function onCopy(e) {
+    var sel = getSelection();
+    if (!e.clipboardData || BR.isHost(e.target) || !sel || !sel.rangeCount || sel.isCollapsed) return;
+    var range = sel.getRangeAt(0);
+    var spans = Array.prototype.some.call(document.querySelectorAll(HOSTS), function (h) {
+      return BR.isHost(h) && range.intersectsNode(h);
+    });
+    if (!spans) return;
+    var box = document.createElement('div');
+    box.className = 'markdown-body';
+    box.style.cssText = 'position:fixed;left:-99999px;top:0;width:800px;white-space:normal';
+    box.appendChild(range.cloneContents());
+    box.querySelectorAll(HOSTS).forEach(function (h) { h.remove(); });
+    document.body.appendChild(box);
+    var text = box.innerText;
+    var html = box.innerHTML;
+    box.remove();
+    // A selection inside a note reaches the page as its host alone: the browser copies that
+    if (!text.trim()) return;
+    e.clipboardData.setData('text/plain', text);
+    e.clipboardData.setData('text/html', html);
+    e.preventDefault();
+  }
+
   // --- The turn ---
 
   function act() {
@@ -464,7 +508,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     if (!shown(s)) return;
     var b = BR.pure.turnButton(s, turnOpts(now()));
     if (!b || b.disabled) return;
-    if (/^Hand back/.test(b.text)) handBack();
+    if (/^Hand back/.test(b.text)) handBackWhenAcked();
     // With unseen changes the guard steps through them instead
     else if (/ unseen$/.test(b.text)) BR.pointing.toUnseen();
     else if (b.text === 'Approve' || / unanswered$/.test(b.text)) BR.op({ op: 'approve' });
@@ -489,6 +533,10 @@ var BR = typeof BR === 'undefined' ? {} : BR;
         break;
       case 'ack':
         if (message && message.nack) message = null;
+        if (handBackDue && !BR.pending.unacked()) {
+          handBackDue = false;
+          handBack();
+        }
         if (handing && msg.cid === handing.cid && msg.batch != null) {
           batch = { batch: msg.batch, n: msg.n, count: handing.count, not_before: msg.not_before };
         }
@@ -496,11 +544,26 @@ var BR = typeof BR === 'undefined' ? {} : BR;
         if (msg.cid === withdrawing) batch = withdrawing = null;
         break;
       case 'nack':
+        // A refused note leaves the others: hand back what was kept, and never approve instead
+        if (handBackDue && !BR.pending.unacked()) {
+          handBackDue = false;
+          var b = BR.pure.turnButton(BR.currentState() || {}, turnOpts(now()));
+          if (b && /^Hand back/.test(b.text)) handBack();
+        }
         if (handing && msg.cid === handing.cid) handing = null;
         if (msg.cid === withdrawing) withdrawing = null;
         break;
     }
     render();
+  }
+
+  // A ⌘⏎ that came while the page's own notes were still on their way
+  var handBackDue = false;
+
+  /** Hands back once every note this page sent is acked, so the hand-back covers them. */
+  function handBackWhenAcked() {
+    if (BR.pending && BR.pending.unacked()) handBackDue = true;
+    else handBack();
   }
 
   /** Hands back this doc's drafts, or in a folder every file's, as the button counts them. */
@@ -537,12 +600,12 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       phraseText.appendChild(phraseWords);
       p.root.appendChild(phraseText);
       phrase.addEventListener('click', function () {
-        if (!closeMenu()) openMenu();
+        if (!closeMenu()) openMenu(null);
       });
       phraseText.addEventListener('keydown', function (e) {
         if (e.key !== 'Enter' && e.key !== ' ') return;
         e.preventDefault();
-        if (!closeMenu()) openMenu();
+        if (!closeMenu()) openMenu(null);
       });
       document.querySelector('.file-header-left').appendChild(phrase);
 
@@ -579,12 +642,14 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       }, true);
 
       birtaBus.on(onFrame);
+      document.addEventListener('copy', onCopy, true);
       render();
     },
     render: render,
     /** Server time, as this page knows it. */
     now: now,
     turn: act,
+    openMenu: openMenu,
     menuKey: menuKey,
     closeMenu: closeMenu,
     /** Esc's menu layer: true when it closed the menu. */

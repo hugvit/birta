@@ -1474,7 +1474,9 @@ test.describe("rules", () => {
 
   for (const [width, viewport, lane, textX] of [
     ["at 1280px", WIDE, 20, 52],
-    ["under 768px", NARROW, 8, 20],
+    ["under 768px", NARROW, 12, 28],
+    ["at 768px", { width: 768, height: 900 }, 20, 52],
+    ["at 767px", { width: 767, height: 900 }, 12, 28],
   ] as const) {
     test(`${width} a note's rule is at x=${lane} and its text at x=${textX}`, async ({ page, birta }) => {
       await open(page, birta, FLOW_DOC, { state: withDrafts(), viewport });

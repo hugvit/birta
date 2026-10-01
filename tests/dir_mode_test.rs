@@ -701,6 +701,31 @@ async fn hand_back_all_takes_the_folder_note_into_the_batch() {
 }
 
 #[tokio::test]
+async fn the_folder_summary_counts_every_live_folder_note_after_a_hand_back() {
+    let site = review_site();
+    let mut folder = Scenario::folder("root");
+    folder.comment(serde_json::json!("dir"), None, Some("KEPT"));
+    let gone = folder.comment(serde_json::json!("dir"), None, Some("TAKEN BACK"));
+    folder.retract(gone);
+    folder.comment(serde_json::json!("dir"), Some("ask"), Some("ASKED"));
+    folder.submit();
+    folder.claim("claude");
+    site.write(".birta.jsonl", &folder.log());
+    let served = site.serve(&["."], &[GATE_ON]);
+    let (mut ws, frames) = served.viewing("a.md").await;
+    let listing = listing_where(&mut ws, &frames, "the folder's summary", |s| {
+        !s["folder"]["summary"].is_null()
+    })
+    .await;
+    let summary = &listing["folder"]["summary"];
+    assert_eq!(summary["counts"]["drafts"], 0, "{summary:#?}");
+    assert_eq!(
+        summary["notes"], 2,
+        "sent notes count, a retracted one doesn't: {summary:#?}"
+    );
+}
+
+#[tokio::test]
 async fn hand_back_all_with_only_a_folder_note_is_acked() {
     let site = served::Site::new();
     site.write("index.md", "# Index\n");

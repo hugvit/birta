@@ -130,7 +130,8 @@
 
 :host(birta-phrase[data-shown]) {
   display: block !important;
-  flex: 0 1 auto;
+  /* Gives up its width long before the file name does */
+  flex: 0 10000 auto;
   min-width: 0;
   overflow: hidden;
   visibility: visible !important;
@@ -289,6 +290,11 @@
   float: none !important;
   transform: none !important;
   font-size: 16px;
+}
+
+/* Reading mode: notes step aside, but never typed words */
+:host(birta-flow[data-br-hidden]:not([data-kind="composer"])) {
+  display: none !important;
 }
 
 /* The doc pins its first block's top margin to 0, so the doc slot leaves a heading's gap itself */

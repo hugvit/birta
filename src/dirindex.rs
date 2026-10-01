@@ -276,12 +276,7 @@ impl DirIndex {
         }
         let summary = sig.and_then(|_| {
             let parsed = review::log::Log::open(&path).read().ok()??;
-            let state = review::fold::fold_dir(&parsed);
-            Some(Summary {
-                stage: state.phrase.stage,
-                phrase: state.phrase,
-                counts: state.counts,
-            })
+            Some(Summary::of(review::fold::fold_dir(&parsed)))
         });
         self.lock().folder = Some((sig, summary));
         true
@@ -350,6 +345,7 @@ mod tests {
                 decided,
                 attention: unseen,
             },
+            notes: drafts,
         }
     }
 

@@ -167,6 +167,24 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     return null;
   }
 
+  /** The first note drawn under `el`, or in the doc slot for null. */
+  function firstNote(el) {
+    var note = null;
+    if (!el) {
+      for (var d = frame.firstElementChild; d && d !== content && !note; d = d.nextElementSibling) {
+        if (d.localName === 'birta-flow' && BR.isHost(d)) note = d;
+      }
+    } else {
+      for (var c = el.lastElementChild; c && BR.isHost(c); c = c.previousElementSibling) note = c;
+      for (var at = el; !note && at && at !== content; at = at.parentElement) {
+        var sib = at.nextElementSibling;
+        if (sib && BR.isHost(sib)) note = sib;
+        else if (sib) break;
+      }
+    }
+    return note && rendered(note) ? note : null;
+  }
+
   function svg(d) {
     var ns = 'http://www.w3.org/2000/svg';
     var s = document.createElementNS(ns, 'svg');
@@ -213,7 +231,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     var F = frame.getBoundingClientRect();
     var C = content.getBoundingClientRect();
     var narrow = window.innerWidth < 768;
-    var laneX = narrow ? 8 : 20;
+    var laneX = narrow ? 12 : 20;
     var size = narrow ? 12 : 16;
     var glyphs = {};
     marks.forEach(function (m) { if (m.mark === 'glyph') glyphs[m.sp] = true; });
@@ -234,8 +252,11 @@ var BR = typeof BR === 'undefined' ? {} : BR;
         var after = m.after === null ? null : bySp[m.after];
         if (m.after !== null && !rendered(after)) return;
         var next = nextBlock(after);
-        var top = after ? after.getBoundingClientRect().bottom : F.top;
+        var top = after ? ownRect(after).bottom : F.top;
         var bottom = next ? next.getBoundingClientRect().top : F.bottom;
+        // A note under the block starts below the tick, so the tick never crosses its rule
+        var note = firstNote(after);
+        if (note) bottom = Math.min(bottom, note.getBoundingClientRect().top);
         overOut.appendChild(box({ 'data-mark': 'tick', 'data-after': m.after, 'data-count': m.count }, 'tick',
           laneX - 6, (top + bottom) / 2 - 1 - F.top, 12, 2));
         return;
@@ -438,11 +459,16 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       content.addEventListener('focusout', function (e) {
         if (e.target.matches && e.target.matches('a.anchor')) light(null);
       });
-      new MutationObserver(function () {
+      // Reading mode hides marks and notes; m is its own toggle and survives leaving it
+      var syncReading = function () {
         var on = reading();
         [under, focusLayer, over].forEach(function (layer) { layer.classList.toggle('reading', on); });
+        BR.flow.hide(on);
+        highlight();
         schedule();
-      }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+      };
+      new MutationObserver(syncReading).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+      syncReading();
       render();
     },
     focus: function (el) {
@@ -453,6 +479,9 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       hidden = !hidden;
       under.classList.toggle('off', hidden);
       over.classList.toggle('off', hidden);
+      // Link dots are marks too, and live in the page's own CSS
+      if (hidden) document.documentElement.setAttribute('data-br-marks', 'off');
+      else document.documentElement.removeAttribute('data-br-marks');
       highlight();
     },
     /** Measures again on the next frame, after the flow moved blocks. */

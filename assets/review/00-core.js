@@ -12,6 +12,11 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   // What a closing page may still send: never a doc write, a hand-back or an approve
   var BEACON_OPS = { comment: 1, amend: 1, retract: 1, reply: 1 };
   var BUFFER_MS = 500;
+  // Ops that make or change a note: until the state shows them, the page's own drafts
+  var DRAFT_OPS = { comment: 1, amend: 1, reply: 1 };
+
+  // cid -> {n, dir, adds}: n is the acked line, null until the ack comes
+  var pending = {};
 
   var seq = 0;
   var session = Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
@@ -50,8 +55,41 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     box.push(frame);
     writeOutbox(box);
     birtaBus.send(frame);
+    if (DRAFT_OPS[frame.op]) {
+      pending[cid] = { n: null, dir: !!(frame.at && frame.at.k === 'dir'), adds: frame.op !== 'amend' };
+      if (BR.chrome && BR.chrome.render) BR.chrome.render();
+    }
     return cid;
   };
+
+  /** The page's own notes the server hasn't shown back yet. */
+  BR.pending = {
+    /** New notes among them, for the turn button's count. */
+    adds: function () {
+      return Object.keys(pending).filter(function (c) { return pending[c].adds; }).length;
+    },
+    any: function () { return Object.keys(pending).length > 0; },
+    /** Whether any is still waiting for its ack. */
+    unacked: function () {
+      return Object.keys(pending).some(function (c) { return pending[c].n === null; });
+    }
+  };
+
+  /** Drops what a frame shows the server has: an ack's line once a state reaches it. */
+  function settlePending(msg) {
+    Object.keys(pending).forEach(function (cid) {
+      var p = pending[cid];
+      if (msg.type === 'nack' && msg.cid === cid) delete pending[cid];
+      else if (msg.type === 'ack' && msg.cid === cid) {
+        if (msg.n == null) delete pending[cid];
+        else p.n = msg.n;
+      } else if (p.n !== null && !p.dir && msg.type === 'review_state' && msg.path === CURRENT_PATH && msg.state) {
+        if (((msg.state.log && msg.state.log.lines) || 0) >= p.n) delete pending[cid];
+      } else if (p.n !== null && p.dir && msg.type === 'dir_state') {
+        delete pending[cid];
+      }
+    });
+  }
 
   function replay() {
     readOutbox().forEach(function (frame) { birtaBus.send(frame); });
@@ -126,6 +164,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   }
 
   function onFrame(msg) {
+    settlePending(msg);
     BR.flow.frame(msg);
     switch (msg.type) {
       case 'open':

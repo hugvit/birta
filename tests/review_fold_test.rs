@@ -1483,7 +1483,8 @@ fn a_ten_thousand_op_log_folds_in_time() {
 
 #[test]
 fn a_hunk_over_several_blocks_handles_the_note_on_its_last_one() {
-    // One hunk replaces lines 6-9; the note is on line 9 only
+    // One hunk, as logs before the cut at blocks stored it, replaces lines 6-9; the
+    // note is on line 9 only
     let mut s = Scenario::new(DOC);
     let x = s.verdict("- third item", "no");
     s.submit();
@@ -1492,7 +1493,7 @@ fn a_hunk_over_several_blocks_handles_the_note_on_its_last_one() {
         "- first item\n- second item\n  - nested item\n- third item\n",
         "- one\n- two\n  - three\n- four\n",
     );
-    let ext = s.external(&text);
+    let ext = s.external_diffed(&text);
     s.yield_turn(CLAUDE, turn);
     let state = s.fold();
     assert_eq!(status(&state, x), ItemStatus::Handled);

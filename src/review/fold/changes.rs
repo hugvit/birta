@@ -1,13 +1,14 @@
 //! Each hunk of each recorded write as a change: who made it, whether a note asked for
 //! it, where it is now, what it removed, and whether `x` can undo it.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use comrak::nodes::NodeValue;
 use comrak::{Arena, parse_document};
 use similar::{DiffOp, TextDiff};
 
 use super::items::Notes;
+use super::label::Write;
 use super::texts::{Texts, carry, touches};
 use super::turns::Turns;
 use crate::anchor;
@@ -39,6 +40,8 @@ pub(super) struct Input<'x> {
     pub seen: &'x HashMap<String, u32>,
     /// Lines of hand-backs and approves that stand.
     pub rounds: &'x [u32],
+    /// Ids of hunks that render the same, which make no change.
+    pub hidden: &'x HashSet<String>,
 }
 
 pub(super) struct Built {
@@ -95,20 +98,35 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
         let later = &chain.history()[k + 1..];
         let who = Who::of(line, step, input.turns);
         let reverses = crate::review::hunk::reverse(hunks);
+        let quoted = if who.attr == Attr::Agent {
+            Quoted::of(input, texts, who.turn, step)
+        } else {
+            Quoted::default()
+        };
+        let (from, to) = (texts.text(&step.from), texts.text(&step.to));
+        let write = from
+            .as_deref()
+            .zip(to.as_deref())
+            .map(|(f, t)| Write::new(f, t));
         let mut shift = 0i64;
         for (j, h) in hunks.iter().enumerate() {
             let id = format!("{}.{j}", line.n);
             let new_a = (i64::from(h.a) + shift) as u32;
             shift += h.i.len() as i64 - h.d.len() as i64;
+            if input.hidden.contains(&id) {
+                continue;
+            }
             let (dl, il) = (h.d.len() as u32, h.i.len() as u32);
             let new = (new_a + 1, new_a + il);
-            let placed = place(later, new, il == 0, head);
+            let kind = write.as_ref().and_then(|w| w.label(hunks, j));
+            let whole = kind.as_ref().is_some_and(|k| k.whole_removal());
+            let placed = place(later, new, il == 0, whole, head);
             let gone = placed.status == RangeStatus::Superseded;
 
             let asked = match who.attr {
                 Attr::Human => asked(AskedKind::Human, Vec::new()),
                 Attr::Outside => asked(AskedKind::Outside, Vec::new()),
-                Attr::Agent => asked_for(input, texts, who.turn, step, h),
+                Attr::Agent => asked_for(input, texts, who.turn, step, h, j, &quoted),
             };
             let breaks_stet = if who.attr == Attr::Agent {
                 breaks_stet(input, texts, line.n, step, h)
@@ -136,12 +154,10 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
                 ReversibleReason::Snap
             } else if who.attr == Attr::Outside {
                 ReversibleReason::Outside
-            } else if hunks.len() > 1 {
-                ReversibleReason::MultiHunk
             } else {
                 ReversibleReason::None
             };
-            let ok = matches!(reason, ReversibleReason::None | ReversibleReason::MultiHunk);
+            let ok = reason == ReversibleReason::None;
             let reverse = ok.then(|| Hunk {
                 a: placed.lines.0 - 1,
                 ..reverses[j].clone()
@@ -159,6 +175,8 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
                     } else {
                         stop_above(head, placed.lines.0)
                     },
+                    first_line: first_line(&h.d),
+                    label: kind.as_ref().and_then(|k| k.removed.clone()),
                 });
             }
             for (offset, removed) in gaps {
@@ -172,6 +190,8 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
                     at_byte: now.and_then(|l| head.lines.range(l)).map(|r| r.start + col),
                     removed,
                     after_sp: now.and_then(|l| stop_holding(head, l)),
+                    first_line: None,
+                    label: None,
                 });
             }
 
@@ -231,6 +251,7 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
                     words,
                     touches_html,
                 },
+                label: kind.map(|k| k.text),
                 removed: (dl > 0 && il < dl).then(|| capped(&h.d.concat())),
                 is_rewrite: false,
                 reverse,
@@ -251,7 +272,7 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
             for (j, h) in hunks.iter().enumerate() {
                 let new_a = (i64::from(h.a) + shift) as u32;
                 shift += h.i.len() as i64 - h.d.len() as i64;
-                if !h.i.is_empty() {
+                if !h.i.is_empty() && !input.hidden.contains(&format!("{}.{j}", line.n)) {
                     yours.push(Yours {
                         id: format!("{}.{j}", line.n),
                         span: (new_a + 1, new_a + h.i.len() as u32),
@@ -344,24 +365,56 @@ fn asked(kind: AskedKind, notes: Vec<u32>) -> Asked {
     Asked { kind, notes }
 }
 
-/// Whether a note of the agent's turn asked for hunk `h`: by where it is, or because the
-/// agent cited the note for text the hunk wrote.
-fn asked_for(input: &Input, texts: &mut Texts, turn: Option<u32>, step: &Step, h: &Hunk) -> Asked {
+/// Where in one agent write the turn's `unasked` and `covers` quotes read.
+#[derive(Default)]
+struct Quoted {
+    /// Hunks the agent flagged as changed unasked.
+    unasked: HashSet<usize>,
+    /// Each covered note, with the hunks its quotes read in.
+    covers: Vec<(u32, Vec<usize>)>,
+}
+
+impl Quoted {
+    fn of(input: &Input, texts: &mut Texts, turn: Option<u32>, step: &Step) -> Self {
+        let Some(turn) = turn else {
+            return Self::default();
+        };
+        let unasked = input
+            .turns
+            .unasked
+            .get(&turn)
+            .into_iter()
+            .flatten()
+            .flat_map(|q| cited(q, step, texts))
+            .collect();
+        let covers = input
+            .turns
+            .covers
+            .get(&turn)
+            .into_iter()
+            .flatten()
+            .map(|(to, q)| (*to, cited(q, step, texts)))
+            .collect();
+        Self { unasked, covers }
+    }
+}
+
+/// Whether a note of the agent's turn asked for hunk `h`, index `j` of its write: by
+/// where it is, or because the agent cited the note for text the hunk wrote.
+fn asked_for(
+    input: &Input,
+    texts: &mut Texts,
+    turn: Option<u32>,
+    step: &Step,
+    h: &Hunk,
+    j: usize,
+    quoted: &Quoted,
+) -> Asked {
     let unasked = || asked(AskedKind::Unasked, Vec::new());
     let Some(turn) = turn else {
         return unasked();
     };
-    let wrote = collapse(&h.i.concat());
-    let quoted = |q: &str| {
-        let q = collapse(q);
-        !q.is_empty() && wrote.contains(&q)
-    };
-    let flagged = input
-        .turns
-        .unasked
-        .get(&turn)
-        .is_some_and(|quotes| quotes.iter().any(|q| quoted(q)));
-    if flagged {
+    if quoted.unasked.contains(&j) {
         return unasked();
     }
     let held: &[u32] = input.held.get(&turn).map_or(&[], Vec::as_slice);
@@ -380,13 +433,10 @@ fn asked_for(input: &Input, texts: &mut Texts, turn: Option<u32>, step: &Step, h
     if !location.is_empty() {
         return asked(AskedKind::Location, location);
     }
-    let cited: BTreeSet<u32> = input
-        .turns
+    let cited: BTreeSet<u32> = quoted
         .covers
-        .get(&turn)
-        .into_iter()
-        .flatten()
-        .filter(|(to, q)| held.contains(to) && quoted(q))
+        .iter()
+        .filter(|(to, hunks)| held.contains(to) && hunks.contains(&j))
         .map(|(to, _)| *to)
         .collect();
     if cited.is_empty() {
@@ -396,14 +446,131 @@ fn asked_for(input: &Input, texts: &mut Texts, turn: Option<u32>, step: &Step, h
     }
 }
 
-/// The turns in which a `covers` of each note bound: its quote is in text a write of that
-/// turn put in, whatever the hunk is asked for.
+/// Indexes of the hunks of `step` whose written lines hold `quote`, whitespace aside,
+/// wherever it reads in the text the step left.
+pub(super) fn cited(quote: &str, step: &Step, texts: &mut Texts) -> Vec<usize> {
+    let q = collapse(quote);
+    let Some(hunks) = step.hunks.as_deref().filter(|_| !q.is_empty()) else {
+        return Vec::new();
+    };
+    let (Some(text), Some(lines)) = (texts.text(&step.to), texts.lines(&step.to)) else {
+        return Vec::new();
+    };
+    let (flat, from) = flatten(&text);
+    let mut out = Vec::new();
+    for (at, _) in flat.match_indices(q.as_str()) {
+        let first = lines.line_of(from[at]);
+        let last = lines.line_of(from[at + q.len() - 1]);
+        let mut shift = 0i64;
+        for (j, h) in hunks.iter().enumerate() {
+            let new_a = (i64::from(h.a) + shift) as u32;
+            shift += h.i.len() as i64 - h.d.len() as i64;
+            let il = h.i.len() as u32;
+            if il > 0 && new_a < last && first <= new_a + il && !out.contains(&j) {
+                out.push(j);
+            }
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// `text` with each whitespace run as one space, and where in `text` each byte is from.
+fn flatten(text: &str) -> (String, Vec<usize>) {
+    let mut flat = String::with_capacity(text.len());
+    let mut from = Vec::with_capacity(text.len());
+    let mut space = false;
+    for (i, c) in text.char_indices() {
+        if c.is_whitespace() {
+            if !space {
+                flat.push(' ');
+                from.push(i);
+            }
+            space = true;
+            continue;
+        }
+        space = false;
+        flat.push(c);
+        from.extend((0..c.len_utf8()).map(|k| i + k));
+    }
+    (flat, from)
+}
+
+/// Ids of the changes each `covers` of doc note `note` bound, in the turns that held it.
+pub(super) fn covers_credit(
+    note: u32,
+    held_by: &[u32],
+    turns: &Turns,
+    texts: &mut Texts,
+    hidden: &HashSet<String>,
+) -> Vec<String> {
+    let mut writes: Vec<(u32, u32)> = turns
+        .writes
+        .iter()
+        .filter(|(_, t)| held_by.contains(t))
+        .map(|(&n, &t)| (n, t))
+        .collect();
+    writes.sort_unstable();
+    let mut out = Vec::new();
+    for (n, turn) in writes {
+        let Some((_, step)) = texts.step_at(n) else {
+            continue;
+        };
+        let quotes = turns.covers.get(&turn).into_iter().flatten();
+        for (_, q) in quotes.filter(|(to, _)| *to == note) {
+            for j in cited(q, step, texts) {
+                let id = format!("{n}.{j}");
+                if !hidden.contains(&id) && !out.contains(&id) {
+                    out.push(id);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The turns in which a `covers` of each note bound: its quote reads in text a write of
+/// that turn put in, whatever the hunk is asked for.
 pub(super) fn covers_bound(
     lines: &[Line],
     turns: &Turns,
-    texts: &Texts,
+    texts: &mut Texts,
+    hidden: &HashSet<String>,
 ) -> HashMap<u32, BTreeSet<u32>> {
     let mut bound: HashMap<u32, BTreeSet<u32>> = HashMap::new();
+    for line in lines {
+        if !matches!(
+            line.op,
+            Op::Snap { .. } | Op::Edit { .. } | Op::External { .. }
+        ) {
+            continue;
+        }
+        let Some((_, step)) = texts.step_at(line.n) else {
+            continue;
+        };
+        let who = Who::of(line, step, turns);
+        let (Attr::Agent, Some(turn)) = (who.attr, who.turn) else {
+            continue;
+        };
+        let Some(covers) = turns.covers.get(&turn) else {
+            continue;
+        };
+        for (to, q) in covers {
+            let shown = cited(q, step, texts)
+                .into_iter()
+                .any(|j| !hidden.contains(&format!("{}.{j}", line.n)));
+            if shown {
+                bound.entry(*to).or_default().insert(turn);
+            }
+        }
+    }
+    bound
+}
+
+/// Ids of the hunks that render the same as the text they replaced: whitespace only,
+/// and the page they make reads the same with that hunk alone applied.
+pub(super) fn hidden(lines: &[Line], texts: &mut Texts) -> HashSet<String> {
+    let mut hidden = HashSet::new();
     for line in lines {
         if !matches!(
             line.op,
@@ -417,24 +584,63 @@ pub(super) fn covers_bound(
         let Some(hunks) = &step.hunks else {
             continue;
         };
-        let who = Who::of(line, step, turns);
-        let (Attr::Agent, Some(turn)) = (who.attr, who.turn) else {
+        let spaced: Vec<usize> = (0..hunks.len())
+            .filter(|&j| collapse(&hunks[j].d.concat()) == collapse(&hunks[j].i.concat()))
+            .collect();
+        if spaced.is_empty() {
+            continue;
+        }
+        let Some(from) = texts.text(&step.from) else {
             continue;
         };
-        let Some(covers) = turns.covers.get(&turn) else {
-            continue;
-        };
-        for h in hunks {
-            let wrote = collapse(&h.i.concat());
-            for (to, q) in covers {
-                let q = collapse(q);
-                if !q.is_empty() && wrote.contains(&q) {
-                    bound.entry(*to).or_default().insert(turn);
-                }
+        let before = page(&from);
+        for j in spaced {
+            let after = crate::review::hunk::apply(&from, std::slice::from_ref(&hunks[j]));
+            if after.is_ok_and(|after| page(&after) == before) {
+                hidden.insert(format!("{}.{j}", line.n));
             }
         }
     }
-    bound
+    hidden
+}
+
+/// The HTML a text renders to, without line numbers, and with whitespace runs as one
+/// space outside `<pre>`, as a browser shows it.
+fn page(text: &str) -> String {
+    let mut options = anchor::parse_options();
+    options.render.sourcepos = false;
+    let html = comrak::markdown_to_html(text, &options);
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html.as_str();
+    while let Some(at) = rest.find("<pre") {
+        out.push_str(&squash(&rest[..at]));
+        let end = rest[at..].find("</pre>").map_or(rest.len(), |e| at + e);
+        out.push_str(&rest[at..end]);
+        rest = &rest[end..];
+        if let Some(close) = rest.strip_prefix("</pre>") {
+            out.push_str("</pre>");
+            rest = close;
+        }
+    }
+    out.push_str(&squash(rest));
+    out
+}
+
+fn squash(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut space = false;
+    for c in html.chars() {
+        if c.is_whitespace() {
+            if !space {
+                out.push(' ');
+            }
+            space = true;
+        } else {
+            space = false;
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Sent stet notes whose block hunk `h`, written on line `n`, changes.
@@ -464,8 +670,6 @@ struct Placed {
     sp: Option<String>,
 }
 
-/// Lines `new` of a write's text carried through the writes after it. With `gap`, the
-/// hunk removed lines and `new.0` is the line after them.
 /// The undo that reverted each change id. An undo names one change; the rest of its
 /// write counts as undone too when the undo's patch reverted every hunk of it.
 fn undone(input: &Input, texts: &mut Texts) -> HashMap<String, u32> {
@@ -524,7 +728,10 @@ fn reverted_whole(texts: &mut Texts, op: u32, undo: u32) -> Option<usize> {
     (Rev::of(reverted.as_bytes()) == undo.to).then_some(hunks.len())
 }
 
-fn place(later: &[Step], new: (u32, u32), gap: bool, head: &Doc) -> Placed {
+/// Lines `new` of a write's text carried through the writes after it. With `gap`, the
+/// hunk removed lines and `new.0` is the line after them; a removal of `whole` blocks
+/// has no block of its own, and any other keeps the block it cut into.
+fn place(later: &[Step], new: (u32, u32), gap: bool, whole: bool, head: &Doc) -> Placed {
     let gone = Placed {
         status: RangeStatus::Superseded,
         lines: new,
@@ -543,11 +750,14 @@ fn place(later: &[Step], new: (u32, u32), gap: bool, head: &Doc) -> Placed {
             return gone;
         };
         let byte = head.lines.range(at).map_or(head.text.len(), |r| r.start);
+        let sp = (!whole)
+            .then(|| stop_holding(head, at).or_else(|| stop_holding(head, at - 1)))
+            .flatten();
         return Placed {
             status: status((at, at - 1)),
             lines: (at, at - 1),
             bytes: (byte, byte),
-            sp: stop_holding(head, at),
+            sp,
         };
     }
     // Any later hunk over any of its lines writes over it, not only one at an end
@@ -668,6 +878,14 @@ fn row_col(lines: &[String], offset: usize) -> (u32, usize) {
         start += line.len();
     }
     (0, offset)
+}
+
+/// The first removed line with text, without its terminator.
+fn first_line(removed: &[String]) -> Option<String> {
+    removed
+        .iter()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.trim_end_matches(['\r', '\n']).trim_end().to_string())
 }
 
 fn capped(text: &str) -> String {

@@ -41,7 +41,7 @@
       "answered": 1,
       "didnt": 0,
       "asked": 0,
-      "unasked": 1,
+      "unasked": 3,
       "not_handled": 0,
       "note": "Said why the upload fails."
     }
@@ -51,15 +51,15 @@
   "counts": {
     "drafts": 0,
     "sent_unclaimed": 0,
-    "unseen": 3,
-    "unasked": 1,
+    "unseen": 5,
+    "unasked": 3,
     "not_handled": 0,
     "open_asks": 0,
     "later": 0,
     "lost": 0,
     "items": 3,
     "decided": 1,
-    "attention": 4
+    "attention": 6
   },
   "items": [
     {
@@ -243,6 +243,7 @@
         "new_lines": 1,
         "touches_html": false
       },
+      "label": "6 words changed",
       "is_rewrite": true,
       "reversible": {
         "ok": true,
@@ -262,21 +263,21 @@
       },
       "old": [
         10,
-        12
+        10
       ],
       "new": [
         10,
-        12
+        10
       ],
       "range": {
         "status": "ok",
         "lines": [
           10,
-          12
+          10
         ],
         "bytes": [
           186,
-          252
+          215
         ],
         "sp": "10:1-10:29"
       },
@@ -291,21 +292,126 @@
       "seen": false,
       "settled": false,
       "what": {
-        "old_lines": 3,
-        "new_lines": 3,
+        "old_lines": 1,
+        "new_lines": 1,
+        "words": 3,
         "touches_html": false
       },
+      "label": "3 words → 6",
       "is_rewrite": true,
       "reversible": {
         "ok": true,
-        "reason": "multi_hunk"
+        "reason": "none"
       },
-      "op_hunks": 2
+      "op_hunks": 4
     },
     {
       "id": "10.1",
       "op": 10,
       "idx": 1,
+      "turn": 8,
+      "attr": "agent",
+      "by": {
+        "type": "agent",
+        "name": "claude"
+      },
+      "old": [
+        11,
+        11
+      ],
+      "new": [
+        11,
+        11
+      ],
+      "range": {
+        "status": "ok",
+        "lines": [
+          11,
+          11
+        ],
+        "bytes": [
+          216,
+          234
+        ],
+        "sp": "11:1-11:18"
+      },
+      "asked": {
+        "kind": "unasked",
+        "notes": []
+      },
+      "reverts_your_edit": false,
+      "breaks_stet": [],
+      "seen": false,
+      "settled": false,
+      "what": {
+        "old_lines": 1,
+        "new_lines": 1,
+        "touches_html": false
+      },
+      "label": "7 words → 2",
+      "is_rewrite": true,
+      "reversible": {
+        "ok": true,
+        "reason": "none"
+      },
+      "op_hunks": 4
+    },
+    {
+      "id": "10.2",
+      "op": 10,
+      "idx": 2,
+      "turn": 8,
+      "attr": "agent",
+      "by": {
+        "type": "agent",
+        "name": "claude"
+      },
+      "old": [
+        12,
+        12
+      ],
+      "new": [
+        12,
+        12
+      ],
+      "range": {
+        "status": "ok",
+        "lines": [
+          12,
+          12
+        ],
+        "bytes": [
+          235,
+          252
+        ],
+        "sp": "12:1-13:0"
+      },
+      "asked": {
+        "kind": "unasked",
+        "notes": []
+      },
+      "reverts_your_edit": false,
+      "breaks_stet": [],
+      "seen": false,
+      "settled": false,
+      "what": {
+        "old_lines": 1,
+        "new_lines": 1,
+        "words": 3,
+        "touches_html": false
+      },
+      "label": "2 words → 3",
+      "is_rewrite": true,
+      "reversible": {
+        "ok": true,
+        "reason": "none"
+      },
+      "op_hunks": 4
+    },
+    {
+      "id": "10.3",
+      "op": 10,
+      "idx": 3,
       "turn": 8,
       "attr": "agent",
       "by": {
@@ -345,12 +451,13 @@
         "new_lines": 1,
         "touches_html": false
       },
+      "label": "2 words → 4",
       "is_rewrite": true,
       "reversible": {
         "ok": true,
-        "reason": "multi_hunk"
+        "reason": "none"
       },
-      "op_hunks": 2
+      "op_hunks": 4
     }
   ],
   "deletions": [
@@ -361,14 +468,6 @@
       "at_byte": 146,
       "removed": " with backoff",
       "after_sp": "5:1-6:68"
-    },
-    {
-      "change": "10.0",
-      "kind": "words",
-      "at_line": 10,
-      "at_byte": 207,
-      "removed": "\n-",
-      "after_sp": "10:1-10:29"
     }
   ],
   "rewrite": {

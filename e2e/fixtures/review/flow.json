@@ -304,7 +304,14 @@
       "sent_in": 11,
       "turn": 12,
       "amended": [],
-      "replies": []
+      "replies": [],
+      "outcome": {
+        "done": false,
+        "no_change": false,
+        "changes": [
+          "13.0"
+        ]
+      }
     },
     {
       "n": 21,
@@ -441,6 +448,7 @@
         "new_lines": 1,
         "touches_html": false
       },
+      "label": "6 words changed",
       "is_rewrite": false,
       "reversible": {
         "ok": true,
@@ -493,6 +501,7 @@
         "new_lines": 1,
         "touches_html": false
       },
+      "label": "7 words → 10",
       "is_rewrite": false,
       "reversible": {
         "ok": true,
@@ -544,6 +553,7 @@
         "words": 1,
         "touches_html": false
       },
+      "label": "2 words → 3",
       "is_rewrite": false,
       "reversible": {
         "ok": true,
@@ -594,6 +604,7 @@
         "words": 1,
         "touches_html": false
       },
+      "label": "1 word changed",
       "is_rewrite": false,
       "reversible": {
         "ok": false,
@@ -643,6 +654,7 @@
         "words": 3,
         "touches_html": false
       },
+      "label": "2 words → 3",
       "is_rewrite": false,
       "reversible": {
         "ok": false,

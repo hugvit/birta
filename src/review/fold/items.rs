@@ -1,6 +1,8 @@
 //! Notes and what became of them: amends, retracts, replies, and whether the turn that
 //! took each one answered it.
 
+use std::collections::HashSet;
+
 use super::texts::{Texts, touches, untouched};
 use super::turns::{RoundRec, Turns};
 use super::{RoundKind, TurnIndex};
@@ -204,7 +206,13 @@ pub(super) struct Outcome {
     pub compare: Option<(Rev, Rev)>,
 }
 
-pub(super) fn outcome(note: &Note, held_by: &[u32], turns: &Turns, texts: &mut Texts) -> Outcome {
+pub(super) fn outcome(
+    note: &Note,
+    held_by: &[u32],
+    turns: &Turns,
+    texts: &mut Texts,
+    hidden: &HashSet<String>,
+) -> Outcome {
     let mut out = Outcome::default();
     if let Some(dones) = turns.dones.get(&note.n) {
         out.done_in = dones.iter().copied().find(|t| held_by.contains(t));
@@ -245,8 +253,9 @@ pub(super) fn outcome(note: &Note, held_by: &[u32], turns: &Turns, texts: &mut T
             continue;
         };
         for (i, h) in hunks.iter().enumerate() {
-            if touches(h, span) {
-                out.changes.push(format!("{n}.{i}"));
+            let id = format!("{n}.{i}");
+            if touches(h, span) && !hidden.contains(&id) {
+                out.changes.push(id);
             }
         }
     }

@@ -237,6 +237,7 @@
         "new_lines": 1,
         "touches_html": false
       },
+      "label": "6 words changed",
       "is_rewrite": false,
       "reversible": {
         "ok": true,
@@ -287,6 +288,7 @@
         "new_lines": 1,
         "touches_html": false
       },
+      "label": "7 words → 10",
       "is_rewrite": false,
       "reversible": {
         "ok": true,
@@ -337,6 +339,7 @@
         "words": 2,
         "touches_html": false
       },
+      "label": "paragraph removed",
       "removed": "\nNothing yet.\n",
       "is_rewrite": false,
       "reversible": {
@@ -361,7 +364,9 @@
       "at_line": 15,
       "at_byte": 283,
       "removed": "\nNothing yet.\n",
-      "after_sp": "14:1-14:13"
+      "after_sp": "14:1-14:13",
+      "first_line": "Nothing yet.",
+      "label": "paragraph"
     }
   ],
   "later": [],

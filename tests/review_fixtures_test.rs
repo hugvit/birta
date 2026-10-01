@@ -147,6 +147,7 @@ fn full_state() -> ReviewState {
                 block: Some((5, 7)),
                 section: Some("Summary".to_string()),
                 rev: Some(REV.to_string()),
+                change: Some("37.0".to_string()),
                 loc: Some(Loc {
                     sp: "5:1-7:20".to_string(),
                     off: Some((8, 20)),
@@ -210,12 +211,13 @@ fn full_state() -> ReviewState {
                 words: Some(2),
                 touches_html: false,
             },
+            label: Some("2 words changed".to_string()),
             removed: Some("old text".to_string()),
             is_rewrite: false,
             reverse: None,
             reversible: Reversible {
                 ok: false,
-                reason: ReversibleReason::MultiHunk,
+                reason: ReversibleReason::LaterOverlap,
             },
             op_hunks: 2,
         }],
@@ -226,6 +228,8 @@ fn full_state() -> ReviewState {
             at_byte: Some(1230),
             removed: "## Stacked on\n".to_string(),
             after_sp: Some("39:1-40:12".to_string()),
+            first_line: Some("## Stacked on".to_string()),
+            label: Some("section · 2 blocks".to_string()),
         }],
         rewrite: Some(Rewrite {
             turn: 33,
@@ -306,6 +310,7 @@ fn fresh_state() -> ReviewState {
                 block: None,
                 section: None,
                 rev: None,
+                change: None,
                 loc: None,
             },
             verdict: None,
@@ -328,6 +333,8 @@ fn fresh_state() -> ReviewState {
             at_byte: None,
             removed: "gone".to_string(),
             after_sp: None,
+            first_line: None,
+            label: None,
         }],
         rewrite: None,
         later: vec![],
@@ -377,7 +384,7 @@ fn a_full_state_serializes_to_the_frozen_shape() {
             "n": 12, "op": "comment", "by": {"type": "human", "name": "andres"}, "cid": "c-9f", "ts": 1_790_000_000_000u64,
             "at": {"kind": "anchor", "status": "moved", "scope": "quote", "quote": "we just fail", "shown": "we just fail",
                    "lines": [5, 5], "range": [212, 224], "block": [5, 7], "section": "Summary", "rev": REV,
-                   "loc": {"sp": "5:1-7:20", "off": [8, 20], "tl": 64}},
+                   "change": "37.0", "loc": {"sp": "5:1-7:20", "off": [8, 20], "tl": 64}},
             "verdict": "no", "body": "say why", "to": 3, "kind": "aside",
             "status": "handled", "sent_in": 31, "turn": 33, "amended": [40],
             "replies": [{"n": 36, "id": "#36", "by": {"type": "agent", "name": "claude"}, "kind": "answer", "verdict": "yes",
@@ -393,10 +400,11 @@ fn a_full_state_serializes_to_the_frozen_shape() {
             "changes_your_edit": "20.0", "reverts_your_edit": false, "breaks_stet": [14],
             "seen": false, "settled": false, "undone_by": 45,
             "what": {"old_lines": 9, "new_lines": 4, "words": 2, "touches_html": false},
-            "removed": "old text", "is_rewrite": false,
-            "reversible": {"ok": false, "reason": "multi_hunk"}, "op_hunks": 2
+            "label": "2 words changed", "removed": "old text", "is_rewrite": false,
+            "reversible": {"ok": false, "reason": "later_overlap"}, "op_hunks": 2
         }],
-        "deletions": [{"change": "37.1", "kind": "block", "at_line": 41, "at_byte": 1230, "removed": "## Stacked on\n", "after_sp": "39:1-40:12"}],
+        "deletions": [{"change": "37.1", "kind": "block", "at_line": 41, "at_byte": 1230, "removed": "## Stacked on\n", "after_sp": "39:1-40:12",
+                       "first_line": "## Stacked on", "label": "section · 2 blocks"}],
         "rewrite": {"turn": 33, "pct": 0.625, "blocks_changed": 5, "blocks_total": 8},
         "later": [21, 22],
         "lost": [23],
@@ -537,7 +545,6 @@ fn state_enums_use_their_snake_case_names() {
         assert_eq!(to(&v), want);
     }
     for (v, want) in [
-        (ReversibleReason::MultiHunk, "multi_hunk"),
         (ReversibleReason::LaterOverlap, "later_overlap"),
         (ReversibleReason::Snap, "snap"),
         (ReversibleReason::Outside, "outside"),
@@ -587,6 +594,7 @@ fn nested_optionals_are_omitted() {
             words: None,
             touches_html: false,
         },
+        label: None,
         removed: None,
         is_rewrite: false,
         reverse: None,

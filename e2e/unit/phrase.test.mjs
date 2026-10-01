@@ -114,8 +114,8 @@ const FIXTURE_CHROME = {
     menu: [COPY, MINE],
   },
   rewrite: {
-    phrase: "Claude replied 14:13 · 1 done · 1 answered · 1 unasked",
-    button: B("Approve · 3 unseen", false),
+    phrase: "Claude replied 14:13 · 1 done · 1 answered · 3 unasked",
+    button: B("Approve · 5 unseen", false),
     pill: null,
     menu: [COPY, MINE],
   },

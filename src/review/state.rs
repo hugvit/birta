@@ -221,6 +221,9 @@ pub struct AtState {
     pub section: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rev: Option<String>,
+    /// The change an orphaned note's text went into, which the page places it at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change: Option<String>,
     /// `null` for doc and dir notes, and when the anchor can't be placed.
     pub loc: Option<Loc>,
 }
@@ -302,6 +305,9 @@ pub struct Change {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub undone_by: Option<u32>,
     pub what: What,
+    /// What kind of change it is and how big, as the page words it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub removed: Option<String>,
     pub is_rewrite: bool,
@@ -309,7 +315,7 @@ pub struct Change {
     #[serde(skip)]
     pub reverse: Option<Hunk>,
     pub reversible: Reversible,
-    /// Hunks in the same op, so undoing one can ask to confirm.
+    /// Hunks the op recorded, those that render the same included.
     pub op_hunks: u32,
 }
 
@@ -373,7 +379,6 @@ pub struct Reversible {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReversibleReason {
-    MultiHunk,
     LaterOverlap,
     Snap,
     Outside,
@@ -390,6 +395,12 @@ pub struct Deletion {
     pub removed: String,
     /// The surviving stop above the gap, `null` at the top of the doc.
     pub after_sp: Option<String>,
+    /// A removed block's first line with text, markers kept.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_line: Option<String>,
+    /// What whole blocks went, e.g. `section · 2 blocks`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

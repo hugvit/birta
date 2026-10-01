@@ -1,0 +1,60 @@
+{"birta":"review/1","doc":"checklist.md","about":"ops after the last hand-back are drafts; don't act on them"}
+{"n":2,"ts":1790886924164,"by":{"type":"birta"},"op":"snap","rev":"f12d27adb6e768b812e1646f7da74a1d9bb464b4","text":"# Release checklist\n\n- [ ] Changelog entry\n- [ ] Docs updated\n- [ ] Tested on staging\n"}
+{"n":3,"ts":1790886924164,"by":{"type":"birta"},"op":"owner","drafted_by":null}
+{"n":4,"ts":1790886924211,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-1","op":"comment","at":{"quote":"# Release checklist","pre":"","suf":"","lines":[1,5],"rev":"f12d27adb6e768b812e1646f7da74a1d9bb464b4","scope":"section"},"body":"Finally a release!"}
+{"n":5,"ts":1790886966852,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-2","op":"comment","at":"doc","verdict":"later"}
+{"n":6,"ts":1790886968030,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-3","op":"retract","to":5}
+{"n":7,"ts":1790886968781,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-4","op":"comment","at":"doc","verdict":"later"}
+{"n":8,"ts":1790886969664,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-5","op":"retract","to":7}
+{"n":9,"ts":1790886969935,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-6","op":"comment","at":"doc","verdict":"later"}
+{"n":10,"ts":1790886970137,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-7","op":"retract","to":9}
+{"n":11,"ts":1790886970562,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-8","op":"comment","at":"doc","verdict":"later"}
+{"n":12,"ts":1790886971758,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-9","op":"retract","to":11}
+{"n":13,"ts":1790886972828,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-10","op":"comment","at":"doc","verdict":"later"}
+{"n":14,"ts":1790886973603,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-11","op":"retract","to":13}
+{"n":15,"ts":1790886978002,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-12","op":"comment","at":"doc","verdict":"later"}
+{"n":16,"ts":1790886980007,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-13","op":"retract","to":15}
+{"n":17,"ts":1790887064038,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-14","op":"comment","at":"doc","verdict":"later"}
+{"n":18,"ts":1790887064759,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-15","op":"retract","to":17}
+{"n":19,"ts":1790887065964,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-16","op":"comment","at":{"quote":"# Release checklist","pre":"","suf":"","lines":[1,5],"rev":"f12d27adb6e768b812e1646f7da74a1d9bb464b4","scope":"section"},"verdict":"later"}
+{"n":20,"ts":1790887066652,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-17","op":"retract","to":19}
+{"n":21,"ts":1790887067316,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-18","op":"comment","at":{"quote":"# Release checklist","pre":"","suf":"","lines":[1,5],"rev":"f12d27adb6e768b812e1646f7da74a1d9bb464b4","scope":"section"},"verdict":"later"}
+{"n":22,"ts":1790887069235,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-19","op":"retract","to":21}
+{"n":23,"ts":1790887069537,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-20","op":"comment","at":{"quote":"# Release checklist","pre":"","suf":"","lines":[1,5],"rev":"f12d27adb6e768b812e1646f7da74a1d9bb464b4","scope":"section"},"verdict":"later"}
+{"n":24,"ts":1790887069733,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-21","op":"retract","to":23}
+{"n":25,"ts":1790887069920,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-22","op":"comment","at":{"quote":"# Release checklist","pre":"","suf":"","lines":[1,5],"rev":"f12d27adb6e768b812e1646f7da74a1d9bb464b4","scope":"section"},"verdict":"later"}
+{"n":26,"ts":1790887071392,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-23","op":"comment","at":"doc","verdict":"later"}
+{"n":27,"ts":1790887072750,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-24","op":"retract","to":26}
+{"n":28,"ts":1790887073108,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-25","op":"comment","at":"doc","verdict":"later"}
+{"n":29,"ts":1790887073292,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-26","op":"retract","to":28}
+{"n":30,"ts":1790887073442,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-27","op":"comment","at":"doc","verdict":"later"}
+{"n":31,"ts":1790887073591,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-28","op":"retract","to":30}
+{"n":32,"ts":1790887074621,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-29","op":"retract","to":25}
+{"n":33,"ts":1790887076025,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-30","op":"comment","at":"doc","verdict":"later"}
+{"n":34,"ts":1790887077075,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-31","op":"retract","to":33}
+{"n":35,"ts":1790887155284,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-32","op":"comment","at":"doc","verdict":"later"}
+{"n":36,"ts":1790887156193,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-33","op":"retract","to":35}
+{"n":37,"ts":1790887156561,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-34","op":"comment","at":"doc","verdict":"later"}
+{"n":38,"ts":1790887228360,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-35","op":"comment","at":{"quote":"# Release checklist","pre":"","suf":"","lines":[1,5],"rev":"f12d27adb6e768b812e1646f7da74a1d9bb464b4","scope":"section"},"verdict":"later"}
+{"n":39,"ts":1790887232608,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-36","op":"retract","to":38}
+{"n":40,"ts":1790887233513,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-37","op":"comment","at":{"quote":"# Release checklist","pre":"","suf":"","lines":[1,5],"rev":"f12d27adb6e768b812e1646f7da74a1d9bb464b4","scope":"section"},"verdict":"later"}
+{"n":41,"ts":1790887238155,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-38","op":"retract","to":37}
+{"n":42,"ts":1790887240356,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-39","op":"retract","to":40}
+{"n":43,"ts":1790887242413,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-40","op":"comment","at":"doc","verdict":"later"}
+{"n":44,"ts":1790887243300,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-41","op":"comment","at":{"quote":"# Release checklist","pre":"","suf":"","lines":[1,5],"rev":"f12d27adb6e768b812e1646f7da74a1d9bb464b4","scope":"section"},"verdict":"later"}
+{"n":45,"ts":1790887244109,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-42","op":"retract","to":44}
+{"n":46,"ts":1790887244520,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-43","op":"comment","at":{"quote":"# Release checklist","pre":"","suf":"","lines":[1,5],"rev":"f12d27adb6e768b812e1646f7da74a1d9bb464b4","scope":"section"},"verdict":"later"}
+{"n":47,"ts":1790887244688,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-44","op":"retract","to":46}
+{"n":48,"ts":1790887245334,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-45","op":"comment","at":{"quote":"# Release checklist","pre":"","suf":"","lines":[1,5],"rev":"f12d27adb6e768b812e1646f7da74a1d9bb464b4","scope":"section"},"verdict":"later"}
+{"n":49,"ts":1790887247048,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-46","op":"retract","to":43}
+{"n":50,"ts":1790887250359,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-47","op":"comment","at":"doc","verdict":"later"}
+{"n":51,"ts":1790887252923,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-48","op":"retract","to":48}
+{"n":52,"ts":1790887254140,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-49","op":"comment","at":{"quote":"# Release checklist","pre":"","suf":"","lines":[1,5],"rev":"f12d27adb6e768b812e1646f7da74a1d9bb464b4","scope":"section"},"verdict":"later"}
+{"n":53,"ts":1790887254891,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-50","op":"retract","to":52}
+{"n":54,"ts":1790887255496,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-51","op":"comment","at":{"quote":"# Release checklist","pre":"","suf":"","lines":[1,5],"rev":"f12d27adb6e768b812e1646f7da74a1d9bb464b4","scope":"section"},"verdict":"later"}
+{"n":55,"ts":1790887256061,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-52","op":"retract","to":54}
+{"n":56,"ts":1790887256323,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-53","op":"comment","at":{"quote":"# Release checklist","pre":"","suf":"","lines":[1,5],"rev":"f12d27adb6e768b812e1646f7da74a1d9bb464b4","scope":"section"},"verdict":"later"}
+{"n":57,"ts":1790887269931,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-54","op":"retract","to":50}
+{"n":58,"ts":1790887270792,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-55","op":"comment","at":"doc","verdict":"later"}
+{"n":59,"ts":1790887271236,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-56","op":"retract","to":58}
+{"n":60,"ts":1790887346620,"by":{"type":"human","via":"browser"},"cid":"rmupzt984d0nnrjph-57","op":"submit","upto":59,"not_before":1790887351620,"hold_ms":5000,"batch":1790887346618}

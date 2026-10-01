@@ -237,6 +237,7 @@
         "new_lines": 1,
         "touches_html": false
       },
+      "label": "6 words changed",
       "is_rewrite": false,
       "reversible": {
         "ok": true,

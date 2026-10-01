@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use super::cut;
 use super::fold::TurnIndex;
 use super::hunk;
 use super::ops::{ByKind, Hunk, Op, Parsed};
@@ -268,7 +269,7 @@ impl Chain {
         let Some(old) = old.filter(|old| old.len() <= REV_ONLY_OVER) else {
             return recorded(None, Some(new.to_string()));
         };
-        let hunks = hunk::diff(old, new);
+        let hunks = cut::diff(old, new);
         let size = serde_json::to_vec(&hunks).map_or(usize::MAX, |json| json.len());
         if size > SNAP_OVER {
             return recorded(None, Some(new.to_string()));

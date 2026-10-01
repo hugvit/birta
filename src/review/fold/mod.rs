@@ -4,6 +4,7 @@
 
 mod changes;
 mod items;
+mod label;
 mod texts;
 mod turns;
 
@@ -18,8 +19,8 @@ use super::ladder;
 use super::ops::{At, ByKind, Line, Op, Parsed, Scope, Verdict};
 use super::state::{
     AnchorStatus, ApproveState, AskedKind, AtKind, AtState, Attr, Change, Counts, Hold, HoldKind,
-    Item, ItemOutcome, ItemStatus, Loc, LogInfo, OwnerState, Phrase, PickedUp, Replied, ReplyState,
-    ReviewState, Round as RoundState, Sent, Silence, Stage,
+    Item, ItemOutcome, ItemStatus, Loc, LogInfo, OwnerState, Phrase, PickedUp, RangeStatus,
+    Replied, ReplyState, ReviewState, Round as RoundState, Sent, Silence, Stage,
 };
 use crate::anchor::{self, StopKind};
 use crate::rev::Rev;
@@ -442,8 +443,17 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
             .iter()
             .filter_map(|note| Some((note.n, note.anchor()?))),
     );
+    // Labels and the render check read the text before and after each write
+    texts.prefetch(
+        chain
+            .history()
+            .iter()
+            .flat_map(|step| [step.from.clone(), step.to.clone()])
+            .collect::<Vec<_>>(),
+    );
+    let hidden = changes::hidden(&parsed.lines, &mut texts);
     // A bound `covers` settles its note, so the carry below must already see it
-    let bound = changes::covers_bound(&parsed.lines, &turns, &texts);
+    let bound = changes::covers_bound(&parsed.lines, &turns, &mut texts, &hidden);
     let mut facts: Vec<Facts> = notes
         .notes
         .iter()
@@ -469,14 +479,14 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
             let mut out = if held_by.is_empty() {
                 Outcome::default()
             } else {
-                items::outcome(note, &held_by, &turns, &mut texts)
+                items::outcome(note, &held_by, &turns, &mut texts, &hidden)
             };
             out.covered = covered(&held_by);
             let mut status = items::status(note, round, holder, &turns, &out);
             while let Some(next) = items::carried_to(&turns, holder, status) {
                 held_by.push(next);
                 holder = Some(next);
-                out = items::outcome(note, &held_by, &turns, &mut texts);
+                out = items::outcome(note, &held_by, &turns, &mut texts, &hidden);
                 out.covered = covered(&held_by);
                 status = items::status(note, round, holder, &turns, &out);
             }
@@ -531,16 +541,20 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
             stets: &stets,
             seen: &seen_at,
             rounds: &standing,
+            hidden: &hidden,
         },
         &mut texts,
     );
     let locator = anchor::Locator::new(&doc.text);
-    let items: Vec<Item> = notes
+    let mut items: Vec<Item> = notes
         .notes
         .iter()
         .zip(&facts)
         .map(|(note, f)| {
             let mut it = item(note, f, &seen, at_state(note, &mut texts, &locator));
+            if matches!(note.at, At::Doc) && !f.held_by.is_empty() {
+                credit(&mut it, f, &turns, &mut texts, &hidden, &built.changes);
+            }
             it.seen = if f.status == ItemStatus::NotHandled {
                 // A not-handled row is acknowledged by its own id, after the turn that left it
                 let after = f.turn.and_then(|t| turns.turn(t)).map_or(0, |t| t.close());
@@ -580,16 +594,21 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
             .filter(|(note, i)| orphaned(note, i) && i.status == ItemStatus::Handled)
             .filter_map(|(_, i)| chain.rev_at_line(turns.turn(i.turn?)?.close()).cloned()),
     );
-    let lost: Vec<u32> = notes
-        .notes
-        .iter()
-        .zip(&items)
-        .filter(|(note, i)| {
-            orphaned(note, i)
-                && !(i.status == ItemStatus::Handled && lost_in_turn(note, i, &turns, &mut texts))
-        })
-        .map(|(note, _)| note.n)
-        .collect();
+    let mut lost = Vec::new();
+    for ((note, it), f) in notes.notes.iter().zip(&mut items).zip(&facts) {
+        if !orphaned(note, it) {
+            continue;
+        }
+        // A note its own turn rewrote sits at the change that took its text
+        let in_turn =
+            it.status == ItemStatus::Handled && lost_in_turn(note, it, &turns, &mut texts);
+        if in_turn {
+            it.at.change = landed(&f.out.changes, &built.changes);
+        }
+        if !in_turn || (it.at.change.is_none() && !f.out.changes.is_empty()) {
+            lost.push(note.n);
+        }
+    }
     let unseen = built
         .changes
         .iter()
@@ -717,6 +736,45 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
     }
 }
 
+/// The first of a note's changes that still stands, where the page places the note once
+/// its own text is gone.
+fn landed(ids: &[String], changes: &[Change]) -> Option<String> {
+    ids.iter()
+        .find(|id| {
+            changes.iter().any(|c| {
+                c.id == **id && c.range.status != RangeStatus::Superseded && c.undone_by.is_none()
+            })
+        })
+        .cloned()
+}
+
+/// Credits a doc note with the changes its `covers` bound, in doc order.
+fn credit(
+    it: &mut Item,
+    f: &Facts,
+    turns: &Turns,
+    texts: &mut Texts,
+    hidden: &HashSet<String>,
+    changes: &[Change],
+) {
+    let mut ids = changes::covers_credit(it.n, &f.held_by, turns, texts, hidden);
+    if ids.is_empty() {
+        return;
+    }
+    let place = |id: &String| {
+        let i = changes.iter().position(|c| c.id == *id);
+        (i.map(|i| changes[i].range.lines.0), i)
+    };
+    ids.sort_by_key(place);
+    let outcome = it.outcome.get_or_insert_with(|| ItemOutcome {
+        done: f.out.done,
+        no_change: false,
+        changes: Vec::new(),
+    });
+    outcome.no_change = false;
+    outcome.changes = ids;
+}
+
 fn log_info(parsed: &Parsed, chain: &Chain) -> LogInfo {
     let last_line = parsed
         .lines
@@ -791,6 +849,7 @@ fn at_state(note: &items::Note, texts: &mut Texts, locator: &anchor::Locator) ->
                 block: None,
                 section: None,
                 rev: None,
+                change: None,
                 loc: None,
             };
         }
@@ -827,6 +886,7 @@ fn at_state(note: &items::Note, texts: &mut Texts, locator: &anchor::Locator) ->
         block: located.block,
         section: located.section,
         rev: Some(anchor.rev.as_str().to_string()),
+        change: None,
         loc,
     }
 }

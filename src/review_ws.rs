@@ -565,10 +565,9 @@ enum WsOp {
     Owner {
         drafted_by: Option<String>,
     },
+    /// Pages may still send `confirm`; a revert never needs it.
     UndoChange {
         change: String,
-        #[serde(default)]
-        confirm: bool,
     },
 }
 
@@ -657,7 +656,7 @@ fn apply(app: &Arc<AppState>, frame: OpFrame, beacon: bool) -> Result<Acked, Nac
         WsOp::Comment {
             at: AnchorReq::Dir, ..
         } => return folder_note(app, hub, &frame),
-        WsOp::UndoChange { change, confirm } => undo_change(&doc, &frame, change, *confirm)?,
+        WsOp::UndoChange { change } => undo_change(&doc, &frame, change)?,
         WsOp::HandBack {
             scope: HandBackScope::All,
         } if hub.dir_mode => hand_back_all(app, hub, &doc, &frame)?,
@@ -1052,10 +1051,10 @@ fn change_anchor(parsed: &Parsed, doc: &Doc, id: &str) -> Result<At, Nack> {
 }
 
 /// `x` on a change: the strict write reverts it and records the undo under the lock.
-fn undo_change(doc: &DocRef, frame: &OpFrame, change: &str, confirm: bool) -> Result<Acked, Nack> {
+fn undo_change(doc: &DocRef, frame: &OpFrame, change: &str) -> Result<Acked, Nack> {
     let rev = frame.client_rev().ok_or("changed_since")?;
     let cid = frame.cid.as_deref();
-    let written = undo::reverse_change(doc, change, &rev, confirm, cid).map_err(|e| match e {
+    let written = undo::reverse_change(doc, change, &rev, cid).map_err(|e| match e {
         undo::UndoErr::ChangedSince => "changed_since",
         undo::UndoErr::NotReversible => "not_reversible",
         undo::UndoErr::ReadOnly => "read_only",

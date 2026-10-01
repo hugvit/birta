@@ -34,17 +34,16 @@ impl From<WriteErr> for UndoErr {
     }
 }
 
-/// Reverts the write `change` belongs to, when the doc's bytes are still `client_rev`.
-/// A write of more than one hunk is reverted whole, and only with `confirm`. A `cid`
-/// already recorded gets the write it made before, and nothing is written again.
+/// Reverts change `change`'s hunk alone, when the doc's bytes are still `client_rev`
+/// and no later write overlaps it. A `cid` already recorded gets the write it made
+/// before, and nothing is written again.
 pub(crate) fn reverse_change(
     doc: &DocRef,
     change: &str,
     client_rev: &Rev,
-    confirm: bool,
     cid: Option<&str>,
 ) -> Result<Written, UndoErr> {
-    reverse_change_with(doc, change, client_rev, confirm, cid, |_| {})
+    reverse_change_with(doc, change, client_rev, cid, |_| {})
 }
 
 /// [`reverse_change`], telling `stage` how far the write got.
@@ -52,7 +51,6 @@ fn reverse_change_with(
     doc: &DocRef,
     change: &str,
     client_rev: &Rev,
-    confirm: bool,
     cid: Option<&str>,
     mut stage: impl FnMut(Stage),
 ) -> Result<Written, UndoErr> {
@@ -70,8 +68,9 @@ fn reverse_change_with(
     }
     held.sync(&doc.canonical, &before).map_err(UndoErr::Io)?;
     let text = std::str::from_utf8(&before).map_err(|_| UndoErr::NotReversible)?;
-    let reverses = reverses(held.parsed(), text, change, confirm).ok_or(UndoErr::NotReversible)?;
-    let after = apply_reverse(&before, &reverses).ok_or(UndoErr::NotReversible)?;
+    let reverse = reverse(held.parsed(), text, change).ok_or(UndoErr::NotReversible)?;
+    let after =
+        apply_reverse(&before, std::slice::from_ref(&reverse)).ok_or(UndoErr::NotReversible)?;
     let target = WriteTarget {
         canonical: doc.canonical.clone(),
         rel: doc.rel.clone(),
@@ -102,16 +101,12 @@ fn undone(parsed: &Parsed, cid: &str) -> Option<Rev> {
     })
 }
 
-/// The hunks that revert the whole write `change` belongs to, in `text`'s lines, when
-/// every one of them can be undone.
-fn reverses(parsed: &Parsed, text: &str, change: &str, confirm: bool) -> Option<Vec<Hunk>> {
+/// The hunk that reverts change `change`, in `text`'s lines, when it can be undone.
+fn reverse(parsed: &Parsed, text: &str, change: &str) -> Option<Hunk> {
     let chain = Chain::build(parsed);
     let doc = Doc::new(text);
     let changes = fold::fold(parsed, &chain, &doc).state.changes;
-    let pressed = changes.iter().find(|c| c.id == change)?;
-    if pressed.op_hunks > 1 && !confirm {
-        return None;
-    }
+    let pressed = changes.into_iter().find(|c| c.id == change)?;
     // Redoing is editing again
     let is_undo = parsed
         .lines
@@ -120,16 +115,7 @@ fn reverses(parsed: &Parsed, text: &str, change: &str, confirm: bool) -> Option<
     if is_undo {
         return None;
     }
-    let mut reverses: Vec<Hunk> = changes
-        .iter()
-        .filter(|c| c.op == pressed.op)
-        .map(|c| c.reverse.clone())
-        .collect::<Option<_>>()?;
-    if reverses.len() != pressed.op_hunks as usize {
-        return None;
-    }
-    reverses.sort_by_key(|h| h.a);
-    Some(reverses)
+    pressed.reverse
 }
 
 /// `bytes` with `reverses` applied, each only where its lines are exactly as it expects.
@@ -280,8 +266,8 @@ mod tests {
             }
         }
 
-        fn undo(&self, id: &str, client: &[u8], confirm: bool) -> Result<Written, UndoErr> {
-            reverse_change(&self.docref(), id, &Rev::of(client), confirm, None)
+        fn undo(&self, id: &str, client: &[u8]) -> Result<Written, UndoErr> {
+            reverse_change(&self.docref(), id, &Rev::of(client), None)
         }
 
         fn disk(&self) -> Vec<u8> {
@@ -401,7 +387,8 @@ mod tests {
                 "\u{feff}# Title two\r\n\r\nbody\r\n",
             ),
             ("no final eol", "# T\n\nold line", "# T\n\nnew line"),
-            ("final eol added", "# T\n\nold line", "# T\n\nold line\n"),
+            // Line endings alone render the same and make no change to undo
+            ("final eol added", "# T\n\nold line", "# T\n\nnew line\n"),
             ("final eol removed", "# T\n\nold line\n", "# T\n\nnew line"),
             ("insertion", "# T\n\nend\n", "# T\n\nnew\n\nend\n"),
             (
@@ -412,9 +399,8 @@ mod tests {
             (
                 "one eol flipped",
                 "# T\n\nold line\n",
-                "# T\n\nold line\r\n",
+                "# T\n\nnew line\r\n",
             ),
-            ("lf to crlf", "# T\n\nold line\n", "# T\r\n\r\nold line\r\n"),
             (
                 "bom added",
                 "# Title\n\nbody\n",
@@ -438,7 +424,7 @@ mod tests {
             .map(|&(name, base, changed)| (name, base, changed, agent_change(base, changed)))
             .collect();
         for (name, base, changed, (f, id)) in built {
-            let written = f.undo(&id, changed.as_bytes(), false);
+            let written = f.undo(&id, changed.as_bytes());
 
             let written = written.unwrap_or_else(|e| panic!("{name}: {e:?}"));
             assert_eq!(f.disk(), base.as_bytes(), "{name}");
@@ -460,7 +446,7 @@ mod tests {
         assert_eq!(doc.canonical, f.doc, "setup");
         assert_eq!(doc.review_path, f.log.path(), "setup");
 
-        reverse_change(&doc, &id, &Rev::of(changed.as_bytes()), false, None).unwrap();
+        reverse_change(&doc, &id, &Rev::of(changed.as_bytes()), None).unwrap();
 
         assert!(
             fs::symlink_metadata(&link)
@@ -483,7 +469,7 @@ mod tests {
             })
             .collect();
         for (mode, f, id) in built {
-            f.undo(&id, b"# T\n\nnew line\n", false).unwrap();
+            f.undo(&id, b"# T\n\nnew line\n").unwrap();
 
             let got = fs::metadata(&f.doc).unwrap().permissions().mode() & 0o7777;
             assert_eq!(got, mode, "mode {mode:o}");
@@ -498,7 +484,7 @@ mod tests {
         fs::set_permissions(&f.doc, fs::Permissions::from_mode(0o444)).unwrap();
         let ino = fs::metadata(&f.doc).unwrap().ino();
 
-        let result = f.undo(&id, changed.as_bytes(), false);
+        let result = f.undo(&id, changed.as_bytes());
 
         assert!(matches!(result, Err(UndoErr::ReadOnly)), "{result:?}");
         assert_eq!(f.disk(), changed.as_bytes());
@@ -513,7 +499,7 @@ mod tests {
         let outside = "# T\n\nnew line\n\nand a paragraph from an editor\n";
         fs::write(&f.doc, outside).unwrap();
 
-        let result = f.undo(&id, changed.as_bytes(), false);
+        let result = f.undo(&id, changed.as_bytes());
 
         assert!(matches!(result, Err(UndoErr::ChangedSince)), "{result:?}");
         assert_eq!(f.disk(), outside.as_bytes());
@@ -542,7 +528,7 @@ mod tests {
             "setup"
         );
 
-        let result = f.undo(&id, changed.as_bytes(), false);
+        let result = f.undo(&id, changed.as_bytes());
 
         assert!(matches!(result, Err(UndoErr::ChangedSince)), "{result:?}");
         assert_eq!(f.disk(), outside.as_bytes());
@@ -560,7 +546,6 @@ mod tests {
             &f.docref(),
             &id,
             &Rev::of(changed.as_bytes()),
-            false,
             None,
             |stage| {
                 if stage == Stage::Read {
@@ -595,7 +580,6 @@ mod tests {
             &f.docref(),
             &id,
             &Rev::of(b"# T\n\nnew line\n"),
-            false,
             None,
             |stage| {
                 if stage != Stage::Read {
@@ -625,51 +609,188 @@ mod tests {
     /// that shift is kept.
     const THREE: &str = "# Plan\n\nONE\nONE-b\n\ntwo\n\nTHREE\n\nFOUR\n";
 
-    /// The agent's three-hunk write of [`THREE`] over [`FOUR`]; its change ids.
-    fn multi_hunk(f: &mut Fixture) -> Vec<String> {
+    /// The agent's write of [`THREE`] over [`FOUR`], each change checked reversible on
+    /// its own; its change ids.
+    fn three_changes(f: &mut Fixture) -> Vec<String> {
         let n = f.writes(THREE);
         let ids: Vec<String> = (0..3).map(|j| format!("{n}.{j}")).collect();
         for id in &ids {
             let c = f.change(id);
-            assert_eq!((c.attr, c.op_hunks), (Attr::Agent, 3), "setup: {c:?}");
-            assert!(c.reversible.ok, "setup: {c:?}");
-            assert_eq!(c.reversible.reason, ReversibleReason::MultiHunk, "setup");
+            assert_eq!(c.attr, Attr::Agent, "setup: {c:?}");
+            assert_eq!(
+                (c.reversible.ok, c.reversible.reason),
+                (true, ReversibleReason::None),
+                "{id}"
+            );
         }
         ids
     }
 
     #[test]
-    fn a_multi_hunk_change_needs_confirm_and_reverts_its_whole_write() {
+    fn undoing_one_change_of_a_write_reverts_only_its_hunk() {
         let mut f = Fixture::claimed(FOUR);
-        let ids = multi_hunk(&mut f);
-        let entries = f.entries();
+        let ids = three_changes(&mut f);
 
-        let unconfirmed = f.undo(&ids[1], THREE.as_bytes(), false);
-        assert!(
-            matches!(unconfirmed, Err(UndoErr::NotReversible)),
-            "{unconfirmed:?}"
-        );
-        assert_eq!(f.disk(), THREE.as_bytes());
-        assert_eq!(f.count(is_edit), 0);
+        let written = f.undo(&ids[1], THREE.as_bytes()).unwrap();
 
-        let written = f.undo(&ids[1], THREE.as_bytes(), true).unwrap();
-
-        assert_eq!(f.disk(), FOUR.as_bytes());
-        assert_eq!(written.rev, Rev::of(FOUR.as_bytes()));
-        assert_eq!(f.count(is_edit), 1, "one edit for the whole write");
-        assert_undo_edit(&f, &ids[1], THREE.as_bytes(), FOUR.as_bytes());
-        let edit = f.lines().last().unwrap().n;
-        for id in &ids {
+        let want = "# Plan\n\nONE\nONE-b\n\ntwo\n\nthree\n\nFOUR\n";
+        assert_eq!(f.disk(), want.as_bytes());
+        assert_eq!(written.rev, Rev::of(want.as_bytes()));
+        assert_eq!(f.count(is_edit), 1);
+        assert_undo_edit(&f, &ids[1], THREE.as_bytes(), want.as_bytes());
+        for id in [&ids[0], &ids[2]] {
             let c = f.change(id);
-            assert_eq!((c.undone_by, c.reversible.ok), (Some(edit), false), "{id}");
+            assert_eq!(c.undone_by, None, "{id}");
+            assert!(c.reversible.ok, "{id}: {c:?}");
         }
-        assert_eq!(f.entries(), entries, "temp file left behind");
     }
 
     #[test]
-    fn a_whole_write_undo_follows_a_later_insert_above_it() {
+    fn every_change_of_a_write_can_be_reverted_on_its_own() {
         let mut f = Fixture::claimed(FOUR);
-        let ids = multi_hunk(&mut f);
+        let ids = three_changes(&mut f);
+        let steps = [
+            (&ids[2], "# Plan\n\nONE\nONE-b\n\ntwo\n\nTHREE\n\nfour\n"),
+            (&ids[0], "# Plan\n\none\n\ntwo\n\nTHREE\n\nfour\n"),
+            (&ids[1], FOUR),
+        ];
+        let mut disk = THREE.to_string();
+        for (id, want) in steps {
+            f.undo(id, disk.as_bytes())
+                .unwrap_or_else(|e| panic!("{id}: {e:?}"));
+            assert_eq!(String::from_utf8(f.disk()).unwrap(), want, "{id}");
+            assert_undo_edit(&f, id, disk.as_bytes(), want.as_bytes());
+            disk = want.to_string();
+        }
+        assert_eq!(f.count(is_edit), 3);
+    }
+
+    #[test]
+    fn a_change_reverted_alone_keeps_crlf_and_its_siblings_shift() {
+        let base = "# Plan\r\n\r\none\r\n\r\ntwo\r\n\r\nthree\r\n";
+        let changed = "# Plan\r\n\r\nONE\r\nONE-b\r\nONE-c\r\n\r\ntwo\r\n\r\nTHREE\r\n";
+        let mut f = Fixture::claimed(base);
+        let n = f.writes(changed);
+        let last = format!("{n}.1");
+        assert_eq!(f.change(&last).op_hunks, 2, "setup");
+
+        f.undo(&last, changed.as_bytes()).unwrap();
+
+        let want = "# Plan\r\n\r\nONE\r\nONE-b\r\nONE-c\r\n\r\ntwo\r\n\r\nthree\r\n";
+        assert_eq!(f.disk(), want.as_bytes());
+        assert_undo_edit(&f, &last, changed.as_bytes(), want.as_bytes());
+    }
+
+    #[test]
+    fn a_removed_block_comes_back_alone_from_a_write_of_several_changes() {
+        let changed = "# Plan\n\nONE\n\ntwo\n\nfour\n";
+        let mut f = Fixture::claimed(FOUR);
+        let n = f.writes(changed);
+        let ids: Vec<String> = (0..2).map(|j| format!("{n}.{j}")).collect();
+        let removal = f.change(&ids[1]);
+        assert_eq!(
+            (
+                removal.op_hunks,
+                removal.what.old_lines,
+                removal.what.new_lines
+            ),
+            (2, 2, 0),
+            "setup: {removal:?}"
+        );
+
+        f.undo(&ids[1], changed.as_bytes()).unwrap();
+
+        let want = "# Plan\n\nONE\n\ntwo\n\nthree\n\nfour\n";
+        assert_eq!(f.disk(), want.as_bytes());
+        assert_undo_edit(&f, &ids[1], changed.as_bytes(), want.as_bytes());
+        assert!(f.change(&ids[0]).reversible.ok);
+    }
+
+    #[test]
+    fn a_change_whose_sibling_was_written_over_can_still_be_reverted() {
+        let mut f = Fixture::claimed(FOUR);
+        let ids = three_changes(&mut f);
+        f.yield_turn();
+        let over = "# Plan\n\nOne, again\n\ntwo\n\nTHREE\n\nFOUR\n";
+        f.writes(over);
+        assert_eq!(
+            f.change(&ids[0]).reversible.reason,
+            ReversibleReason::LaterOverlap,
+            "setup"
+        );
+
+        f.undo(&ids[2], over.as_bytes()).unwrap();
+
+        let want = "# Plan\n\nOne, again\n\ntwo\n\nTHREE\n\nfour\n";
+        assert_eq!(f.disk(), want.as_bytes());
+        assert_undo_edit(&f, &ids[2], over.as_bytes(), want.as_bytes());
+    }
+
+    /// Pieces cut from one hunk touch, with no unchanged line between them.
+    #[test]
+    fn adjacent_pieces_of_one_write_revert_one_at_a_time_in_either_order() {
+        let base = "# Plan\n\n## Old heading\nBody text here.\n\nEnd.\n";
+        let changed = "# Plan\n\n## New heading\nBody text changed.\n\nEnd.\n";
+        let heading_back = "# Plan\n\n## Old heading\nBody text changed.\n\nEnd.\n";
+        let body_back = "# Plan\n\n## New heading\nBody text here.\n\nEnd.\n";
+        for (first, mid) in [(0, heading_back), (1, body_back)] {
+            let mut f = Fixture::claimed(base);
+            let n = f.writes(changed);
+            let ids = [format!("{n}.0"), format!("{n}.1")];
+            assert_eq!(f.change(&ids[1]).op_hunks, 2, "setup: no split");
+            let second = 1 - first;
+            f.undo(&ids[first], changed.as_bytes()).unwrap();
+            assert_eq!(String::from_utf8(f.disk()).unwrap(), mid, "{first}");
+            let c = f.change(&ids[second]);
+            assert_eq!(
+                (c.reversible.ok, c.reversible.reason),
+                (true, ReversibleReason::None),
+                "{c:?}"
+            );
+            f.undo(&ids[second], mid.as_bytes()).unwrap();
+            assert_eq!(f.disk(), base.as_bytes(), "{first}");
+            assert_undo_edit(&f, &ids[second], mid.as_bytes(), base.as_bytes());
+        }
+    }
+
+    /// One plain hunk rewrites Why and drops Stacked on; undoing the removal brings back
+    /// only the section.
+    #[test]
+    fn a_removed_section_comes_back_alone_from_beside_a_rewrite() {
+        let base = "## Why\n\nUploads hit failures, and\ntoday we just fail.\n\n## Stacked on\n\n- #412 — options struct\n\n## Testing\n\n- [ ] Ran it\n";
+        let changed = "## Why\n\nNo retry logic, so we just fail.\n\n## Testing\n\n- [ ] Ran it\n";
+        let mut f = Fixture::claimed(base);
+        let n = f.writes(changed);
+        let removal = format!("{n}.1");
+        let c = f.change(&removal);
+        assert_eq!((c.op_hunks, c.what.new_lines), (2, 0), "setup: {c:?}");
+
+        f.undo(&removal, changed.as_bytes()).unwrap();
+
+        let want = "## Why\n\nNo retry logic, so we just fail.\n\n## Stacked on\n\n- #412 — options struct\n\n## Testing\n\n- [ ] Ran it\n";
+        assert_eq!(String::from_utf8(f.disk()).unwrap(), want);
+        assert_undo_edit(&f, &removal, changed.as_bytes(), want.as_bytes());
+        assert!(f.change(&format!("{n}.0")).reversible.ok);
+    }
+
+    #[test]
+    fn a_change_reverted_alone_keeps_a_missing_final_eol() {
+        let base = "# Plan\n\none\n\ntwo\n";
+        let changed = "# Plan\n\nONE\n\nTWO";
+        for (j, want) in [(1, "# Plan\n\nONE\n\ntwo\n"), (0, "# Plan\n\none\n\nTWO")] {
+            let mut f = Fixture::claimed(base);
+            let n = f.writes(changed);
+            let id = format!("{n}.{j}");
+            f.undo(&id, changed.as_bytes()).unwrap();
+            assert_eq!(String::from_utf8(f.disk()).unwrap(), want, "{id}");
+            assert_undo_edit(&f, &id, changed.as_bytes(), want.as_bytes());
+        }
+    }
+
+    #[test]
+    fn a_change_undo_follows_a_later_insert_above_it() {
+        let mut f = Fixture::claimed(FOUR);
+        let ids = three_changes(&mut f);
         f.yield_turn();
         let prefaced = format!("Preface.\n\n{THREE}");
         f.writes(&prefaced);
@@ -677,9 +798,9 @@ mod tests {
             assert!(f.change(id).reversible.ok, "setup: {id}");
         }
 
-        f.undo(&ids[0], prefaced.as_bytes(), true).unwrap();
+        f.undo(&ids[0], prefaced.as_bytes()).unwrap();
 
-        let restored = format!("Preface.\n\n{FOUR}");
+        let restored = format!("Preface.\n\n{}", THREE.replace("ONE\nONE-b\n", "one\n"));
         assert_eq!(f.disk(), restored.as_bytes());
         assert_undo_edit(&f, &ids[0], prefaced.as_bytes(), restored.as_bytes());
     }
@@ -701,21 +822,13 @@ mod tests {
         let c = over.change(&over_id);
         assert_eq!(c.reversible.reason, ReversibleReason::LaterOverlap, "setup");
 
-        let mut sibling = Fixture::claimed(FOUR);
-        let sibling_ids = multi_hunk(&mut sibling);
-        sibling.yield_turn();
-        sibling.writes("# Plan\n\nOne, again\n\ntwo\n\nTHREE\n\nFOUR\n");
-        let c = sibling.change(&sibling_ids[0]);
-        assert_eq!(c.reversible.reason, ReversibleReason::LaterOverlap, "setup");
-        assert!(sibling.change(&sibling_ids[2]).reversible.ok, "setup");
-
         let (other, other_id) = agent_change(FOUR, TWO);
         let (undone, undone_id) = agent_change("# T\n\nold line\n", "# T\n\nnew line\n");
 
         let mut bad = Vec::new();
         let mut check = |name: &str, f: &Fixture, id: &str| {
             let (disk, edits) = (f.disk(), f.count(is_edit));
-            let result = f.undo(id, &disk, true);
+            let result = f.undo(id, &disk);
             if !matches!(result, Err(UndoErr::NotReversible))
                 || f.disk() != disk
                 || f.count(is_edit) != edits
@@ -725,7 +838,6 @@ mod tests {
         };
         check("outside", &outside, &outside_id);
         check("written over later", &over, &over_id);
-        check("a sibling written over later", &sibling, &sibling_ids[2]);
         check("unknown id", &other, "999.0");
         check("not an id", &other, "two");
         check(
@@ -733,9 +845,7 @@ mod tests {
             &other,
             &other_id.replace(".0", ".1"),
         );
-        undone
-            .undo(&undone_id, b"# T\n\nnew line\n", false)
-            .unwrap();
+        undone.undo(&undone_id, b"# T\n\nnew line\n").unwrap();
         assert!(!undone.change(&undone_id).reversible.ok, "setup");
         check("already undone", &undone, &undone_id);
         let undo = undone.lines().last().unwrap().n;
@@ -751,7 +861,7 @@ mod tests {
         let (f, id) = agent_change(base, changed);
 
         // The page still shows the text before the agent's write.
-        let result = f.undo(&id, base.as_bytes(), false);
+        let result = f.undo(&id, base.as_bytes());
 
         assert!(matches!(result, Err(UndoErr::ChangedSince)), "{result:?}");
         assert_eq!(f.disk(), changed.as_bytes());
@@ -772,7 +882,7 @@ mod tests {
             log_writable: true,
         };
 
-        let result = reverse_change(&doc, "3.0", &Rev::of(b"# T\n\nline\n"), true, None);
+        let result = reverse_change(&doc, "3.0", &Rev::of(b"# T\n\nline\n"), None);
 
         assert!(matches!(result, Err(UndoErr::NotReversible)), "{result:?}");
         assert_eq!(fs::read(&path).unwrap(), b"# T\n\nline\n");
@@ -787,7 +897,7 @@ mod tests {
         let outside = "# Plan\n\none\n\nTWO\n\nthree\n\nfour, edited\n";
         fs::write(&f.doc, outside).unwrap();
 
-        f.undo(&id, outside.as_bytes(), false).unwrap();
+        f.undo(&id, outside.as_bytes()).unwrap();
 
         let restored = "# Plan\n\none\n\ntwo\n\nthree\n\nfour, edited\n";
         assert_eq!(f.disk(), restored.as_bytes());
@@ -831,8 +941,7 @@ mod tests {
         .unwrap();
         let ticked = "# Plan\n\nnew intro\n\n- [x] ship it\n\nnew outro\n";
         assert_eq!(f.disk(), ticked.as_bytes());
-        f.undo(&format!("{outro}.0"), ticked.as_bytes(), false)
-            .unwrap();
+        f.undo(&format!("{outro}.0"), ticked.as_bytes()).unwrap();
 
         assert_eq!(
             f.disk(),
@@ -851,12 +960,12 @@ mod tests {
         let base = "# T\n\nkeep\n\ngone\n\nend\n";
         let changed = "# T\n\nkeep\n\nend\n";
         let (f, id) = agent_change(base, changed);
-        f.undo(&id, changed.as_bytes(), false).unwrap();
+        f.undo(&id, changed.as_bytes()).unwrap();
         assert_eq!(f.disk(), base.as_bytes());
         assert_undo_edit(&f, &id, changed.as_bytes(), base.as_bytes());
 
         // The re-inserted lines only shift the gap, so only `undone_by` can refuse it.
-        let again = f.undo(&id, base.as_bytes(), false);
+        let again = f.undo(&id, base.as_bytes());
 
         assert!(matches!(again, Err(UndoErr::NotReversible)), "{again:?}");
         assert_eq!(f.disk(), base.as_bytes());
@@ -877,7 +986,7 @@ mod tests {
         let c = f.change(&id);
         assert!(c.reversible.ok && c.range.lines != c.new, "setup: {c:?}");
 
-        f.undo(&id, moved.as_bytes(), false).unwrap();
+        f.undo(&id, moved.as_bytes()).unwrap();
 
         let restored = "# Plan\n\nintro\n\nmore\n\none\n\ntwo\n\nthree\n\nfour\n";
         assert_eq!(f.disk(), restored.as_bytes());
@@ -893,7 +1002,7 @@ mod tests {
         fs::set_permissions(&f.doc, fs::Permissions::from_mode(0o444)).unwrap();
         let ino = fs::metadata(&f.doc).unwrap().ino();
 
-        let result = reverse_change(&doc, &id, &Rev::of(changed.as_bytes()), false, None);
+        let result = reverse_change(&doc, &id, &Rev::of(changed.as_bytes()), None);
 
         assert!(matches!(result, Err(UndoErr::ReadOnly)), "{result:?}");
         assert_eq!(f.disk(), changed.as_bytes());
@@ -907,7 +1016,7 @@ mod tests {
         let (f, id) = agent_change("# T\n\nold line\n", changed);
         let (ino, entries) = (fs::metadata(&f.doc).unwrap().ino(), f.entries());
 
-        f.undo(&id, changed.as_bytes(), false).unwrap();
+        f.undo(&id, changed.as_bytes()).unwrap();
 
         assert_ne!(fs::metadata(&f.doc).unwrap().ino(), ino, "written in place");
         assert_eq!(f.entries(), entries, "temp file left behind");
@@ -929,7 +1038,7 @@ mod tests {
             ("review/2", &newer, &newer_id),
         ] {
             let log = f.log_bytes();
-            let result = f.undo(id, changed.as_bytes(), false);
+            let result = f.undo(id, changed.as_bytes());
             if !matches!(result, Err(UndoErr::ReadOnly))
                 || f.disk() != changed.as_bytes()
                 || f.log_bytes() != log
@@ -951,7 +1060,6 @@ mod tests {
             &f.docref(),
             &id,
             &Rev::of(changed.as_bytes()),
-            false,
             None,
             |stage| {
                 assert_locked(&review);

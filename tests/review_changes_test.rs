@@ -701,7 +701,8 @@ fn paragraphs() -> String {
 }
 
 /// A turn that edits paragraphs 1..=`edited` and grows the last one into 11 paragraphs,
-/// so the doc ends with 100 blocks of which `edited + 11` were touched.
+/// so the doc ends with 100 blocks of which `edited + 11` were touched. The last hunk is
+/// recorded as the edit and the ten added paragraphs.
 fn grown(edited: usize) -> (Scenario, u32, u32) {
     let mut s = Scenario::new(&paragraphs());
     let turn = claimed(&mut s);
@@ -733,7 +734,7 @@ fn a_turn_touching_41_percent_of_a_grown_doc_is_a_rewrite() {
     assert_eq!(r.turn, turn);
     assert_eq!((r.blocks_changed, r.blocks_total), (41, 100));
     assert!((r.pct - 0.41).abs() < 1e-9, "{}", r.pct);
-    assert_eq!(state.changes.len(), 31);
+    assert_eq!(state.changes.len(), 32);
     assert!(state.changes.iter().all(|c| c.is_rewrite));
 }
 
@@ -741,7 +742,7 @@ fn a_turn_touching_41_percent_of_a_grown_doc_is_a_rewrite() {
 fn a_rewrite_is_over_once_its_changes_are_seen() {
     let (mut s, _, _) = grown(30);
     let all: Vec<String> = s.fold().changes.iter().map(|c| c.id.clone()).collect();
-    assert_eq!(all.len(), 31);
+    assert_eq!(all.len(), 32);
     s.seen(&all.iter().map(String::as_str).collect::<Vec<_>>());
     let state = s.fold();
     assert!(state.rewrite.is_none());
@@ -771,7 +772,7 @@ fn a_single_hunk_change_is_reversible_in_current_text_coordinates() {
 }
 
 #[test]
-fn each_hunk_of_a_multi_hunk_write_is_reversible_with_a_confirm() {
+fn each_hunk_of_a_multi_hunk_write_is_reversible_on_its_own() {
     let mut s = Scenario::new(DOC);
     let turn = claimed(&mut s);
     let text = s
@@ -785,7 +786,7 @@ fn each_hunk_of_a_multi_hunk_write_is_reversible_with_a_confirm() {
         let c = change(&state, &id(ext, i));
         assert_eq!(c.op_hunks, 2);
         assert!(c.reversible.ok);
-        assert_eq!(c.reversible.reason, ReversibleReason::MultiHunk);
+        assert_eq!(c.reversible.reason, ReversibleReason::None);
         assert!(c.reverse.is_some());
     }
     // Undoing the second alone leaves the first in place
@@ -813,7 +814,7 @@ fn a_change_written_over_later_is_not_reversible() {
     // Its sibling hunk is untouched
     assert_eq!(
         change(&state, &id(ext, 0)).reversible.reason,
-        ReversibleReason::MultiHunk
+        ReversibleReason::None
     );
 }
 
@@ -866,49 +867,51 @@ fn cut_to_four(rev_only: bool) -> (Scenario, u32, u32) {
 fn scenario_15b_cutting_nine_lines_to_four_keeps_receipts_undo_and_seen() {
     let (mut s, x, ext) = cut_to_four(false);
     let state = s.fold();
-    assert_eq!(ids(&state), [id(ext, 0)]);
-    let c = change(&state, &id(ext, 0));
-    assert_eq!((c.old, c.new), ((11, 19), (11, 14)));
-    assert_eq!((c.what.old_lines, c.what.new_lines), (9, 4));
-    assert_eq!(
-        c.removed.as_deref(),
-        Some(
-            "## Details\n\n- detail one\n- detail two\n\n| key | value |\n|-----|-------|\n| a | 1 |\n| b | 2 |\n"
-        )
+    // Recorded cut where blocks meet: the heading, and the body that replaced the rest
+    let both = [id(ext, 0), id(ext, 1)];
+    assert_eq!(ids(&state), both);
+    let (heading, body) = (change(&state, &both[0]), change(&state, &both[1]));
+    assert_eq!((heading.old, heading.new), ((11, 12), (11, 11)));
+    assert_eq!((body.old, body.new), ((13, 19), (12, 14)));
+    let removed = format!(
+        "{}{}",
+        heading.removed.as_deref().unwrap(),
+        body.removed.as_deref().unwrap()
     );
-    assert_eq!(c.asked.kind, AskedKind::Location);
-    assert_eq!(c.asked.notes, [x]);
-    assert!(c.reversible.ok);
-    let undone = hunk::apply(s.text(), &[c.reverse.clone().unwrap()]).unwrap();
+    assert_eq!(
+        removed,
+        "## Details\n\n- detail one\n- detail two\n\n| key | value |\n|-----|-------|\n| a | 1 |\n| b | 2 |\n"
+    );
+    for c in [heading, body] {
+        assert_eq!(c.asked.kind, AskedKind::Location, "{}", c.id);
+        assert_eq!(c.asked.notes, [x], "{}", c.id);
+        assert!(c.reversible.ok, "{}", c.id);
+    }
+    // Each reverts alone; the body first, so the heading's lines stay where they are
+    let undone = hunk::apply(s.text(), &[body.reverse.clone().unwrap()]).unwrap();
+    let undone = hunk::apply(&undone, &[heading.reverse.clone().unwrap()]).unwrap();
     assert_eq!(undone, DOC);
     assert_eq!(item(&state, x).status, ItemStatus::Handled);
-    assert_eq!(
-        item(&state, x).outcome.as_ref().unwrap().changes,
-        [id(ext, 0)]
-    );
+    assert_eq!(item(&state, x).outcome.as_ref().unwrap().changes, both);
 
-    s.seen(&[id(ext, 0).as_str()]);
+    s.seen(&[both[0].as_str(), both[1].as_str()]);
     let state = s.fold();
-    assert!(change(&state, &id(ext, 0)).seen);
+    assert!(state.changes.iter().all(|c| c.seen));
     assert_eq!(state.counts.unseen, 0);
 }
 
+/// A rev-only write's hunks are derived when the log is read, so they are never cut and
+/// equal the plain diff.
 #[test]
-fn scenario_15b_a_rev_only_write_folds_to_the_same_changes() {
-    let (patched, _, ext) = cut_to_four(false);
-    let (rev_only, x, ext_rev_only) = cut_to_four(true);
-    assert_eq!(ext, ext_rev_only);
-    let a = patched.fold();
-    let b = rev_only.fold();
-    assert_eq!(
-        serde_json::to_value(&a.changes).unwrap(),
-        serde_json::to_value(&b.changes).unwrap()
-    );
-    assert_eq!(
-        change(&a, &id(ext, 0)).reverse,
-        change(&b, &id(ext, 0)).reverse
-    );
-    assert_eq!(item(&b, x).status, ItemStatus::Handled);
+fn scenario_15b_a_rev_only_write_folds_to_the_plain_diff() {
+    let (rev_only, x, ext) = cut_to_four(true);
+    let state = rev_only.fold();
+    let plain = hunk::diff(DOC, rev_only.text());
+    assert_eq!(ids(&state), [id(ext, 0)]);
+    let c = change(&state, &id(ext, 0));
+    assert_eq!((c.old, c.new), ((11, 19), (11, 14)));
+    assert_eq!(c.reverse, Some(hunk::reverse(&plain)[0].clone()));
+    assert_eq!(item(&state, x).status, ItemStatus::Handled);
 }
 
 #[test]
@@ -1361,8 +1364,8 @@ fn exactly_40_percent_is_no_rewrite_and_a_part_seen_rewrite_stands() {
 
     let (mut s, turn, _) = grown(30);
     let all: Vec<String> = s.fold().changes.iter().map(|c| c.id.clone()).collect();
-    assert_eq!(all.len(), 31, "setup");
-    s.seen(&all[..30].iter().map(String::as_str).collect::<Vec<_>>());
+    assert_eq!(all.len(), 32, "setup");
+    s.seen(&all[..31].iter().map(String::as_str).collect::<Vec<_>>());
     let state = s.fold();
     assert_eq!(state.rewrite.as_ref().map(|r| r.turn), Some(turn));
     assert_eq!(state.counts.unseen, 1);

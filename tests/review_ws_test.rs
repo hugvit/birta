@@ -606,8 +606,10 @@ async fn every_op_fixture_is_acked_by_the_real_handler() {
     assert!(failures.is_empty(), "{failures:#?}");
 }
 
+/// A page may still send `confirm`, as the fixture does; without it, one change of a
+/// two-hunk write is reverted alone.
 #[tokio::test]
-async fn undoing_a_multi_hunk_change_needs_confirm() {
+async fn undoing_one_change_of_a_two_hunk_write_needs_no_confirm() {
     let fixture = committed_fixtures()
         .into_iter()
         .find(|(name, _)| name == "undo_change-confirm")
@@ -629,11 +631,12 @@ async fn undoing_a_multi_hunk_change_needs_confirm() {
         .cloned()
         .unwrap();
     assert_eq!(change["op_hunks"], 2, "setup: {change}");
+    assert_eq!(change["reversible"]["reason"], "none", "setup: {change}");
     frame.as_object_mut().unwrap().remove("confirm");
-    let lines = log_lines(&review_file(&site)).len();
-    assert_eq!(nacked(&mut ws, frame).await, "not_reversible");
-    assert_eq!(site.read(PR).as_deref(), Some(doc), "the doc is untouched");
-    assert_eq!(log_lines(&review_file(&site)).len(), lines);
+    acked(&mut ws, frame).await;
+    let want = doc.replace("- first item, reworded\n", "- first item\n");
+    assert_ne!(want, doc, "setup");
+    assert_eq!(site.read(PR).as_deref(), Some(want.as_str()));
 }
 
 /// Serves `fixture` with its doc changed on disk since the frames were made, sends its

@@ -988,7 +988,7 @@ test.describe("real server", () => {
     });
   }
 
-  test("two x's put a two-hunk write back whole", async ({ page, birta }) => {
+  test("two x's on one change of a two-hunk write put back only that change", async ({ page, birta }) => {
     const s = seeded("\r\n", [FIX, UNASKED]);
     const { served, bytes } = await openSeeded(page, birta, s, ["7.0", "7.1"]);
     await reply(page, DONE).click();
@@ -996,7 +996,8 @@ test.describe("real server", () => {
     await expect.poll(() => pillOf(page)).toBe("x again to undo 2 changes");
     expect(bytes().equals(Buffer.from(s.doc))).toBe(true);
     await page.keyboard.press("x");
-    await expect.poll(() => bytes().equals(Buffer.from(s.orig)), { timeout: 5_000 }).toBe(true);
+    const unasked = seeded("\r\n", [UNASKED]).doc;
+    await expect.poll(() => bytes().equals(Buffer.from(unasked)), { timeout: 5_000 }).toBe(true);
     await expect.poll(() => reviewLog(served.root)!.at(-1)).toMatchObject({ op: "edit", act: "undo", of: "7.0" });
   });
 

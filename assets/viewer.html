@@ -136,6 +136,10 @@
     var sourceView = document.getElementById('source-view');
     var laneFrame = document.getElementById('lane-frame');
     var currentWs = null;
+    // A variant sync sent on open is answered by a theme update for the entry doc; the hello's
+    // content, rendered after it, then brings this doc in the new theme, so no refetch is needed
+    var syncPending = false;
+    var helloPending = false;
 
     // Keyed before math, diagrams or checkboxes touch the server-rendered blocks.
     birtaPatch.attach(mdBody, {
@@ -650,11 +654,14 @@
           reconnectDelay = 1000;
           hideStatus();
           // Sync client variant preference to server (OS/session may differ from server default)
+          syncPending = false;
           if (activeVariant !== BOOT.activeVariant) {
             ws.send(JSON.stringify({ type: 'variant_change', variant: activeVariant }));
+            syncPending = true;
           }
           // After the variant sync, so the reply is rendered in the page's variant.
           ws.send(JSON.stringify({ type: 'hello', path: CURRENT_PATH, tab: tabId }));
+          helloPending = true;
           birtaBus.emit({ type: 'open' });
         };
 
@@ -673,6 +680,7 @@
           switch (msg.type) {
             case 'content':
               if (msg.path && CURRENT_PATH && msg.path !== CURRENT_PATH) break;
+              helloPending = false;
               if (status.textContent === FILE_REMOVED) hideStatus();
               // A hello reply usually repeats what is shown; re-applying it would swap boxes mid-click.
               if (msg.rev && msg.rev === shownRev) break;
@@ -685,6 +693,8 @@
               break;
 
             case 'theme_update':
+              var ownSync = syncPending;
+              syncPending = false;
               // Update CSS variables
               themeVarsEl.textContent = msg.css_vars;
               // Update theme attribute
@@ -707,8 +717,13 @@
               }
               // Re-render content with new syntax theme
               if (CURRENT_PATH && msg.path !== CURRENT_PATH) {
-                // Viewing a different file — fetch fresh render for both views
-                refetchContent();
+                if (ownSync && helloPending) {
+                  // Let the hello's content apply even at the rev on screen
+                  shownRev = null;
+                } else {
+                  // Viewing a different file — fetch fresh render for both views
+                  refetchContent();
+                }
               } else {
                 if (msg.rev) {
                   docRev = msg.rev;

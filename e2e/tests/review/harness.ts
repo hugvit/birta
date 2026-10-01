@@ -290,7 +290,7 @@ export interface Mock {
   ops(): State[];
   /** The path of the latest `content` the page was sent. */
   path: string;
-  /** While set, the server's `content` frames never reach the page. */
+  /** While set, the server's `content` frames, and theme updates that carry the doc, never reach the page. */
   holdContent: boolean;
   push(msg: State): void;
   pushState(state: State, path?: string): void;
@@ -358,6 +358,8 @@ export async function mockReview(page: Page, opts: MockOptions = {}): Promise<Mo
     server.onMessage((raw) => {
       const msg = JSON.parse(raw.toString());
       if (["review_state", "dir_state", "compose_restore"].includes(msg.type)) return;
+      // A page whose OS variant differs syncs it on open; the answer can land late and carry the doc
+      if (msg.type === "theme_update" && msg.html != null && mock.holdContent) return;
       if (msg.type === "content") {
         if (mock.holdContent) return;
         ws.send(raw);

@@ -6,6 +6,7 @@ import {
   expect,
   GATE_ON,
   Mock,
+  State,
   booted,
   cacheCdn,
   fixtureDoc,
@@ -478,6 +479,46 @@ test.describe("rev gate, timing and races", () => {
     await expect.poll(() => markKeys(page), { timeout: 3_000 }).toEqual(UNSEEN_KEYS);
     await page.locator('#view-toggle .view-btn[data-view="raw"]').click();
     await expect(page.locator("#source-view")).toContainText("capped at 8");
+  });
+
+  test("the page's own variant sync fetches nothing, and its doc still shows in that variant", async ({ page, birta }) => {
+    const doc = "# Code\n\n```js\nconst answer = 42;\n```\n";
+    // In a folder the theme update carries the entry doc, not this one. This theme colours
+    // code inline per variant, so a doc left in the old variant shows
+    const served = await birta({ "pr.md": doc, "a.md": "# Entry\n" }, GATE_ON, [".", "--theme", "catppuccin"]);
+    await page.setViewportSize(WIDE);
+    // The OS prefers the variant the server did not render, so the page syncs it on open
+    const html = await (await page.request.get(`${served.url}/view/pr.md`)).text();
+    const boot = JSON.parse(html.match(/<script type="application\/json" id="birta-boot"[^>]*>([^<]*)<\/script>/)![1]);
+    const want = boot.activeVariant === "dark" ? "light" : "dark";
+    await page.emulateMedia({ colorScheme: want });
+    const renders: string[] = [];
+    page.on("request", (r) => {
+      if (r.url().includes("/render/")) renders.push(r.url());
+    });
+    const themes: State[] = [];
+    page.on("websocket", (ws) =>
+      ws.on("framereceived", (f) => {
+        try {
+          const msg = JSON.parse(String(f.payload));
+          if (msg.type === "theme_update") themes.push(msg);
+        } catch {
+          // not JSON
+        }
+      }),
+    );
+    await page.goto(`${served.url}/view/pr.md`);
+    await booted(page);
+    await page.waitForTimeout(900);
+    // Control: the page did sync its variant, and the update was for another doc
+    expect(themes.map((t) => [t.active_variant, t.path])).toEqual([[want, "a.md"]]);
+    expect(renders).toEqual([]);
+    const fresh = await page.evaluate(async () => {
+      const t = document.createElement("template");
+      t.innerHTML = await (await fetch("/render/pr.md", { cache: "no-store" })).text();
+      return t.content.querySelector("pre")!.innerHTML;
+    });
+    expect(await page.locator("#content pre").evaluate((e) => e.innerHTML)).toBe(fresh);
   });
 
   test("a state for another doc fetches nothing and leaves the page alone", async ({ page, birta }) => {

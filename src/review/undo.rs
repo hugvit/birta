@@ -7,7 +7,7 @@ use super::doc::Doc;
 use super::fold;
 use super::hunk;
 use super::log::Log;
-use super::ops::{Act, Hunk, Op, Parsed};
+use super::ops::{Act, ByKind, Hunk, Op, Parsed};
 use super::sync::read_doc;
 use crate::doc_write::{self, Recording, Stage, Via, WriteErr, WriteTarget, Written};
 use crate::paths::DocRef;
@@ -35,14 +35,16 @@ impl From<WriteErr> for UndoErr {
 }
 
 /// Reverts the write `change` belongs to, when the doc's bytes are still `client_rev`.
-/// A write of more than one hunk is reverted whole, and only with `confirm`.
+/// A write of more than one hunk is reverted whole, and only with `confirm`. A `cid`
+/// already recorded gets the write it made before, and nothing is written again.
 pub(crate) fn reverse_change(
     doc: &DocRef,
     change: &str,
     client_rev: &Rev,
     confirm: bool,
+    cid: Option<&str>,
 ) -> Result<Written, UndoErr> {
-    reverse_change_with(doc, change, client_rev, confirm, |_| {})
+    reverse_change_with(doc, change, client_rev, confirm, cid, |_| {})
 }
 
 /// [`reverse_change`], telling `stage` how far the write got.
@@ -51,12 +53,16 @@ fn reverse_change_with(
     change: &str,
     client_rev: &Rev,
     confirm: bool,
+    cid: Option<&str>,
     mut stage: impl FnMut(Stage),
 ) -> Result<Written, UndoErr> {
     // The fold, the write and the record all happen under this one lock
     let Some(mut held) = Log::open(&doc.review_path).hold_for_edit()? else {
         return Err(UndoErr::NotReversible);
     };
+    if let Some(rev) = cid.and_then(|cid| undone(held.parsed(), cid)) {
+        return Ok(Written { rev });
+    }
     let before = read_doc(&doc.canonical).map_err(UndoErr::Io)?;
     stage(Stage::Read);
     if Rev::of(&before) != *client_rev {
@@ -72,6 +78,7 @@ fn reverse_change_with(
     };
     let via = Via::Undo {
         of: change.to_string(),
+        cid: cid.map(str::to_string),
     };
     Ok(doc_write::replace(
         &target,
@@ -81,6 +88,18 @@ fn reverse_change_with(
         &after,
         &mut stage,
     )?)
+}
+
+/// The rev an undo sent with `cid` left the doc at, when one was recorded.
+fn undone(parsed: &Parsed, cid: &str) -> Option<Rev> {
+    parsed.lines.iter().find_map(|l| match &l.op {
+        Op::Edit {
+            act: Act::Undo,
+            to_rev,
+            ..
+        } if l.cid.as_deref() == Some(cid) && l.by.kind == ByKind::Human => Some(to_rev.clone()),
+        _ => None,
+    })
 }
 
 /// The hunks that revert the whole write `change` belongs to, in `text`'s lines, when
@@ -262,7 +281,7 @@ mod tests {
         }
 
         fn undo(&self, id: &str, client: &[u8], confirm: bool) -> Result<Written, UndoErr> {
-            reverse_change(&self.docref(), id, &Rev::of(client), confirm)
+            reverse_change(&self.docref(), id, &Rev::of(client), confirm, None)
         }
 
         fn disk(&self) -> Vec<u8> {
@@ -441,7 +460,7 @@ mod tests {
         assert_eq!(doc.canonical, f.doc, "setup");
         assert_eq!(doc.review_path, f.log.path(), "setup");
 
-        reverse_change(&doc, &id, &Rev::of(changed.as_bytes()), false).unwrap();
+        reverse_change(&doc, &id, &Rev::of(changed.as_bytes()), false, None).unwrap();
 
         assert!(
             fs::symlink_metadata(&link)
@@ -542,6 +561,7 @@ mod tests {
             &id,
             &Rev::of(changed.as_bytes()),
             false,
+            None,
             |stage| {
                 if stage == Stage::Read {
                     fs::write(&f.doc, outside).unwrap();
@@ -576,6 +596,7 @@ mod tests {
             &id,
             &Rev::of(b"# T\n\nnew line\n"),
             false,
+            None,
             |stage| {
                 if stage != Stage::Read {
                     return;
@@ -751,7 +772,7 @@ mod tests {
             log_writable: true,
         };
 
-        let result = reverse_change(&doc, "3.0", &Rev::of(b"# T\n\nline\n"), true);
+        let result = reverse_change(&doc, "3.0", &Rev::of(b"# T\n\nline\n"), true, None);
 
         assert!(matches!(result, Err(UndoErr::NotReversible)), "{result:?}");
         assert_eq!(fs::read(&path).unwrap(), b"# T\n\nline\n");
@@ -872,7 +893,7 @@ mod tests {
         fs::set_permissions(&f.doc, fs::Permissions::from_mode(0o444)).unwrap();
         let ino = fs::metadata(&f.doc).unwrap().ino();
 
-        let result = reverse_change(&doc, &id, &Rev::of(changed.as_bytes()), false);
+        let result = reverse_change(&doc, &id, &Rev::of(changed.as_bytes()), false, None);
 
         assert!(matches!(result, Err(UndoErr::ReadOnly)), "{result:?}");
         assert_eq!(f.disk(), changed.as_bytes());
@@ -931,6 +952,7 @@ mod tests {
             &id,
             &Rev::of(changed.as_bytes()),
             false,
+            None,
             |stage| {
                 assert_locked(&review);
                 if stage == Stage::Renamed {

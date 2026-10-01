@@ -32,8 +32,8 @@ pub(crate) enum Via {
         #[expect(dead_code, reason = "the recorded patch already names the line")]
         line: u32,
     },
-    /// `x` on change `of`, reverting the write it belongs to.
-    Undo { of: String },
+    /// `x` on change `of`, reverting the write it belongs to; `cid` is the page's op.
+    Undo { of: String, cid: Option<String> },
 }
 
 #[derive(Debug)]

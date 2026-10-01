@@ -215,9 +215,9 @@ impl Recording for Held {
         let Some(recorded) = Chain::build(&self.parsed).record(text) else {
             return Ok(());
         };
-        let (act, of) = match via {
-            Via::Checkbox { .. } => (Act::Checkbox, None),
-            Via::Undo { of } => (Act::Undo, Some(of.clone())),
+        let (act, of, cid) = match via {
+            Via::Checkbox { .. } => (Act::Checkbox, None, None),
+            Via::Undo { of, cid } => (Act::Undo, Some(of.clone()), cid.clone()),
         };
         let mut ops = vec![Op::Edit {
             rev: recorded.rev,
@@ -240,7 +240,7 @@ impl Recording for Held {
                 name: None,
                 via: Some(ops::Via::Browser),
             },
-            cid: None,
+            cid,
         };
         match self.append_with(ctx, |_, _| Ok(ops)) {
             Ok(_) => Ok(()),

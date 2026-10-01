@@ -217,15 +217,22 @@ impl DirIndex {
         true
     }
 
-    /// A doc at `rel` was written. With no review file and no page on it, that is news.
-    pub(crate) fn wrote(&self, doc: &Path, rel: &str, viewed: bool, now_ms: u64) -> bool {
+    /// A doc at `rel` was written. With no review file and no page on it under any of its
+    /// paths, as `viewed` tells, that is news.
+    pub(crate) fn wrote(
+        &self,
+        doc: &Path,
+        rel: &str,
+        viewed: impl Fn(&str) -> bool,
+        now_ms: u64,
+    ) -> bool {
         {
             let mut inner = self.lock();
             let entry = inner.docs.entry(doc.to_path_buf()).or_default();
             entry.paths.insert(rel.to_string());
             entry.activity_ms = now_ms;
             if !review_path_for(doc).is_file() {
-                let news = entry.news || !viewed;
+                let news = entry.news || !entry.paths.iter().any(|p| viewed(p));
                 let changed = news != entry.news;
                 entry.news = news;
                 entry.has_log = false;

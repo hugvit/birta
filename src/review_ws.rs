@@ -125,7 +125,7 @@ impl ReviewHub {
         };
         state.server_now = now_ms();
         state.writable = folder_root && can_write(canonical);
-        state.log_writable = folder_root && canonical.parent().is_some_and(can_write);
+        state.log_writable = log_writable(folder_root, canonical);
         state.hand_off = fold::hand_off(canonical);
         Some(state)
     }
@@ -267,6 +267,12 @@ fn can_write(path: &Path) -> bool {
     };
     // SAFETY: `path` is a valid NUL-terminated string for the duration of the call
     unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
+}
+
+/// Whether the doc's review file may be written: it sits beside a doc in a folder root,
+/// in a folder birta can write. Every review write checks this, not only the first.
+fn log_writable(folder_root: bool, canonical: &Path) -> bool {
+    folder_root && canonical.parent().is_some_and(can_write)
 }
 
 fn human() -> By {
@@ -436,15 +442,22 @@ pub(crate) fn doc_event(app: &Arc<AppState>, rel: &str, canonical: &Path, remove
         return;
     }
     let log = Log::open(&review_path_for(canonical)).git_exclude(hub.git_exclude);
-    if let Ok(mut held) = log.hold()
+    let mut synced = false;
+    if log_writable(app.roots.folder_root(canonical), canonical)
+        && let Ok(mut held) = log.hold()
         && !held.parsed().read_only
     {
         sync::sync_external(&mut held, canonical, now_ms());
-        drop(held);
+        synced = true;
+    }
+    // A doc with no review file still has a state on its new text
+    if synced || app.viewers.wants(rel) {
         push_state(app, canonical);
     }
-    let viewed = app.viewers.count(rel) > 0;
-    if hub.dir.wrote(canonical, rel, viewed, now_ms()) {
+    if hub
+        .dir
+        .wrote(canonical, rel, |path| app.viewers.count(path) > 0, now_ms())
+    {
         push_dir(app);
     }
 }
@@ -637,6 +650,9 @@ fn apply(app: &Arc<AppState>, frame: OpFrame, beacon: bool) -> Result<Acked, Nac
             PathError::NotFound => "gone",
             _ => "read_only",
         })?;
+    if !log_writable(doc.log_writable, &doc.canonical) {
+        return Err("read_only");
+    }
     let acked = match &frame.op {
         WsOp::Comment {
             at: AnchorReq::Dir, ..
@@ -1038,7 +1054,8 @@ fn change_anchor(parsed: &Parsed, doc: &Doc, id: &str) -> Result<At, Nack> {
 /// `x` on a change: the strict write reverts it and records the undo under the lock.
 fn undo_change(doc: &DocRef, frame: &OpFrame, change: &str, confirm: bool) -> Result<Acked, Nack> {
     let rev = frame.client_rev().ok_or("changed_since")?;
-    let written = undo::reverse_change(doc, change, &rev, confirm).map_err(|e| match e {
+    let cid = frame.cid.as_deref();
+    let written = undo::reverse_change(doc, change, &rev, confirm, cid).map_err(|e| match e {
         undo::UndoErr::ChangedSince => "changed_since",
         undo::UndoErr::NotReversible => "not_reversible",
         undo::UndoErr::ReadOnly => "read_only",
@@ -1054,6 +1071,7 @@ fn undo_change(doc: &DocRef, frame: &OpFrame, change: &str, confirm: bool) -> Re
         .lines
         .iter()
         .rev()
+        .filter(|l| l.cid.as_deref() == cid)
         .find(|l| matches!(&l.op, Op::Edit { of: Some(of), .. } if of == change))
         .map(|l| l.n)
         .ok_or("read_only")?;
@@ -1072,6 +1090,13 @@ fn hand_back_all(
     doc: &DocRef,
     frame: &OpFrame,
 ) -> Result<Acked, Nack> {
+    if let Some(acked) = frame
+        .cid
+        .as_deref()
+        .and_then(|cid| replayed_batch(app, hub, doc, cid))
+    {
+        return Ok(acked);
+    }
     let batch = now_ms();
     let mut own = Err("nothing_to_send");
     let mut first = None;
@@ -1089,6 +1114,9 @@ fn hand_back_all(
         let Ok(other_doc) = app.roots.resolve_doc(&rel, Access::Write) else {
             continue;
         };
+        if !log_writable(other_doc.log_writable, &other_doc.canonical) {
+            continue;
+        }
         let Ok(mut held) = Log::open(&other_doc.review_path).hold() else {
             continue;
         };
@@ -1120,6 +1148,42 @@ fn hand_back_all(
         not_before: Some(batch + hub.hold_ms),
         ..Acked::default()
     })
+}
+
+/// What a hand-back of all sent with `cid` was acked with: its batch, read from a submit
+/// it wrote, and this doc's line when it had one, else the first found.
+fn replayed_batch(app: &AppState, hub: &ReviewHub, doc: &DocRef, cid: &str) -> Option<Acked> {
+    let others = hub
+        .dir
+        .logged()
+        .into_iter()
+        .filter(|c| *c != doc.canonical)
+        .map(|c| review_path_for(&c));
+    let reviews = std::iter::once(doc.review_path.clone())
+        .chain(others)
+        .chain([app.roots.root().join(FOLDER_REVIEW)]);
+    reviews
+        .filter_map(|review| Log::open(&review).read().ok().flatten())
+        .find_map(|parsed| {
+            let n = replayed(&parsed, cid)?;
+            parsed
+                .lines
+                .iter()
+                .find(|l| l.n == n)
+                .and_then(|l| match l.op {
+                    Op::Submit {
+                        batch: Some(batch),
+                        hold_ms,
+                        ..
+                    } => Some(Acked {
+                        n,
+                        batch: Some(batch),
+                        not_before: Some(batch + hold_ms),
+                        ..Acked::default()
+                    }),
+                    _ => None,
+                })
+        })
 }
 
 /// The folder's own drafts, handed back in `batch`; the submit's line when there were any.
@@ -1271,6 +1335,7 @@ fn withdraw_batch(
         .filter(|c| **c != doc.canonical)
         .filter_map(|c| hub.dir.path_of(c))
         .filter_map(|rel| app.roots.resolve_doc(&rel, Access::Write).ok())
+        .filter(|d| log_writable(d.log_writable, &d.canonical))
         .collect();
     let docs: Vec<&DocRef> = std::iter::once(doc).chain(&others).collect();
     let folder = app.roots.root().join(FOLDER_REVIEW);

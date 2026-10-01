@@ -856,3 +856,57 @@ async fn a_folder_note_is_refused_when_one_file_is_served() {
     assert!(!site.path(".birta.jsonl").exists());
     assert!(!site.root.parent().unwrap().join(".birta.jsonl").exists());
 }
+
+#[tokio::test]
+async fn a_replayed_hand_back_of_all_is_acked_with_its_first_batch() {
+    let site = review_site();
+    site.write("b.md", A_MD);
+    let mut b = Scenario::new(A_MD);
+    b.note("Another draft.");
+    site.write("b.md.birta.jsonl", &b.log());
+    let served = site.serve(&["."], &[GATE_ON, ("BIRTA_REVIEW_HOLD_MS", "60000")]);
+    let (mut ws, _) = served.viewing("a.md").await;
+    let rev = birta::rev::Rev::of(A_MD.as_bytes());
+    let hand_back = serde_json::json!({"type": "op", "cid": "hb", "path": "a.md",
+        "rev": rev, "op": "hand_back", "scope": "all"});
+    let first = served::acked(&mut ws, hand_back.clone()).await;
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let again = served::acked(&mut ws, hand_back).await;
+    for key in ["n", "batch", "not_before"] {
+        assert_eq!(first[key], again[key], "{key}: {first} then {again}");
+    }
+    let withdraw = serde_json::json!({"type": "op", "cid": "w1", "path": "a.md",
+        "rev": rev, "op": "withdraw", "to": again["n"], "batch": again["batch"]});
+    served::acked(&mut ws, withdraw).await;
+    for log in ["a.md.birta.jsonl", "b.md.birta.jsonl"] {
+        let path = site.path(log);
+        assert_eq!(served::ops_named(&path, "submit").len(), 1, "{log}");
+        assert_eq!(served::ops_named(&path, "withdraw").len(), 1, "{log}");
+    }
+}
+
+#[tokio::test]
+async fn a_doc_viewed_under_one_path_is_not_news_through_another() {
+    let site = review_site();
+    site.write("sub/x.md", "# X\n");
+    symlink("sub", site.path("linked")).unwrap();
+    let served = site.serve(&["."], &[GATE_ON]);
+    let (_viewer, _) = served.viewing("sub/x.md").await;
+    let (mut ws, _) = served.viewing("index.md").await;
+    site.write("sub/x.md", "# X, edited\n");
+    // Written after x.md, so its news arriving means x.md's write was handled
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    site.write("d.md", "# D\n");
+    let (seen, state) = served::until(&mut ws, "d.md as news", |f| {
+        f["type"] == "dir_state" && entry(f, "d.md").is_some()
+    })
+    .await;
+    for state in seen.iter().chain([&state]) {
+        if state["type"] == "dir_state" {
+            assert!(
+                entry(state, "sub/x.md").is_none_or(|x| x["news"] == false),
+                "{state}"
+            );
+        }
+    }
+}

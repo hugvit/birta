@@ -3080,3 +3080,262 @@ async fn an_amend_drops_a_verdict_but_never_sets_and_drops_one_at_once() {
     assert_eq!(amends[0]["drop_verdict"], json!(true));
     assert_eq!(amends[0].get("verdict"), None);
 }
+
+// --- review stays inside the root ---
+
+/// The paths of `logs` whose bytes are no longer `before`.
+fn touched(logs: &[PathBuf], before: &[Vec<u8>]) -> Vec<String> {
+    logs.iter()
+        .zip(before)
+        .filter(|(log, bytes)| std::fs::read(log).ok().as_ref() != Some(*bytes))
+        .map(|(log, _)| log.display().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_doc_linked_from_outside_the_root_takes_no_op_and_its_log_is_never_touched() {
+    const T: &str = "# T\n\nOutside text.\n";
+    let site = Site::new();
+    site.write(PR, DOC);
+    let out = site.base.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    // One outside doc with a draft to hand back, one with a batch to withdraw
+    let mut drafted = Scenario::new(T);
+    drafted.note("A draft.");
+    let batch = now_ms();
+    let mut sent = Scenario::new(T);
+    let note = sent.note("Sent in a batch.");
+    sent.push(
+        human(),
+        json!({"op": "submit", "upto": note, "not_before": batch + 3_600_000,
+            "hold_ms": 3_600_000, "to": "*", "batch": batch}),
+    );
+    for (name, log) in [("t.md", drafted.log()), ("u.md", sent.log())] {
+        std::fs::write(out.join(name), T).unwrap();
+        std::fs::write(out.join(format!("{name}.birta.jsonl")), log).unwrap();
+    }
+    std::os::unix::fs::symlink("../out/t.md", site.path("evil.md")).unwrap();
+    std::os::unix::fs::symlink("../out/u.md", site.path("sent.md")).unwrap();
+    let logs = [out.join("t.md.birta.jsonl"), out.join("u.md.birta.jsonl")];
+    let before: Vec<Vec<u8>> = logs.iter().map(|l| std::fs::read(l).unwrap()).collect();
+    let served = site.serve(&["."], &[GATE_ON, ("BIRTA_REVIEW_HOLD_MS", "60000")]);
+    let (mut ws, frames) = served.viewing("evil.md").await;
+    assert_eq!(hello_state(&frames)["state"]["log_writable"], false);
+    // Both are in the listing, so a hand-back or withdraw of all would reach them
+    let both = |f: &Value| {
+        f["type"] == "dir_state"
+            && ["evil.md", "sent.md"].iter().all(|p| {
+                f["files"].as_array().is_some_and(|fs| {
+                    fs.iter()
+                        .any(|e| e["paths"].as_array().unwrap().contains(&json!(p)))
+                })
+            })
+    };
+    if !frames.iter().any(both) {
+        until(&mut ws, "both outside docs listed", both).await;
+    }
+    let r = rev(T);
+    let on = |path: &str, mut frame: Value| {
+        frame["path"] = json!(path);
+        frame
+    };
+    let snap = || -> Vec<Vec<u8>> { logs.iter().map(|l| std::fs::read(l).unwrap()).collect() };
+    let mut failures = Vec::new();
+    // Each step is checked against the bytes just before it, so a write names its step
+    let mut step = snap();
+    let mut wrote = |what: &str, failures: &mut Vec<String>| {
+        let changed = touched(&logs, &step);
+        if !changed.is_empty() {
+            failures.push(format!("{what} wrote {changed:?}"));
+        }
+        step = snap();
+    };
+    let refused =
+        |what: &str, got: Option<Value>, want: Option<&str>, failures: &mut Vec<String>| {
+            let nack = got
+                .as_ref()
+                .is_some_and(|g| g["type"] == "nack" && want.is_none_or(|w| g["reason"] == w));
+            if !nack {
+                failures.push(format!("{what}: {got:?}"));
+            }
+        };
+    let comment = json!({"at": {"k": "doc"}, "body": "x"});
+    for (what, frame) in [
+        (
+            "comment",
+            on("evil.md", op("o1", &r, "comment", comment.clone())),
+        ),
+        (
+            "seen",
+            on("evil.md", op("o2", &r, "seen", json!({"ids": ["1"]}))),
+        ),
+        (
+            "hand_back",
+            on(
+                "evil.md",
+                op("o3", &r, "hand_back", json!({"scope": "doc"})),
+            ),
+        ),
+        (
+            "hand_back all",
+            on(
+                "evil.md",
+                op("o4", &r, "hand_back", json!({"scope": "all"})),
+            ),
+        ),
+        (
+            "folder note",
+            on(
+                "evil.md",
+                op(
+                    "o5",
+                    &r,
+                    "comment",
+                    json!({"at": {"k": "dir"}, "body": "x"}),
+                ),
+            ),
+        ),
+        (
+            "withdraw",
+            on("sent.md", op("o6", &r, "withdraw", json!({"to": note + 1}))),
+        ),
+    ] {
+        let got = reply(&mut ws, frame).await;
+        refused(what, got, Some("read_only"), &mut failures);
+        wrote(what, &mut failures);
+    }
+    // From a doc inside the root, the batch ops must still pass the outside docs by
+    let r0 = rev(DOC);
+    let all = op("o7", &r0, "hand_back", json!({"scope": "all"}));
+    let got = reply(&mut ws, all).await;
+    refused("hand_back all from inside", got, None, &mut failures);
+    wrote("hand_back all from inside", &mut failures);
+    let withdraw = op("o8", &r0, "withdraw", json!({"to": 1, "batch": batch}));
+    let got = reply(&mut ws, withdraw).await;
+    refused("withdraw batch from inside", got, None, &mut failures);
+    wrote("withdraw batch from inside", &mut failures);
+    let token = served.boot(PR).await["review"]["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for path in ["evil.md", "sent.md"] {
+        let body = json!({"tab": "t1", "path": path, "token": token, "seen": ["1"],
+            "ops": [on(path, op(&format!("b-{path}"), &r, "comment", comment.clone()))]});
+        beacon(&served, body).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    wrote("the beacon", &mut failures);
+    let edited = format!("{T}Edited outside.\n");
+    std::fs::write(out.join("t.md"), &edited).unwrap();
+    std::fs::write(out.join("u.md"), &edited).unwrap();
+    until(&mut ws, "the outside edit's content", |f| {
+        f["type"] == "content" && f["rev"] == rev(&edited)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    wrote("the outside edit", &mut failures);
+    assert!(failures.is_empty(), "{failures:#?}");
+    assert!(touched(&logs, &before).is_empty());
+}
+
+#[tokio::test]
+async fn a_folder_birta_cannot_write_takes_no_op_on_a_log_already_there() {
+    if as_root() {
+        return;
+    }
+    let site = Site::new();
+    site.write(PR, DOC);
+    let mut s = Scenario::new(DOC);
+    s.note("A draft.");
+    site.write(LOG, &s.log());
+    let logs = [review_file(&site)];
+    let before = vec![std::fs::read(&logs[0]).unwrap()];
+    let _mode = chmod(&site.root, 0o555);
+    let served = site.serve(&[PR], &[GATE_ON]);
+    let (mut ws, _) = served.viewing(PR).await;
+    let r = rev(DOC);
+    let mut failures = Vec::new();
+    for frame in [
+        op(
+            "c1",
+            &r,
+            "comment",
+            json!({"at": {"k": "doc"}, "body": "x"}),
+        ),
+        op("c2", &r, "seen", json!({"ids": ["1"]})),
+        op("c3", &r, "hand_back", json!({"scope": "doc"})),
+    ] {
+        let got = reply(&mut ws, frame.clone()).await;
+        if got.as_ref().map(|g| (&g["type"], &g["reason"]))
+            != Some((&json!("nack"), &json!("read_only")))
+        {
+            failures.push(format!("{}: {got:?}", frame["op"]));
+        }
+    }
+    // The doc itself is writable; only its folder is not
+    let edited = format!("{DOC}Edited outside.\n");
+    std::fs::write(site.path(PR), &edited).unwrap();
+    until(&mut ws, "the outside edit's content", |f| {
+        f["type"] == "content" && f["rev"] == rev(&edited)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let changed = touched(&logs, &before);
+    assert!(
+        changed.is_empty() && failures.is_empty(),
+        "{changed:?} {failures:#?}"
+    );
+}
+
+#[tokio::test]
+async fn a_replayed_undo_is_acked_again_and_undoes_once() {
+    let fixture = committed_fixtures()
+        .into_iter()
+        .find(|(n, _)| n == "undo_change")
+        .unwrap()
+        .1;
+    let site = Site::new();
+    site.write(PR, fixture["doc"].as_str().unwrap());
+    site.write(LOG, fixture["log"].as_str().unwrap());
+    let served = site.serve(&[PR], &[GATE_ON]);
+    let (mut ws, _) = served.viewing(PR).await;
+    let frame = fixture["frame"].clone();
+    let first = acked(&mut ws, frame.clone()).await;
+    let again = reply(&mut ws, frame.clone()).await;
+    assert_eq!(
+        again.as_ref().map(|r| (&r["type"], &r["n"], &r["rev"])),
+        Some((&json!("ack"), &first["n"], &first["rev"])),
+        "{first} then {again:?}"
+    );
+    let log = review_file(&site);
+    let undos: Vec<Value> = ops_named(&log, "edit")
+        .into_iter()
+        .filter(|l| l["act"] == "undo")
+        .collect();
+    assert_eq!(undos.len(), 1, "{:#?}", log_lines(&log));
+    assert_eq!(undos[0]["cid"], frame["cid"]);
+    assert_eq!(undos[0]["n"], first["n"]);
+}
+
+#[tokio::test]
+async fn an_outside_write_to_a_doc_with_no_log_pushes_its_state() {
+    let site = Site::new();
+    site.write(PR, DOC);
+    let served = site.serve(&[PR], &[GATE_ON]);
+    let (mut ws, frames) = served.viewing(PR).await;
+    let items = hello_state(&frames)["state"]["counts"]["items"]
+        .as_u64()
+        .unwrap();
+    let changed = format!("{DOC}- one more item\n");
+    site.write(PR, &changed);
+    let (mut seen, state) = until(&mut ws, "a state on the new text", |f| {
+        f["type"] == "review_state" && f["rev"] == rev(&changed)
+    })
+    .await;
+    assert_eq!(state["state"]["counts"]["items"], items + 1, "{state}");
+    assert_eq!(state["state"]["log"]["lines"], 0);
+    seen.push(state);
+    let early = states_before_their_content(PR, &rev(DOC), &seen);
+    assert!(early.is_empty(), "states before their content {early:?}");
+    assert!(!review_file(&site).exists());
+}

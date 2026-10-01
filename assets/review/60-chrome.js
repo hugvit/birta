@@ -9,7 +9,10 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   var NACKS = {
     changed_since: 'changed since · try again',
     nothing_to_send: 'nothing to hand back',
-    hold_pending: 'already handing back'
+    hold_pending: 'already handing back',
+    // A read-only doc can't take an undo at all, so a refusal blames the review file
+    read_only: 'review file is read-only',
+    not_reversible: "can't undo this one · c instead"
   };
 
   function cap(name) { return name.charAt(0).toUpperCase() + name.slice(1); }
@@ -407,6 +410,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     if (!b || b.disabled) return;
     if (/^Hand back/.test(b.text)) BR.op({ op: 'hand_back', scope: 'doc' });
     // With unseen changes the guard steps through them instead
+    else if (/ unseen$/.test(b.text)) BR.pointing.toUnseen();
     else if (b.text === 'Approve' || / unanswered$/.test(b.text)) BR.op({ op: 'approve' });
   }
 

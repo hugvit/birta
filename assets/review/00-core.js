@@ -9,6 +9,8 @@ var BR = typeof BR === 'undefined' ? {} : BR;
 
   // The server closes a socket past 256 KiB, and the outbox would resend it forever
   var MAX_OP_BYTES = 200 * 1024;
+  // What a closing page may still send: never a doc write, a hand-back or an approve
+  var BEACON_OPS = { comment: 1, amend: 1, retract: 1, reply: 1 };
   var BUFFER_MS = 500;
 
   var seq = 0;
@@ -59,6 +61,25 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     var box = readOutbox();
     var left = box.filter(function (f) { return f.cid !== cid; });
     if (left.length !== box.length) writeOutbox(left);
+  }
+
+  // Cids a beacon already carried, so hiding and then closing sends them once
+  var flushed = {};
+
+  /** Hands the server what the socket hasn't acked yet, as the page hides or goes. */
+  function flush() {
+    var seen = [];
+    var ops = [];
+    readOutbox().forEach(function (f) {
+      if (f.path !== CURRENT_PATH || flushed[f.cid]) return;
+      if (f.op === 'seen') seen = seen.concat(f.ids || []);
+      else if (BEACON_OPS[f.op]) ops.push(f);
+      else return;
+      flushed[f.cid] = true;
+    });
+    if (!seen.length && !ops.length) return;
+    var body = { token: BOOT.review.token, tab: birtaBus.tab(), path: CURRENT_PATH, seen: seen, ops: ops };
+    navigator.sendBeacon('/review/flush', new Blob([JSON.stringify(body)], { type: 'application/json' }));
   }
 
   // --- Store and rev gate ---
@@ -146,6 +167,10 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     BR.keys.init();
     BR.pointing.init();
     BR.chrome.init();
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'hidden') flush();
+    });
+    addEventListener('pagehide', flush);
   };
 
   // After the whole bundle has run, so the shadow CSS appended to it is in place

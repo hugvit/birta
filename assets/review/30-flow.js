@@ -14,11 +14,52 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     return { quote: quote, rest: m[3] };
   };
 
+  /**
+   * What `n` and `p` walk, in order: unseen changes, then unseen agent replies, open agent
+   * questions and not-handled rows, each in doc order with the doc slot first. Each stop is
+   * `{kind, id, sp}`, with `id` the one its seen op would carry.
+   */
+  // Doc order is block order: the start line of a stop's sp, with the doc slot first
+  function lineOf(sp) { return sp ? parseInt(sp, 10) : 0; }
+
+  BR.pure.attention = function (s) {
+    var out = [];
+    var lost = {};
+    (s.lost || []).forEach(function (n) { lost[n] = 1; });
+    var removed = {};
+    (s.deletions || []).forEach(function (d) { removed[d.change] = d; });
+    (s.changes || []).forEach(function (c) {
+      if (c.seen || c.settled || c.attr === 'human') return;
+      var d = removed[c.id];
+      // A removal walks at the block above its tick, or in the doc slot at the very top
+      var sp = (c.range && c.range.sp) || (d && d.after_sp) || null;
+      out.push({ kind: 'change', id: c.id, sp: sp, rank: 0, line: lineOf(sp), order: c.op * 1e4 + c.idx });
+    });
+    (s.items || []).forEach(function (i) {
+      var sp = !lost[i.n] && i.at && i.at.kind !== 'doc' && i.at.loc ? i.at.loc.sp : null;
+      var line = lineOf(sp);
+      (i.replies || []).forEach(function (r) {
+        if (r.by && r.by.type === 'agent' && !r.seen) out.push({ kind: 'reply', id: r.id, sp: sp, rank: 1, line: line, order: r.n });
+      });
+      if (i.by && i.by.type === 'agent' && i.verdict === 'ask' && i.status === 'open') {
+        out.push({ kind: 'blank', id: '#' + i.n, sp: sp, rank: 2, line: line, order: i.n });
+      }
+      if (i.status === 'not_handled' && !i.seen) {
+        out.push({ kind: 'not_handled', id: 'nh:' + i.n, sp: sp, rank: 3, line: line, order: i.n });
+      }
+    });
+    out.sort(function (a, b) { return a.rank - b.rank || a.line - b.line || a.order - b.order; });
+    return out;
+  };
+
   var VERDICT_OF = { yes: 'yes', no: 'no', later: 'later', your_call: 'your_call' };
   // A seen note in one of these folds to its dot
   var FOLDS = { handled: 1, answered: 1, later: 1 };
   // Open blanks past this many show only their question until focused
   var OPEN_BLANKS = 5;
+  // How long a first x on a many-hunk change waits for the second
+  var CONFIRM_MS = 3000;
+  var CANT_UNDO = "can't undo this one · c instead";
   var RESOLVE_MS = 120;
   var COMPOSE_MS = 300;
   var QUOTE_CHARS = 40;
@@ -47,6 +88,10 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   var afterAck = {};
   // Words an op carries that a nack must hand back: {key, text} for notes and edits, {blank, text} for answers
   var pending = {};
+  // A many-hunk undo waiting for its second x: {id, until}
+  var armed = null;
+  // The cid of an undo the server hasn't answered, so a second x can't send another
+  var undoing = null;
 
   function content() { return document.getElementById('content'); }
   function narrow() { return window.innerWidth < 768; }
@@ -105,9 +150,19 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     }
   }
 
+  /** The block a request points at: its own sp, or for a change, the block it changed. */
+  function spOfAt(at) {
+    if (!at || at.k === 'doc') return null;
+    if (at.k !== 'change') return at.sp || null;
+    var c = changeOf(at.id);
+    var d = ((state && state.deletions) || []).filter(function (x) { return x.change === at.id; })[0];
+    return c && c.range && c.range.sp ? c.range.sp : d ? d.after_sp : null;
+  }
+
   /** Where a note on `at` (a request) goes: under its block, or in the doc slot. */
   function slotOfAt(at) {
-    return at && at.k !== 'doc' && at.sp ? { sp: at.sp } : { doc: true };
+    var sp = spOfAt(at);
+    return sp ? { sp: sp } : { doc: true };
   }
 
   /** Where an item of the state goes: under the block it is on now, or in the doc slot. */
@@ -129,6 +184,8 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     var h = { id: id, host: host, box: box, sig: null, rule: null, entry: null };
     box.addEventListener('keydown', function (ev) {
       if (h.blank && h.entry && h.entry.kind === 'blank') blankKey(ev, h.blank.n, h.blank.slot);
+      else if (h.entry && h.entry.change) receiptKey(ev, h.entry.change);
+      else if (h.entry && h.entry.nh != null) notHandledKey(ev, h.entry.nh);
       else if (h.entry && h.entry.focusable) noteKey(ev, h);
     });
     // A quiet blank shows its slot while it has focus
@@ -138,6 +195,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     });
     box.addEventListener('click', function () {
       if (h.entry && h.entry.kind === 'rewrite' && state && state.rewrite) markRewriteSeen();
+      else if (h.entry && h.entry.seen && writable()) BR.op({ op: 'seen', ids: [h.entry.seen] });
     });
     hosts.set(id, h);
     return h;
@@ -151,9 +209,9 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   }
 
   // Each key is its own text, so a bidi override in a quoted body can't reorder them
-  function keysRow(parent) {
+  function keysRow(parent, keys) {
     parent.append(' · ');
-    ['y keep', 'x undo', 'c instead'].forEach(function (k, i) {
+    keys.forEach(function (k, i) {
       if (i) parent.append('  ');
       parent.appendChild(el('span', 'key', k));
     });
@@ -178,7 +236,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     if (e.lead) line.append(e.lead);
     if (e.text) line.appendChild(isolated(e.text));
     if (e.tail) line.append(e.tail);
-    if (e.keys) keysRow(line);
+    if (e.keys) keysRow(line, e.keys);
     h.box.appendChild(line);
     if (e.fold) {
       var more = el('div', 'muted more', '▸ more');
@@ -234,6 +292,25 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     return ((state && state.changes) || []).filter(function (c) { return c.id === id; })[0] || null;
   }
 
+  function linesOf(c) {
+    var w = (c && c.what) || {};
+    return plural(w.old_lines || 0, 'line', 'lines') + ' → ' + (w.new_lines || 0);
+  }
+
+  function canUndo(c) {
+    return !!c.reversible && c.reversible.ok && !(state && state.writable === false);
+  }
+
+  /** `e` as the line a change answers to: its keys follow whether it can be undone. */
+  function receiptOf(c, e) {
+    if (!c) return e;
+    e.change = c;
+    e.keys = canUndo(c) ? ['y keep', 'x undo', 'c instead'] : ['y keep', 'c instead'];
+    e.focusable = true;
+    e.seen = c.seen ? null : c.id;
+    return e;
+  }
+
   function whatOf(c) {
     var w = (c && c.what) || {};
     if (w.words) return plural(w.words, 'word changed', 'words changed');
@@ -271,6 +348,8 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     var s = state;
     var cids = {};
     var lost = {};
+    // Changes a done reply already carries the keys for
+    var keyed = {};
     dotList = [];
     function add(e, slot, order) {
       e.slot = slot;
@@ -284,6 +363,9 @@ var BR = typeof BR === 'undefined' ? {} : BR;
         if (lost[i.n] || i.status === 'retracted') return;
         var slot = slotOfItem(i);
         var agent = i.by && i.by.type === 'agent';
+        // Its done reply carries the change's keys, folded or not
+        var named = i.outcome && i.outcome.done && !i.outcome.no_change && i.outcome.changes.length ? i.outcome.changes[0] : null;
+        if (named) keyed[named] = 1;
         if (folded(i, slot)) {
           dotList.push({ sp: slot.sp, role: agent ? 'agent' : 'you' });
           return;
@@ -299,43 +381,54 @@ var BR = typeof BR === 'undefined' ? {} : BR;
           }
           return;
         }
-        if (!i.body && !agent && !(i.replies || []).length) return;
+        // A bare verdict is its glyph; only a row left not handled shows under it
+        var bare = !i.body && !agent && !(i.replies || []).length;
+        if (bare && i.status !== 'not_handled') return;
         var group = agent ? G_BLANK : G_NOTE;
         var quote = i.at && i.at.scope === 'quote' ? i.at.shown || i.at.quote : null;
-        add({ id: 'n' + i.n, kind: 'note', text: i.body || '', prefix: quote ? '→ "' + clamp(quote) + '"' : null,
-          item: i, focusable: true,
-          rule: agent ? ['dotted', 'agent'] : [i.status === 'draft' ? 'dashed' : 'solid', 'you'] }, slot, [group, i.n, 0]);
+        if (!bare) {
+          add({ id: 'n' + i.n, kind: 'note', text: i.body || '', prefix: quote ? '→ "' + clamp(quote) + '"' : null,
+            item: i, focusable: true,
+            rule: agent ? ['dotted', 'agent'] : [i.status === 'draft' ? 'dashed' : 'solid', 'you'] }, slot, [group, i.n, 0]);
+        }
         (i.replies || []).forEach(function (r, k) {
           var human = r.by && r.by.type === 'human';
           var lead = '↳ ' + who(r.by) + ' · ' + (r.kind === 'didnt' ? "didn't · " : '');
           add({ id: 'r' + r.n, kind: 'reply', lead: lead, text: r.body || r.verdict || '', fold: true,
-            rule: ['solid', human ? 'you' : 'agent'] }, slot, [group, i.n, 1 + k]);
+            seen: !human && !r.seen ? r.id : null, rule: ['solid', human ? 'you' : 'agent'] }, slot, [group, i.n, 1 + k]);
         });
         var name = turnAgent(i.turn);
         if (i.outcome && i.outcome.done) {
           var change = !i.outcome.no_change && i.outcome.changes.length ? changeOf(i.outcome.changes[0]) : null;
-          add({ id: 'o' + i.n, kind: 'reply', lead: '↳ ' + name + ' · done · ', text: change ? whatOf(change) : 'no change in text',
-            keys: !!change, rule: ['solid', 'agent'] }, slot, [group, i.n, 1e6]);
+          add(receiptOf(change, { id: 'o' + i.n, kind: 'reply', lead: '↳ ' + name + ' · done · ',
+            text: change ? whatOf(change) : 'no change in text', rule: ['solid', 'agent'] }), slot, [group, i.n, 1e6]);
         }
         if (i.status === 'not_handled') {
           var replied = s.phrase && s.phrase.replied;
           var when = replied && replied.turn === i.turn && replied.ts ? hhmm(replied.ts) : 'earlier';
           add({ id: 'h' + i.n, kind: 'reply', text: '↳ not handled in ' + name + "'s " + when + ' turn',
-            rule: ['solid', 'agent'] }, slot, [group, i.n, 1e6 + 1]);
+            nh: i.n, focusable: true, rule: ['solid', 'agent'] }, slot, [group, i.n, 1e6 + 1]);
         }
       });
+      var removed = {};
+      (s.deletions || []).forEach(function (d) { removed[d.change] = d; });
       (s.changes || []).forEach(function (c) {
-        var slot = c.range && c.range.sp ? { sp: c.range.sp } : null;
-        if (!slot) return;
-        if (c.asked && c.asked.kind === 'cited') {
+        // A removed block's change goes under the block above its tick
+        var d = removed[c.id];
+        var slot = c.range && c.range.sp ? { sp: c.range.sp } : d ? (d.after_sp ? { sp: d.after_sp } : { doc: true }) : null;
+        if (!slot || keyed[c.id] || c.attr === 'human') return;
+        var count = linesOf(c);
+        var order = [G_RECEIPT, c.op, c.idx];
+        if (c.attr === 'outside') {
+          add(receiptOf(c, { id: 'f' + c.id, kind: 'fact', text: 'changed outside birta' + (c.cause === 'git' ? ' (git)' : ''),
+            rule: ['dotted', 'agent'] }), slot, [G_FACT, c.op, c.idx]);
+        } else if (c.asked && (c.asked.kind === 'cited' || c.asked.kind === 'location')) {
           var note = (s.items || []).filter(function (i) { return c.asked.notes.indexOf(i.n) >= 0; })[0];
-          var w = c.what || {};
-          add({ id: 'c' + c.id, kind: 'receipt', lead: who(c.by) + ' · because you said "',
-            text: (note && note.body) || '', tail: '" · ' + plural(w.old_lines || 0, 'line', 'lines') + ' → ' + (w.new_lines || 0),
-            keys: true, rule: ['solid', 'agent'] }, slot, [G_RECEIPT, c.op, c.idx]);
-        } else if (c.attr === 'outside') {
-          add({ id: 'f' + c.id, kind: 'fact', text: 'changed outside birta' + (c.cause === 'git' ? ' (git)' : ''),
-            rule: ['dotted', 'agent'] }, slot, [G_FACT, c.op, c.idx]);
+          add(receiptOf(c, { id: 'c' + c.id, kind: 'receipt', lead: who(c.by) + ' · because you said "',
+            text: (note && note.body) || '', tail: '" · ' + count, rule: ['solid', 'agent'] }), slot, order);
+        } else {
+          add(receiptOf(c, { id: 'c' + c.id, kind: 'receipt', lead: who(c.by) + ' · nobody asked · ', text: count,
+            rule: ['dotted', 'agent'] }), slot, order);
         }
       });
       var replied = s.phrase && s.phrase.replied;
@@ -528,8 +621,9 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     var h = makeHost('composer');
     h.host.setAttribute('data-kind', 'composer');
     h.box.classList.add('composer');
-    var anchor = at.k !== 'doc' && at.sp ? blockOf(at.sp) : null;
-    comp = { h: h, kind: kind, at: at, key: key, own: own, anchor: anchor, sp: anchor ? at.sp : null,
+    var sp = spOfAt(at);
+    var anchor = sp ? blockOf(sp) : null;
+    comp = { h: h, kind: kind, at: at, key: key, own: own, anchor: anchor, sp: anchor ? sp : null,
       candidates: null, pick: 0, asked: null, rcid: null, timer: null, qtimer: null, sent: false, active: true };
     var target = el('div', 'muted target');
     var area = document.createElement('textarea');
@@ -691,7 +785,56 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     reconcile();
   }
 
-  // --- notes and blanks with focus ---
+  // --- receipts, not-handled rows, notes and blanks with focus ---
+
+  /** x on a change: undo it, after a second x for a many-hunk write. */
+  function undo(c) {
+    if (!canUndo(c)) {
+      BR.chrome.pill(CANT_UNDO);
+      return;
+    }
+    if (undoing) return;
+    var many = (c.op_hunks || 1) > 1;
+    if (many && !(armed && armed.id === c.id && Date.now() < armed.until)) {
+      armed = { id: c.id, until: Date.now() + CONFIRM_MS };
+      BR.chrome.pill('x again to undo ' + c.op_hunks + ' changes');
+      return;
+    }
+    armed = null;
+    var f = { op: 'undo_change', change: c.id };
+    if (many) f.confirm = true;
+    undoing = BR.op(f);
+  }
+
+  // Keys on a receipt act on its change; every other review key acts as on the page
+  function receiptKey(e, c) {
+    if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+    var a = action(e);
+    var mine = a === 'no' || a === 'yes' || a === 'note';
+    if (mine && writable()) {
+      if (a !== 'no') armed = null;
+      if (a === 'no') undo(c);
+      else if (a === 'yes') BR.op({ op: 'seen', ids: [c.id] });
+      else open('note', { k: 'change', id: c.id }, null);
+    } else if (!mine && !BR.keys.run(e)) {
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
+  // A not-handled row needs y to be acknowledged; stepping or clicking onto it never does
+  function notHandledKey(e, n) {
+    if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+    var a = action(e);
+    if (a === 'yes') {
+      if (writable()) BR.op({ op: 'seen', ids: ['nh:' + n] });
+    } else if (!BR.keys.run(e)) {
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+  }
 
   function action(e) {
     return BR.pure.keyAction(e, typeof KEYBINDINGS === 'undefined' ? null : KEYBINDINGS);
@@ -771,6 +914,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
         reconcile();
         break;
       case 'ack':
+        if (msg.cid === undoing) undoing = null;
         delete pending[msg.cid];
         if (afterAck[msg.cid]) {
           var run = afterAck[msg.cid];
@@ -779,6 +923,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
         }
         break;
       case 'nack':
+        if (msg.cid === undoing) undoing = null;
         delete afterAck[msg.cid];
         if (msg.reason) BR.chrome.nack(msg.reason);
         drafts = drafts.filter(function (d) { return d.cid !== msg.cid; });
@@ -841,6 +986,22 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       return hit;
     },
     rewriteActive: function () { return !!(state && state.rewrite); },
+    /**
+     * Puts the keys where a walk stop takes them: a change's receipt, a not-handled row, or a
+     * blank. False when the stop has no line of its own.
+     */
+    focusStop: function (stop) {
+      var hit = null;
+      hosts.forEach(function (h) {
+        var e = h.entry;
+        if (hit || !e || !h.host.isConnected) return;
+        if ((stop.kind === 'change' && e.change && e.change.id === stop.id) ||
+          (stop.kind === 'not_handled' && 'nh:' + e.nh === stop.id) ||
+          (stop.kind === 'blank' && e.kind === 'blank' && '#' + e.blank === stop.id)) hit = h;
+      });
+      if (hit) hit.box.focus({ preventScroll: true });
+      return !!hit;
+    },
     markRewriteSeen: markRewriteSeen,
     /** Rules for the overlay: each host with its style and role. */
     rules: function () {

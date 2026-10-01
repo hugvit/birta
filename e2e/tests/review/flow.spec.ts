@@ -1142,6 +1142,9 @@ function handedBack(state: State, submit: number): State {
   return round;
 }
 
+/** A seen op for changes only, which a j walk past changed blocks sends. */
+const changeSeen = (o: State) => o.op === "seen" && o.ids.every((id: string) => /^\d+\.\d+$/.test(id));
+
 /** An op frame without the envelope the core adds. */
 function opFields(frame: State): State {
   const out = { ...frame };
@@ -1354,7 +1357,8 @@ test.describe("note dots", () => {
     await expect.poll(async () => texts(await hostsAt(page, "11:1-11:44")).join("\n")).toContain("cap it");
     await expect.poll(async () => (await dots(page)).length).toBe(0);
     await page.waitForTimeout(SETTLE_MS);
-    expect(mock.ops()).toEqual([]);
+    // The walk there steps past changed blocks, which marks them seen; a note's own seen still counts
+    expect(mock.ops().filter((o) => !changeSeen(o))).toEqual([]);
   });
 
   test("a note folded by y stays folded after a reload, and a new reply opens it again", async ({ page, birta }) => {
@@ -1605,7 +1609,8 @@ test.describe("names, verdicts and z", () => {
       await page.waitForTimeout(SETTLE_MS);
     }
     expect(mock.ops().filter((o) => o.to === 7)).toEqual([]);
-    expect(mock.ops()[0]).toMatchObject({ op: "comment", verdict: "yes", at: { k: "block", sp: "10:1-10:16" } });
+    // The walk there steps past changed blocks, which marks them seen
+    expect(mock.ops().filter((o) => !changeSeen(o))[0]).toMatchObject({ op: "comment", verdict: "yes", at: { k: "block", sp: "10:1-10:16" } });
   });
 
   test("c on a verdict that has words opens them in the composer, and ⏎ sends the edit", async ({ page, birta }) => {

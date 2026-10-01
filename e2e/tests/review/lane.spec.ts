@@ -663,7 +663,9 @@ test.describe("the doc cannot reach the lane", () => {
     // The raw HTML did render, inside the box
     expect(near(s.at(box.left + box.width / 2, box.top + 20), RED)).toBe(true);
     const leaks: string[] = [];
-    for (let y = Math.ceil(frame.top) + 1; y < frame.bottom - 1; y += 7) {
+    // The doc's rows can run past the viewport, and the shot stops there
+    const bottom = Math.min(frame.bottom, page.viewportSize()!.height);
+    for (let y = Math.ceil(frame.top) + 1; y < bottom - 1; y += 7) {
       for (const x of [frame.left + 2, frame.left + 10, frame.left + 30, frame.right - 30, frame.right - 3]) {
         if (near(s.at(x, y), RED, 40)) leaks.push(`${x},${y}`);
       }

@@ -488,7 +488,8 @@ test.describe("hold", () => {
       expect(await turnOf(p)).toEqual(during.turn);
     }
 
-    const after = `sent ${hhmm(submit.ts)} · not picked up yet`;
+    // A hand-back is sent when its hold ends, which can fall in the next minute
+    const after = `sent ${hhmm(submit.not_before)} · not picked up yet`;
     for (const p of [page, other]) {
       await expect.poll(() => phraseOf(p), { timeout: 8_000 }).toBe(after);
       expect(await pillOf(p)).toBeNull();
@@ -511,7 +512,7 @@ test.describe("hold", () => {
     const log = reviewLog(served.root)!;
     const approve = log[log.length - 1];
     expect(approve).toMatchObject({ op: "approve", rev: revOf(STOPS_DOC) });
-    await expect.poll(() => phraseOf(page), { timeout: 6_000 }).toBe(`approved ${hhmm(approve.ts)}`);
+    await expect.poll(() => phraseOf(page), { timeout: 6_000 }).toBe(`approved ${hhmm(approve.not_before)}`);
     expect(await pillOf(page)).toBeNull();
     expect(await turnOf(page)).toEqual({ text: "Approved", kbd: null, disabled: true });
   });

@@ -635,6 +635,8 @@
       addEventListener('pagehide', function() {
         try { sessionStorage.setItem(TAB_KEY, tabId); } catch (e) {}
       });
+      // The review beacon names the tab its hello did
+      birtaBus.tab = function() { return tabId; };
 
       function showStatus(msg) {
         status.textContent = msg;

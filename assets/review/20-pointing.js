@@ -18,6 +18,8 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   // This page's own acts, newest last; z takes back the top once its ack names its line
   var undos = [];
   var scrollQueued = false;
+  // Where n and p last landed, as `[rank, line, order]`, so a server push can't skip a stop
+  var cursor = null;
 
   function content() { return document.getElementById('content'); }
 
@@ -115,6 +117,59 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     }
     setFocus(next);
     reveal(next);
+    see(next);
+  }
+
+  // --- seen and the attention walk ---
+
+  /** Sends seen for the unseen changes on `el`; true when there were any. */
+  function see(el) {
+    var state = BR.currentState();
+    var sp = el && el.getAttribute && el.getAttribute('data-sourcepos');
+    if (!state || !sp || state.log_writable === false) return false;
+    var ids = (state.changes || []).filter(function (c) {
+      return !c.seen && !c.settled && c.attr !== 'human' && c.range && c.range.sp === sp;
+    }).map(function (c) { return c.id; });
+    if (ids.length) BR.op({ op: 'seen', ids: ids });
+    return ids.length > 0;
+  }
+
+  function keyOf(stop) { return [stop.rank, stop.line, stop.order]; }
+
+  function before(a, b) {
+    for (var i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] < b[i];
+    return false;
+  }
+
+  /** Focuses a walk stop and marks it seen; blanks and not-handled rows wait for an answer or y. */
+  function land(stop) {
+    cursor = keyOf(stop);
+    var el = stop.sp ? blockOf(stop.sp) : null;
+    setFocus(el);
+    if (el) reveal(el);
+    if (stop.kind === 'change' || stop.kind === 'reply') BR.op({ op: 'seen', ids: [stop.id] });
+    BR.flow.focusStop(stop);
+  }
+
+  function walk(step) {
+    var state = BR.currentState();
+    if (!state || state.log_writable === false) return;
+    var all = BR.pure.attention(state);
+    var next = step > 0
+      ? all.filter(function (x) { return !cursor || before(cursor, keyOf(x)); })[0]
+      : all.filter(function (x) { return cursor && before(keyOf(x), cursor); }).pop();
+    if (next) land(next);
+  }
+
+  function onClick(e) {
+    var t = e.target;
+    if (!t || !t.closest || BR.isHost(t) || !content().contains(t)) return;
+    // A drag that selects text is pointing, not looking
+    var s = getSelection();
+    if (s && !s.isCollapsed) return;
+    for (var el = t; el && el !== content(); el = el.parentElement) {
+      if (el.hasAttribute('data-sourcepos') && see(el)) return;
+    }
   }
 
   function selectedRange() {
@@ -337,6 +392,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       try { active = sessionStorage.getItem(ACTIVE_KEY) === '1'; } catch (e) {}
       paintDoc();
       document.addEventListener('selectionchange', onSelection);
+      document.addEventListener('click', onClick);
       window.addEventListener('scroll', onScroll, { passive: true });
       birtaBus.on(onFrame);
     },
@@ -345,6 +401,10 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       if (ACTIVATES[action]) activate();
       if (action === 'focus_next' || action === 'focus_prev') {
         move(action === 'focus_next' ? 1 : -1);
+        return true;
+      }
+      if (action === 'next_item' || action === 'prev_item') {
+        walk(action === 'next_item' ? 1 : -1);
         return true;
       }
       if (action === 'turn') {
@@ -378,6 +438,13 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     },
     /** Shows `text` in the pill, or hides it for ''. */
     pill: showPill,
+    /** The approve guard: goes to the first unseen change; false when there is none. */
+    toUnseen: function () {
+      var state = BR.currentState();
+      var first = state && BR.pure.attention(state).filter(function (x) { return x.kind === 'change'; })[0];
+      if (first) land(first);
+      return !!first;
+    },
     /** Puts an act of this page's on the z stack: `{cid, undo(n) -> op fields, item?, created?}`. */
     remember: remember,
     /** Drops one Esc layer: the phrase menu, the composer, the selection, then the focus. False when none is there. */

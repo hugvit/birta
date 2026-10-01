@@ -973,6 +973,20 @@ fn attention_counts_unseen_replies_and_unseen_not_handled_rows() {
     assert_eq!(status(&state, x), ItemStatus::NotHandled);
 }
 
+#[test]
+fn only_an_agents_open_question_is_attention_or_unanswered() {
+    let mut s = Scenario::new(DOC);
+    // Your own question waits on the agent, not on you
+    s.verdict("- second item", "ask");
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    let blank = s.blank(CLAUDE, s.block("first item"), "keep it?", turn);
+    let state = s.fold();
+    assert_eq!(status(&state, blank), ItemStatus::Open, "setup");
+    assert_eq!(state.counts.attention, 1);
+    assert_eq!(state.counts.open_asks, 1);
+}
+
 // --- later carries ---
 
 #[test]
@@ -1863,4 +1877,57 @@ fn only_the_human_marks_a_note_seen() {
     // Control: the same line from the human counts
     s.seen(&[&format!("#{x}")]);
     assert!(note_seen(&s.fold(), x));
+}
+
+/// A verdict the agent's turn left alone, and that turn's claim.
+fn not_handled_note() -> (Scenario, u32) {
+    let mut s = Scenario::new(DOC);
+    let x = s.verdict("- first item", "no");
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    s.yield_turn(CLAUDE, turn);
+    (s, x)
+}
+
+#[test]
+fn a_not_handled_row_seen_by_its_nh_id_is_seen_and_leaves_attention() {
+    let (mut s, x) = not_handled_note();
+    let state = s.fold();
+    assert_eq!(status(&state, x), ItemStatus::NotHandled, "setup");
+    assert!(!note_seen(&state, x), "unseen until the seen line");
+    assert_eq!(state.counts.attention, 1, "setup: the row needs you");
+    s.seen(&[&format!("nh:{x}")]);
+    let state = s.fold();
+    assert!(note_seen(&state, x));
+    assert_eq!(state.counts.attention, 0);
+    // Acknowledged, not handled: the status and the count stay
+    assert_eq!(status(&state, x), ItemStatus::NotHandled);
+    assert_eq!(state.counts.not_handled, 1);
+    assert!(state.warnings.is_empty(), "{:?}", state.warnings);
+}
+
+#[test]
+fn a_seen_before_the_turn_that_left_a_note_not_handled_does_not_count() {
+    let mut s = Scenario::new(DOC);
+    let x = s.verdict("- first item", "no");
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    s.seen(&[&format!("nh:{x}")]);
+    s.yield_turn(CLAUDE, turn);
+    let state = s.fold();
+    assert_eq!(status(&state, x), ItemStatus::NotHandled);
+    assert!(!note_seen(&state, x));
+    assert_eq!(state.counts.attention, 1);
+}
+
+#[test]
+fn only_the_human_acknowledges_a_not_handled_note() {
+    let (mut s, x) = not_handled_note();
+    s.push(
+        support::scenario::agent(CLAUDE),
+        json!({"op": "seen", "ids": [format!("nh:{x}")]}),
+    );
+    let state = s.fold();
+    assert!(!note_seen(&state, x));
+    assert_eq!(state.counts.attention, 1);
 }

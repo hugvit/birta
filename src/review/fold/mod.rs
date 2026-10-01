@@ -541,9 +541,17 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
         .zip(&facts)
         .map(|(note, f)| {
             let mut it = item(note, f, &seen, at_state(note, &mut texts, &locator));
-            it.seen = seen_last
-                .get(&format!("#{}", note.n))
-                .is_some_and(|&s| s > news_at.get(&note.n).copied().unwrap_or(0));
+            it.seen = if f.status == ItemStatus::NotHandled {
+                // A not-handled row is acknowledged by its own id, after the turn that left it
+                let after = f.turn.and_then(|t| turns.turn(t)).map_or(0, |t| t.close());
+                seen_last
+                    .get(&format!("nh:{}", note.n))
+                    .is_some_and(|&s| s > after)
+            } else {
+                seen_last
+                    .get(&format!("#{}", note.n))
+                    .is_some_and(|&s| s > news_at.get(&note.n).copied().unwrap_or(0))
+            };
             it
         })
         .collect();
@@ -595,8 +603,8 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
                 .iter()
                 .filter(|r| r.by.kind == ByKind::Agent && !r.seen)
                 .count();
-            let open = i.status == ItemStatus::Open && i.verdict == Some(Verdict::Ask);
-            let unseen_nh = i.id.as_ref().is_some_and(|id| !seen.contains(id));
+            let open = agent_ask(i);
+            let unseen_nh = i.status == ItemStatus::NotHandled && !i.seen;
             replies + usize::from(open) + usize::from(unseen_nh)
         })
         .sum::<usize>() as u32
@@ -611,10 +619,7 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
             .filter(|c| c.asked.kind == AskedKind::Unasked && !c.settled)
             .count() as u32,
         not_handled: count(ItemStatus::NotHandled),
-        open_asks: items
-            .iter()
-            .filter(|i| i.status == ItemStatus::Open && i.verdict == Some(Verdict::Ask))
-            .count() as u32,
+        open_asks: items.iter().filter(|i| agent_ask(i)).count() as u32,
         later: later.len() as u32,
         lost: lost.len() as u32,
         items: item_stops(doc).count() as u32,
@@ -1011,6 +1016,11 @@ fn item(note: &items::Note, f: &Facts, seen: &HashSet<String>, at: AtState) -> I
         }),
         seen: false,
     }
+}
+
+/// An agent's question still waiting for the human; anyone else's ask waits on an agent.
+fn agent_ask(i: &Item) -> bool {
+    i.status == ItemStatus::Open && i.verdict == Some(Verdict::Ask) && i.by.kind == ByKind::Agent
 }
 
 fn item_stops(doc: &Doc) -> impl Iterator<Item = &crate::anchor::Stop> {

@@ -60,8 +60,22 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     return typeof viewMode === 'undefined' || viewMode !== 'raw';
   }
 
+  /** Runs the review action a key asks for; true when it acted. */
+  function run(e) {
+    var action = BR.pure.keyAction(e, typeof KEYBINDINGS === 'undefined' ? null : KEYBINDINGS);
+    if (!action || !reviewable()) return false;
+    // The menu and what a key opens are never open together
+    BR.chrome.closeMenu();
+    return BR.pointing.act(action);
+  }
+
   function onKey(e) {
     if (e.defaultPrevented || typing(e.target) || BR.isHost(e.target)) return;
+    if (BR.chrome.menuKey(e)) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     if (e.key === 'Escape') {
       if (e.isComposing || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
       // One layer per press; an unconsumed Esc falls through to the viewer's reading mode
@@ -71,12 +85,13 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       }
       return;
     }
-    var action = BR.pure.keyAction(e, typeof KEYBINDINGS === 'undefined' ? null : KEYBINDINGS);
-    if (!action || onControl(e.target) || !reviewable()) return;
-    if (BR.pointing.act(action)) e.preventDefault();
+    if (onControl(e.target)) return;
+    if (run(e)) e.preventDefault();
   }
 
   BR.keys = {
+    /** For a key pressed in the phrase menu, which is a review host the page guard skips. */
+    run: run,
     init: function () {
       // Capture, so the viewer's own handler sees a consumed key as defaultPrevented
       document.addEventListener('keydown', onKey, true);

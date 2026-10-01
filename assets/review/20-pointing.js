@@ -17,8 +17,6 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   var active = false;
   // This page's own acts, newest last; z takes back the top once its ack names its line
   var undos = [];
-  var pill = null;
-  var pillText = null;
   var scrollQueued = false;
 
   function content() { return document.getElementById('content'); }
@@ -67,6 +65,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     active = true;
     try { sessionStorage.setItem(ACTIVE_KEY, '1'); } catch (e) {}
     paintDoc();
+    BR.chrome.render();
   }
 
   function setFocus(el) {
@@ -177,30 +176,11 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     return best;
   }
 
-  // --- the pill ---
+  // --- the pill, which the chrome shows ---
 
-  function showPill(text) {
-    if (!pill) {
-      pill = document.createElement('birta-pop');
-      pill.style.setProperty('position', 'fixed', 'important');
-      pill.style.setProperty('z-index', '2147483647', 'important');
-      pill.style.setProperty('left', '50%', 'important');
-      pill.style.setProperty('bottom', '16px', 'important');
-      pill.style.setProperty('transform', 'translateX(-50%)', 'important');
-      var root = pill.attachShadow({ mode: 'closed' });
-      var style = document.createElement('style');
-      style.textContent = BR.shadowCss || '';
-      pillText = document.createElement('div');
-      pillText.className = 'pill';
-      root.append(style, pillText);
-      BR.FLOW_HOSTS.add(pill);
-      document.body.appendChild(pill);
-    }
-    pillText.textContent = text;
-    pill.style.setProperty('display', text ? 'block' : 'none', 'important');
-  }
+  function showPill(text) { BR.chrome.pill(text); }
 
-  function pillSays(text) { return !!pill && pillText.textContent === text; }
+  function pillSays(text) { return BR.chrome.pillSays(text); }
 
   function ownerOf(node) {
     var el = node && (node.nodeType === 1 ? node : node.parentElement);
@@ -367,6 +347,10 @@ var BR = typeof BR === 'undefined' ? {} : BR;
         move(action === 'focus_next' ? 1 : -1);
         return true;
       }
+      if (action === 'turn') {
+        BR.chrome.turn();
+        return true;
+      }
       if (action === 'hide_marks') {
         BR.lane.toggle();
         return true;
@@ -396,8 +380,9 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     pill: showPill,
     /** Puts an act of this page's on the z stack: `{cid, undo(n) -> op fields, item?, created?}`. */
     remember: remember,
-    /** Drops one Esc layer: the composer, the selection, then the focus. False when none is there. */
+    /** Drops one Esc layer: the phrase menu, the composer, the selection, then the focus. False when none is there. */
     escape: function () {
+      if (BR.chrome.escape()) return true;
       if (BR.flow.escape()) return true;
       var s = getSelection();
       if (s && s.rangeCount && !s.isCollapsed) {

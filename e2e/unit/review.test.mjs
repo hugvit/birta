@@ -97,8 +97,8 @@ const FIXTURE_MARKS = {
   dir: [],
   drafts: [glyph("5:1-6:54", "no", "you"), glyph("10:1-10:16", "no", "you")],
   sent: [glyph("5:1-6:54", "no", "agent"), glyph("10:1-10:16", "no", "agent")],
-  // Glyph colour during a hold is left to the chrome step
-  hold: [glyph("5:1-6:54", "no"), glyph("10:1-10:16", "no")],
+  // Inside the hold nothing has left yet, so the held verdicts keep your colour
+  hold: [glyph("5:1-6:54", "no", "you"), glyph("10:1-10:16", "no", "you")],
   picked: [glyph("5:1-6:54", "no", "agent"), glyph("10:1-10:16", "no", "agent")],
   replied: [
     glyph("5:1-6:68", "no", "agent"),
@@ -116,7 +116,8 @@ const FIXTURE_MARKS = {
     tick("14:1-14:13"),
   ],
   // The agent's change has settled, so it keeps no bar and no wash
-  approved: [glyph("5:1-6:68", "no", "agent"), glyph("10:1-10:16", "no", "agent"), glyph("12:1-13:0", "later")],
+  // A later item has been sent and carries across rounds, so it is grey
+  approved: [glyph("5:1-6:68", "no", "agent"), glyph("10:1-10:16", "no", "agent"), glyph("12:1-13:0", "later", "agent")],
   // An asked and a later outside change share the paragraph: the newest unseen one's bar wins
   lost: [glyph("10:1-10:16", "no", "agent"), bar("5:1-6:68", "dotted", "agent"), wash("5:1-6:68")],
   rewrite: [glyph("5:1-6:68", "no", "agent"), glyph("10:1-10:29", "no", "agent")],
@@ -323,4 +324,31 @@ test("laneMarks: a settled change's removed block leaves no tick", () => {
   const s = state("unseen");
   s.changes[2].settled = true;
   assertMarks(BR.pure.laneMarks(s), replace(UNSEEN, "tick 14:1-14:13"), "settled removal");
+});
+
+test("laneMarks: held verdicts turn grey when the hold passes, by the clock it is given", () => {
+  const { BR } = load();
+  const s = state("hold");
+  const at = (now) => JSON.parse(JSON.stringify(BR.pure.laneMarks(s, { now }))).filter((m) => m.mark === "glyph").map((m) => m.role);
+  assert.deepEqual(at(s.hold.not_before - 1), ["you", "you"]);
+  assert.deepEqual(at(s.hold.not_before), ["agent", "agent"]);
+  // With no clock given, the state's own server time decides
+  assert.deepEqual(at(undefined), ["you", "you"]);
+});
+
+test("laneMarks: a held approve leaves sent verdicts grey", () => {
+  const { BR } = load();
+  const s = state("approved");
+  const roles = JSON.parse(JSON.stringify(BR.pure.laneMarks(s, { now: s.hold.not_before - 1 })))
+    .filter((m) => m.mark === "glyph")
+    .map((m) => m.role);
+  assert.deepEqual(roles, ["agent", "agent", "agent"]);
+});
+
+test("laneMarks: a later verdict still in your drafts keeps your colour", () => {
+  const { BR } = load();
+  const s = state("drafts");
+  s.items.find((i) => i.at.loc?.sp === "5:1-6:54").verdict = "later";
+  const g = JSON.parse(JSON.stringify(BR.pure.laneMarks(s))).filter((m) => m.mark === "glyph" && m.sp === "5:1-6:54");
+  assert.deepEqual(g.map((m) => [m.verdict, m.role]), [["later", "you"]]);
 });

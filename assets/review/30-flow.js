@@ -23,7 +23,6 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   var COMPOSE_MS = 300;
   var QUOTE_CHARS = 40;
   var UNSENT = 'unsent · ⏎ to keep';
-  var REASONS = { changed_since: 'changed since · try again' };
 
   // Group order under one anchor: notes with their replies, then what the page added, then facts
   var G_NOTE = 1, G_DRAFT = 2, G_UNSENT = 3, G_COMPOSER = 4, G_RECEIPT = 5, G_FACT = 6, G_BLANK = 7,
@@ -781,7 +780,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
         break;
       case 'nack':
         delete afterAck[msg.cid];
-        if (msg.reason && BR.pointing.pill) BR.pointing.pill(REASONS[msg.reason] || msg.reason);
+        if (msg.reason) BR.chrome.nack(msg.reason);
         drafts = drafts.filter(function (d) { return d.cid !== msg.cid; });
         var words = pending[msg.cid];
         delete pending[msg.cid];

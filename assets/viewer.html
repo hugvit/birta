@@ -766,6 +766,7 @@
 
         ws.onclose = function() {
           currentWs = null;
+          birtaBus.emit({ type: 'close' });
           // Unsent ticks never reach disk; the one in flight may have, so it is left as is.
           checkQueue.forEach(revertCheck);
           checkInFlight = null;

@@ -840,7 +840,7 @@ export function pixelsOf(s: Shot, box: Box): Rgb[] {
 // --- Test objects -------------------------------------------------------------------------
 
 /** Makes closed shadow roots open, so specs can look inside. Only the closed spec goes without. */
-const OPEN_ROOTS = `(() => {
+export const OPEN_ROOTS = `(() => {
   const attach = Element.prototype.attachShadow;
   Element.prototype.attachShadow = function (init) {
     return attach.call(this, Object.assign({}, init, { mode: "open" }));

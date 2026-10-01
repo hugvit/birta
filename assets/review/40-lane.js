@@ -15,7 +15,15 @@ var BR = typeof BR === 'undefined' ? {} : BR;
    * `{mark:'glyph', sp, verdict, role, n}`, `{mark:'bar', sp, style, role}`, `{mark:'wash', sp}`
    * and `{mark:'tick', after, count}`, where `after` is null above the first block.
    */
-  BR.pure.laneMarks = function (state) {
+  BR.pure.laneMarks = function (state, opts) {
+    // Inside a hand-back's hold nothing has left yet, so its verdicts keep your colour
+    var now = opts && opts.now != null ? opts.now : state.server_now;
+    var held = {};
+    if (state.hold && state.hold.kind === 'hand_back' && now < state.hold.not_before) {
+      (state.rounds || []).forEach(function (r) {
+        if (r.submit === state.hold.n) (r.items || []).forEach(function (n) { held[n] = true; });
+      });
+    }
     var out = [];
     (state.items || [])
       .filter(function (i) {
@@ -24,7 +32,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       .sort(function (a, b) { return a.n - b.n; })
       .forEach(function (i) {
         // A withdrawn round hands its notes back as drafts
-        var yours = i.status === 'draft' || i.status === 'withdrawn';
+        var yours = i.status === 'draft' || i.status === 'withdrawn' || !!held[i.n];
         out.push({ mark: 'glyph', sp: i.at.loc.sp, verdict: i.verdict, role: yours ? 'you' : 'agent', n: i.n });
       });
     // A rewrite speaks through its own row, so per-block marks would only repeat it
@@ -193,7 +201,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
 
   function render() {
     queued = false;
-    var marks = current ? BR.pure.laneMarks(current) : [];
+    var marks = current ? BR.pure.laneMarks(current, { now: BR.chrome.now() }) : [];
     // A glyph shares its block's lane with the bar, so it moves to the slot beside it
     var barred = {};
     marks.forEach(function (m) { if (m.mark === 'bar') barred[m.sp] = m; });

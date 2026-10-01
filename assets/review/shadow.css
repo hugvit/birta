@@ -122,15 +122,116 @@
   opacity: 1;
 }
 
-.pill {
+/* The header's phrase and turn button: shown only once review has something to say */
+:host(birta-phrase),
+:host(birta-turn) {
+  display: none !important;
+}
+
+:host(birta-phrase[data-shown]) {
+  display: block !important;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  visibility: visible !important;
+  opacity: 1 !important;
+}
+
+:host(birta-turn[data-shown]) {
+  display: block !important;
+  flex: none;
+  visibility: visible !important;
+  opacity: 1 !important;
+}
+
+/* Its popovers live in the top layer, but a hidden host would still hide them */
+:host(birta-pop) {
+  display: block !important;
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 0 !important;
+  height: 0 !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+}
+
+.phrase {
+  display: block;
+  max-width: 60ch;
+  font: 12px/26px ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--birta-fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.turn {
+  min-width: 112px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--birta-border);
+  border-radius: 6px;
+  background: none;
+  color: var(--birta-fg);
+  font: 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.turn:hover:not(:disabled) {
+  border-color: var(--birta-fg);
+}
+
+.turn:disabled {
+  color: var(--birta-fg-muted);
+  cursor: default;
+}
+
+.turn kbd {
+  font: inherit;
+  color: var(--birta-fg-muted);
+}
+
+.pill,
+.menu {
+  margin: 0;
   font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--birta-fg);
   background: var(--birta-bg);
   border: 1px solid var(--birta-border);
   border-radius: 6px;
-  padding: 2px 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+.pill {
+  position: fixed;
+  inset: auto auto 16px 50%;
+  transform: translateX(-50%);
+  padding: 2px 8px;
   white-space: nowrap;
+}
+
+.menu {
+  position: fixed;
+  inset: auto;
+  min-width: 460px;
+  padding: 0;
+  outline: none;
+}
+
+.menu .row {
+  padding: 8px 16px;
+  cursor: pointer;
+}
+
+.menu .row + .row {
+  border-top: 1px solid var(--borderColor-muted, var(--birta-border));
+}
+
+.menu .row.current {
+  background: var(--review-wash);
 }
 
 /* A note's rule: dashed while a draft, solid once sent or asked for, dotted when the agent began it */

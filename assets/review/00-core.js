@@ -145,6 +145,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     birtaBus.on(onFrame);
     BR.keys.init();
     BR.pointing.init();
+    BR.chrome.init();
   };
 
   // After the whole bundle has run, so the shadow CSS appended to it is in place

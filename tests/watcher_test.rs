@@ -76,6 +76,9 @@ async fn next_frame(ws: &mut Client, wait: Duration) -> Option<serde_json::Value
     .ok()
 }
 
+// FSEvents can lag well past 10 s while the whole suite runs in parallel
+const EVENT_BUDGET: Duration = Duration::from_secs(30);
+
 /// Reads frames, in any order, until `done` holds for the frames seen or 10 s pass.
 /// Returns every frame seen.
 async fn frames_until(
@@ -85,7 +88,7 @@ async fn frames_until(
     let started = Instant::now();
     let mut seen = Vec::new();
     while !done(&seen) {
-        let Some(left) = Duration::from_secs(10).checked_sub(started.elapsed()) else {
+        let Some(left) = EVENT_BUDGET.checked_sub(started.elapsed()) else {
             break;
         };
         match next_frame(ws, left).await {
@@ -134,7 +137,7 @@ async fn edit_until(
     let started = Instant::now();
     let mut seen = Vec::new();
     let mut n = 0;
-    while !done(&seen) && started.elapsed() < Duration::from_secs(10) {
+    while !done(&seen) && started.elapsed() < EVENT_BUDGET {
         site.write(rel, &format!("# Edit {n}\n"));
         n += 1;
         let round = Instant::now();

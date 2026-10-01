@@ -954,7 +954,8 @@ mod tests {
         let started = Instant::now();
         let mut seen: Vec<String> = Vec::new();
         let mut n = 0;
-        while started.elapsed() < Duration::from_secs(10) {
+        // FSEvents can lag well past 10 s while the whole suite runs in parallel
+        while started.elapsed() < Duration::from_secs(30) {
             tree.write(path, &format!("edit {n}\n"));
             n += 1;
             let round = Instant::now();

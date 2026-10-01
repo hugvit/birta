@@ -141,6 +141,9 @@ fn last_head(parsed: &Parsed) -> Option<String> {
 /// or when git doesn't answer in time.
 fn git_head(dir: &Path, timeout: Duration) -> Option<String> {
     let mut child = Command::new("git")
+        // An inherited GIT_DIR (e.g. from a hook) would name another repo than dir's
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
         .arg("-C")
         .arg(dir)
         .args(["rev-parse", "--verify", "--quiet", "HEAD"])

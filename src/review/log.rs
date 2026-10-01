@@ -389,7 +389,11 @@ fn exclude_from_git(review: &Path) {
     };
     let git = |args: &[&str]| {
         let mut cmd = Command::new("git");
-        cmd.arg("-C")
+        // An inherited GIT_DIR (e.g. from a hook) would name another repo than dir's
+        cmd.env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .arg("-C")
             .arg(dir)
             .args(args)
             .stdin(Stdio::null())

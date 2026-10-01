@@ -333,6 +333,10 @@ fn a_write_made_before_the_pickup_lands_before_the_claim_as_outside() {
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
+        // A pre-commit hook exports these, and they would aim git at the outer repo
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .arg("-C")
         .arg(dir)
         .args([

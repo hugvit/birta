@@ -958,6 +958,9 @@ fn a_git_that_hangs_holds_the_respond_up_only_for_its_timeout() {
     let tmp = Tmp::new(&r.s);
     // A real repo, so a `.git` check cannot skip running git
     std::process::Command::new("git")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .args(["init", "-q"])
         .current_dir(&tmp.base)
         .status()

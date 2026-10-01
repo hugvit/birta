@@ -1289,6 +1289,9 @@ fn creating_the_review_file_follows_the_git_exclude_setting() {
         let tmp = Tmp::new();
         let git = |args: &[&str]| {
             let out = StdCommand::new("git")
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
                 .args(args)
                 .current_dir(tmp.path("repo"))
                 .env("HOME", tmp.path("home"))

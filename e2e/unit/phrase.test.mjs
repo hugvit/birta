@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ASSETS = path.join(HERE, "..", "..", "assets", "review");
 const FIXTURES = path.join(HERE, "..", "fixtures", "review");
-const SHARED_BR = "var BR = typeof BR === 'undefined' ? {} : BR;";
+const SHARED_BR = "var BR = BR && BR.__birta === true ? BR : { __birta: true };";
 const ORDER = ["quote.js", "00-core.js", "10-keys.js", "20-pointing.js", "30-flow.js", "40-lane.js", "60-chrome.js"];
 
 /** Runs the review files in a context with no DOM, as they must touch none at load. */

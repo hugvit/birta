@@ -983,6 +983,30 @@ test.describe("blanks", () => {
     expect(blank.text).toContain("y x . l or type");
   });
 
+  test("opening the lost row redraws that row alone, and an answer being typed stays", async ({ page, birta }) => {
+    await open(page, birta, FLOW_DOC, { state: fixtureState("flow") });
+    await page.locator('birta-flow[data-kind="blank"]', { hasText: "is 503 the only code?" }).click();
+    await page.keyboard.type("half an answer");
+    const answer = page.locator('birta-flow[data-kind="blank"] textarea');
+    await expect(answer).toHaveValue("half an answer");
+    // A mark on every other host's drawn line: a redraw would replace it
+    const marked = await page.evaluate(() =>
+      Array.from(document.querySelectorAll("birta-flow:not([data-kind=lost])")).filter((h) => {
+        const line = h.shadowRoot!.querySelector(".flow > div");
+        if (line) (line as HTMLElement).dataset.probe = "1";
+        return !!line;
+      }).length,
+    );
+    expect(marked).toBeGreaterThan(1);
+    await page.locator('birta-flow[data-kind="lost"] .more').click();
+    await expect(page.getByText("cut this")).toBeVisible();
+    await expect(answer).toHaveValue("half an answer");
+    const kept = await page.evaluate(
+      () => Array.from(document.querySelectorAll("birta-flow")).filter((h) => h.shadowRoot!.querySelector('[data-probe="1"]')).length,
+    );
+    expect(kept).toBe(marked);
+  });
+
   for (const [key, verdict] of [
     ["y", "yes"],
     ["x", "no"],
@@ -1892,6 +1916,225 @@ test.describe("the composer, harder cases", () => {
           false,
       ),
     ).toBe(true);
+  });
+});
+
+test.describe("a note kept after the doc moved under it", () => {
+  const PARAS = "# Title\n\nAlpha has the word fix.\n\nBravo has the word fix.\n\nCharlie para.\n";
+  // The new paragraph takes Alpha's lines, and Alpha takes Bravo's sp
+  const PARAS_GREW = PARAS.replace("Alpha", "Zerox para.\n\nAlpha");
+  const LIST = "# Title\n\n- [ ] task alpha\n- [ ] task bravo\n- [ ] task charl\n\nDetail words.\n";
+  // The list is one block, so its items are all replaced, and alpha takes bravo's sp
+  const LIST_GREW = LIST.replace("- [ ] task alpha", "- [ ] task zerox\n- [ ] task alpha");
+  // As LIST_GREW, and bravo's own words change, so nothing in the doc is bravo any more
+  const LIST_MOVED = LIST_GREW.replace("task bravo", "task bravo, reworded");
+  const MOVED = "its block changed · c to re-point";
+
+  const pill = (page: Page) => page.locator("birta-pop .pill");
+  const comments = (root: string) => (reviewLog(root) ?? []).filter((l) => l.op === "comment");
+  const sentComments = (sent: State[]) => sent.filter((f) => f.type === "op" && f.op === "comment");
+
+  /** The sp the doc shows now for the innermost block holding `text`. */
+  function spNow(page: Page, text: string): Promise<string | null> {
+    return page.evaluate((text) => {
+      const all = Array.from(document.querySelectorAll("#content [data-sourcepos]")).filter((e) =>
+        (e.textContent ?? "").includes(text),
+      );
+      return all.at(-1)?.getAttribute("data-sourcepos") ?? null;
+    }, text);
+  }
+
+  /** Walks to the block holding `text` as the doc shows it now, whatever the boot data said. */
+  async function focusText(page: Page, text: string) {
+    const sp = await spNow(page, text);
+    while ((await focused(page)) !== null) await page.keyboard.press("k");
+    for (let i = 0; i < 20 && (await focused(page)) !== sp; i++) await page.keyboard.press("j");
+    expect(await focused(page)).toBe(sp);
+  }
+
+  test("a block note kept after a paragraph lands above it goes on its own block", async ({ page, birta }) => {
+    const { served } = await openReal(page, birta, PARAS);
+    await focusOn(page, await stopSp(page, "Bravo has"));
+    await page.keyboard.press("c");
+    await page.keyboard.type("note meant for bravo");
+    served.write("pr.md", PARAS_GREW);
+    await expect(page.locator("#content")).toContainText("Zerox para.");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => comments(served.root).length).toBe(1);
+    expect(comments(served.root)[0].at.quote).toContain("Bravo has");
+  });
+
+  test("a selection note kept after a paragraph lands above it goes on its own words", async ({ page, birta }) => {
+    const { served } = await openReal(page, birta, PARAS);
+    await selectWord(page, await stopSp(page, "Bravo has"), "fix");
+    await page.keyboard.press("c");
+    await page.keyboard.type("this fix");
+    served.write("pr.md", PARAS_GREW);
+    await expect(page.locator("#content")).toContainText("Zerox para.");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => comments(served.root).length).toBe(1);
+    const at = comments(served.root)[0].at;
+    expect(at.quote).toBe("fix");
+    expect(at.pre).toContain("Bravo has");
+  });
+
+  test("a picked typed quote kept after a paragraph lands above it goes where it was picked", async ({ page, birta }) => {
+    const { served } = await openReal(page, birta, PARAS);
+    await page.keyboard.press("c");
+    await page.keyboard.type('"fix" the second one');
+    const target = page.locator('birta-flow[data-kind="composer"] .target');
+    await expect(target).not.toBeEmpty();
+    await page.keyboard.press(PICK_NEXT);
+    await expect(target).toContainText("vo has the word");
+    served.write("pr.md", PARAS_GREW);
+    await expect(page.locator("#content")).toContainText("Zerox para.");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => comments(served.root).length).toBe(1);
+    const note = comments(served.root)[0];
+    expect(note.body).toBe("the second one");
+    expect(note.at.pre).toContain("Bravo has");
+  });
+
+  test("a block note on a list item keeps to its item when a write edits a sibling", async ({ page, birta }) => {
+    const { served } = await openReal(page, birta, LIST);
+    await focusOn(page, await stopSp(page, "task bravo"));
+    await page.keyboard.press("c");
+    await page.keyboard.type("note meant for bravo");
+    served.write("pr.md", LIST.replace("task charl", "task charlie"));
+    await expect(page.locator("#content")).toContainText("task charlie");
+    // The list was replaced whole, and the composer is still drawn under bravo's new item
+    await expect.poll(async () => (await hostsAt(page, (await spNow(page, "task bravo"))!)).map((h) => h.kind)).toEqual([
+      "composer",
+    ]);
+    await page.keyboard.press("Enter");
+    await expect.poll(() => comments(served.root).length).toBe(1);
+    expect(comments(served.root)[0].at.quote).toContain("task bravo");
+    await expect(page.locator("birta-flow", { hasText: MOVED })).toHaveCount(0);
+  });
+
+  test("a block note on a list item keeps to its item when an item lands above it", async ({ page, birta }) => {
+    const { served } = await openReal(page, birta, LIST);
+    await focusOn(page, await stopSp(page, "task bravo"));
+    await page.keyboard.press("c");
+    await page.keyboard.type("note meant for bravo");
+    served.write("pr.md", LIST_GREW);
+    await expect(page.locator("#content")).toContainText("task zerox");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => comments(served.root).length).toBe(1);
+    expect(comments(served.root)[0].at.quote).toContain("task bravo");
+  });
+
+  test("a block note whose item has a twin after a write stays unsent rather than guess", async ({ page, birta }) => {
+    const { served, sent } = await openReal(page, birta, LIST);
+    await focusOn(page, await stopSp(page, "task bravo"));
+    await page.keyboard.press("c");
+    await page.keyboard.type("note meant for bravo");
+    served.write("pr.md", LIST.replace("task charl", "task bravo"));
+    await expect(page.locator("#content li", { hasText: "task bravo" })).toHaveCount(2);
+    await page.keyboard.press("Enter");
+    await expect(pill(page)).toHaveText(MOVED);
+    await page.waitForTimeout(SETTLE_MS);
+    expect(sentComments(sent)).toEqual([]);
+  });
+
+  test("a block note whose block a write replaced stays unsent, ⏎ sends nothing, and c re-points it", async ({
+    page,
+    birta,
+  }) => {
+    const { served, sent } = await openReal(page, birta, LIST);
+    await focusOn(page, await stopSp(page, "task bravo"));
+    await page.keyboard.press("c");
+    await page.keyboard.type("note meant for bravo");
+    served.write("pr.md", LIST_MOVED);
+    await expect(page.locator("#content")).toContainText("task zerox");
+    await page.keyboard.press("Enter");
+    await expect(pill(page)).toHaveText(MOVED);
+    const row = page.locator("birta-flow", { hasText: "note meant for bravo" });
+    await expect(row).toContainText(MOVED);
+    for (let i = 0; i < 2; i++) {
+      await row.click();
+      await page.keyboard.press("Enter");
+      await expect(pill(page)).toHaveText(MOVED);
+    }
+    await page.waitForTimeout(SETTLE_MS);
+    expect(sentComments(sent)).toEqual([]);
+    await focusText(page, "task bravo");
+    await page.keyboard.press("c");
+    await expect(composer(page)).toHaveValue("note meant for bravo");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => comments(served.root).length).toBe(1);
+    expect(comments(served.root)[0].at.quote).toContain("task bravo");
+    await expect(page.locator("birta-flow", { hasText: MOVED })).toHaveCount(0);
+  });
+
+  test("a selection note whose block a write replaced lets the server find its words", async ({ page, birta }) => {
+    const { served, sent } = await openReal(page, birta, LIST);
+    await selectWord(page, await stopSp(page, "task bravo"), "bravo");
+    await page.keyboard.press("c");
+    await page.keyboard.type("this one");
+    served.write("pr.md", LIST_MOVED);
+    await expect(page.locator("#content")).toContainText("task zerox");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => comments(served.root).length).toBe(1);
+    const op = sentComments(sent)[0];
+    expect(op.at).toMatchObject({ k: "quote", q: "bravo" });
+    expect(op.at.sp).toBeUndefined();
+    expect(comments(served.root)[0].at.quote).toBe("bravo");
+  });
+
+  test("half-typed words restored after a reload stay on their block when a write only moves it", async ({ page, birta }) => {
+    const { served } = await openReal(page, birta, LIST);
+    await focusOn(page, await stopSp(page, "task bravo"));
+    await page.keyboard.press("c");
+    await page.keyboard.type("about bravo");
+    await expect.poll(() => draftFiles(served.root).length).toBe(1);
+    await page.reload();
+    await booted(page);
+    await expect(page.locator("birta-flow", { hasText: "about bravo" })).toBeVisible();
+    // The list is kept whole, so its items stay and only their sps move
+    served.write("pr.md", LIST.replace("# Title\n", "# Title\n\nA new opening line.\n"));
+    await expect(page.locator("#content")).toContainText("A new opening line.");
+    const bravo = await spNow(page, "task bravo");
+    await expect.poll(async () => (await hostsAt(page, bravo!)).map((h) => h.text)).toEqual([
+      expect.stringMatching(/about bravo[\s\S]*unsent · ⏎ to keep/),
+    ]);
+    await page.locator("birta-flow", { hasText: "about bravo" }).click();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => comments(served.root).length).toBe(1);
+    expect(comments(served.root)[0].at.quote).toContain("task bravo");
+  });
+
+  test("half-typed words restored after a reload, on a block a write then replaced, never send to the wrong block", async ({
+    page,
+    birta,
+  }) => {
+    const { served, sent } = await openReal(page, birta, LIST);
+    const bravo = await stopSp(page, "task bravo");
+    await focusOn(page, bravo);
+    await page.keyboard.press("c");
+    await page.keyboard.type("about bravo");
+    await expect.poll(() => draftFiles(served.root).length).toBe(1);
+    await page.reload();
+    await booted(page);
+    served.write("pr.md", LIST_MOVED);
+    await expect(page.locator("#content")).toContainText("task zerox");
+    const row = page.locator("birta-flow", { hasText: "about bravo" });
+    await expect(row).toContainText(MOVED);
+    await row.click();
+    await page.keyboard.press("Enter");
+    await expect(pill(page)).toHaveText(MOVED);
+    // ⏎ on what now sits at bravo's old sp is not bravo's
+    await focusText(page, "task alpha");
+    expect(await focused(page)).toBe(bravo);
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(sentComments(sent)).toEqual([]);
+    await focusText(page, "task bravo");
+    await page.keyboard.press("c");
+    await expect(composer(page)).toHaveValue("about bravo");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => comments(served.root).length).toBe(1);
+    expect(comments(served.root)[0].at.quote).toContain("task bravo");
   });
 });
 

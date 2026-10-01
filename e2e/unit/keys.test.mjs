@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ASSETS = path.join(HERE, "..", "..", "assets", "review");
-const SHARED_BR = "var BR = typeof BR === 'undefined' ? {} : BR;";
+const SHARED_BR = "var BR = BR && BR.__birta === true ? BR : { __birta: true };";
 const OURS = ["10-keys.js", "20-pointing.js"];
 const ORDER = ["quote.js", "00-core.js", "10-keys.js", "20-pointing.js", "40-lane.js"];
 

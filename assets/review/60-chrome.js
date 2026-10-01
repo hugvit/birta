@@ -1,4 +1,4 @@
-var BR = typeof BR === 'undefined' ? {} : BR;
+var BR = BR && BR.__birta === true ? BR : { __birta: true };
 (function () {
   BR.pure = BR.pure || {};
 
@@ -12,7 +12,9 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     hold_pending: 'already handing back',
     // A read-only doc can't take an undo at all, so a refusal blames the review file
     read_only: 'review file is read-only',
-    not_reversible: "can't undo this one · c instead"
+    not_reversible: "can't undo this one · c instead",
+    // The socket went before the op reached it or was answered, and it is never replayed
+    not_sent: 'connection lost · try again'
   };
 
   function cap(name) { return name.charAt(0).toUpperCase() + name.slice(1); }
@@ -234,13 +236,8 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   function batchHold(t) { return batch && t < batch.not_before ? batch : null; }
 
   function host(tag) {
-    var el = document.createElement(tag);
-    var root = el.attachShadow({ mode: 'closed' });
-    var style = document.createElement('style');
-    style.textContent = BR.shadowCss || '';
-    root.appendChild(style);
-    BR.FLOW_HOSTS.add(el);
-    return { el: el, root: root };
+    var made = BR.shadowHost(tag);
+    return { el: made.host, root: made.root };
   }
 
   function active() {
@@ -427,7 +424,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   function closeMenu() {
     if (!menuOpen()) return false;
     popover(menu, false);
-    // Focus left in the popover's host would make the next key a host's, which review ignores
+    // Focus left in a hidden popover would hold the keys somewhere the reader can't see
     if (document.activeElement === pop.el) menu.blur();
     return true;
   }
@@ -457,14 +454,12 @@ var BR = typeof BR === 'undefined' ? {} : BR;
 
   function onMenuKey(e) {
     var mine = e.key === 'Escape' ? closeMenu() : menuKey(e);
-    // Any other review key closes the menu, then acts as it would on the page
-    if (!mine) {
-      closeMenu();
-      mine = BR.keys.run(e);
-    }
     if (mine) {
       e.preventDefault();
       e.stopPropagation();
+    } else {
+      // Any other key closes the menu, then goes on to act as it would on the page
+      closeMenu();
     }
   }
 

@@ -183,10 +183,10 @@ test.describe("quote extractor", () => {
     await page.addScriptTag({ path: QUOTE_JS });
   });
 
-  test("loads as a classic script without touching an existing BR", async ({ page }) => {
+  test("loads as a classic script without touching review's existing BR", async ({ page }) => {
     await page.reload();
     await page.evaluate(() => {
-      (window as any).BR = { keep: 1 };
+      (window as any).BR = { __birta: true, keep: 1 };
     });
     await page.addScriptTag({ path: QUOTE_JS });
     const shape = await page.evaluate(() => {

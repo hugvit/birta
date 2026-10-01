@@ -105,7 +105,7 @@ async function washEdge(page: Page, sp: string): Promise<Rgb> {
 
 /** Every outbox key the page holds, so a spec can wait for acks to land. */
 const outbox = (page: Page) =>
-  page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("birta-outbox:") && localStorage.getItem(k)));
+  page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("birta-unacked:") && localStorage.getItem(k)));
 
 test.describe("focus", () => {
   test("j walks every stop in order, nested items included, and k walks back to the doc", async ({
@@ -828,5 +828,64 @@ test.describe("underline", () => {
     await open(page, birta, fixtureDoc("drafts"), { state: fixtureState("drafts") });
     await expect.poll(async () => (await markKeys(page)).some((k) => k.includes("5:1-6:54"))).toBe(true);
     expect(errors).toEqual([]);
+  });
+});
+
+test.describe("a long doc", () => {
+  const paragraphs = (n: number) =>
+    "# Long\n\n" + Array.from({ length: n }, (_, i) => `Paragraph number ${i} with *some* words.\n`).join("\n");
+
+  /** Serves `n` paragraphs and focuses the second stop, so the next j is a step between blocks. */
+  async function openLong(page: Page, birta: Start, n: number) {
+    const served = await birta({ "pr.md": paragraphs(n) }, GATE_ON);
+    await page.setViewportSize(WIDE);
+    await page.goto(`${served.url}/view/pr.md`);
+    await booted(page);
+    expect(await stops(page)).toHaveLength(n + 1);
+    await page.keyboard.press("j");
+    await page.keyboard.press("j");
+    await expect.poll(() => focused(page)).not.toBeNull();
+  }
+
+  /** One j, dispatched as the keyboard would: the queries it makes and how long it takes. */
+  function oneJ(page: Page): Promise<{ queries: number; ms: number }> {
+    return page.evaluate(() => {
+      let queries = 0;
+      const el = Element.prototype.querySelectorAll;
+      const doc = Document.prototype.querySelectorAll;
+      Element.prototype.querySelectorAll = function (this: Element, sel: string) {
+        queries++;
+        return el.call(this, sel);
+      } as typeof el;
+      Document.prototype.querySelectorAll = function (this: Document, sel: string) {
+        queries++;
+        return doc.call(this, sel);
+      } as typeof doc;
+      const t0 = performance.now();
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "j", code: "KeyJ", bubbles: true, cancelable: true }));
+      const ms = performance.now() - t0;
+      Element.prototype.querySelectorAll = el;
+      Document.prototype.querySelectorAll = doc;
+      return { queries, ms };
+    });
+  }
+
+  test("one j queries the doc no more on 3000 paragraphs than on 300", async ({ page, birta }) => {
+    const counts: number[] = [];
+    for (const n of [300, 3000]) {
+      await openLong(page, birta, n);
+      counts.push((await oneJ(page)).queries);
+    }
+    expect(counts[1]).toBe(counts[0]);
+    expect(counts[1]).toBeLessThanOrEqual(5);
+  });
+
+  test("one j on 3000 paragraphs takes under 30 ms", async ({ page, birta, browserName }) => {
+    test.skip(browserName !== "chromium", "the budget is chromium's");
+    await openLong(page, birta, 3000);
+    const times: number[] = [];
+    for (let i = 0; i < 5; i++) times.push((await oneJ(page)).ms);
+    times.sort((a, b) => a - b);
+    expect(times[2]).toBeLessThan(30);
   });
 });

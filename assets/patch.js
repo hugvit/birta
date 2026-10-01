@@ -52,7 +52,7 @@
         var out = [];
         for (var n = parent.firstChild; n; n = n.nextSibling) {
           // Review's in-flow hosts are not the doc's blocks
-          if (!isBlank(n) && !(typeof BR !== 'undefined' && BR.isHost(n))) out.push(n);
+          if (!isBlank(n) && !api.skip(n)) out.push(n);
         }
         return out;
       }
@@ -248,10 +248,13 @@
         root.addEventListener('load', reanchor, true);
       }
 
-      return {
+      var api = {
         planPatch: planPatch,
         attach: attach,
         apply: apply,
-        withScrollAnchor: withScrollAnchor
+        withScrollAnchor: withScrollAnchor,
+        // Set by review at boot, so the patcher never looks up a global a doc element's id can take
+        skip: function() { return false; }
       };
+      return api;
     })();

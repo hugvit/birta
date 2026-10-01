@@ -1,4 +1,21 @@
-/* Important declarations inside a shadow tree outrank the page's, so doc CSS can't hide the lane */
+/* Important declarations inside a shadow tree outrank the page's, so doc CSS can't hide, move or blend away a host */
+:host {
+  visibility: visible !important;
+  opacity: 1 !important;
+  clip-path: none !important;
+  filter: none !important;
+  mask-image: none !important;
+  -webkit-mask-image: none !important;
+  mix-blend-mode: normal !important;
+  content-visibility: visible !important;
+  transform: none !important;
+  translate: none !important;
+  rotate: none !important;
+  scale: none !important;
+  offset-path: none !important;
+  zoom: 1 !important;
+}
+
 :host(birta-under),
 :host(birta-over) {
   position: absolute !important;
@@ -281,14 +298,18 @@
 /* In-flow hosts sit in the doc, whose CSS must not hide them */
 :host(birta-flow) {
   display: block !important;
-  visibility: visible !important;
-  opacity: 1 !important;
   position: static !important;
+  z-index: auto !important;
+  width: auto !important;
+  max-width: none !important;
+  height: auto !important;
+  max-height: none !important;
+  overflow: visible !important;
+  contain: none !important;
   margin: 8px 0 !important;
   padding: 0 !important;
   border: 0 !important;
   float: none !important;
-  transform: none !important;
   font-size: 16px;
 }
 
@@ -303,6 +324,15 @@
 }
 
 /* The doc slot sits outside .markdown-body, so the doc's font is named here rather than inherited */
+/* Inherited from the host, where doc CSS could make it clear */
+.flow,
+.phrase,
+.turn,
+.pill,
+.menu {
+  -webkit-text-fill-color: currentColor;
+}
+
 .flow {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
   font-size: 14px;

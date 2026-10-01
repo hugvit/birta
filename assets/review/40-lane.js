@@ -1,4 +1,4 @@
-var BR = typeof BR === 'undefined' ? {} : BR;
+var BR = BR && BR.__birta === true ? BR : { __birta: true };
 (function () {
   BR.pure = BR.pure || {};
 
@@ -111,21 +111,18 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   }
 
   function makeHost(tag, z) {
-    var host = document.createElement(tag);
+    var made = BR.shadowHost(tag);
+    var host = made.host;
     pin(host, {
       position: 'absolute', inset: '0', width: 'auto', height: 'auto', display: 'block',
       visibility: 'visible', opacity: '1', overflow: 'visible', 'clip-path': 'none', filter: 'none',
       'mask-image': 'none', '-webkit-mask-image': 'none', 'content-visibility': 'visible',
-      transform: 'none', margin: '0', padding: '0', 'pointer-events': 'none', 'z-index': String(z)
+      transform: 'none', translate: 'none', rotate: 'none', scale: 'none', 'offset-path': 'none', zoom: '1',
+      'mix-blend-mode': 'normal', margin: '0', padding: '0', 'pointer-events': 'none', 'z-index': String(z)
     });
-    var root = host.attachShadow({ mode: 'closed' });
-    var style = document.createElement('style');
-    style.textContent = BR.shadowCss || '';
-    root.appendChild(style);
     var layer = document.createElement('div');
     layer.className = 'layer';
-    root.appendChild(layer);
-    BR.FLOW_HOSTS.add(host);
+    made.root.appendChild(layer);
     frame.appendChild(host);
     return layer;
   }
@@ -223,11 +220,6 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     // A glyph shares its block's lane with the bar, so it moves to the slot beside it
     var barred = {};
     marks.forEach(function (m) { if (m.mark === 'bar') barred[m.sp] = m; });
-    var bySp = {};
-    content.querySelectorAll('[data-sourcepos]').forEach(function (el) {
-      // Document order puts a list item after a list that shares its sp
-      bySp[el.getAttribute('data-sourcepos')] = el;
-    });
     var F = frame.getBoundingClientRect();
     var C = content.getBoundingClientRect();
     var narrow = window.innerWidth < 768;
@@ -249,7 +241,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     // All reads happen before the layers change, so the doc is laid out once
     marks.forEach(function (m) {
       if (m.mark === 'tick') {
-        var after = m.after === null ? null : bySp[m.after];
+        var after = m.after === null ? null : BR.blocks.of(m.after);
         if (m.after !== null && !rendered(after)) return;
         var next = nextBlock(after);
         var top = after ? ownRect(after).bottom : F.top;
@@ -261,7 +253,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
           laneX - 6, (top + bottom) / 2 - 1 - F.top, 12, 2));
         return;
       }
-      var el = bySp[m.sp];
+      var el = BR.blocks.of(m.sp);
       if (!rendered(el)) return;
       var r = ownRect(el);
       if (m.mark === 'bar') {
@@ -292,7 +284,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
         'rule ' + f.style + ' ' + f.role, laneX - 1, r.top - F.top, 2, r.height));
     });
     BR.flow.dots().forEach(function (d) {
-      var el = bySp[d.sp];
+      var el = BR.blocks.of(d.sp);
       if (!rendered(el)) return;
       var line = firstLine(el);
       overOut.appendChild(box({ 'data-mark': 'dot', 'data-sp': d.sp, 'data-role': d.role }, 'dot ' + d.role,
@@ -309,20 +301,25 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       places.push({ h: h, link: link, left: left - F.left, top: (line.top + line.bottom) / 2 - 8 - F.top });
     });
 
-    var focusOut = document.createDocumentFragment();
-    if (focused && focused.isConnected && rendered(focused)) {
-      var fr = sectionRect(focused, C);
-      var fl = Math.max(focused.localName === 'li' ? focused.parentElement.getBoundingClientRect().left : fr.left, C.left) - 8;
-      var fright = Math.min(fr.right, C.right) + 8;
-      focusOut.appendChild(box({ 'data-mark': 'focus', 'data-sp': focused.getAttribute('data-sourcepos'),
-        'data-target': focused.localName === 'summary' ? 'summary' : null }, 'focus',
-        fl - F.left, fr.top - F.top, fright - fl, fr.bottom - fr.top));
-    }
-    focusLayer.replaceChildren(focusOut);
+    drawFocus(F, C);
     highlight();
     under.replaceChildren(underOut);
     overMarks.replaceChildren(overOut);
     placeAnchors(places);
+  }
+
+  // The wash where the keys act, which a move redraws on its own
+  function drawFocus(F, C) {
+    var out = document.createDocumentFragment();
+    if (focused && focused.isConnected && rendered(focused)) {
+      var fr = sectionRect(focused, C);
+      var fl = Math.max(focused.localName === 'li' ? focused.parentElement.getBoundingClientRect().left : fr.left, C.left) - 8;
+      var fright = Math.min(fr.right, C.right) + 8;
+      out.appendChild(box({ 'data-mark': 'focus', 'data-sp': focused.getAttribute('data-sourcepos'),
+        'data-target': focused.localName === 'summary' ? 'summary' : null }, 'focus',
+        fl - F.left, fr.top - F.top, fright - fl, fr.bottom - fr.top));
+    }
+    focusLayer.replaceChildren(out);
   }
 
   // Icons are kept across redraws, so a click that spans one still lands on the same element
@@ -473,7 +470,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     },
     focus: function (el) {
       focused = el;
-      render();
+      drawFocus(frame.getBoundingClientRect(), content.getBoundingClientRect());
     },
     toggle: function () {
       hidden = !hidden;

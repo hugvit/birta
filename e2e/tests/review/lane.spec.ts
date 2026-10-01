@@ -717,6 +717,80 @@ test.describe("the doc cannot reach the lane, however hard it tries", () => {
   });
 });
 
+test.describe("the doc cannot hide or recolour the notes", () => {
+  const HIDE =
+    "clip-path: inset(50%) !important; filter: opacity(0) !important; opacity: 0 !important; translate: -9999px 0 !important; rotate: 90deg !important; scale: 0 !important; zoom: 0.01 !important; offset-path: path('M 0 0 L -9999 0') !important; mix-blend-mode: screen !important; mask-image: linear-gradient(transparent, transparent) !important; -webkit-mask-image: linear-gradient(transparent, transparent) !important; content-visibility: hidden !important; visibility: hidden !important;";
+  const VARS =
+    "--review-agent: transparent !important; --review-you: transparent !important; --review-new: transparent !important; --review-wash: transparent !important; --birta-fg: transparent !important; --birta-fg-muted: transparent !important; --birta-bg: transparent !important;";
+  const css = [
+    `birta-flow, birta-under, birta-over, birta-phrase, birta-turn, birta-pop { ${HIDE} }`,
+    `:root, html, body, #lane-frame, #content, li, birta-flow, birta-under, birta-over, birta-phrase, birta-turn, birta-pop { ${VARS} }`,
+  ].join("\n");
+  const doc = `${fixtureDoc("unseen")}\n<style>${css}</style>\n`;
+  const ITEM = "11:1-11:44";
+
+  test("doc CSS cannot hide, move or blend away a note, the lane or their colours", async ({ page, birta }) => {
+    await open(page, birta, doc, { state: withRev(fixtureState("unseen"), revOf(doc)) });
+    await expect.poll(() => markKeys(page)).toEqual(UNSEEN_KEYS);
+    // The lane: the agent's bar in its grey, and the new block's wash
+    const ms = await marks(page);
+    const bar = only(ms, "bar", "5:1-6:68");
+    const glyph = only(ms, "glyph", "5:1-6:68");
+    const px = await column(page, await laneX(page), glyph.bottom + 2, bar.bottom - 1);
+    expect(px.filter((p) => !near(p, AGENT, 12))).toEqual([]);
+    const p = (await blockBox(page, "5:1-6:68"))!;
+    const s = await shot(page, await frameBox(page));
+    expect(near(s.at(p.right + 4, p.top + 4), NEW)).toBe(true);
+    // The receipt under the item: laid out where it belongs, and painted there
+    const host = page.locator(`#content [data-sourcepos="${ITEM}"] > birta-flow`, { hasText: "nobody asked" });
+    await expect(host).toHaveCount(1);
+    const styles = await host.evaluate((h) => {
+      const cs = getComputedStyle(h);
+      const line = h.shadowRoot!.querySelector(".text")!;
+      return {
+        clip: cs.clipPath,
+        filter: cs.filter,
+        opacity: cs.opacity,
+        translate: cs.translate,
+        rotate: cs.rotate,
+        scale: cs.scale,
+        offset: cs.getPropertyValue("offset-path"),
+        blend: cs.mixBlendMode,
+        visibility: cs.visibility,
+        mask: cs.maskImage || cs.getPropertyValue("-webkit-mask-image"),
+        text: getComputedStyle(line).color,
+      };
+    });
+    expect(styles).toMatchObject({
+      clip: "none",
+      filter: "none",
+      opacity: "1",
+      translate: "none",
+      rotate: "none",
+      scale: "none",
+      blend: "normal",
+      visibility: "visible",
+      mask: "none",
+    });
+    expect(["none", ""]).toContain(styles.offset);
+    expect(styles.text).not.toMatch(/rgba\(0, 0, 0, 0\)|transparent/);
+    const item = (await blockBox(page, ITEM))!;
+    const hb = await host.evaluate((h) => {
+      const r = h.getBoundingClientRect();
+      return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
+    });
+    expect(hb.top).toBeGreaterThanOrEqual(item.top - 1);
+    expect(hb.left).toBeGreaterThanOrEqual(item.left - 1);
+    expect(hb.height).toBeGreaterThan(10);
+    expect(await inkIn(page, hb, WHITE)).not.toBeNull();
+    // The hosts carry the theme's own colours, whatever the doc said
+    const vars = await page.evaluate(() =>
+      ["birta-over", "birta-flow"].map((t) => getComputedStyle(document.querySelector(t)!).getPropertyValue("--review-agent").trim()),
+    );
+    expect(vars.map((v) => near(hex(v.length === 4 ? `#${v[1]}${v[1]}${v[2]}${v[2]}${v[3]}${v[3]}` : v), AGENT, 2))).toEqual([true, true]);
+  });
+});
+
 test.describe("lane edges", () => {
   test("a removed item leaves its tick between the items around it", async ({ page, birta }) => {
     const doc = "# Ticks\n\n- First item\n- Second item\n- Third item\n\nAfter the list.\n";

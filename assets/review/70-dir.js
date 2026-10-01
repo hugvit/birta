@@ -1,4 +1,4 @@
-var BR = typeof BR === 'undefined' ? {} : BR;
+var BR = BR && BR.__birta === true ? BR : { __birta: true };
 (function () {
   BR.pure = BR.pure || {};
   // Where n or p sent this tab, and which end of that page's walk to land on

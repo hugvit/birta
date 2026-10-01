@@ -1,4 +1,4 @@
-var BR = typeof BR === 'undefined' ? {} : BR;
+var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
 // A selection's text as the server's anchor resolver reads it: the owner block's rendered
 // text with whitespace collapsed, counted in code points.
@@ -169,21 +169,28 @@ BR.quote = (function () {
   function paint(sp, off) {
     var root = content();
     if (!root) return null;
+    // The shared index holds the last element with the sp, which is the owner unless it shares one
+    var known = BR.blocks ? BR.blocks.of(sp) : null;
+    if (BR.blocks && !known) return null;
+    if (known && known.matches(OWNER)) return rangeIn(known, off);
     var all = root.querySelectorAll('[data-sourcepos]');
     for (var i = 0; i < all.length; i++) {
-      if (all[i].getAttribute('data-sourcepos') !== sp || !all[i].matches(OWNER)) continue;
-      var list = units(all[i]);
-      var a = off[0], b = off[1];
-      if (!(a >= 0 && a < b && b <= list.length)) return null;
-      var range = document.createRange();
-      var first = list[a].where, last = list[b - 1].where;
-      if (first.node) range.setStart(first.node, first.start);
-      else range.setStartBefore(first.el);
-      if (last.node) range.setEnd(last.node, last.end);
-      else range.setEndAfter(last.el);
-      return range;
+      if (all[i].getAttribute('data-sourcepos') === sp && all[i].matches(OWNER)) return rangeIn(all[i], off);
     }
     return null;
+  }
+
+  function rangeIn(owner, off) {
+    var list = units(owner);
+    var a = off[0], b = off[1];
+    if (!(a >= 0 && a < b && b <= list.length)) return null;
+    var range = document.createRange();
+    var first = list[a].where, last = list[b - 1].where;
+    if (first.node) range.setStart(first.node, first.start);
+    else range.setStartBefore(first.el);
+    if (last.node) range.setEnd(last.node, last.end);
+    else range.setEndAfter(last.el);
+    return range;
   }
 
   return { fromRange: fromRange, paint: paint };

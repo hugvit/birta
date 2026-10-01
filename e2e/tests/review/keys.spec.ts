@@ -202,6 +202,89 @@ test.describe("guard", () => {
   });
 });
 
+test.describe("keys with focus in a review host", () => {
+  /** The local name of the page's focused element, as the document sees it. */
+  const active = (page: Page) => page.evaluate(() => document.activeElement?.localName ?? null);
+
+  test("after clicking Hand back, z withdraws it", async ({ page, birta, browserName }) => {
+    const served = await birta({ "pr.md": STOPS_DOC }, { ...GATE_ON, BIRTA_REVIEW_HOLD_MS: "6000" });
+    await page.setViewportSize(WIDE);
+    await page.goto(`${served.url}/view/pr.md`);
+    await booted(page);
+    await page.keyboard.press("j");
+    await page.keyboard.press("c");
+    await page.keyboard.type("hand me back");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => (reviewLog(served.root) ?? []).filter((l) => l.op === "comment").length).toBe(1);
+    await page.locator(".file-header birta-turn button").click();
+    await expect.poll(() => (reviewLog(served.root) ?? []).filter((l) => l.op === "submit").length).toBe(1);
+    // WebKit never focuses a clicked button, so only chromium puts the key in the host
+    await expect(page.locator("birta-pop .pill")).toContainText("handing back");
+    if (browserName === "chromium") expect(await active(page)).toBe("birta-turn");
+    await page.keyboard.press("z");
+    await expect.poll(() => (reviewLog(served.root) ?? []).filter((l) => l.op === "withdraw").length).toBe(1);
+  });
+
+  test("after clicking a note, j moves the focus and Esc drops it", async ({ page, birta }) => {
+    await open(page, birta, fixtureDoc("flow"), { state: fixtureState("flow") });
+    await page.locator('birta-flow[data-kind="note"]').first().click();
+    expect(await active(page)).toBe("birta-flow");
+    expect(await focused(page)).toBeNull();
+    await page.keyboard.press("j");
+    await expect.poll(() => focused(page)).not.toBeNull();
+    await page.keyboard.press("Escape");
+    await expect.poll(() => focused(page)).toBeNull();
+  });
+
+  test("a focused settled note swallows the verdict and note keys it doesn't own, and j still moves", async ({
+    page,
+    birta,
+  }) => {
+    const { mock } = await open(page, birta, fixtureDoc("flow"), { state: fixtureState("flow") });
+    const note = page.locator('birta-flow[data-kind="note"]', { hasText: "cap it" });
+    await note.click();
+    for (const key of ["x", "l", ".", "c", "q", "Shift+X"]) await page.keyboard.press(key);
+    await page.waitForTimeout(SETTLE_MS);
+    expect(mock.ops()).toEqual([]);
+    await expect(page.locator('birta-flow[data-kind="composer"]')).toHaveCount(0);
+    await page.keyboard.press("y");
+    await expect.poll(() => mock.ops().length).toBe(1);
+    expect(mock.ops()[0]).toMatchObject({ op: "seen", ids: ["#6"] });
+    await note.click();
+    await page.keyboard.press("j");
+    await expect.poll(() => focused(page)).not.toBeNull();
+  });
+
+  test("after clicking the phrase open and shut, j moves the focus", async ({ page, birta }) => {
+    await open(page, birta, fixtureDoc("flow"), { state: fixtureState("flow") });
+    const phrase = page.locator(".file-header birta-phrase .phrase");
+    await phrase.click();
+    await expect(page.locator("birta-pop .menu")).toBeVisible();
+    await phrase.click();
+    await expect(page.locator("birta-pop .menu")).toBeHidden();
+    await page.keyboard.press("j");
+    await expect.poll(() => focused(page)).not.toBeNull();
+  });
+
+  test("Enter on the focused turn button still presses it, once", async ({ page, birta }) => {
+    const served = await birta({ "pr.md": STOPS_DOC }, { ...GATE_ON, BIRTA_REVIEW_HOLD_MS: "6000" });
+    await page.setViewportSize(WIDE);
+    const sent = watchSent(page);
+    await page.goto(`${served.url}/view/pr.md`);
+    await booted(page);
+    await page.keyboard.press("j");
+    await page.keyboard.press("c");
+    await page.keyboard.type("hand me back");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => (reviewLog(served.root) ?? []).filter((l) => l.op === "comment").length).toBe(1);
+    await page.locator(".file-header birta-turn button").focus();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => (reviewLog(served.root) ?? []).filter((l) => l.op === "submit").length).toBe(1);
+    await page.waitForTimeout(SETTLE_MS);
+    expect(sent.filter((f) => f.type === "op" && f.op === "hand_back")).toHaveLength(1);
+  });
+});
+
 test.describe("guard, edges", () => {
   test("Shift with a verdict, note or undo key does nothing", async ({ page, birta }) => {
     const { mock } = await open(page, birta, STOPS_DOC);

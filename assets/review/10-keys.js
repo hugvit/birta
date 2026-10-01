@@ -1,4 +1,4 @@
-var BR = typeof BR === 'undefined' ? {} : BR;
+var BR = BR && BR.__birta === true ? BR : { __birta: true };
 (function () {
   BR.pure = BR.pure || {};
 
@@ -69,8 +69,20 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     return BR.pointing.act(action);
   }
 
+  // Enter and Space on a button or link press it
+  function presses(e, t) {
+    return (e.key === 'Enter' || e.key === ' ') && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey &&
+      !!t && !!t.closest && !!t.closest('button, a, [role="button"]');
+  }
+
+  // A review host's keys reach its own handlers and then fromHost, never this
   function onKey(e) {
     if (e.defaultPrevented || typing(e.target) || BR.isHost(e.target)) return;
+    handle(e, false);
+  }
+
+  /** Acts on a key; `own` is for a key from inside a review host, whose controls are review's. */
+  function handle(e, own) {
     if (BR.chrome.menuKey(e)) {
       e.preventDefault();
       e.stopPropagation();
@@ -85,13 +97,17 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       }
       return;
     }
-    if (onControl(e.target)) return;
+    if (!own && onControl(e.target)) return;
     if (run(e)) e.preventDefault();
   }
 
   BR.keys = {
-    /** For a key pressed in the phrase menu, which is a review host the page guard skips. */
-    run: run,
+    /** A key inside a review host that its own handlers left: acts as it would on the page. */
+    fromHost: function (e) {
+      var t = e.composedPath()[0];
+      if (e.defaultPrevented || typing(t) || presses(e, t)) return;
+      handle(e, true);
+    },
     init: function () {
       // Capture, so the viewer's own handler sees a consumed key as defaultPrevented
       document.addEventListener('keydown', onKey, true);

@@ -1,4 +1,4 @@
-var BR = typeof BR === 'undefined' ? {} : BR;
+var BR = BR && BR.__birta === true ? BR : { __birta: true };
 (function () {
   // Blocks that own quote text, as quote.js finds them
   var OWNERS = 'p,li,h1,h2,h3,h4,h5,h6,td,th,dt,dd,pre';
@@ -21,19 +21,26 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   // Where n and p last landed, as `[rank, line, order]`, so a server push can't skip a stop
   var cursor = null;
 
+  // Each stop's element, or the summary of a closed details for those it hides, until the doc changes
+  var placed = null;
+  var placedAt = -1;
+  var placedFor = null;
+  var standIns = new Set();
+  // The walk's stops for the state they came from
+  var walkFor = null;
+  var walkStops = [];
+
   function content() { return document.getElementById('content'); }
 
-  function blockOf(sp) {
-    // A list shares its first item's sp and comes first, so the last match is the item
-    var all = content().querySelectorAll('[data-sourcepos="' + sp + '"]');
-    return all[all.length - 1] || null;
-  }
+  function blockOf(sp) { return BR.blocks.of(sp); }
 
   function isSummary(el) { return !!el && el.localName === 'summary'; }
 
-  /** The focus stops in document order; a closed `<details>` stands in with its summary. */
-  function targets() {
+  function placedStops() {
+    var v = BR.blocks.version();
+    if (placed && placedAt === v && placedFor === stops) return placed;
     var out = [];
+    standIns = new Set();
     stops.forEach(function (s) {
       var el = blockOf(s.sp);
       if (!el) return;
@@ -42,12 +49,29 @@ var BR = typeof BR === 'undefined' ? {} : BR;
         var summary = closed.querySelector(':scope > summary');
         if (summary && !summary.contains(el)) {
           if (out[out.length - 1] !== summary) out.push(summary);
+          standIns.add(summary);
           return;
         }
       }
-      if (el.getClientRects().length) out.push(el);
+      out.push(el);
     });
+    placed = out;
+    placedAt = v;
+    placedFor = stops;
     return out;
+  }
+
+  /** The focus stops in document order; a closed `<details>` stands in with its summary. */
+  function targets() {
+    return placedStops().filter(function (el) { return standIns.has(el) || el.getClientRects().length; });
+  }
+
+  function attention(state) {
+    if (state !== walkFor) {
+      walkFor = state;
+      walkStops = BR.pure.attention(state);
+    }
+    return walkStops;
   }
 
   function headerBottom() {
@@ -70,9 +94,9 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     BR.chrome.render();
   }
 
-  function setFocus(el) {
+  function setFocus(el, all) {
     focus = el;
-    focusWas = el && { name: el.localName, text: el.textContent, at: targets().indexOf(el) };
+    focusWas = el && { name: el.localName, text: el.textContent, at: (all || targets()).indexOf(el) };
     BR.lane.focus(el);
     paintDoc();
   }
@@ -97,7 +121,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     if (!focus) {
       if (step < 0) return;
       var top = headerBottom() - 1;
-      next = all.filter(function (el) { return el.getBoundingClientRect().top >= top; })[0] || all[all.length - 1];
+      next = all.find(function (el) { return el.getBoundingClientRect().top >= top; }) || all[all.length - 1];
     } else {
       var at = all.indexOf(focus);
       var i = at + step;
@@ -115,7 +139,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       }
       next = all[Math.min(i, all.length - 1)];
     }
-    setFocus(next);
+    setFocus(next, all);
     reveal(next);
     see(next);
   }
@@ -154,7 +178,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   function walk(step) {
     var state = BR.currentState();
     if (!state || state.log_writable === false) return;
-    var all = BR.pure.attention(state);
+    var all = attention(state);
     var next = step > 0
       ? all.filter(function (x) { return !cursor || before(cursor, keyOf(x)); })[0]
       : all.filter(function (x) { return cursor && before(keyOf(x), cursor); }).pop();
@@ -447,7 +471,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     /** The approve guard: goes to the first unseen change; false when there is none. */
     toUnseen: function () {
       var state = BR.currentState();
-      var first = state && BR.pure.attention(state).filter(function (x) { return x.kind === 'change'; })[0];
+      var first = state && attention(state).filter(function (x) { return x.kind === 'change'; })[0];
       if (first) land(first);
       return !!first;
     },
@@ -455,7 +479,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     landAt: function (which) {
       var state = BR.currentState();
       if (!state) return;
-      var all = BR.pure.attention(state);
+      var all = attention(state);
       var stop = which === 'last' ? all[all.length - 1] : all[0];
       if (stop) land(stop);
     },

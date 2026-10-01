@@ -142,3 +142,11 @@ test("cost stays linear in the list lengths", () => {
     );
   }
 });
+
+test("never reads a global BR, which a doc element can be; review hands its check over as skip", () => {
+  const src = fs.readFileSync(PATCH_JS, "utf-8");
+  assert.doesNotMatch(src, /\bBR\b/);
+  const patch = load();
+  assert.equal(typeof patch.skip, "function");
+  assert.equal(patch.skip({}), false);
+});

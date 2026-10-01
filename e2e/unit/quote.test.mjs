@@ -23,7 +23,7 @@ function load(globals = {}) {
 
 test("starts by reusing the shared BR namespace", () => {
   const first = fs.readFileSync(QUOTE_JS, "utf-8").split("\n")[0];
-  assert.equal(first, "var BR = typeof BR === 'undefined' ? {} : BR;");
+  assert.equal(first, "var BR = BR && BR.__birta === true ? BR : { __birta: true };");
 });
 
 test("loads without a DOM and exposes fromRange and paint", () => {
@@ -33,7 +33,7 @@ test("loads without a DOM and exposes fromRange and paint", () => {
 });
 
 test("keeps what other review scripts put on BR", () => {
-  const other = { keep: 1 };
+  const other = { __birta: true, keep: 1 };
   const { BR } = load({ BR: other });
   assert.equal(BR, other);
   assert.equal(BR.keep, 1);

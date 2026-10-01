@@ -15,6 +15,8 @@ import {
   misaligned,
   mockReview,
   revOf,
+  reviewLog,
+  watchSent,
   withRev,
 } from "./harness";
 
@@ -42,8 +44,12 @@ function sendOp(page: Page, op: object): Promise<string> {
   return page.evaluate((op) => (window as unknown as { BR: { op: (o: object) => string } }).BR.op(op), op);
 }
 
+/** What the outboxes for `path` hold, every tab's run together, or null when none does. */
 function outbox(page: Page, path = "pr.md"): Promise<string | null> {
-  return page.evaluate((p) => localStorage.getItem("birta-outbox:" + p), path);
+  return page.evaluate((p) => {
+    const keys = Object.keys(localStorage).filter((k) => k.startsWith("birta-unacked:") && k.endsWith(":" + p));
+    return keys.length ? keys.map((k) => localStorage.getItem(k)).join("") : null;
+  }, path);
 }
 
 /** Frames of `type` from the socket that carried the op `cid`, and where the op sat among them. */
@@ -293,6 +299,115 @@ test.describe("outbox", () => {
     const after = await sendOp(page, { op: "seen", ids: ["9.0"] });
     expect(new Set([...before, after]).size).toBe(3);
   });
+});
+
+test.describe("outbox, only notes and only this tab's", () => {
+  const ACTS = [
+    { op: "approve" },
+    { op: "hand_back", scope: "doc" },
+    { op: "undo_change", change: "10.0" },
+    { op: "owner", drafted_by: null },
+    { op: "withdraw", to: 3 },
+    { op: "release", claim: 3 },
+  ];
+
+  test("an approve, a hand-back, an undo, an owner change, a withdraw or a release is never kept, so a reload sends none again", async ({
+    page,
+    birta,
+  }) => {
+    const served = await birta({ "pr.md": UNSEEN }, GATE_ON);
+    const mock = await mockReview(page, { acks: "manual" });
+    await page.goto(`${served.url}/view/pr.md`);
+    await booted(page);
+    const acts: string[] = [];
+    for (const op of ACTS) acts.push(await sendOp(page, op));
+    const note = await sendOp(page, { op: "comment", at: { k: "doc" }, body: "keep me" });
+    await expect.poll(() => mock.ops().length).toBe(ACTS.length + 1);
+    const kept = (await outbox(page)) ?? "";
+    expect(kept).toContain(note);
+    for (const cid of acts) expect(kept).not.toContain(cid);
+    await page.reload();
+    await booted(page);
+    await expect.poll(() => mock.ops().filter((o) => o.cid === note).length).toBe(2);
+    await page.waitForTimeout(500);
+    expect(mock.ops().filter((o) => acts.includes(o.cid))).toHaveLength(ACTS.length);
+  });
+
+  test("an outbox kept under the old key is dropped at boot, and none of it is sent", async ({ page, birta }) => {
+    const served = await birta({ "pr.md": UNSEEN }, GATE_ON);
+    const sent = watchSent(page);
+    const rev = revOf(UNSEEN);
+    const old = [...ACTS.slice(0, 3), { op: "comment", at: { k: "doc" }, body: "from an old page" }].map((op, i) => ({
+      type: "op",
+      cid: `rforeign-${i + 1}`,
+      path: "pr.md",
+      rev,
+      ...op,
+    }));
+    await page.addInitScript((box) => {
+      if (!sessionStorage.getItem("seeded")) localStorage.setItem("birta-outbox:pr.md", box);
+      sessionStorage.setItem("seeded", "1");
+    }, JSON.stringify(old));
+    await page.goto(`${served.url}/view/pr.md`);
+    await booted(page);
+    await page.waitForTimeout(1_000);
+    expect(sent.filter((f) => f.type === "op")).toEqual([]);
+    expect(reviewLog(served.root)).toBeNull();
+    expect(await page.evaluate(() => localStorage.getItem("birta-outbox:pr.md"))).toBeNull();
+  });
+
+  test("another tab's outbox is never sent from this one", async ({ page, birta }) => {
+    const served = await birta({ "pr.md": UNSEEN }, GATE_ON);
+    const sent = watchSent(page);
+    const frame = { type: "op", cid: "rother-1", path: "pr.md", rev: revOf(UNSEEN), op: "comment", at: { k: "doc" }, body: "theirs" };
+    await page.addInitScript((box) => localStorage.setItem("birta-unacked:othertab:pr.md", box), JSON.stringify([frame]));
+    await page.goto(`${served.url}/view/pr.md`);
+    await booted(page);
+    await page.waitForTimeout(1_000);
+    expect(sent.filter((f) => f.type === "op")).toEqual([]);
+    expect(reviewLog(served.root)).toBeNull();
+  });
+
+  test("an undo lost with its socket leaves x free to undo again, and is not sent twice", async ({ page, birta }) => {
+    const served = await birta({ "pr.md": UNSEEN }, GATE_ON);
+    await page.setViewportSize(WIDE);
+    const mock = await mockReview(page, { state: fixtureState("unseen"), acks: "manual" });
+    await page.goto(`${served.url}/view/pr.md`);
+    await booted(page);
+    const receipt = page.locator("birta-flow", { hasText: "nobody asked" }).filter({ hasText: "x undo" }).first();
+    await receipt.click();
+    await page.keyboard.press("x");
+    await expect.poll(() => mock.ops().filter((o) => o.op === "undo_change").length).toBe(1);
+    const first = mock.ops().find((o) => o.op === "undo_change")!.cid;
+    await mock.drop();
+    await expect.poll(() => mock.frames.filter((f) => f.msg.type === "hello").length, { timeout: 10_000 }).toBe(2);
+    await receipt.click();
+    await page.keyboard.press("x");
+    await expect.poll(() => mock.ops().filter((o) => o.op === "undo_change").length).toBe(2);
+    expect(mock.ops().filter((o) => o.cid === first)).toHaveLength(1);
+  });
+});
+
+test.describe("a doc element with the id BR", () => {
+  const DOC = '# T\n\n<a id="BR">x</a>\n\ntext\n';
+
+  for (const gate of ["off", "on"] as const) {
+    test(`with review ${gate}, the page keeps its socket and live reload, and nothing throws`, async ({ page, birta }) => {
+      const served = await birta({ "pr.md": DOC }, gate === "on" ? GATE_ON : {});
+      const errors: string[] = [];
+      page.on("pageerror", (e) => errors.push(e.message));
+      await page.goto(`${served.url}/view/pr.md`);
+      // The doc's id reaches the page as is, so the global it names is the element
+      await expect(page.locator('#content [id="BR"]')).toHaveCount(1);
+      if (gate === "on") {
+        await booted(page);
+        expect(await page.evaluate(() => (window as unknown as { BR: { op?: unknown } }).BR.op !== undefined)).toBe(true);
+      }
+      served.write("pr.md", DOC.replace("text", "text, edited on disk"));
+      await expect(page.locator("#content")).toContainText("text, edited on disk");
+      expect(errors).toEqual([]);
+    });
+  }
 });
 
 test.describe("one socket", () => {

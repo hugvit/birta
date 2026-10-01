@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ASSETS = path.join(HERE, "..", "..", "assets", "review");
-const SHARED_BR = "var BR = typeof BR === 'undefined' ? {} : BR;";
+const SHARED_BR = "var BR = BR && BR.__birta === true ? BR : { __birta: true };";
 // Every review script, whatever is added later, so a new file can't skip the shared line
 const ALL = fs
   .readdirSync(ASSETS)
@@ -70,12 +70,24 @@ for (const [name, files] of [
 }
 
 test("a BR made before the bundle is the one every file extends", () => {
-  const before = { keep: 1 };
+  const before = { __birta: true, keep: 1 };
   const { BR } = load(ALL, { BR: before });
   assert.equal(BR, before);
   assert.equal(BR.keep, 1);
   assert.equal(typeof BR.quote.fromRange, "function");
   assert.equal(typeof BR.boot, "function");
+});
+
+test("a BR that isn't review's own, like a doc element named by its id, is never extended", () => {
+  const element = { localName: "a", id: "BR" };
+  for (const files of [ALL, [...ALL].reverse()]) {
+    const { BR } = load(files, { BR: element });
+    assert.notEqual(BR, element);
+    assert.equal(BR.__birta, true);
+    assert.equal(typeof BR.boot, "function");
+    assert.equal(typeof BR.quote.fromRange, "function");
+    assert.equal(element.boot, undefined);
+  }
 });
 
 // K10: the page gets review_ws.rs's own list, joined into one script

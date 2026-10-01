@@ -1,4 +1,4 @@
-var BR = typeof BR === 'undefined' ? {} : BR;
+var BR = BR && BR.__birta === true ? BR : { __birta: true };
 (function () {
   BR.pure = BR.pure || {};
 
@@ -53,6 +53,8 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   };
 
   var VERDICT_OF = { yes: 'yes', no: 'no', later: 'later', your_call: 'your_call' };
+  // What a focused note keeps from the page: each would write a verdict or a note
+  var NOTE_KEYS = { yes: 1, no: 1, later: 1, your_call: 1, note: 1, ask: 1 };
   // A seen note in one of these folds to its dot
   var FOLDS = { handled: 1, answered: 1, later: 1 };
   // Open blanks past this many show only their question until focused
@@ -64,6 +66,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   var COMPOSE_MS = 300;
   var QUOTE_CHARS = 40;
   var UNSENT = 'unsent · ⏎ to keep';
+  var MOVED = 'its block changed · c to re-point';
 
   // Group order under one anchor: notes with their replies, then what the page added, then facts
   var G_NOTE = 1, G_DRAFT = 2, G_UNSENT = 3, G_COMPOSER = 4, G_RECEIPT = 5, G_FACT = 6, G_BLANK = 7,
@@ -74,7 +77,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   var skew = 0;
   // Kept notes the snapshot doesn't hold yet, by cid
   var drafts = [];
-  // Half-typed notes: {key, text}
+  // Half-typed notes: {key, text, tie?, lost?}, `tie` the block they were typed for while this page has it
   var unsent = [];
   var comp = null;
   var seq = 0;
@@ -90,7 +93,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   var rewriteTurn = null;
   // Runs once the op with that cid is acked; dropped on a nack
   var afterAck = {};
-  // Words an op carries that a nack must hand back: {key, text} for notes and edits, {blank, text} for answers
+  // Words an op carries that a nack must hand back: {key, text, tie} for notes and edits, {blank, text} for answers
   var pending = {};
   // A many-hunk undo waiting for its second x: {id, until}
   var armed = null;
@@ -101,11 +104,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   function narrow() { return window.innerWidth < 768; }
   function writable() { return !state || state.log_writable !== false; }
 
-  function blockOf(sp) {
-    // A list shares its first item's sp and comes first, so the last match is the item
-    var all = content().querySelectorAll('[data-sourcepos="' + sp + '"]');
-    return all[all.length - 1] || null;
-  }
+  function blockOf(sp) { return BR.blocks.of(sp); }
 
   function capital(name) { return name.charAt(0).toUpperCase() + name.slice(1); }
 
@@ -138,10 +137,11 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     return chars.length > QUOTE_CHARS ? chars.slice(0, QUOTE_CHARS).join('') + '…' : text;
   }
 
-  /** A half-typed note's key: its target, its kind, and the note its words edit, if any. */
+  /** A half-typed note's key: its target, its kind, the note its words edit, if any, and the rev its sp is from. */
   function composeKey(at, kind, to) {
     var k = { at: at, kind: kind };
     if (to != null) k.to = to;
+    k.rev = birtaBus.rev();
     return JSON.stringify(k);
   }
 
@@ -169,6 +169,58 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     return sp ? { sp: sp } : { doc: true };
   }
 
+  /** Ties words to the block `el`, so they can find it again once a patch replaces it. */
+  function tie(el) {
+    return el ? { el: el, name: el.localName, text: el.textContent } : null;
+  }
+
+  /**
+   * The tied block in the doc now: its element, else the one block a patch left with its tag and
+   * its text, or null when none or several are.
+   */
+  function tied(t) {
+    if (!t) return null;
+    if (!t.el.isConnected) {
+      var alike = BR.blocks.alike(t.name, t.text);
+      if (alike.length !== 1) return null;
+      t.el = alike[0];
+    }
+    return t.el;
+  }
+
+  /**
+   * `at` as the doc on screen places it, for words tied by `t` (or, untied, from rev `rev`). A tied
+   * block gives the sp as it is now. Otherwise a quote drops its sp so the server searches, and a
+   * block anchor is null.
+   */
+  function aim(at, t, rev) {
+    if (!at || !at.sp || (at.k !== 'block' && at.k !== 'quote')) return at;
+    var out = {};
+    for (var k in at) out[k] = at[k];
+    var el = tied(t);
+    if (t ? el : rev === birtaBus.rev()) {
+      if (el) out.sp = el.getAttribute('data-sourcepos');
+      return out;
+    }
+    if (at.k === 'block') return null;
+    delete out.sp;
+    delete out.off;
+    delete out.tl;
+    return out;
+  }
+
+  /** Whether a half-typed note's block is known: it is tied and found, or untied and from this rev. */
+  function fresh(u, t) {
+    if (u.lost) return false;
+    return u.tie ? !!tied(u.tie) : t.rev === birtaBus.rev();
+  }
+
+  /** A half-typed note on a block the page can no longer find, until c re-points it. */
+  function stranded(u) {
+    var t = keyTarget(u.key);
+    return !!t && t.at.k === 'block' && !!t.at.sp && t.to == null && !fresh(u, t);
+  }
+
   /** Where an item of the state goes: under the block it is on now, or in the doc slot. */
   function slotOfItem(i) {
     return i.at && i.at.kind !== 'doc' && i.at.loc ? { sp: i.at.loc.sp } : { doc: true };
@@ -177,15 +229,12 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   // --- hosts ---
 
   function makeHost(id) {
-    var host = document.createElement('birta-flow');
+    var made = BR.shadowHost('birta-flow');
+    var host = made.host;
     host.toggleAttribute('data-br-hidden', hiddenAll);
-    var root = host.attachShadow({ mode: 'closed' });
-    var style = document.createElement('style');
-    style.textContent = BR.shadowCss || '';
     var box = document.createElement('div');
     box.className = 'flow';
-    root.append(style, box);
-    BR.FLOW_HOSTS.add(host);
+    made.root.appendChild(box);
     var h = { id: id, host: host, box: box, sig: null, rule: null, entry: null };
     box.addEventListener('keydown', function (ev) {
       if (h.blank && h.entry && h.entry.kind === 'blank') blankKey(ev, h.blank.n, h.blank.slot);
@@ -229,7 +278,8 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     h.host.setAttribute('data-kind', e.kind);
     h.rule = e.rule || null;
     h.entry = e;
-    var sig = JSON.stringify([e.kind, e.lead, e.text, e.tail, e.prefix, e.meta, e.keys, e.fold, e.quiet, e.lost, lostOpen]);
+    var sig = JSON.stringify([e.kind, e.lead, e.text, e.tail, e.prefix, e.meta, e.keys, e.fold, e.quiet, e.lost,
+      e.kind === 'lost' && lostOpen]);
     if (h.sig === sig) return;
     h.sig = sig;
     h.box.textContent = '';
@@ -470,8 +520,10 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       if (comp && comp.key === u.key) return;
       var t = keyTarget(u.key);
       if (!t) return;
-      add({ id: 'u' + u.key, kind: 'note', text: u.text, meta: UNSENT, unsent: u, focusable: true, rule: ['dashed', 'you'] },
-        slotOfAt(t.at), [G_UNSENT, k, 0]);
+      // An sp from another rev may name another block now
+      var slot = !t.at.sp ? slotOfAt(t.at) : !fresh(u, t) ? { doc: true } : u.tie ? { el: u.tie.el } : slotOfAt(t.at);
+      add({ id: 'u' + u.key, kind: 'note', text: u.text, meta: stranded(u) ? MOVED : UNSENT, unsent: u, focusable: true,
+        rule: ['dashed', 'you'] }, slot, [G_UNSENT, k, 0]);
     });
     // Open blanks past the fifth, in doc order, show only their question until focused
     var open = out.filter(function (e) { return e.kind === 'blank' && e.open; });
@@ -607,10 +659,15 @@ var BR = typeof BR === 'undefined' ? {} : BR;
 
   // --- the composer ---
 
-  /** The composer's block: its own element while it lives, else the new one at its line. */
+  /** Where the composer is drawn: its block while it lives, else the new one at its line. */
   function composerSlot() {
     if (!comp.anchor) return { doc: true };
     if (comp.anchor.isConnected) return { el: comp.anchor };
+    var found = tied(comp.tie);
+    if (found) {
+      comp.anchor = found;
+      return { el: found };
+    }
     var line = comp.sp.split(':')[0] + ':';
     var found = Array.prototype.filter.call(content().querySelectorAll('[data-sourcepos]'), function (e) {
       return e.localName === comp.anchor.localName && e.getAttribute('data-sourcepos').indexOf(line) === 0;
@@ -640,13 +697,22 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   function open(kind, at, own) {
     if (comp) keep(false);
     var key = composeKey(at, kind, own ? own.n : null);
+    var restored = unsent.filter(function (u) { return u.key === key; })[0];
+    // The words a block change left behind go where the reader points next
+    var moved = !restored && !(own && own.body) && at.k !== 'dir' ? unsent.filter(stranded).pop() : null;
+    if (moved) {
+      kind = keyTarget(moved.key).kind;
+      key = composeKey(at, kind, own ? own.n : null);
+    }
     var h = makeHost('composer');
     h.host.setAttribute('data-kind', 'composer');
     h.box.classList.add('composer');
     var sp = spOfAt(at);
     var anchor = sp ? blockOf(sp) : null;
+    // `tie` is the block the note is for; `anchor` only places the composer
     comp = { h: h, kind: kind, at: at, key: key, own: own, anchor: anchor, sp: anchor ? sp : null,
-      candidates: null, pick: 0, asked: null, rcid: null, timer: null, qtimer: null, sent: false, active: true };
+      tie: at.sp && (at.k === 'block' || at.k === 'quote') ? tie(anchor) : null, rev: birtaBus.rev(),
+      candidates: null, pick: 0, asked: null, rcid: null, rrev: null, timer: null, qtimer: null, sent: false, active: true };
     var target = el('div', 'muted target');
     var area = document.createElement('textarea');
     area.setAttribute('dir', 'auto');
@@ -659,9 +725,15 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     h.box.append(target, area, el('div', 'muted hint', hint));
     comp.area = area;
     comp.target = target;
-    var restored = unsent.filter(function (u) { return u.key === key; })[0];
     if (restored) area.value = restored.text;
+    else if (moved) area.value = moved.text;
     else if (own && own.body) area.value = own.body;
+    if (moved) {
+      unsent = unsent.filter(function (u) { return u !== moved; });
+      birtaBus.send({ type: 'compose', path: CURRENT_PATH, key: moved.key, text: '' });
+      sendCompose(moved.text);
+      comp.sent = true;
+    }
     area.addEventListener('keydown', composerKey);
     area.addEventListener('input', composerInput);
     area.addEventListener('focus', function () { if (comp && comp.area === area) comp.active = true; });
@@ -696,7 +768,8 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       if (!comp) return;
       comp.asked = quote;
       comp.rcid = 'q' + (++seq);
-      birtaBus.send({ type: 'resolve', cid: comp.rcid, path: CURRENT_PATH, rev: birtaBus.rev(), text: quote });
+      comp.rrev = birtaBus.rev();
+      birtaBus.send({ type: 'resolve', cid: comp.rcid, path: CURRENT_PATH, rev: comp.rrev, text: quote });
     }, RESOLVE_MS);
   }
 
@@ -744,31 +817,48 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       close();
       return;
     }
-    var at = comp.at;
+    // A typed quote picks its own target; else the note goes where the composer was opened
+    var at = null;
     var body = text;
     var p = BR.pure.parseTypedQuote(text);
     if (p && comp.candidates && p.quote === comp.asked) {
       if (comp.candidates.length) {
-        at = comp.candidates[comp.pick].at;
-        body = p.rest || text;
+        var c = comp.candidates[comp.pick];
+        at = aim(c.at, c.tie, comp.rrev);
       } else {
         at = { k: 'doc' };
       }
+      body = comp.candidates.length ? p.rest || text : text;
     } else if (p) {
       // Not resolved yet: the server searches for it
       at = { k: 'quote', q: p.quote, pre: '', suf: '' };
       body = p.rest || text;
     }
     var cid;
-    if (comp.own && at === comp.at) {
+    if (!at && comp.own) {
       cid = BR.op({ op: 'amend', to: comp.own.n, body: body });
     } else {
+      at = at || aim(comp.at, comp.tie, comp.rev);
+      if (!at) {
+        strand(text);
+        return;
+      }
       cid = submit(at, body, comp.kind);
     }
-    pending[cid] = { key: comp.key, text: text };
+    pending[cid] = { key: comp.key, text: text, tie: comp.tie };
     if (hadDraft) sendCompose('');
     unsent = unsent.filter(function (u) { return u.key !== comp.key; });
     if (handBack) afterAck[cid] = BR.chrome.handBack;
+    close();
+  }
+
+  /** Keeps the composer's words unsent, as its block is gone, and says so. */
+  function strand(text) {
+    unsent = unsent.filter(function (u) { return u.key !== comp.key; })
+      .concat([{ key: comp.key, text: text, tie: comp.tie }]);
+    // Kept on the server too, so a reload still offers it
+    sendCompose(text);
+    BR.chrome.pill(MOVED);
     close();
   }
 
@@ -801,9 +891,14 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       // As a composer's ⏎ before its quote resolves: the server searches
       cid = submit({ k: 'quote', q: p.quote, pre: '', suf: '' }, p.rest || u.text, t.kind);
     } else {
-      cid = submit(t.at, u.text, t.kind);
+      var at = u.lost ? aim(t.at, null, null) : aim(t.at, u.tie, t.rev);
+      if (!at) {
+        BR.chrome.pill(MOVED);
+        return;
+      }
+      cid = submit(at, u.text, t.kind);
     }
-    pending[cid] = { key: u.key, text: u.text };
+    pending[cid] = { key: u.key, text: u.text, tie: u.tie };
     birtaBus.send({ type: 'compose', path: CURRENT_PATH, key: u.key, text: '' });
     unsent = unsent.filter(function (x) { return x !== u; });
     reconcile();
@@ -830,18 +925,16 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     undoing = BR.op(f);
   }
 
-  // Keys on a receipt act on its change; every other review key acts as on the page
+  // Keys on a receipt act on its change; every other key goes on to act as on the page
   function receiptKey(e, c) {
     if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
     var a = action(e);
-    var mine = a === 'no' || a === 'yes' || a === 'note';
-    if (mine && writable()) {
+    if (a !== 'no' && a !== 'yes' && a !== 'note') return;
+    if (writable()) {
       if (a !== 'no') armed = null;
       if (a === 'no') undo(c);
       else if (a === 'yes') BR.op({ op: 'seen', ids: [c.id] });
       else open('note', { k: 'change', id: c.id }, null);
-    } else if (!mine && !BR.keys.run(e)) {
-      return;
     }
     e.preventDefault();
     e.stopPropagation();
@@ -849,13 +942,8 @@ var BR = typeof BR === 'undefined' ? {} : BR;
 
   // A not-handled row needs y to be acknowledged; stepping or clicking onto it never does
   function notHandledKey(e, n) {
-    if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
-    var a = action(e);
-    if (a === 'yes') {
-      if (writable()) BR.op({ op: 'seen', ids: ['nh:' + n] });
-    } else if (!BR.keys.run(e)) {
-      return;
-    }
+    if (e.defaultPrevented || e.isComposing || e.keyCode === 229 || action(e) !== 'yes') return;
+    if (writable()) BR.op({ op: 'seen', ids: ['nh:' + n] });
     e.preventDefault();
     e.stopPropagation();
   }
@@ -864,32 +952,35 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     return BR.pure.keyAction(e, typeof KEYBINDINGS === 'undefined' ? null : KEYBINDINGS);
   }
 
+  // Keys that write act on the note or not at all, never on the doc behind it; the rest act as on the page
   function noteKey(e, h) {
     var entry = h.entry;
-    if (e.defaultPrevented || e.isComposing || e.keyCode === 229 || !writable()) return;
-    if (entry.unsent && e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
-      e.preventDefault();
-      e.stopPropagation();
-      keepUnsent(entry.unsent);
-    } else if (entry.item && action(e) === 'yes' && settled(entry.item)) {
-      e.preventDefault();
-      e.stopPropagation();
-      BR.op({ op: 'seen', ids: ['#' + entry.item.n] });
-    }
+    if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+    var a = action(e);
+    var unsentEnter = !!entry.unsent && e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey;
+    // On words not yet sent, c and q are how they are re-pointed
+    if (!unsentEnter && !(entry.unsent ? VERDICT_OF[a] : NOTE_KEYS[a])) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (!writable()) return;
+    if (unsentEnter) keepUnsent(entry.unsent);
+    else if (a === 'yes' && entry.item && settled(entry.item)) BR.op({ op: 'seen', ids: ['#' + entry.item.n] });
   }
 
+  // A typed character starts the written answer; keys that type nothing act as on the page
   function blankKey(e, n, slot) {
-    e.stopPropagation();
     if (e.defaultPrevented || e.isComposing || e.keyCode === 229 || !writable()) return;
     if (slot.querySelector('textarea')) return;
     var verdict = VERDICT_OF[action(e)];
     if (verdict) {
       e.preventDefault();
+      e.stopPropagation();
       BR.op({ op: 'reply', to: n, verdict: verdict });
       return;
     }
     if (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey) return;
     e.preventDefault();
+    e.stopPropagation();
     answer(slot, n, e.key);
   }
 
@@ -941,13 +1032,27 @@ var BR = typeof BR === 'undefined' ? {} : BR;
         // An answer for a quote since edited away is stale
         var p = BR.pure.parseTypedQuote(comp.area.value);
         if (!p || p.quote !== comp.asked) break;
-        comp.candidates = msg.candidates || [];
+        comp.candidates = (msg.candidates || []).map(function (c) {
+          // Its sp names a block here only while the page still shows the rev it asked about
+          var el = c.at && c.at.sp && comp.rrev === birtaBus.rev() ? blockOf(c.at.sp) : null;
+          return { at: c.at, preview: c.preview, tie: tie(el) };
+        });
         comp.pick = 0;
         showPick();
         break;
       case 'compose_restore':
         if (msg.path !== CURRENT_PATH) break;
-        unsent = (msg.items || []).filter(function (u) { return typeof u.key === 'string' && typeof u.text === 'string'; });
+        var had = {};
+        unsent.forEach(function (u) { had[u.key] = u; });
+        unsent = (msg.items || []).filter(function (u) { return typeof u.key === 'string' && typeof u.text === 'string'; })
+          .map(function (u) {
+            var was = had[u.key];
+            if (was) return { key: u.key, text: u.text, tie: was.tie, lost: was.lost };
+            // Typed at the rev on screen: its block is found now, so a write that only moves it keeps it
+            var t = keyTarget(u.key);
+            var el = t && t.at.sp && t.rev === birtaBus.rev() ? blockOf(t.at.sp) : null;
+            return el ? { key: u.key, text: u.text, tie: tie(el) } : { key: u.key, text: u.text };
+          });
         reconcile();
         break;
       case 'ack':
@@ -966,21 +1071,23 @@ var BR = typeof BR === 'undefined' ? {} : BR;
         drafts = drafts.filter(function (d) { return d.cid !== msg.cid; });
         var words = pending[msg.cid];
         delete pending[msg.cid];
-        if (words) giveBack(words);
+        if (words) giveBack(words, msg.reason);
         reconcile();
         break;
     }
   }
 
   /** Hands a refused op's words back: a blank's answer to its blank, a note as half-typed. */
-  function giveBack(words) {
+  function giveBack(words, reason) {
     if (words.blank != null) {
       var h = hosts.get('b' + words.blank);
       if (h && h.blank && !h.blank.slot.querySelector('textarea')) answer(h.blank.slot, words.blank, words.text);
       return;
     }
+    // An anchor the server could not place is never sent as it was again
+    var u = { key: words.key, text: words.text, tie: words.tie, lost: reason === 'bad_anchor' };
     // Kept on the server too, so a reload still offers it
-    unsent = unsent.filter(function (u) { return u.key !== words.key; }).concat([{ key: words.key, text: words.text }]);
+    unsent = unsent.filter(function (x) { return x.key !== words.key; }).concat([u]);
     birtaBus.send({ type: 'compose', path: CURRENT_PATH, key: words.key, text: words.text });
   }
 
@@ -1004,7 +1111,10 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       var sp = block ? block.getAttribute('data-sourcepos') : null;
       var u = unsent.filter(function (x) {
         var t = keyTarget(x.key);
-        return t && (sp ? t.at.sp === sp : t.at.k === 'doc');
+        if (!t) return false;
+        if (!sp) return t.at.k === 'doc';
+        // Only words still known to be this block's: an sp from another rev may be another block's
+        return fresh(x, t) && (x.tie ? x.tie.el === block : t.at.sp === sp);
       })[0];
       if (u && writable()) {
         keepUnsent(u);

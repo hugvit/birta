@@ -202,9 +202,8 @@
       on: function(fn) {
         this.subs.push(fn);
         if (currentWs && currentWs.readyState === WebSocket.OPEN) fn({ type: 'open' });
-        var early = this.early;
-        this.early = [];
-        early.forEach(fn);
+        // Every subscriber gets what came before review started, in order, not only the first
+        this.early.slice().forEach(fn);
       },
       emit: function(msg) {
         if (this.subs.length) {

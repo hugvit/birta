@@ -72,6 +72,12 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   /** The header phrase for `s` at server time `opts.now` (design call 5, r-frontend §11). */
   BR.pure.formatPhrase = function (s, opts) {
     if (s.log_writable === false) return 'review unavailable · folder not writable';
+    var base = docPhrase(s, opts);
+    var others = opts.dir ? BR.pure.otherFiles(opts.dir, opts.path).length : 0;
+    return others ? base + ' · ' + plural(others, 'other file', 'other files') + ' ▾' : base;
+  };
+
+  function docPhrase(s, opts) {
     if (s.writable === false) return 'read-only · notes only';
     var v = view(s, opts.now);
     var p = v.p;
@@ -111,7 +117,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
         return drafter + (v.items ? v.items + ' items · your turn' : 'your turn');
       }
     }
-  };
+  }
 
   function button(text, kbd, disabled) { return { text: text, kbd: !!kbd, disabled: !!disabled }; }
 
@@ -127,10 +133,11 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       return button('Approve', true);
     }
     if (v.held && s.hold.kind === 'approve') return approve();
-    if (v.drafts > 0) {
-      var t = opts.dir && opts.dir.totals;
-      if (t && t.unseen_files) return button('Hand back · ' + t.drafts + ' · ' + plural(t.unseen_files, 'file', 'files') + ' unseen');
-      return button('Hand back · ' + v.drafts, true);
+    var t = opts.dir && opts.dir.totals;
+    var total = t ? Math.max(t.drafts, v.drafts) : v.drafts;
+    if (total > 0) {
+      if (t && t.unseen_files) return button('Hand back · ' + total + ' · ' + plural(t.unseen_files, 'file', 'files') + ' unseen');
+      return button('Hand back · ' + total, true);
     }
     if (p.stage === 'sent' || p.stage === 'picked_up') {
       var who = holder(s, p);
@@ -164,6 +171,16 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     var agent = drafter ? null : anyAgent(s);
     if (drafter) rows.push({ id: 'owner', text: 'drafted by ' + cap(drafter) + ' · mark as yours', op: { op: 'owner', drafted_by: null } });
     else if (agent) rows.push({ id: 'owner', text: 'mark as drafted by ' + cap(agent), op: { op: 'owner', drafted_by: agent } });
+    // A folder note can only be handed back where a folder is served
+    if (opts.folder) {
+      var f = opts.dir && opts.dir.folder;
+      rows.push({ id: 'folder', text: 'note on this folder', note: f && f.summary ? BR.pure.fileNote({ summary: f.summary }, opts) : '' });
+    }
+    if (opts.dir) {
+      BR.pure.otherFiles(opts.dir, opts.path).forEach(function (x) {
+        rows.push({ id: 'file', text: x.paths[0], note: BR.pure.fileNote(x, opts), href: BR.pure.fileHref(x.paths[0]) });
+      });
+    }
     return rows;
   };
 
@@ -183,6 +200,11 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   var skew = null;
   var dir = null;
   var down = false;
+  // A hand-back this page sent, until its ack: {cid, count}
+  var handing = null;
+  // Its batch once acked; another doc's hold the page's own state never shows
+  var batch = null;
+  var withdrawing = null;
   // The pill's own message: {text} from pointing, or {nack, until} for a refused op
   var message = null;
   var heldN = null;
@@ -194,6 +216,16 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   var dottedIcon = null;
 
   function now() { return Date.now() + (skew || 0); }
+
+  function folderMode() { return typeof BOOT !== 'undefined' && !!(BOOT.review && BOOT.review.dir); }
+
+  function opts(t) { return { now: t, dir: dir, path: CURRENT_PATH, folder: folderMode() }; }
+
+  /** The button's options: only in a folder do its count and hand-back take in every file. */
+  function turnOpts(t) { return { now: t, dir: folderMode() ? dir : null, path: CURRENT_PATH }; }
+
+  /** The active hand-back of all, from its ack: `{batch, n, count, not_before}`, or null. */
+  function batchHold(t) { return batch && t < batch.not_before ? batch : null; }
 
   function host(tag) {
     var el = document.createElement(tag);
@@ -209,9 +241,14 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     try { return sessionStorage.getItem('birta-review-active') === '1'; } catch (e) { return false; }
   }
 
-  /** Design call 4: a review file, a drafter, or review started in this tab. */
+  /** Design call 4: a review file, a drafter, or review started in this tab; in a folder, a review file anywhere. */
   function shown(s) {
-    return !!s && ((s.log && s.log.lines > 0) || !!(s.owner && s.owner.drafted_by) || active());
+    return !!s && ((s.log && s.log.lines > 0) || !!(s.owner && s.owner.drafted_by) || active() || reviewedFolder());
+  }
+
+  function reviewedFolder() {
+    if (!folderMode() || !dir) return false;
+    return !!(dir.folder && dir.folder.summary) || (dir.files || []).some(function (f) { return !!f.summary; });
   }
 
   function show(el, on) {
@@ -232,11 +269,11 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     var t = now();
     var on = shown(s);
     show(phrase, on);
-    var b = on ? BR.pure.turnButton(s, { now: t, dir: dir }) : null;
+    var b = on ? BR.pure.turnButton(s, turnOpts(t)) : null;
     show(turn, !!b);
     // Text changes in place: WebKit drops a click whose pressed node was replaced before release
     if (on) {
-      var text = BR.pure.formatPhrase(s, { now: t, dir: dir });
+      var text = BR.pure.formatPhrase(s, opts(t));
       if (phraseWords.data !== text) phraseWords.data = text;
       if (phrase.getAttribute('title') !== text) phrase.setAttribute('title', text);
     }
@@ -258,8 +295,11 @@ var BR = typeof BR === 'undefined' ? {} : BR;
 
   function renderPill(s, t) {
     var hold = s && BR.pure.holdPill(s, { now: t });
+    var b = batchHold(t);
+    // A folder's hand-back counts every file's notes, whichever doc it was sent from
+    if (b && !(hold && s.hold.kind === 'approve')) hold = 'handing back · ' + plural(b.count, 'note', 'notes') + ' · z to undo';
     // A new hold speaks over whatever the pill said before it
-    var n = hold ? s.hold.n : null;
+    var n = b ? 'batch ' + b.batch : hold ? s.hold.n : null;
     if (n !== null && n !== heldN) message = null;
     heldN = n;
     // A refusal's deadline runs on the page's own clock
@@ -275,6 +315,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     clearTimeout(timer);
     var waits = [];
     if (s && s.hold && s.hold.not_before > t) waits.push(s.hold.not_before - t);
+    if (batchHold(t)) waits.push(batch.not_before - t);
     var p = (s && s.phrase) || {};
     var quiet = p.stage === 'picked_up' && p.picked_up && p.picked_up.silence;
     if (quiet) {
@@ -327,10 +368,15 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     try { return menu.matches(':popover-open'); } catch (e) { return false; }
   }
 
+  function rowKey(r) { return r ? r.id + ' ' + r.text : null; }
+
   function fillMenu() {
     var s = BR.currentState();
-    rows = s ? BR.pure.menuRows(s, { now: now(), dir: dir }) : [];
-    cur = Math.max(0, Math.min(cur, rows.length - 1));
+    var was = rowKey(rows[cur]);
+    rows = s ? BR.pure.menuRows(s, opts(now())) : [];
+    // The current row stays itself when a push moves it, so ⏎ opens what was shown
+    var at = rows.map(rowKey).indexOf(was);
+    cur = at >= 0 ? at : Math.max(0, Math.min(cur, rows.length - 1));
     // Rows are kept and rewritten in place, so a push mid-click doesn't lose the click
     while (menu.children.length > rows.length) menu.lastElementChild.remove();
     rows.forEach(function (r, i) {
@@ -338,16 +384,24 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       if (!row) {
         row = document.createElement('div');
         row.setAttribute('role', 'menuitem');
-        row.appendChild(document.createTextNode(''));
+        var label = document.createElement('span');
+        label.className = 'label';
+        label.appendChild(document.createTextNode(''));
+        var note = document.createElement('span');
+        note.className = 'note';
+        note.appendChild(document.createTextNode(''));
+        row.append(label, note);
         row.addEventListener('click', function () { pick(i); });
         menu.appendChild(row);
       }
-      if (row.firstChild.data !== r.text) row.firstChild.data = r.text;
-      row.className = 'row' + (i === cur ? ' current' : '');
+      if (row.firstChild.firstChild.data !== r.text) row.firstChild.firstChild.data = r.text;
+      if (row.lastChild.firstChild.data !== (r.note || '')) row.lastChild.firstChild.data = r.note || '';
+      row.className = 'row' + (i === cur ? ' current' : '') + (r.id === 'file' ? ' file' : '');
     });
   }
 
   function openMenu() {
+    rows = [];
     cur = 0;
     fillMenu();
     var r = phrase.getBoundingClientRect();
@@ -372,6 +426,8 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     if (!r) return;
     if (r.op) BR.op(r.op);
     if (r.copy && navigator.clipboard) navigator.clipboard.writeText(r.copy);
+    if (r.href) BR.dir.open(r.href);
+    if (r.id === 'folder') BR.flow.open('note', { k: 'dir' }, null);
   }
 
   /** j, k and ⏎ move and pick rows while the menu is open; true when the key was the menu's. */
@@ -406,9 +462,9 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     var s = BR.currentState();
     // A plain reader's ⌘⏎ never writes: review has to be on in the tab first
     if (!shown(s)) return;
-    var b = BR.pure.turnButton(s, { now: now(), dir: dir });
+    var b = BR.pure.turnButton(s, turnOpts(now()));
     if (!b || b.disabled) return;
-    if (/^Hand back/.test(b.text)) BR.op({ op: 'hand_back', scope: 'doc' });
+    if (/^Hand back/.test(b.text)) handBack();
     // With unseen changes the guard steps through them instead
     else if (/ unseen$/.test(b.text)) BR.pointing.toUnseen();
     else if (b.text === 'Approve' || / unanswered$/.test(b.text)) BR.op({ op: 'approve' });
@@ -433,12 +489,39 @@ var BR = typeof BR === 'undefined' ? {} : BR;
         break;
       case 'ack':
         if (message && message.nack) message = null;
+        if (handing && msg.cid === handing.cid && msg.batch != null) {
+          batch = { batch: msg.batch, n: msg.n, count: handing.count, not_before: msg.not_before };
+        }
+        if (handing && msg.cid === handing.cid) handing = null;
+        if (msg.cid === withdrawing) batch = withdrawing = null;
+        break;
+      case 'nack':
+        if (handing && msg.cid === handing.cid) handing = null;
+        if (msg.cid === withdrawing) withdrawing = null;
         break;
     }
     render();
   }
 
+  /** Hands back this doc's drafts, or in a folder every file's, as the button counts them. */
+  function handBack() {
+    var b = BR.pure.turnButton(BR.currentState() || {}, turnOpts(now()));
+    var count = b && /^Hand back · (\d+)/.exec(b.text);
+    var cid = BR.op({ op: 'hand_back', scope: folderMode() ? 'all' : 'doc' });
+    handing = { cid: cid, count: count ? Number(count[1]) : 0 };
+  }
+
+  /** z inside a folder's hand-back: withdraws its whole batch. False when there is none. */
+  function withdrawBatch() {
+    var b = batchHold(now());
+    if (!b) return false;
+    withdrawing = BR.op({ op: 'withdraw', to: b.n, batch: b.batch });
+    return true;
+  }
+
   BR.chrome = {
+    handBack: handBack,
+    withdrawBatch: withdrawBatch,
     init: function () {
       baseTitle = document.title.replace(/^● /, '');
       var link = document.querySelector('link[rel~="icon"]');

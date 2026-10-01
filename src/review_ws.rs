@@ -24,7 +24,7 @@ use crate::review::ops::{
     self, AnchorReq, At, BlockScope, By, ByKind, CommentKind, Header, Line, Op, Parsed, Verdict,
 };
 use crate::review::state::{ItemStatus, ReviewState};
-use crate::review::{Reject, fold, review_path_for, sync, undo};
+use crate::review::{FOLDER_REVIEW, Reject, fold, review_path_for, sync, undo};
 use crate::server::{AppState, WsEvent};
 
 const DEFAULT_HOLD_MS: u64 = 5_000;
@@ -47,7 +47,7 @@ pub(crate) struct ReviewHub {
     drafts: Option<PathBuf>,
     git_exclude: bool,
     /// A hand-back of "all" sends every doc under the root only when a folder is served.
-    dir_mode: bool,
+    pub(crate) dir_mode: bool,
     pub(crate) dir: DirIndex,
     folds: Mutex<HashMap<PathBuf, (FoldKey, ReviewState)>>,
     /// The pending hold each doc has a timer for, by its end.
@@ -542,6 +542,9 @@ enum WsOp {
     Approve {},
     Withdraw {
         to: u32,
+        /// The batch a hand-back of all was acked with, so a doc outside it can take it back.
+        #[serde(default)]
+        batch: Option<u64>,
     },
     Release {
         claim: u32,
@@ -595,6 +598,10 @@ pub(crate) async fn op(app: &Arc<AppState>, msg: Value) -> Option<String> {
             if let Some(rev) = ack.rev {
                 frame["rev"] = json!(rev.as_str());
             }
+            if let Some(batch) = ack.batch {
+                frame["batch"] = json!(batch);
+                frame["not_before"] = json!(ack.not_before);
+            }
             frame.to_string()
         }
         Err(reason) => nack(&cid, reason),
@@ -605,9 +612,13 @@ fn nack(cid: &Value, reason: &str) -> String {
     json!({"type": "nack", "cid": cid, "reason": reason}).to_string()
 }
 
+#[derive(Default)]
 struct Acked {
     n: u32,
     rev: Option<Rev>,
+    /// A hand-back of all: the batch its submits share, and when its hold ends.
+    batch: Option<u64>,
+    not_before: Option<u64>,
 }
 
 fn apply(app: &Arc<AppState>, frame: OpFrame, beacon: bool) -> Result<Acked, Nack> {
@@ -627,10 +638,19 @@ fn apply(app: &Arc<AppState>, frame: OpFrame, beacon: bool) -> Result<Acked, Nac
             _ => "read_only",
         })?;
     let acked = match &frame.op {
+        WsOp::Comment {
+            at: AnchorReq::Dir, ..
+        } => return folder_note(app, hub, &frame),
         WsOp::UndoChange { change, confirm } => undo_change(&doc, &frame, change, *confirm)?,
         WsOp::HandBack {
             scope: HandBackScope::All,
         } if hub.dir_mode => hand_back_all(app, hub, &doc, &frame)?,
+        WsOp::Withdraw { to, batch } if hub.dir_mode => {
+            match batch.or_else(|| batch_of(&doc.review_path, *to)) {
+                Some(batch) => withdraw_batch(app, hub, &doc, batch, &frame)?,
+                None => keep(hub, &doc, &frame)?,
+            }
+        }
         _ => keep(hub, &doc, &frame)?,
     };
     landed(app, &doc.canonical, &doc.rel);
@@ -718,7 +738,10 @@ fn append(
         .as_deref()
         .and_then(|c| replayed(held.parsed(), c))
     {
-        return Ok(Acked { n, rev: None });
+        return Ok(Acked {
+            n,
+            ..Acked::default()
+        });
     }
     if held.parsed().read_only {
         return Err("read_only");
@@ -749,7 +772,10 @@ fn append(
         AppendError::Io(_) => "read_only",
     })?;
     let n = lines.last().copied().ok_or("read_only")?;
-    Ok(Acked { n, rev: None })
+    Ok(Acked {
+        n,
+        ..Acked::default()
+    })
 }
 
 /// The line an earlier send of this cid landed on, so a resend writes nothing.
@@ -876,7 +902,7 @@ fn build(
             }]
         }
         WsOp::Approve {} => log::approve_ops(&Chain::build(parsed), text, now + hold, hold),
-        WsOp::Withdraw { to } => {
+        WsOp::Withdraw { to, .. } => {
             withdrawable(parsed, now, *to)?;
             vec![Op::Withdraw { to: *to }]
         }
@@ -1034,6 +1060,7 @@ fn undo_change(doc: &DocRef, frame: &OpFrame, change: &str, confirm: bool) -> Re
     Ok(Acked {
         n,
         rev: Some(written.rev),
+        ..Acked::default()
     })
 }
 
@@ -1079,10 +1106,248 @@ fn hand_back_all(
             landed(app, &other_doc.canonical, &rel);
         }
     }
-    match (own, first) {
-        (Ok(acked), _) => Ok(acked),
-        (Err(_), Some(n)) => Ok(Acked { n, rev: None }),
-        (Err(reason), None) => Err(reason),
+    if let Some(n) = folder_hand_back(app, hub, frame, batch) {
+        first.get_or_insert(n);
+    }
+    let n = match (own, first) {
+        (Ok(acked), _) => acked.n,
+        (Err(_), Some(n)) => n,
+        (Err(reason), None) => return Err(reason),
+    };
+    Ok(Acked {
+        n,
+        batch: Some(batch),
+        not_before: Some(batch + hub.hold_ms),
+        ..Acked::default()
+    })
+}
+
+/// The folder's own drafts, handed back in `batch`; the submit's line when there were any.
+fn folder_hand_back(
+    app: &Arc<AppState>,
+    hub: &ReviewHub,
+    frame: &OpFrame,
+    batch: u64,
+) -> Option<u32> {
+    let mut held = Log::open(&app.roots.root().join(FOLDER_REVIEW))
+        .hold()
+        .ok()?;
+    let acked = append_plain(&mut held, frame, |parsed| {
+        build(
+            hub,
+            &frame.op,
+            parsed,
+            "",
+            &Rev::of(b""),
+            now_ms(),
+            Some(batch),
+        )
+    })
+    .ok()?;
+    drop(held);
+    if hub.dir.refresh_folder() {
+        push_dir(app);
+    }
+    Some(acked.n)
+}
+
+/// A note on the whole folder, in the folder's own review file. Folder mode only: with
+/// one file served, nothing would ever hand it back.
+fn folder_note(app: &Arc<AppState>, hub: &ReviewHub, frame: &OpFrame) -> Result<Acked, Nack> {
+    if !hub.dir_mode {
+        return Err("bad_anchor");
+    }
+    let WsOp::Comment {
+        verdict,
+        body,
+        kind,
+        to,
+        ..
+    } = &frame.op
+    else {
+        return Err("bad_anchor");
+    };
+    if to.is_some() {
+        return Err("no_such_note");
+    }
+    let root = app.roots.root();
+    let log = Log::open(&root.join(FOLDER_REVIEW)).git_exclude(hub.git_exclude);
+    let mut held = match log.hold() {
+        Ok(held) => held,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            if !can_write(root) {
+                return Err("read_only");
+            }
+            let name = root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            log.create_if_missing(&name, "", None)
+                .map_err(|_| "read_only")?;
+            log.hold().map_err(|_| "read_only")?
+        }
+        Err(_) => return Err("read_only"),
+    };
+    let acked = append_plain(&mut held, frame, |_| {
+        Ok(vec![Op::Comment {
+            at: At::Dir,
+            verdict: *verdict,
+            body: body.clone(),
+            to: None,
+            kind: *kind,
+            turn: None,
+        }])
+    })?;
+    drop(held);
+    if hub.dir.refresh_folder() {
+        push_dir(app);
+    }
+    Ok(acked)
+}
+
+/// Appends what `ops` builds as the page's op, with no doc to sync; a resent cid gets
+/// the line it landed on before.
+fn append_plain(
+    held: &mut Held,
+    frame: &OpFrame,
+    ops: impl FnOnce(&Parsed) -> Result<Vec<Op>, Nack>,
+) -> Result<Acked, Nack> {
+    if let Some(n) = frame
+        .cid
+        .as_deref()
+        .and_then(|c| replayed(held.parsed(), c))
+    {
+        return Ok(Acked {
+            n,
+            ..Acked::default()
+        });
+    }
+    if held.parsed().read_only {
+        return Err("read_only");
+    }
+    let ops = ops(held.parsed())?;
+    let ctx = AppendCtx {
+        now_ms: now_ms(),
+        by: human(),
+        cid: frame.cid.clone(),
+    };
+    let lines = held.append_with(ctx, |_, _| Ok(ops)).map_err(|e| match e {
+        AppendError::Rejected(r) => reject(&r),
+        AppendError::Io(_) => "read_only",
+    })?;
+    let n = lines.last().copied().ok_or("read_only")?;
+    Ok(Acked {
+        n,
+        ..Acked::default()
+    })
+}
+
+/// The batch of the hand-back on line `to` of the review file, if it had one.
+fn batch_of(review: &Path, to: u32) -> Option<u64> {
+    let parsed = Log::open(review).read().ok().flatten()?;
+    parsed
+        .lines
+        .iter()
+        .find(|l| l.n == to)
+        .and_then(|l| match l.op {
+            Op::Submit { batch, .. } => batch,
+            _ => None,
+        })
+}
+
+/// Takes back every hand-back of `batch`, the folder's and every doc's, and only those.
+/// Acked with this doc's line when it had one in the batch, else the first.
+fn withdraw_batch(
+    app: &Arc<AppState>,
+    hub: &ReviewHub,
+    doc: &DocRef,
+    batch: u64,
+    frame: &OpFrame,
+) -> Result<Acked, Nack> {
+    let others: Vec<DocRef> = hub
+        .dir
+        .logged()
+        .iter()
+        .filter(|c| **c != doc.canonical)
+        .filter_map(|c| hub.dir.path_of(c))
+        .filter_map(|rel| app.roots.resolve_doc(&rel, Access::Write).ok())
+        .collect();
+    let docs: Vec<&DocRef> = std::iter::once(doc).chain(&others).collect();
+    let folder = app.roots.root().join(FOLDER_REVIEW);
+    let mut own = None;
+    let mut first = None;
+    let mut refused = None;
+    let mut landed_docs = Vec::new();
+    let targets = docs
+        .iter()
+        .map(|d| (d.review_path.clone(), Some(d)))
+        .chain([(folder, None)]);
+    for (review, of) in targets {
+        let Ok(mut held) = Log::open(&review).hold() else {
+            continue;
+        };
+        let now = now_ms();
+        if let Some(d) = of {
+            sync::sync_external(&mut held, &d.canonical, now);
+        }
+        let rounds: Vec<u32> = held
+            .parsed()
+            .lines
+            .iter()
+            .filter(|l| matches!(l.op, Op::Submit { batch: Some(b), .. } if b == batch))
+            .map(|l| l.n)
+            .collect();
+        let mut wrote = None;
+        for to in rounds {
+            if let Some(n) = frame
+                .cid
+                .as_deref()
+                .and_then(|c| replayed(held.parsed(), c))
+            {
+                wrote = Some(n);
+                break;
+            }
+            match withdrawable(held.parsed(), now, to) {
+                Ok(()) => {
+                    let result = append_plain(&mut held, frame, |_| Ok(vec![Op::Withdraw { to }]));
+                    match result {
+                        Ok(acked) => wrote = Some(acked.n),
+                        Err(reason) => {
+                            refused.get_or_insert(reason);
+                        }
+                    }
+                }
+                Err("no_such_note") => {}
+                Err(reason) => {
+                    refused.get_or_insert(reason);
+                }
+            }
+        }
+        drop(held);
+        let Some(n) = wrote else {
+            continue;
+        };
+        first.get_or_insert(n);
+        match of {
+            Some(d) if d.canonical == doc.canonical => own = Some(n),
+            Some(d) => landed_docs.push((d.canonical.clone(), d.rel.clone())),
+            None => {
+                if hub.dir.refresh_folder() {
+                    push_dir(app);
+                }
+            }
+        }
+    }
+    for (canonical, rel) in landed_docs {
+        landed(app, &canonical, &rel);
+    }
+    match (own.or(first), refused) {
+        (Some(n), _) => Ok(Acked {
+            n,
+            ..Acked::default()
+        }),
+        (None, Some(reason)) => Err(reason),
+        (None, None) => Err("no_such_note"),
     }
 }
 

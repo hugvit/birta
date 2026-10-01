@@ -1,0 +1,17 @@
+{
+  "before": [],
+  "doc": "# Plan\n\nIntro paragraph here,\nwith a second line.\n\n- first item\n- second item\n  - nested item\n- third item\n\n## Details\n\n- detail one\n- detail two\n\n| key | value |\n|-----|-------|\n| a | 1 |\n| b | 2 |\n\n## More\n\n- more item\n\n# Appendix\n\n- appendix item\n",
+  "frame": {
+    "at": {
+      "k": "dir"
+    },
+    "body": "Make these consistent.",
+    "cid": "c1",
+    "op": "comment",
+    "path": "pr.md",
+    "rev": "21e4c7251bbee8cd8d40ac78988ff326db67ae96",
+    "type": "op"
+  },
+  "log": null,
+  "reply": "ack"
+}

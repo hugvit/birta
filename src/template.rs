@@ -76,6 +76,8 @@ pub struct PageOptions<'a> {
     pub extra_boot: Option<&'a serde_json::Value>,
     /// The beacon token when review is on; `None` leaves every review surface out.
     pub review_token: Option<&'a str>,
+    /// A folder is served, so review acts on every doc under it.
+    pub review_dir: bool,
     /// Focus stops of `content_html`, left out of BOOT when `None`.
     pub stops: Option<&'a [Stop]>,
 }
@@ -161,7 +163,9 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
         "initialView": if opts.raw_mode { "raw" } else { "preview" },
         "extra": opts.extra_boot,
         "review": match opts.review_token {
-            Some(token) => serde_json::json!({"enabled": true, "token": token}),
+            Some(token) => {
+                serde_json::json!({"enabled": true, "token": token, "dir": opts.review_dir})
+            }
             None => serde_json::json!({"enabled": false}),
         },
     });
@@ -295,6 +299,7 @@ mod tests {
             nonce: "",
             extra_boot: None,
             review_token: None,
+            review_dir: false,
             stops: None,
             rev: None,
         })
@@ -364,6 +369,7 @@ mod tests {
             nonce: "",
             extra_boot: None,
             review_token: None,
+            review_dir: false,
             stops: None,
             rev: None,
         })
@@ -498,6 +504,7 @@ mod tests {
             nonce: "",
             extra_boot: None,
             review_token: None,
+            review_dir: false,
             stops: None,
             rev: None,
         })
@@ -584,6 +591,7 @@ mod tests {
             nonce: "",
             extra_boot: None,
             review_token: None,
+            review_dir: false,
             stops: None,
             rev: None,
         })
@@ -679,6 +687,7 @@ mod tests {
             nonce: "",
             extra_boot: None,
             review_token: None,
+            review_dir: false,
             stops: None,
             rev: None,
         }
@@ -815,11 +824,12 @@ mod tests {
         let on = render_page(&PageOptions {
             nonce: "N0nce",
             review_token: Some("t0ken"),
+            review_dir: false,
             ..base_opts(&theme)
         });
         assert_eq!(
             boot(&on)["review"],
-            serde_json::json!({"enabled": true, "token": "t0ken"})
+            serde_json::json!({"enabled": true, "token": "t0ken", "dir": false})
         );
         assert!(on.contains("<script defer src=\"/_birta/review.js\" nonce=\"N0nce\"></script>"));
         assert!(on.contains("<link rel=\"stylesheet\" href=\"/_birta/review.css\">"));
@@ -880,6 +890,7 @@ mod tests {
         let page = render_page(&PageOptions {
             extra_boot: Some(&extra),
             review_token: None,
+            review_dir: false,
             stops: None,
             rev: None,
             ..base_opts(&theme)
@@ -914,6 +925,7 @@ mod tests {
             nonce: "abc123",
             extra_boot: Some(&extra),
             review_token: None,
+            review_dir: false,
             stops: None,
             rev: None,
             ..base_opts(&github)
@@ -1089,6 +1101,7 @@ mod tests {
             keybindings_json: r#"{"toggle_dark":"<!--"}"#,
             extra_boot: Some(&extra),
             review_token: None,
+            review_dir: false,
             stops: None,
             rev: None,
             ..base_opts(&theme)

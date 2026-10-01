@@ -167,6 +167,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     BR.keys.init();
     BR.pointing.init();
     BR.chrome.init();
+    BR.dir.init();
     document.addEventListener('visibilitychange', function () {
       if (document.visibilityState === 'hidden') flush();
     });

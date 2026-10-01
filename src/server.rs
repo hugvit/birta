@@ -683,6 +683,7 @@ async fn index_handler(
         nonce: nonce.as_str(),
         extra_boot: None,
         review_token: None,
+        review_dir: false,
         stops: Some(&current.stops),
         rev: None,
     });
@@ -770,6 +771,7 @@ async fn view_handler(
         nonce: nonce.as_str(),
         extra_boot: None,
         review_token: state.review.as_ref().map(|r| r.token.as_str()),
+        review_dir: state.review.as_ref().is_some_and(|r| r.dir_mode),
         stops: Some(&index.stops),
         rev: Some(rev.as_str()),
     });

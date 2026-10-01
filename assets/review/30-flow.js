@@ -746,7 +746,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     pending[cid] = { key: comp.key, text: text };
     if (hadDraft) sendCompose('');
     unsent = unsent.filter(function (u) { return u.key !== comp.key; });
-    if (handBack) afterAck[cid] = function () { BR.op({ op: 'hand_back', scope: 'doc' }); };
+    if (handBack) afterAck[cid] = BR.chrome.handBack;
     close();
   }
 
@@ -756,6 +756,8 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     var f = { op: 'comment', at: at, body: body };
     if (kind === 'ask') f.verdict = 'ask';
     var cid = BR.op(f);
+    // A folder note lives in the folder's review file, never in this doc's state, and z here can't reach it
+    if (at.k === 'dir') return cid;
     drafts.push({ cid: cid, at: at, body: body, seq: ++seq });
     BR.pointing.remember({
       cid: cid,
@@ -948,7 +950,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   }
 
   BR.flow = {
-    // Core forwards frames: the bus gives frames from before boot to its first subscriber only
+    // Core forwards frames, so the flow has each one before core draws
     frame: onFrame,
     /** Redraws the flow for `s`, the state of the page's rev, or null. */
     reconcile: function (s) {

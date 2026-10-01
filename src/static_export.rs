@@ -178,6 +178,7 @@ pub fn export_bundle(
             nonce: "",
             extra_boot: None,
             review_token: None,
+            review_dir: false,
             stops: None,
             rev: None,
         });

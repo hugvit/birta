@@ -154,6 +154,21 @@ fn op_fixtures() -> Vec<(&'static str, Value)> {
         ),
     ));
     out.push((
+        "comment-dir",
+        fixture(
+            DOC,
+            None,
+            vec![],
+            op(
+                "c1",
+                &r,
+                "comment",
+                json!({"at": {"k": "dir"}, "body": "Make these consistent."}),
+            ),
+            "ack",
+        ),
+    ));
+    out.push((
         "comment-block",
         fixture(
             DOC,
@@ -545,11 +560,11 @@ fn op_fixtures_cover_every_frozen_frame() {
             }
         })
         .collect();
-    let want: BTreeSet<String> = ["doc", "block", "quote", "quote without sp", "change"]
+    let want: BTreeSet<String> = ["doc", "dir", "block", "quote", "quote without sp", "change"]
         .iter()
         .map(|s| s.to_string())
         .collect();
-    assert_eq!(kinds, want, "every page anchor kind but dir");
+    assert_eq!(kinds, want, "every page anchor kind");
 }
 
 #[tokio::test]
@@ -561,7 +576,9 @@ async fn every_op_fixture_is_acked_by_the_real_handler() {
         if let Some(log) = fixture["log"].as_str() {
             site.write(LOG, log);
         }
-        let served = site.serve(&[PR], &[GATE_ON]);
+        // A note on the folder exists only where a folder is served
+        let args: &[&str] = if name == "comment-dir" { &["."] } else { &[PR] };
+        let served = site.serve(args, &[GATE_ON]);
         let (mut ws, _) = served.viewing(PR).await;
         let mut ok = true;
         for frame in fixture["before"].as_array().unwrap() {

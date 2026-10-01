@@ -159,6 +159,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       ? all.filter(function (x) { return !cursor || before(cursor, keyOf(x)); })[0]
       : all.filter(function (x) { return cursor && before(keyOf(x), cursor); }).pop();
     if (next) land(next);
+    else BR.dir.cross(step);
   }
 
   function onClick(e) {
@@ -344,6 +345,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   }
 
   function undo() {
+    if (BR.chrome.withdrawBatch()) return;
     var hold = BR.flow.holdActive();
     if (hold) {
       BR.op({ op: 'withdraw', to: hold.n });
@@ -407,6 +409,10 @@ var BR = typeof BR === 'undefined' ? {} : BR;
         walk(action === 'next_item' ? 1 : -1);
         return true;
       }
+      if (action === 'next_file' || action === 'prev_file') {
+        BR.dir.step(action === 'next_file' ? 1 : -1);
+        return true;
+      }
       if (action === 'turn') {
         BR.chrome.turn();
         return true;
@@ -444,6 +450,14 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       var first = state && BR.pure.attention(state).filter(function (x) { return x.kind === 'change'; })[0];
       if (first) land(first);
       return !!first;
+    },
+    /** Lands on this page's first or last walk stop, after n or p crossed files. */
+    landAt: function (which) {
+      var state = BR.currentState();
+      if (!state) return;
+      var all = BR.pure.attention(state);
+      var stop = which === 'last' ? all[all.length - 1] : all[0];
+      if (stop) land(stop);
     },
     /** Puts an act of this page's on the z stack: `{cid, undo(n) -> op fields, item?, created?}`. */
     remember: remember,

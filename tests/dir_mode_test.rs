@@ -627,3 +627,207 @@ async fn an_alias_viewer_gets_the_state_under_its_own_path() {
     .await;
     assert_eq!(frame["path"], "alias.md");
 }
+
+/// A note on the folder from the page at `path`, which is `text` on disk.
+fn folder_note(cid: &str, path: &str, text: &str, body: &str) -> serde_json::Value {
+    serde_json::json!({"type": "op", "cid": cid, "path": path,
+        "rev": birta::rev::Rev::of(text.as_bytes()), "op": "comment", "at": {"k": "dir"}, "body": body})
+}
+
+#[tokio::test]
+async fn a_folder_note_lands_in_the_folder_review_file() {
+    let site = review_site();
+    let a_log = site.read("a.md.birta.jsonl").unwrap();
+    let served = site.serve(&["."], &[GATE_ON]);
+    let (mut index, _) = served.viewing("index.md").await;
+    let (mut ws, _) = served.viewing("c.md").await;
+    served::acked(&mut ws, folder_note("f1", "c.md", "# C\n", "FOLDER-NOTE")).await;
+    let notes = served::ops_named(&site.path(".birta.jsonl"), "comment");
+    assert_eq!(notes.len(), 1, "{notes:#?}");
+    assert_eq!(notes[0]["at"], "dir");
+    assert_eq!(notes[0]["body"], "FOLDER-NOTE");
+    assert!(
+        !site.path("c.md.birta.jsonl").exists(),
+        "the page's own doc gets no review file"
+    );
+    assert_eq!(site.read("a.md.birta.jsonl").unwrap(), a_log);
+    dir_state_where(&mut index, "the folder's draft listed", |s| {
+        s["folder"]["summary"]["counts"]["drafts"] == 1
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_folder_note_from_a_linked_folder_lands_at_the_served_root() {
+    let site = served::Site::new();
+    site.write("index.md", "# Index\n");
+    let outside = site.base.join("vault");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("notes.md"), A_MD).unwrap();
+    symlink("../vault", site.path("linked")).unwrap();
+    let served = site.serve(&["."], &[GATE_ON]);
+    let (mut ws, _) = served.viewing("linked/notes.md").await;
+    served::acked(
+        &mut ws,
+        folder_note("f1", "linked/notes.md", A_MD, "FROM-LINKED"),
+    )
+    .await;
+    let notes = served::ops_named(&site.path(".birta.jsonl"), "comment");
+    assert_eq!(notes.len(), 1, "{notes:#?}");
+    assert_eq!(notes[0]["at"], "dir");
+    assert!(
+        !outside.join(".birta.jsonl").exists(),
+        "not the link target's folder"
+    );
+    assert!(!outside.join("notes.md.birta.jsonl").exists());
+}
+
+#[tokio::test]
+async fn hand_back_all_takes_the_folder_note_into_the_batch() {
+    let site = review_site();
+    let mut folder = Scenario::folder("root");
+    folder.comment(serde_json::json!("dir"), None, Some("FOLDER-NOTE"));
+    site.write(".birta.jsonl", &folder.log());
+    let served = site.serve(&["."], &[GATE_ON]);
+    let (mut ws, _) = served.viewing("a.md").await;
+    let hand_back = serde_json::json!({"type": "op", "cid": "h1", "path": "a.md",
+        "rev": birta::rev::Rev::of(A_MD.as_bytes()), "op": "hand_back", "scope": "all"});
+    served::acked(&mut ws, hand_back).await;
+    let a = served::ops_named(&site.path("a.md.birta.jsonl"), "submit");
+    let f = served::ops_named(&site.path(".birta.jsonl"), "submit");
+    assert_eq!((a.len(), f.len()), (1, 1), "{a:#?} {f:#?}");
+    assert!(a[0]["batch"].is_u64(), "{a:#?}");
+    assert_eq!(a[0]["batch"], f[0]["batch"]);
+}
+
+#[tokio::test]
+async fn hand_back_all_with_only_a_folder_note_is_acked() {
+    let site = served::Site::new();
+    site.write("index.md", "# Index\n");
+    let mut folder = Scenario::folder("root");
+    folder.comment(serde_json::json!("dir"), None, Some("FOLDER-NOTE"));
+    site.write(".birta.jsonl", &folder.log());
+    let served = site.serve(&["."], &[GATE_ON]);
+    let (mut ws, _) = served.viewing("index.md").await;
+    let hand_back = serde_json::json!({"type": "op", "cid": "h1", "path": "index.md",
+        "rev": birta::rev::Rev::of(b"# Index\n"), "op": "hand_back", "scope": "all"});
+    served::acked(&mut ws, hand_back).await;
+    assert_eq!(
+        served::ops_named(&site.path(".birta.jsonl"), "submit").len(),
+        1
+    );
+    assert!(!site.path("index.md.birta.jsonl").exists());
+}
+
+#[tokio::test]
+async fn withdrawing_a_hand_back_of_all_withdraws_every_file_of_its_batch() {
+    let site = review_site();
+    site.write("b.md", A_MD);
+    let mut b = Scenario::new(A_MD);
+    b.note("Another draft.");
+    site.write("b.md.birta.jsonl", &b.log());
+    let mut folder = Scenario::folder("root");
+    folder.comment(serde_json::json!("dir"), None, Some("FOLDER-NOTE"));
+    site.write(".birta.jsonl", &folder.log());
+    let served = site.serve(&["."], &[GATE_ON, ("BIRTA_REVIEW_HOLD_MS", "60000")]);
+    let (mut ws, _) = served.viewing("a.md").await;
+    let rev = birta::rev::Rev::of(A_MD.as_bytes());
+    let hand_back = serde_json::json!({"type": "op", "cid": "h1", "path": "a.md",
+        "rev": rev, "op": "hand_back", "scope": "all"});
+    let n = served::acked(&mut ws, hand_back).await["n"].clone();
+    let withdraw = serde_json::json!({"type": "op", "cid": "w1", "path": "a.md",
+        "rev": rev, "op": "withdraw", "to": n});
+    served::acked(&mut ws, withdraw).await;
+    for log in ["a.md.birta.jsonl", "b.md.birta.jsonl", ".birta.jsonl"] {
+        let lines = served::log_lines(&site.path(log));
+        let submit = lines
+            .iter()
+            .position(|l| l["op"] == "submit")
+            .unwrap_or_else(|| panic!("{log}: no submit: {lines:#?}"));
+        let withdrawn = lines
+            .iter()
+            .any(|l| l["op"] == "withdraw" && l["to"] == submit + 1);
+        assert!(withdrawn, "{log} still sent: {lines:#?}");
+    }
+}
+
+#[tokio::test]
+async fn boot_says_whether_a_folder_is_served() {
+    let site = review_site();
+    let folder = site.serve(&["."], &[GATE_ON]);
+    assert_eq!(folder.boot("a.md").await["review"]["dir"], true);
+    let file = site.serve(&["a.md"], &[GATE_ON]);
+    assert_eq!(file.boot("a.md").await["review"]["dir"], false);
+    let off = site.serve(&["."], &[]);
+    assert_eq!(
+        off.boot("a.md").await["review"],
+        serde_json::json!({"enabled": false})
+    );
+}
+
+#[tokio::test]
+async fn a_hand_back_of_all_from_a_doc_with_no_drafts_is_withdrawn_from_that_doc() {
+    let site = review_site();
+    let served = site.serve(&["."], &[GATE_ON, ("BIRTA_REVIEW_HOLD_MS", "60000")]);
+    let (mut ws, _) = served.viewing("c.md").await;
+    let rev = birta::rev::Rev::of(b"# C\n");
+    let hand_back = serde_json::json!({"type": "op", "cid": "h1", "path": "c.md",
+        "rev": rev, "op": "hand_back", "scope": "all"});
+    let ack = served::acked(&mut ws, hand_back).await;
+    assert!(ack["batch"].is_u64(), "the ack names its batch: {ack}");
+    assert!(ack["not_before"].is_u64(), "and when its hold ends: {ack}");
+    // Whatever line the ack names, the page can only send it back under its own path
+    let withdraw = serde_json::json!({"type": "op", "cid": "w1", "path": "c.md",
+        "rev": rev, "op": "withdraw", "to": ack["n"], "batch": ack["batch"]});
+    served::acked(&mut ws, withdraw).await;
+    let lines = served::log_lines(&site.path("a.md.birta.jsonl"));
+    let submit = lines
+        .iter()
+        .position(|l| l["op"] == "submit")
+        .expect("a.md was sent");
+    assert!(
+        lines
+            .iter()
+            .any(|l| l["op"] == "withdraw" && l["to"] == submit + 1),
+        "{lines:#?}"
+    );
+    assert!(
+        !site.path("c.md.birta.jsonl").exists(),
+        "c.md never had a note"
+    );
+}
+
+#[tokio::test]
+async fn withdrawing_a_batch_leaves_a_hand_back_outside_it_alone() {
+    let site = review_site();
+    let mut c = Scenario::new("# C\n");
+    c.note("Sent on its own.");
+    c.submit();
+    site.write("c.md.birta.jsonl", &c.log());
+    let served = site.serve(&["."], &[GATE_ON, ("BIRTA_REVIEW_HOLD_MS", "60000")]);
+    let (mut ws, _) = served.viewing("a.md").await;
+    let rev = birta::rev::Rev::of(A_MD.as_bytes());
+    let hand_back = serde_json::json!({"type": "op", "cid": "h1", "path": "a.md",
+        "rev": rev, "op": "hand_back", "scope": "all"});
+    let n = served::acked(&mut ws, hand_back).await["n"].clone();
+    let withdraw = serde_json::json!({"type": "op", "cid": "w1", "path": "a.md",
+        "rev": rev, "op": "withdraw", "to": n});
+    served::acked(&mut ws, withdraw).await;
+    assert_eq!(
+        served::ops_named(&site.path("a.md.birta.jsonl"), "withdraw").len(),
+        1
+    );
+    let c_withdrawn = served::ops_named(&site.path("c.md.birta.jsonl"), "withdraw");
+    assert!(c_withdrawn.is_empty(), "not in the batch: {c_withdrawn:#?}");
+}
+
+#[tokio::test]
+async fn a_folder_note_is_refused_when_one_file_is_served() {
+    let site = review_site();
+    let served = site.serve(&["a.md"], &[GATE_ON]);
+    let (mut ws, _) = served.viewing("a.md").await;
+    let reason = served::nacked(&mut ws, folder_note("f1", "a.md", A_MD, "NOPE")).await;
+    assert_eq!(reason, "bad_anchor");
+    assert!(!site.path(".birta.jsonl").exists());
+    assert!(!site.root.parent().unwrap().join(".birta.jsonl").exists());
+}

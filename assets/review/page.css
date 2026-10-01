@@ -55,3 +55,14 @@ html[data-review] ::highlight(birta-quote) {
   text-decoration: underline 2px var(--review-you);
   text-underline-offset: 3px;
 }
+
+a[data-br-news]::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--review-agent);
+  margin-left: 4px;
+  vertical-align: .15em;
+}

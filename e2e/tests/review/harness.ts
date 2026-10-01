@@ -9,7 +9,7 @@ import * as zlib from "zlib";
 export { expect };
 
 export const REPO = path.resolve(__dirname, "..", "..", "..");
-const BIN = path.join(REPO, "target", "debug", "birta");
+export const BIN = path.join(REPO, "target", "debug", "birta");
 const FIXTURES = path.join(REPO, "e2e", "fixtures", "review");
 
 export const GATE_ON: Record<string, string> = { BIRTA_REVIEW: "1" };
@@ -188,19 +188,26 @@ export interface Served {
 /**
  * Runs `target/debug/birta` over a fresh copy of `files` on a port the OS picks. `args`
  * defaults to the first file. HOME and XDG_STATE_HOME are private, so no user config applies.
+ * `links` maps a path under the root to its symlink target; `../x` files land beside the root.
  */
 export async function startBirta(
   files: Record<string, string>,
   env: Record<string, string> = {},
   args?: string[],
+  links: Record<string, string> = {},
 ): Promise<Served> {
   ensureBuilt();
   // realpath: the watcher compares canonical paths and macOS tmpdir is a symlink
   const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "birta-e2e-review-")));
   const root = path.join(base, "root");
+  fs.mkdirSync(root, { recursive: true });
   for (const [rel, text] of Object.entries(files)) {
     fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
     fs.writeFileSync(path.join(root, rel), text);
+  }
+  for (const [rel, target] of Object.entries(links)) {
+    fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+    fs.symlinkSync(target, path.join(root, rel));
   }
   const proc: ChildProcess = spawn(
     BIN,
@@ -847,7 +854,12 @@ export const OPEN_ROOTS = `(() => {
   };
 })();`;
 
-type Start = (files: Record<string, string>, env?: Record<string, string>, args?: string[]) => Promise<Served>;
+type Start = (
+  files: Record<string, string>,
+  env?: Record<string, string>,
+  args?: string[],
+  links?: Record<string, string>,
+) => Promise<Served>;
 
 /** Pages share the CDN cache; `birta` starts servers that stop when the test ends. */
 export const testClosed = base.extend<{ birta: Start }>({
@@ -857,8 +869,8 @@ export const testClosed = base.extend<{ birta: Start }>({
   },
   birta: async ({}, use) => {
     const started: Served[] = [];
-    await use(async (files, env, args) => {
-      const s = await startBirta(files, env, args);
+    await use(async (files, env, args, links) => {
+      const s = await startBirta(files, env, args, links);
       started.push(s);
       return s;
     });

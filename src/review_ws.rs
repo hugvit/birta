@@ -520,6 +520,8 @@ enum WsOp {
         body: Option<String>,
         #[serde(default)]
         verdict: Option<Verdict>,
+        #[serde(default)]
+        drop_verdict: bool,
     },
     Retract {
         to: u32,
@@ -820,12 +822,21 @@ fn build(
                 turn: None,
             }]
         }
-        WsOp::Amend { to, body, verdict } => {
+        WsOp::Amend {
+            to,
+            body,
+            verdict,
+            drop_verdict,
+        } => {
+            if verdict.is_some() && *drop_verdict {
+                return Err("bad_op");
+            }
             editable(parsed, text, *to)?;
             vec![Op::Amend {
                 to: *to,
                 body: body.clone(),
                 verdict: *verdict,
+                drop_verdict: *drop_verdict,
             }]
         }
         WsOp::Retract { to } => {

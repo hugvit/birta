@@ -852,11 +852,17 @@ fn as_sent(item: &Item, lines: &HashMap<u32, &Line>, upto: u32) -> Item {
         sent.body.clone_from(body);
     }
     for &n in &sent.amended {
-        if let Some(Op::Amend { body, verdict, .. }) = lines.get(&n).map(|l| &l.op) {
+        if let Some(Op::Amend {
+            body,
+            verdict,
+            drop_verdict,
+            ..
+        }) = lines.get(&n).map(|l| &l.op)
+        {
             if body.is_some() {
                 sent.body.clone_from(body);
             }
-            if verdict.is_some() {
+            if verdict.is_some() || *drop_verdict {
                 sent.verdict = *verdict;
             }
         }

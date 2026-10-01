@@ -410,6 +410,51 @@ test.describe("Esc ladder", () => {
     expect(await layers()).toEqual({ menu: false, selection: false, focus: null, reading: false });
   });
 
+  test("Esc drops one layer per press: theme menu, composer, then focus", async ({ page, birta }) => {
+    const { mock } = await open(page, birta, STOPS_DOC);
+    const all = await stops(page);
+    await page.keyboard.press("j");
+    await page.keyboard.press("j");
+    await expect.poll(() => focused(page)).toBe(all[1].sp);
+    await page.keyboard.press("c");
+    const composer = page.locator("textarea");
+    await expect(composer).toBeFocused();
+    // Opened by a script, so the empty composer keeps the keyboard
+    await page.evaluate(() => document.getElementById("theme-dropdown-btn")!.click());
+    const dropdown = page.locator(".theme-dropdown");
+    await expect(dropdown).toHaveClass(/\bopen\b/);
+    await expect(composer).toBeFocused();
+
+    const layers = async () => ({
+      menu: /\bopen\b/.test((await dropdown.getAttribute("class")) ?? ""),
+      composer: await composer.count(),
+      focus: await focused(page),
+    });
+    expect(await layers()).toEqual({ menu: true, composer: 1, focus: all[1].sp });
+    await page.keyboard.press("Escape");
+    await expect.poll(layers).toEqual({ menu: false, composer: 1, focus: all[1].sp });
+    await page.keyboard.press("Escape");
+    await expect.poll(layers).toEqual({ menu: false, composer: 0, focus: all[1].sp });
+    await page.keyboard.press("Escape");
+    await expect.poll(layers).toEqual({ menu: false, composer: 0, focus: null });
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await layers()).toEqual({ menu: false, composer: 0, focus: null });
+    expect(mock.ops()).toEqual([]);
+  });
+
+  test("an open composer the reader clicked away from still closes on Esc", async ({ page, birta }) => {
+    const { mock } = await open(page, birta, STOPS_DOC);
+    await page.keyboard.press("c");
+    const composer = page.locator("textarea");
+    await expect(composer).toBeFocused();
+    await page.locator("#content h1").click();
+    await expect(composer).not.toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(composer).toHaveCount(0);
+    expect(mock.ops()).toEqual([]);
+  });
+
   test("with only reading mode on, Esc leaves it", async ({ page, birta }) => {
     await open(page, birta, STOPS_DOC);
     await page.keyboard.press("r");
@@ -466,8 +511,7 @@ test.describe("files and activation", () => {
     await expect(page.getByText("review file created")).toHaveCount(0);
   });
 
-  // Needs the composer, which step 5.4 builds
-  test.fixme("an empty composer opened and closed with Esc writes nothing", async ({ page, birta }) => {
+  test("an empty composer opened and closed with Esc writes nothing", async ({ page, birta }) => {
     const served = await birta({ "pr.md": STOPS_DOC }, GATE_ON);
     const sent = watchSent(page);
     await page.setViewportSize(WIDE);
@@ -483,6 +527,28 @@ test.describe("files and activation", () => {
     expect(sent.filter((f) => f.type === "op" || (f.type === "compose" && f.text))).toEqual([]);
     expect(reviewLog(served.root)).toBeNull();
     expect(draftFiles(served.root)).toEqual([]);
+  });
+
+  test("a blank takes a rebound verdict key as its answer", async ({ page, birta }) => {
+    const { mock } = await open(page, birta, fixtureDoc("flow"), {
+      state: fixtureState("flow"),
+      args: ["pr.md", "--bind", "yes=g"],
+    });
+    await page.locator('birta-flow[data-kind="blank"]', { hasText: "is 503 the only code?" }).click();
+    await page.keyboard.press("g");
+    await expect.poll(() => mock.ops().length).toBe(1);
+    expect(mock.ops()[0]).toMatchObject({ op: "reply", to: 21, verdict: "yes" });
+  });
+
+  test("with the folder not writable a blank takes no answer", async ({ page, birta }) => {
+    const state = { ...fixtureState("flow"), log_writable: false };
+    const { mock } = await open(page, birta, fixtureDoc("flow"), { state });
+    await page.locator('birta-flow[data-kind="blank"]', { hasText: "is 503 the only code?" }).click();
+    await page.keyboard.press("y");
+    await page.keyboard.type("only 503");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(mock.ops()).toEqual([]);
   });
 
   test("a review key rebound with --bind acts on its new key only", async ({ page, birta }) => {

@@ -176,6 +176,7 @@ fn full_state() -> ReviewState {
                 no_change: false,
                 changes: vec!["37.0".to_string()],
             }),
+            seen: true,
         }],
         changes: vec![Change {
             id: "37.0".to_string(),
@@ -317,6 +318,7 @@ fn fresh_state() -> ReviewState {
             amended: vec![],
             replies: vec![],
             outcome: None,
+            seen: false,
         }],
         changes: vec![],
         deletions: vec![Deletion {
@@ -380,7 +382,8 @@ fn a_full_state_serializes_to_the_frozen_shape() {
             "status": "handled", "sent_in": 31, "turn": 33, "amended": [40],
             "replies": [{"n": 36, "id": "#36", "by": {"type": "agent", "name": "claude"}, "kind": "answer", "verdict": "yes",
                          "body": "flaky S3 503s", "ts": 1_790_000_300_000u64, "seen": true}],
-            "outcome": {"done": true, "no_change": false, "changes": ["37.0"]}
+            "outcome": {"done": true, "no_change": false, "changes": ["37.0"]},
+            "seen": true
         }],
         "changes": [{
             "id": "37.0", "op": 37, "idx": 0, "turn": 33, "attr": "agent", "by": {"type": "agent", "name": "claude"}, "cause": "git",
@@ -773,6 +776,55 @@ fn replied(more: impl FnOnce(&mut Scenario)) -> (Scenario, [u32; 3], [String; 2]
     (s, [q, v, d], [format!("{fix}.0"), format!("#{answer}")])
 }
 
+/// Every in-flow case the other fixtures lack: a fix under its own note, a note cited from
+/// another block, a note done with no change, open and answered blanks, an unasked change,
+/// two notes an outside write left without a place, and a write git made.
+fn flowed() -> Scenario {
+    let mut s = Scenario::drafted_by(PR, CLAUDE).nameless();
+    s.comment(s.quote("Nothing"), None, Some("cut this"));
+    s.comment(s.quote("yet"), None, Some("and this"));
+    let fixed = s.comment(s.quote("backoff of 1, 2 and 4"), Some("no"), Some("cap it"));
+    s.comment(
+        s.block("- retries on 503"),
+        Some("no"),
+        Some("drop this bullet"),
+    );
+    let answered = s.note("is the test ladder still needed?");
+    let tidy = s.comment(s.block("- metrics dashboard"), None, Some("tidy this"));
+    let cited = s.note("say why it fails");
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    s.replace_line(
+        "Retrying three times with backoff fixes most of these.",
+        "S3 answers 503 under load; retrying three times fixes most of these.",
+    );
+    s.covers(CLAUDE, cited, "S3 answers 503 under load", turn);
+    s.replace_line(
+        "- backoff of 1, 2 and 4 seconds",
+        "- backoff of 1, 2 and 4 seconds, capped at 8",
+    );
+    s.done(CLAUDE, fixed, turn);
+    s.done(CLAUDE, tidy, turn);
+    s.agent_reply(CLAUDE, answered, "answer", "Yes: CI runs it on every push.");
+    s.replace_line("## Stacked on", "## Stacked on nothing");
+    s.unasked(CLAUDE, "Stacked on nothing", turn);
+    s.blank(CLAUDE, s.block("## Why"), "is 503 the only code?", turn);
+    let asked = s.blank(
+        CLAUDE,
+        s.block("# Upload retries"),
+        "keep this title?",
+        turn,
+    );
+    s.turn_note(CLAUDE, "Capped the backoff.", turn);
+    s.yield_turn(CLAUDE, turn);
+    s.human_reply(asked, None, Some("yes, keep it"));
+    let text = s.replaced("## What changes", "## What changed");
+    s.external_git(&text);
+    // Last, since a note that loses its place to a git write waits for the checkout to return
+    s.replace_line("Nothing yet.", "Something else now.");
+    s
+}
+
 /// Each fixture's state, and the doc text it is about (none for the folder).
 fn contract_fixtures() -> Vec<(&'static str, ReviewState, Option<String>)> {
     let fresh = Scenario::drafted_by(PR, CLAUDE).nameless();
@@ -827,6 +879,8 @@ fn contract_fixtures() -> Vec<(&'static str, ReviewState, Option<String>)> {
     dir_state.hand_off = "Take a look at my notes: `birta review /work/dirmode`".to_string();
     dir_state.writable = false;
 
+    let flow = flowed();
+
     let hold = served(sent.fold(), ts(sub) + 2_000);
     let doc = |s: &Scenario| Some(s.text().to_string());
     vec![
@@ -844,6 +898,7 @@ fn contract_fixtures() -> Vec<(&'static str, ReviewState, Option<String>)> {
         ("hold", hold, doc(&sent)),
         ("approved", served(approved.fold(), LATER), doc(&approved)),
         ("lost", served(lost.fold(), LATER), doc(&lost)),
+        ("flow", served(flow.fold(), LATER), doc(&flow)),
         ("dir", dir_state, None),
     ]
 }
@@ -974,6 +1029,41 @@ fn each_contract_fixture_shows_its_case() {
     assert_eq!(lost.lost, [q.n]);
     assert!(get("replied").changes[0].reversible.ok);
     assert!(get("unseen").deletions[0].after_sp.is_some());
+
+    let flow = get("flow");
+    assert_eq!(flow.lost.len(), 2);
+    let asked = |kind| flow.changes.iter().filter(|c| c.asked.kind == kind).count();
+    assert_eq!(
+        [AskedKind::Cited, AskedKind::Location, AskedKind::Unasked].map(asked),
+        [1, 1, 1]
+    );
+    let causes: Vec<Option<&str>> = flow
+        .changes
+        .iter()
+        .filter(|c| c.attr == Attr::Outside)
+        .map(|c| c.cause.as_deref())
+        .collect();
+    assert_eq!(causes, [Some("git"), None]);
+    assert!(
+        flow.items
+            .iter()
+            .any(|i| i.outcome.as_ref().is_some_and(|o| o.done && o.no_change))
+    );
+    let blanks: Vec<ItemStatus> = flow
+        .items
+        .iter()
+        .filter(|i| i.by.kind == ByKind::Agent && i.verdict == Some(Verdict::Ask))
+        .map(|i| i.status)
+        .collect();
+    assert_eq!(blanks, [ItemStatus::Open, ItemStatus::Answered]);
+    // Replies from the page carry no name
+    let from_page = flow
+        .items
+        .iter()
+        .flat_map(|i| &i.replies)
+        .find(|r| r.by.kind == ByKind::Human)
+        .unwrap();
+    assert_eq!(from_page.by.name, None);
 }
 
 /// The JSON the page's review code is built against, and the doc each is about.

@@ -393,6 +393,9 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
     let mut drafted_by = None;
     let mut seen = HashSet::new();
     let mut seen_at: HashMap<String, u32> = HashMap::new();
+    let mut seen_last: HashMap<String, u32> = HashMap::new();
+    // The last agent line about each note, which a note's own seen must come after
+    let mut news_at: HashMap<u32, u32> = HashMap::new();
     for line in &parsed.lines {
         notes.step(line, &index, &mut warnings);
         index.step(line);
@@ -412,7 +415,13 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
                 for id in ids {
                     seen.insert(id.clone());
                     seen_at.entry(id.clone()).or_insert(line.n);
+                    seen_last.insert(id.clone(), line.n);
                 }
+            }
+            Op::Done { to, .. } | Op::Covers { to, .. } | Op::Reply { to, .. }
+                if line.by.kind == ByKind::Agent =>
+            {
+                news_at.insert(*to, line.n);
             }
             _ => {}
         }
@@ -530,7 +539,13 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
         .notes
         .iter()
         .zip(&facts)
-        .map(|(note, f)| item(note, f, &seen, at_state(note, &mut texts, &locator)))
+        .map(|(note, f)| {
+            let mut it = item(note, f, &seen, at_state(note, &mut texts, &locator));
+            it.seen = seen_last
+                .get(&format!("#{}", note.n))
+                .is_some_and(|&s| s > news_at.get(&note.n).copied().unwrap_or(0));
+            it
+        })
         .collect();
     let fold = Fold {
         turns: &turns,
@@ -994,6 +1009,7 @@ fn item(note: &items::Note, f: &Facts, seen: &HashSet<String>, at: AtState) -> I
             no_change: out.done && out.no_change,
             changes: out.changes.clone(),
         }),
+        seen: false,
     }
 }
 

@@ -487,7 +487,18 @@ export function blockBox(page: Page, sp: string): Promise<BlockBox | null> {
       if (first) line = { top: first.top, bottom: first.bottom };
     }
     const list = el.tagName === "LI" ? el.parentElement!.getBoundingClientRect() : null;
-    return { ...box(el.getBoundingClientRect()), line, list: list ? box(list) : null };
+    // Notes that close an item are not the item's own lines
+    const own = el.getBoundingClientRect();
+    let first: Element | null = null;
+    for (let c = el.lastElementChild; c && c.localName === "birta-flow"; c = c.previousElementSibling) first = c;
+    if (first) {
+      const range = document.createRange();
+      range.setStart(el, 0);
+      range.setEndBefore(first);
+      const bottom = range.getBoundingClientRect().bottom;
+      return { ...box(own), bottom, height: bottom - own.top, line, list: list ? box(list) : null };
+    }
+    return { ...box(own), line, list: list ? box(list) : null };
   }, sp);
 }
 

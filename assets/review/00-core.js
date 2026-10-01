@@ -69,7 +69,10 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   var shown = {};
 
   function draw() {
-    BR.lane.draw(state && state.rev === birtaBus.rev() ? state : null);
+    var shown = state && state.rev === birtaBus.rev() ? state : null;
+    // Flow first: its hosts move the blocks the lane measures
+    BR.flow.reconcile(shown);
+    BR.lane.draw(shown);
   }
 
   function dropAhead() {
@@ -102,6 +105,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   }
 
   function onFrame(msg) {
+    BR.flow.frame(msg);
     switch (msg.type) {
       case 'open':
         replay();

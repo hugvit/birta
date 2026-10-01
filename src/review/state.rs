@@ -178,6 +178,9 @@ pub struct Item {
     pub replies: Vec<ReplyState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<ItemOutcome>,
+    /// Seen by its own id (`#<n>`) since the agent last answered or handled it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub seen: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

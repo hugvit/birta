@@ -300,6 +300,16 @@ fn op_fixtures() -> Vec<(&'static str, Value)> {
         ),
     ));
     out.push((
+        "amend-drop-verdict",
+        fixture(
+            DOC,
+            Some(&s),
+            vec![],
+            op("c1", &r, "amend", json!({"to": note, "drop_verdict": true})),
+            "ack",
+        ),
+    ));
+    out.push((
         "retract",
         fixture(
             DOC,
@@ -2766,4 +2776,58 @@ async fn an_undo_restores_the_text_and_is_recorded_as_birtas_edit() {
         1,
         "only the agent's write, not the undo"
     );
+}
+
+#[tokio::test]
+async fn an_amend_drops_a_verdict_but_never_sets_and_drops_one_at_once() {
+    let site = Site::new();
+    site.write(PR, DOC);
+    let served = site.serve(&[PR], &[GATE_ON]);
+    let (mut ws, _) = served.viewing(PR).await;
+    let r0 = rev(DOC);
+    let block = json!({"k": "block", "sp": stop_sp(DOC, "first item"), "scope": "block"});
+    let note = acked(
+        &mut ws,
+        op(
+            "c1",
+            &r0,
+            "comment",
+            json!({"at": block, "verdict": "no", "body": "drop it"}),
+        ),
+    )
+    .await["n"]
+        .clone();
+    let before = log_lines(&review_file(&site)).len();
+    assert_eq!(
+        nacked(
+            &mut ws,
+            op(
+                "c2",
+                &r0,
+                "amend",
+                json!({"to": note, "verdict": "yes", "drop_verdict": true})
+            )
+        )
+        .await,
+        "bad_op"
+    );
+    assert_eq!(
+        log_lines(&review_file(&site)).len(),
+        before,
+        "a refused op writes nothing"
+    );
+    acked(
+        &mut ws,
+        op(
+            "c3",
+            &r0,
+            "amend",
+            json!({"to": note, "drop_verdict": true}),
+        ),
+    )
+    .await;
+    let amends = ops_named(&review_file(&site), "amend");
+    assert_eq!(amends.len(), 1);
+    assert_eq!(amends[0]["drop_verdict"], json!(true));
+    assert_eq!(amends[0].get("verdict"), None);
 }

@@ -172,6 +172,9 @@ pub enum Op {
         body: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         verdict: Option<Verdict>,
+        /// Clears the note's verdict and keeps its body.
+        #[serde(default, skip_serializing_if = "is_false")]
+        drop_verdict: bool,
     },
     Retract {
         to: u32,
@@ -553,6 +556,11 @@ pub fn parse_line(n: u32, raw: &str) -> ParsedLine {
         return ParsedLine::Unknown(UnknownLine { n, op });
     }
     match Op::deserialize(&value) {
+        Ok(Op::Amend {
+            verdict: Some(_),
+            drop_verdict: true,
+            ..
+        }) => bad("amend both sets and drops a verdict".to_string()),
         Ok(parsed) => ParsedLine::Ok(Line {
             n,
             ts: envelope.ts,

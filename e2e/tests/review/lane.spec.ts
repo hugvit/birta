@@ -8,6 +8,7 @@ import {
   Rgb,
   booted,
   blockBox,
+  contentBox,
   distance,
   fixtureDoc,
   fixtureState,
@@ -656,10 +657,11 @@ test.describe("the doc cannot reach the lane", () => {
     await open(page, birta, doc, { state: withRev(fixtureState("unseen"), revOf(doc)) });
     await expect.poll(() => markKeys(page)).toEqual(UNSEEN_KEYS);
     const frame = await frameBox(page);
+    const box = await contentBox(page);
     const s = await shot(page, frame);
     const RED = hex("#ff0000");
     // The raw HTML did render, inside the box
-    expect(near(s.at(frame.left + frame.width / 2, frame.top + 60), RED)).toBe(true);
+    expect(near(s.at(box.left + box.width / 2, box.top + 20), RED)).toBe(true);
     const leaks: string[] = [];
     for (let y = Math.ceil(frame.top) + 1; y < frame.bottom - 1; y += 7) {
       for (const x of [frame.left + 2, frame.left + 10, frame.left + 30, frame.right - 30, frame.right - 3]) {

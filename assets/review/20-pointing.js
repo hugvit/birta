@@ -15,8 +15,8 @@ var BR = typeof BR === 'undefined' ? {} : BR;
   // What the focused block looked like, to find it again when a patch replaces its node
   var focusWas = null;
   var active = false;
-  // The last verdict this page sent, which z takes back once its ack names its line
-  var last = null;
+  // This page's own acts, newest last; z takes back the top once its ack names its line
+  var undos = [];
   var pill = null;
   var pillText = null;
   var scrollQueued = false;
@@ -235,17 +235,90 @@ var BR = typeof BR === 'undefined' ? {} : BR;
 
   // --- verdicts and z ---
 
+  /** Your draft verdict on `at`: a sent one is never edited, so a key makes a new note. */
+  function draftVerdictAt(at) {
+    var state = BR.currentState();
+    if (!state || at.k === 'quote') return null;
+    return (state.items || []).filter(function (i) {
+      if (!i.by || i.by.type !== 'human' || !i.verdict || i.status !== 'draft') return false;
+      if (at.k === 'doc') return !!i.at && i.at.kind === 'doc';
+      return !!i.at && !!i.at.loc && i.at.loc.sp === at.sp && i.at.scope === at.scope;
+    })[0] || null;
+  }
+
+  function remember(entry) {
+    entry.n = null;
+    undos.push(entry);
+  }
+
   function verdict(name) {
     var state = BR.currentState();
-    var cid = BR.op({ op: 'comment', at: target(), verdict: name });
-    last = { cid: cid, n: null, created: !state || !state.log || !state.log.lines };
+    var at = target();
+    if (at.k === 'doc' && name === 'yes' && BR.flow.rewriteActive()) {
+      BR.flow.markRewriteSeen();
+      return;
+    }
+    var own = draftVerdictAt(at);
+    if (!own) {
+      remember({
+        cid: BR.op({ op: 'comment', at: at, verdict: name }),
+        created: !state || !state.log || !state.log.lines,
+        undo: function (n) { return { op: 'retract', to: n }; }
+      });
+      return;
+    }
+    var was = own.verdict;
+    if (own.verdict !== name) {
+      remember({
+        cid: BR.op({ op: 'amend', to: own.n, verdict: name }),
+        item: own.n,
+        undo: function () { return { op: 'amend', to: own.n, verdict: was }; }
+      });
+    } else if (own.body) {
+      // The same key clears the verdict; the words stay
+      remember({
+        cid: BR.op({ op: 'amend', to: own.n, drop_verdict: true }),
+        item: own.n,
+        undo: function () { return { op: 'amend', to: own.n, verdict: was }; }
+      });
+    } else {
+      remember({
+        cid: BR.op({ op: 'retract', to: own.n }),
+        undo: function () { return { op: 'comment', at: at, verdict: was }; }
+      });
+    }
+  }
+
+  /** Whether the note on line `n` has left the drafts, so z can no longer touch it. */
+  function sent(n) {
+    var state = BR.currentState();
+    var item = state && (state.items || []).filter(function (i) { return i.n === n; })[0];
+    return !!item && item.status !== 'draft' && item.status !== 'retracted';
+  }
+
+  function takeBack(entry) {
+    undos.splice(undos.indexOf(entry), 1);
+    var n = entry.item != null ? entry.item : entry.n;
+    // What went out with a hand-back stays there; so does everything before it
+    if (sent(n)) {
+      undos = [];
+      return;
+    }
+    BR.op(entry.undo(entry.n));
+    if (pillSays(CREATED)) showPill('');
   }
 
   function undo() {
-    if (!last || last.n == null) return;
-    BR.op({ op: 'retract', to: last.n });
-    last = null;
-    if (pillSays(CREATED)) showPill('');
+    var hold = BR.flow.holdActive();
+    if (hold) {
+      BR.op({ op: 'withdraw', to: hold.n });
+      return;
+    }
+    var top = undos[undos.length - 1];
+    if (!top) return;
+    // Before its ack the line isn't known: take it back once the ack names it
+    if (top.n == null) top.queued = true;
+    else takeBack(top);
   }
 
   function onFrame(msg) {
@@ -253,11 +326,16 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       if (msg.path && msg.path !== CURRENT_PATH) return;
       if (msg.stops) stops = msg.stops;
       if (focus && !focus.isConnected) setFocus(refind());
-    } else if (msg.type === 'ack' && last && msg.cid === last.cid) {
-      last.n = msg.n;
-      if (last.created) showPill(CREATED);
-    } else if (msg.type === 'nack' && last && msg.cid === last.cid) {
-      last = null;
+    } else if (msg.type === 'ack' || msg.type === 'nack') {
+      var entry = undos.filter(function (u) { return u.cid === msg.cid; })[0];
+      if (!entry) return;
+      if (msg.type === 'nack') {
+        undos.splice(undos.indexOf(entry), 1);
+        return;
+      }
+      entry.n = msg.n;
+      if (entry.created) showPill(CREATED);
+      if (entry.queued) takeBack(entry);
     }
   }
 
@@ -301,10 +379,26 @@ var BR = typeof BR === 'undefined' ? {} : BR;
         undo();
         return true;
       }
+      if (action === 'note' || action === 'ask') {
+        var at = target();
+        BR.flow.open(action, at, action === 'note' ? draftVerdictAt(at) : null);
+        return true;
+      }
+      if (action === 'open') {
+        // Enter on a link, summary or button keeps its own meaning
+        var active = document.activeElement;
+        if (active && active !== document.body && active.closest && active.closest('a, summary, button, input, select, textarea')) return false;
+        return !isSummary(focus) && BR.flow.openAt(focus);
+      }
       return false;
     },
-    /** Drops one Esc layer: the selection, then the focus. False when neither is there. */
+    /** Shows `text` in the pill, or hides it for ''. */
+    pill: showPill,
+    /** Puts an act of this page's on the z stack: `{cid, undo(n) -> op fields, item?, created?}`. */
+    remember: remember,
+    /** Drops one Esc layer: the composer, the selection, then the focus. False when none is there. */
     escape: function () {
+      if (BR.flow.escape()) return true;
       var s = getSelection();
       if (s && s.rangeCount && !s.isCollapsed) {
         s.removeAllRanges();

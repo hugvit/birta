@@ -51,7 +51,8 @@
       function blocksOf(parent) {
         var out = [];
         for (var n = parent.firstChild; n; n = n.nextSibling) {
-          if (!isBlank(n)) out.push(n);
+          // Review's in-flow hosts are not the doc's blocks
+          if (!isBlank(n) && !(typeof BR !== 'undefined' && BR.isHost(n))) out.push(n);
         }
         return out;
       }

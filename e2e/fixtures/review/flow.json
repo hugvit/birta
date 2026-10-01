@@ -1,0 +1,691 @@
+{
+  "schema": "review-state/1",
+  "doc": "pr.md",
+  "rev": "cddf13cfcd265547a2195a679ba7509e3704fb94",
+  "server_now": 1790000600000,
+  "writable": true,
+  "log_writable": true,
+  "hand_off": "Take a look at my notes: `birta review /work/pr.md`",
+  "log": {
+    "lines": 27,
+    "bad": 0,
+    "unknown_ops": 0,
+    "read_only": false,
+    "baseline_available": true
+  },
+  "owner": {
+    "drafted_by": "claude"
+  },
+  "phrase": {
+    "stage": "replied",
+    "sent": {
+      "n": 11,
+      "ts": 1790000011000,
+      "items": 7,
+      "can_withdraw": false
+    },
+    "picked_up": {
+      "n": 12,
+      "ts": 1790000012000,
+      "by": "claude",
+      "silence": {
+        "since_ts": 1790000012000,
+        "threshold_ms": 900000
+      }
+    },
+    "replied": {
+      "turn": 12,
+      "ts": 1790000024000,
+      "by": "claude",
+      "done": 2,
+      "answered": 1,
+      "didnt": 0,
+      "asked": 2,
+      "unasked": 1,
+      "not_handled": 3,
+      "note": "Capped the backoff."
+    }
+  },
+  "phrase_before_hold": null,
+  "hold": null,
+  "counts": {
+    "drafts": 1,
+    "sent_unclaimed": 0,
+    "unseen": 5,
+    "unasked": 1,
+    "not_handled": 3,
+    "open_asks": 1,
+    "later": 0,
+    "lost": 2,
+    "items": 3,
+    "decided": 2,
+    "attention": 10
+  },
+  "items": [
+    {
+      "n": 4,
+      "id": "nh:4",
+      "op": "comment",
+      "by": {
+        "type": "human",
+        "via": "browser"
+      },
+      "cid": "c-4",
+      "ts": 1790000004000,
+      "at": {
+        "kind": "anchor",
+        "status": "orphaned",
+        "scope": "quote",
+        "quote": "Nothing",
+        "shown": "Nothing",
+        "rev": "7956425b78307ed38a115054d90494e18cff956c",
+        "loc": null
+      },
+      "body": "cut this",
+      "status": "not_handled",
+      "sent_in": 11,
+      "turn": 12,
+      "amended": [],
+      "replies": []
+    },
+    {
+      "n": 5,
+      "id": "nh:5",
+      "op": "comment",
+      "by": {
+        "type": "human",
+        "via": "browser"
+      },
+      "cid": "c-5",
+      "ts": 1790000005000,
+      "at": {
+        "kind": "anchor",
+        "status": "orphaned",
+        "scope": "quote",
+        "quote": "yet",
+        "shown": "yet",
+        "rev": "7956425b78307ed38a115054d90494e18cff956c",
+        "loc": null
+      },
+      "body": "and this",
+      "status": "not_handled",
+      "sent_in": 11,
+      "turn": 12,
+      "amended": [],
+      "replies": []
+    },
+    {
+      "n": 6,
+      "op": "comment",
+      "by": {
+        "type": "human",
+        "via": "browser"
+      },
+      "cid": "c-6",
+      "ts": 1790000006000,
+      "at": {
+        "kind": "anchor",
+        "status": "moved",
+        "scope": "quote",
+        "quote": "backoff of 1, 2 and 4",
+        "shown": "backoff of 1, 2 and 4",
+        "lines": [
+          11,
+          11
+        ],
+        "range": [
+          205,
+          226
+        ],
+        "block": [
+          11,
+          11
+        ],
+        "section": "What changed",
+        "rev": "7956425b78307ed38a115054d90494e18cff956c",
+        "loc": {
+          "sp": "11:1-11:44",
+          "off": [
+            0,
+            21
+          ],
+          "tl": 42
+        }
+      },
+      "verdict": "no",
+      "body": "cap it",
+      "status": "handled",
+      "sent_in": 11,
+      "turn": 12,
+      "amended": [],
+      "replies": [],
+      "outcome": {
+        "done": true,
+        "no_change": false,
+        "changes": [
+          "15.0"
+        ]
+      }
+    },
+    {
+      "n": 7,
+      "id": "nh:7",
+      "op": "comment",
+      "by": {
+        "type": "human",
+        "via": "browser"
+      },
+      "cid": "c-7",
+      "ts": 1790000007000,
+      "at": {
+        "kind": "anchor",
+        "status": "ok",
+        "scope": "block",
+        "quote": "- retries on 503",
+        "lines": [
+          10,
+          10
+        ],
+        "range": [
+          186,
+          202
+        ],
+        "block": [
+          10,
+          10
+        ],
+        "section": "What changed",
+        "rev": "7956425b78307ed38a115054d90494e18cff956c",
+        "loc": {
+          "sp": "10:1-10:16"
+        }
+      },
+      "verdict": "no",
+      "body": "drop this bullet",
+      "status": "not_handled",
+      "sent_in": 11,
+      "turn": 12,
+      "amended": [],
+      "replies": []
+    },
+    {
+      "n": 8,
+      "op": "comment",
+      "by": {
+        "type": "human",
+        "via": "browser"
+      },
+      "cid": "c-8",
+      "ts": 1790000008000,
+      "at": {
+        "kind": "doc",
+        "loc": null
+      },
+      "body": "is the test ladder still needed?",
+      "status": "handled",
+      "sent_in": 11,
+      "turn": 12,
+      "amended": [],
+      "replies": [
+        {
+          "n": 18,
+          "id": "#18",
+          "by": {
+            "type": "agent",
+            "name": "claude",
+            "via": "cli"
+          },
+          "kind": "answer",
+          "body": "Yes: CI runs it on every push.",
+          "ts": 1790000018000,
+          "seen": false
+        }
+      ]
+    },
+    {
+      "n": 9,
+      "op": "comment",
+      "by": {
+        "type": "human",
+        "via": "browser"
+      },
+      "cid": "c-9",
+      "ts": 1790000009000,
+      "at": {
+        "kind": "anchor",
+        "status": "ok",
+        "scope": "block",
+        "quote": "- metrics dashboard",
+        "lines": [
+          12,
+          12
+        ],
+        "range": [
+          248,
+          267
+        ],
+        "block": [
+          12,
+          12
+        ],
+        "section": "What changed",
+        "rev": "7956425b78307ed38a115054d90494e18cff956c",
+        "loc": {
+          "sp": "12:1-13:0"
+        }
+      },
+      "body": "tidy this",
+      "status": "handled",
+      "sent_in": 11,
+      "turn": 12,
+      "amended": [],
+      "replies": [],
+      "outcome": {
+        "done": true,
+        "no_change": true,
+        "changes": []
+      }
+    },
+    {
+      "n": 10,
+      "op": "comment",
+      "by": {
+        "type": "human",
+        "via": "browser"
+      },
+      "cid": "c-10",
+      "ts": 1790000010000,
+      "at": {
+        "kind": "doc",
+        "loc": null
+      },
+      "body": "say why it fails",
+      "status": "handled",
+      "sent_in": 11,
+      "turn": 12,
+      "amended": [],
+      "replies": []
+    },
+    {
+      "n": 21,
+      "op": "comment",
+      "by": {
+        "type": "agent",
+        "name": "claude",
+        "via": "cli"
+      },
+      "ts": 1790000021000,
+      "at": {
+        "kind": "anchor",
+        "status": "ok",
+        "scope": "block",
+        "quote": "## Why",
+        "lines": [
+          3,
+          3
+        ],
+        "range": [
+          18,
+          24
+        ],
+        "block": [
+          3,
+          3
+        ],
+        "section": "Why",
+        "rev": "2213eeb0d2117608151c85c8951dcc1cc74e3156",
+        "loc": {
+          "sp": "3:1-3:6"
+        }
+      },
+      "verdict": "ask",
+      "body": "is 503 the only code?",
+      "status": "open",
+      "amended": [],
+      "replies": []
+    },
+    {
+      "n": 22,
+      "op": "comment",
+      "by": {
+        "type": "agent",
+        "name": "claude",
+        "via": "cli"
+      },
+      "ts": 1790000022000,
+      "at": {
+        "kind": "anchor",
+        "status": "ok",
+        "scope": "block",
+        "quote": "# Upload retries",
+        "lines": [
+          1,
+          1
+        ],
+        "range": [
+          0,
+          16
+        ],
+        "block": [
+          1,
+          1
+        ],
+        "section": "Upload retries",
+        "rev": "2213eeb0d2117608151c85c8951dcc1cc74e3156",
+        "loc": {
+          "sp": "1:1-1:16"
+        }
+      },
+      "verdict": "ask",
+      "body": "keep this title?",
+      "status": "answered",
+      "amended": [],
+      "replies": [
+        {
+          "n": 25,
+          "id": "#25",
+          "by": {
+            "type": "human",
+            "via": "browser"
+          },
+          "body": "yes, keep it",
+          "ts": 1790000025000,
+          "seen": false
+        }
+      ]
+    }
+  ],
+  "changes": [
+    {
+      "id": "13.0",
+      "op": 13,
+      "idx": 0,
+      "turn": 12,
+      "attr": "agent",
+      "by": {
+        "type": "agent",
+        "name": "claude"
+      },
+      "old": [
+        6,
+        6
+      ],
+      "new": [
+        6,
+        6
+      ],
+      "range": {
+        "status": "ok",
+        "lines": [
+          6,
+          6
+        ],
+        "bytes": [
+          99,
+          167
+        ],
+        "sp": "5:1-6:68"
+      },
+      "asked": {
+        "kind": "cited",
+        "notes": [
+          10
+        ]
+      },
+      "reverts_your_edit": false,
+      "breaks_stet": [],
+      "seen": false,
+      "settled": false,
+      "what": {
+        "old_lines": 1,
+        "new_lines": 1,
+        "touches_html": false
+      },
+      "is_rewrite": false,
+      "reversible": {
+        "ok": true,
+        "reason": "none"
+      },
+      "op_hunks": 1
+    },
+    {
+      "id": "15.0",
+      "op": 15,
+      "idx": 0,
+      "turn": 12,
+      "attr": "agent",
+      "by": {
+        "type": "agent",
+        "name": "claude"
+      },
+      "old": [
+        11,
+        11
+      ],
+      "new": [
+        11,
+        11
+      ],
+      "range": {
+        "status": "ok",
+        "lines": [
+          11,
+          11
+        ],
+        "bytes": [
+          203,
+          247
+        ],
+        "sp": "11:1-11:44"
+      },
+      "asked": {
+        "kind": "location",
+        "notes": [
+          6
+        ]
+      },
+      "reverts_your_edit": false,
+      "breaks_stet": [],
+      "seen": false,
+      "settled": false,
+      "what": {
+        "old_lines": 1,
+        "new_lines": 1,
+        "touches_html": false
+      },
+      "is_rewrite": false,
+      "reversible": {
+        "ok": true,
+        "reason": "none"
+      },
+      "op_hunks": 1
+    },
+    {
+      "id": "19.0",
+      "op": 19,
+      "idx": 0,
+      "turn": 12,
+      "attr": "agent",
+      "by": {
+        "type": "agent",
+        "name": "claude"
+      },
+      "old": [
+        14,
+        14
+      ],
+      "new": [
+        14,
+        14
+      ],
+      "range": {
+        "status": "ok",
+        "lines": [
+          14,
+          14
+        ],
+        "bytes": [
+          269,
+          290
+        ],
+        "sp": "14:1-14:21"
+      },
+      "asked": {
+        "kind": "unasked",
+        "notes": []
+      },
+      "reverts_your_edit": false,
+      "breaks_stet": [],
+      "seen": false,
+      "settled": false,
+      "what": {
+        "old_lines": 1,
+        "new_lines": 1,
+        "words": 1,
+        "touches_html": false
+      },
+      "is_rewrite": false,
+      "reversible": {
+        "ok": true,
+        "reason": "none"
+      },
+      "op_hunks": 1
+    },
+    {
+      "id": "26.0",
+      "op": 26,
+      "idx": 0,
+      "attr": "outside",
+      "by": {
+        "type": "birta"
+      },
+      "cause": "git",
+      "old": [
+        8,
+        8
+      ],
+      "new": [
+        8,
+        8
+      ],
+      "range": {
+        "status": "ok",
+        "lines": [
+          8,
+          8
+        ],
+        "bytes": [
+          169,
+          184
+        ],
+        "sp": "8:1-8:15"
+      },
+      "asked": {
+        "kind": "outside",
+        "notes": []
+      },
+      "reverts_your_edit": false,
+      "breaks_stet": [],
+      "seen": false,
+      "settled": false,
+      "what": {
+        "old_lines": 1,
+        "new_lines": 1,
+        "words": 1,
+        "touches_html": false
+      },
+      "is_rewrite": false,
+      "reversible": {
+        "ok": false,
+        "reason": "outside"
+      },
+      "op_hunks": 1
+    },
+    {
+      "id": "27.0",
+      "op": 27,
+      "idx": 0,
+      "attr": "outside",
+      "by": {
+        "type": "birta"
+      },
+      "old": [
+        16,
+        16
+      ],
+      "new": [
+        16,
+        16
+      ],
+      "range": {
+        "status": "ok",
+        "lines": [
+          16,
+          16
+        ],
+        "bytes": [
+          292,
+          311
+        ],
+        "sp": "16:1-16:19"
+      },
+      "asked": {
+        "kind": "outside",
+        "notes": []
+      },
+      "reverts_your_edit": false,
+      "breaks_stet": [],
+      "seen": false,
+      "settled": false,
+      "what": {
+        "old_lines": 1,
+        "new_lines": 1,
+        "words": 3,
+        "touches_html": false
+      },
+      "is_rewrite": false,
+      "reversible": {
+        "ok": false,
+        "reason": "outside"
+      },
+      "op_hunks": 1
+    }
+  ],
+  "deletions": [
+    {
+      "change": "13.0",
+      "kind": "words",
+      "at_line": 6,
+      "at_byte": 146,
+      "removed": " with backoff",
+      "after_sp": "5:1-6:68"
+    }
+  ],
+  "later": [],
+  "lost": [
+    4,
+    5
+  ],
+  "rounds": [
+    {
+      "submit": 11,
+      "ts": 1790000011000,
+      "by": "",
+      "to": "*",
+      "items": [
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10
+      ],
+      "claim": 12,
+      "claimed_by": "claude",
+      "yield": 24,
+      "released": false
+    }
+  ],
+  "warnings": []
+}

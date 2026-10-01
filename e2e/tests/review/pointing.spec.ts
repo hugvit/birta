@@ -559,7 +559,7 @@ test.describe("verdict keys", () => {
     expect(op.at).toStrictEqual({ k: "block", sp: moved, scope: "block" });
   });
 
-  test("z retracts the latest verdict by its own ack, whatever order acks arrive in, and only once", async ({
+  test("z retracts the latest verdict by its own ack, whatever order acks arrive in, then the one before", async ({
     page,
     birta,
   }) => {
@@ -580,9 +580,13 @@ test.describe("verdict keys", () => {
     await page.keyboard.press("z");
     await expect.poll(() => mock.ops().length).toBe(3);
     expect(mock.ops()[2]).toMatchObject({ op: "retract", to: 101 });
+    // z is a stack: the next press takes back the verdict before
+    await page.keyboard.press("z");
+    await expect.poll(() => mock.ops().length).toBe(4);
+    expect(mock.ops()[3]).toMatchObject({ op: "retract", to: 102 });
     await page.keyboard.press("z");
     await page.waitForTimeout(SETTLE_MS);
-    expect(mock.ops().filter((o) => o.op === "retract")).toHaveLength(1);
+    expect(mock.ops().filter((o) => o.op === "retract")).toHaveLength(2);
   });
 
   test("z before an ack names no n, and after a nack takes nothing back", async ({ page, birta }) => {

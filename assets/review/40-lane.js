@@ -178,6 +178,19 @@ var BR = typeof BR === 'undefined' ? {} : BR;
     return el;
   }
 
+  // A block's own lines: notes that close a list item are not part of it
+  function ownRect(el) {
+    var r = el.getBoundingClientRect();
+    var first = null;
+    for (var c = el.lastElementChild; c && BR.isHost(c); c = c.previousElementSibling) first = c;
+    if (!first) return r;
+    var range = document.createRange();
+    range.setStart(el, 0);
+    range.setEndBefore(first);
+    var bottom = range.getBoundingClientRect().bottom;
+    return { top: r.top, bottom: bottom, left: r.left, right: r.right, width: r.width, height: bottom - r.top };
+  }
+
   function render() {
     queued = false;
     var marks = current ? BR.pure.laneMarks(current) : [];
@@ -221,7 +234,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       }
       var el = bySp[m.sp];
       if (!rendered(el)) return;
-      var r = el.getBoundingClientRect();
+      var r = ownRect(el);
       if (m.mark === 'bar') {
         var w = barWidth(m);
         overOut.appendChild(box({ 'data-mark': 'bar', 'data-sp': m.sp, 'data-style': m.style, 'data-role': m.role },
@@ -240,6 +253,21 @@ var BR = typeof BR === 'undefined' ? {} : BR;
         g.appendChild(svg(ICONS[m.verdict] || ICONS.no));
         overOut.appendChild(g);
       }
+    });
+
+    // A note's rule runs down the lane beside it, and a folded note leaves a dot in the right padding
+    BR.flow.rules().forEach(function (f) {
+      var r = f.el.getBoundingClientRect();
+      if (!r.height) return;
+      overOut.appendChild(box({ 'data-mark': 'rule', 'data-style': f.style, 'data-role': f.role },
+        'rule ' + f.style + ' ' + f.role, laneX - 1, r.top - F.top, 2, r.height));
+    });
+    BR.flow.dots().forEach(function (d) {
+      var el = bySp[d.sp];
+      if (!rendered(el)) return;
+      var line = firstLine(el);
+      overOut.appendChild(box({ 'data-mark': 'dot', 'data-sp': d.sp, 'data-role': d.role }, 'dot ' + d.role,
+        F.width - 24, (line.top + line.bottom) / 2 - 4 - F.top, 8, 8));
     });
 
     var places = [];
@@ -309,7 +337,7 @@ var BR = typeof BR === 'undefined' ? {} : BR;
 
   // A heading's box grows to the end of its section: the last block before a heading as high
   function sectionRect(el, C) {
-    var r = el.getBoundingClientRect();
+    var r = ownRect(el);
     var level = /^h([1-6])$/.exec(el.localName);
     var bottom = r.bottom;
     if (level && el.parentElement === content) {
@@ -419,6 +447,8 @@ var BR = typeof BR === 'undefined' ? {} : BR;
       over.classList.toggle('off', hidden);
       highlight();
     },
+    /** Measures again on the next frame, after the flow moved blocks. */
+    redraw: function () { schedule(); },
     draw: function (state) {
       current = state;
       render();

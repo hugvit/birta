@@ -193,6 +193,31 @@ fn turn_ops_parse_to_their_fields() {
 }
 
 #[test]
+fn an_amend_drops_its_verdict_only_when_it_names_none() {
+    // An amend from before the field keeps its verdict
+    let old = ok(3, r#"{"op":"amend","to":12,"verdict":"yes"}"#);
+    assert_eq!(
+        serde_json::to_value(&old).unwrap().get("drop_verdict"),
+        None,
+        "false is omitted"
+    );
+    let dropped = ok(
+        3,
+        r#"{"op":"amend","to":12,"body":"why","drop_verdict":true}"#,
+    );
+    assert_eq!(
+        serde_json::to_value(&dropped).unwrap()["drop_verdict"],
+        json!(true)
+    );
+    // Setting and dropping a verdict at once means nothing, so the line is bad
+    assert!(is_bad(
+        3,
+        r#"{"op":"amend","to":12,"verdict":"yes","drop_verdict":true}"#
+    ));
+    assert!(is_bad(3, r#"{"op":"amend","to":12,"drop_verdict":"yes"}"#));
+}
+
+#[test]
 fn seen_takes_ids_in_all_three_grammars() {
     let line = ok(3, r##"{"op":"seen","ids":["12.0","#15","nh:12"]}"##);
     let Op::Seen { ids } = line.op else {
@@ -402,6 +427,7 @@ fn every_op_reserializes_to_its_literal_line() {
         format!(r#"{by_agent},"op":"reply","to":12,"body":"flaky S3","kind":"answer","late":true"#),
         format!(r#"{by_human},"op":"reply","to":15,"verdict":"yes""#),
         format!(r#"{by_human},"op":"amend","to":12,"body":"say why","verdict":"rewrite""#),
+        format!(r#"{by_human},"op":"amend","to":12,"drop_verdict":true"#),
         format!(r#"{by_human},"op":"retract","to":12"#),
         format!(
             r#"{by_human},"op":"submit","upto":30,"not_before":1790000005000,"hold_ms":5000,"to":"*""#

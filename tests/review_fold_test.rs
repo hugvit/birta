@@ -1758,3 +1758,109 @@ fn an_omitted_quote_note_is_not_handled() {
     assert_eq!(status(&state, other), ItemStatus::Handled);
     assert_eq!(state.counts.not_handled, 1);
 }
+
+// --- dropping a verdict, and notes seen by their own id ---
+
+#[test]
+fn an_amend_that_drops_the_verdict_keeps_the_body_and_undecides_the_item() {
+    let mut s = Scenario::new(DOC);
+    let at = s.block("first item");
+    let x = s.comment(at, Some("no"), Some("drop it"));
+    assert_eq!(
+        s.fold().counts.decided,
+        1,
+        "setup: the verdict decides its item"
+    );
+    let am = s.push(
+        human(),
+        json!({"op": "amend", "to": x, "drop_verdict": true}),
+    );
+    let state = s.fold();
+    let it = item(&state, x);
+    assert_eq!(it.verdict, None);
+    assert_eq!(it.body.as_deref(), Some("drop it"));
+    assert_eq!(it.amended, [am]);
+    assert_eq!(it.status, ItemStatus::Draft);
+    assert_eq!(state.counts.decided, 0);
+    assert!(state.warnings.is_empty(), "{:?}", state.warnings);
+}
+
+#[test]
+fn a_verdict_dropped_after_the_hand_back_is_ignored() {
+    let mut s = Scenario::new(DOC);
+    let at = s.block("first item");
+    let x = s.comment(at, Some("no"), Some("drop it"));
+    s.submit();
+    s.push(
+        human(),
+        json!({"op": "amend", "to": x, "drop_verdict": true}),
+    );
+    let state = s.fold();
+    assert_eq!(item(&state, x).verdict, Some(Verdict::No));
+    assert_eq!(state.warnings.len(), 1, "{:?}", state.warnings);
+}
+
+/// `items[].seen` as the page reads it: absent counts as false.
+fn note_seen(state: &ReviewState, n: u32) -> bool {
+    serde_json::to_value(item(state, n)).unwrap()["seen"] == json!(true)
+}
+
+/// A note the agent's turn marked done, and that turn's claim.
+fn handled_note() -> (Scenario, u32) {
+    let mut s = Scenario::drafted_by(DOC, CLAUDE);
+    let x = s.note("tighten the intro");
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    s.done(CLAUDE, x, turn);
+    s.yield_turn(CLAUDE, turn);
+    (s, x)
+}
+
+#[test]
+fn a_handled_note_seen_by_its_own_id_is_seen() {
+    let (mut s, x) = handled_note();
+    assert_eq!(status(&s.fold(), x), ItemStatus::Handled);
+    assert!(!note_seen(&s.fold(), x), "unseen until the seen line");
+    s.seen(&[&format!("#{x}")]);
+    let state = s.fold();
+    assert!(note_seen(&state, x));
+    assert!(state.warnings.is_empty(), "{:?}", state.warnings);
+}
+
+#[test]
+fn a_reply_after_the_seen_makes_the_note_unseen_again() {
+    let (mut s, x) = handled_note();
+    s.seen(&[&format!("#{x}")]);
+    s.late_reply(CLAUDE, x, "note", "one more thing");
+    assert!(!note_seen(&s.fold(), x));
+    // Seeing it again counts from the newest outcome
+    s.seen(&[&format!("#{x}")]);
+    assert!(note_seen(&s.fold(), x));
+}
+
+#[test]
+fn a_seen_before_the_notes_outcome_does_not_count() {
+    let mut s = Scenario::drafted_by(DOC, CLAUDE);
+    let x = s.note("tighten the intro");
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    s.seen(&[&format!("#{x}")]);
+    s.done(CLAUDE, x, turn);
+    s.yield_turn(CLAUDE, turn);
+    let state = s.fold();
+    assert_eq!(status(&state, x), ItemStatus::Handled);
+    assert!(!note_seen(&state, x));
+}
+
+#[test]
+fn only_the_human_marks_a_note_seen() {
+    let (mut s, x) = handled_note();
+    s.push(
+        support::scenario::agent(CLAUDE),
+        json!({"op": "seen", "ids": [format!("#{x}")]}),
+    );
+    assert!(!note_seen(&s.fold(), x));
+    // Control: the same line from the human counts
+    s.seen(&[&format!("#{x}")]);
+    assert!(note_seen(&s.fold(), x));
+}

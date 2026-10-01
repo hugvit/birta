@@ -44,3 +44,26 @@ test("the lane's shadow roots are closed and still paint", async ({ page, birta 
   const s = await shot(page, frame);
   expect(near(s.at(li.list!.left + 3, (li.top + li.bottom) / 2), hex("#fff8c5"))).toBe(true);
 });
+
+test("a note is typed and kept in a closed root, and its keys are never verdicts", async ({ page, birta }) => {
+  const served = await birta({ "pr.md": fixtureDoc("fresh") }, GATE_ON);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  const mock = await mockReview(page);
+  await page.goto(`${served.url}/view/pr.md`);
+  await booted(page);
+  await page.keyboard.press("c");
+  // Focus sits in a closed root: the page sees only its host
+  await expect
+    .poll(() => page.evaluate(() => document.activeElement?.localName ?? null))
+    .toBe("birta-flow");
+  await page.keyboard.type("x marks y spot");
+  await page.keyboard.press("Enter");
+  await expect.poll(() => mock.ops().length).toBe(1);
+  expect(mock.ops()[0]).toMatchObject({ op: "comment", at: { k: "doc" }, body: "x marks y spot" });
+  expect(mock.ops()[0].verdict).toBeUndefined();
+  const roots = await page.evaluate(() =>
+    Array.from(document.querySelectorAll("birta-flow")).map((h) => h.shadowRoot === null),
+  );
+  expect(roots.length).toBeGreaterThan(0);
+  expect(roots.every(Boolean)).toBe(true);
+});

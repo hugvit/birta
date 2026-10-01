@@ -107,20 +107,23 @@ impl Notes {
                     replies: Vec::new(),
                 });
             }
-            Op::Amend { to, body, verdict } if line.by.kind == ByKind::Human => {
-                match self.draft_mut(*to, index) {
-                    Some(note) => {
-                        if body.is_some() {
-                            note.body.clone_from(body);
-                        }
-                        if verdict.is_some() {
-                            note.verdict = *verdict;
-                        }
-                        note.amended.push(line.n);
+            Op::Amend {
+                to,
+                body,
+                verdict,
+                drop_verdict,
+            } if line.by.kind == ByKind::Human => match self.draft_mut(*to, index) {
+                Some(note) => {
+                    if body.is_some() {
+                        note.body.clone_from(body);
                     }
-                    None => warnings.push(unchangeable(line.n, "amend", *to)),
+                    if verdict.is_some() || *drop_verdict {
+                        note.verdict = *verdict;
+                    }
+                    note.amended.push(line.n);
                 }
-            }
+                None => warnings.push(unchangeable(line.n, "amend", *to)),
+            },
             Op::Retract { to } if line.by.kind == ByKind::Human => {
                 match self.draft_mut(*to, index) {
                     Some(note) => note.retracted = true,

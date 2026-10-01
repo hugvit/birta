@@ -120,6 +120,23 @@ const FIXTURE_MARKS = {
   // An asked and a later outside change share the paragraph: the newest unseen one's bar wins
   lost: [glyph("10:1-10:16", "no", "agent"), bar("5:1-6:68", "dotted", "agent"), wash("5:1-6:68")],
   rewrite: [glyph("5:1-6:68", "no", "agent"), glyph("10:1-10:29", "no", "agent")],
+  // Cited and asked fixes are solid; the unasked change and both outside writes are dotted
+  flow: [
+    glyph("11:1-11:44", "no", "agent"),
+    glyph("10:1-10:16", "no", "agent"),
+    glyph("3:1-3:6", "ask", "agent"),
+    glyph("1:1-1:16", "ask", "agent"),
+    bar("5:1-6:68", "solid", "agent"),
+    bar("11:1-11:44", "solid", "agent"),
+    bar("14:1-14:21", "dotted", "agent"),
+    bar("8:1-8:15", "dotted", "agent"),
+    bar("16:1-16:19", "dotted", "agent"),
+    wash("5:1-6:68"),
+    wash("11:1-11:44"),
+    wash("14:1-14:21"),
+    wash("8:1-8:15"),
+    wash("16:1-16:19"),
+  ],
 };
 
 test("the table covers every committed state", () => {

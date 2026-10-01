@@ -1480,7 +1480,7 @@ fn undoing_a_whole_write_marks_every_hunk_undone() {
     s.yield_turn(CLAUDE, turn);
     assert_eq!(change(&s.fold(), &id(ext, 1)).op_hunks, 3, "setup");
 
-    // One `x`, confirmed, on the middle hunk.
+    // An undo as servers before per-change revert wrote it: one `x` reverting the whole write
     let undo = s.undo(&id(ext, 1), DOC);
 
     let state = s.fold();

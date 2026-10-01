@@ -1389,3 +1389,29 @@ fn covers_bind_the_turns_own_writes_whatever_came_after() {
         json!([id(ext, 0)])
     );
 }
+
+#[test]
+fn an_added_list_item_and_a_ticked_box_read_as_what_they_are() {
+    let cases = [
+        (
+            "# T\n\n- one\n- two\n",
+            "# T\n\n- one\n- one and a half\n- two\n",
+            "list item added",
+        ),
+        (
+            "# T\n\n- [ ] ship it\n- other\n",
+            "# T\n\n- [x] ship it\n- other\n",
+            "formatting changed",
+        ),
+    ];
+    let mut bad = Vec::new();
+    for (base, new, want) in cases {
+        let (s, ext) = agent_writes(base, new);
+        let mine = of_write(&wire(&s.fold()), ext);
+        let got: Vec<&Value> = mine.iter().map(|c| &c["label"]).collect();
+        if got != [want] {
+            bad.push(format!("{base:?}: {got:?}"));
+        }
+    }
+    assert!(bad.is_empty(), "{bad:#?}");
+}

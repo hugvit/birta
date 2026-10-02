@@ -311,6 +311,9 @@ pub struct Change {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub removed: Option<String>,
     pub is_rewrite: bool,
+    /// An `unasked` line of its turn names it, so it was flagged rather than forgotten.
+    #[serde(skip)]
+    pub flagged: bool,
     /// The hunk that undoes this one, in the current text's lines; set only when reversible.
     #[serde(skip)]
     pub reverse: Option<Hunk>,
@@ -349,6 +352,9 @@ pub enum RangeStatus {
 pub struct Asked {
     pub kind: AskedKind,
     pub notes: Vec<u32>,
+    /// The reviewer's answers a `covers` cited it for, by reply line.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub answers: Vec<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

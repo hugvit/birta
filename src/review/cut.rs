@@ -11,10 +11,12 @@ use crate::anchor::StopKind;
 
 /// Past this many block pairings a hunk stays whole.
 const MAX_PAIRINGS: usize = 10_000;
+/// Words of its own an unpaired block must give its neighbour's pair to join it.
+const FED_WORDS: usize = 3;
 
 /// The hunks that turn `old` into `new`, cut at block boundaries.
 pub fn diff(old: &str, new: &str) -> Vec<Hunk> {
-    let hunks = hunk::diff(old, new);
+    let hunks = hunk::diff_anchored(old, new);
     // Only a hunk that both removes and adds lines can pair blocks
     if !hunks.iter().any(|h| !h.d.is_empty() && !h.i.is_empty()) {
         return hunks;
@@ -186,6 +188,19 @@ impl Seg {
         let shared = self.words.intersection(&other.words).count();
         !self.words.is_empty() && shared * 2 > self.words.len()
     }
+
+    /// Of this block's words that `beside` lacks, enough read in `into` that the two
+    /// were merged into it, or split from it, with the wording reworked.
+    fn feeds(&self, into: &Seg, beside: &Seg) -> bool {
+        let own: Vec<&String> = self.words.difference(&beside.words).collect();
+        let kept = own.iter().filter(|w| into.words.contains(**w)).count();
+        kept >= FED_WORDS && kept * 4 >= own.len()
+    }
+
+    /// This block, of `beside`'s kind, joins the pair of `beside` and `into`.
+    fn joins(&self, into: &Seg, beside: &Seg) -> bool {
+        self.kind == beside.kind && (self.within(into) || self.feeds(into, beside))
+    }
 }
 
 /// A run of old blocks and the new blocks that took their place, by index.
@@ -268,22 +283,20 @@ fn pieces(old: &[Seg], new: &[Seg]) -> Vec<Piece> {
         let (mut oend, mut nend) = (oe, ne);
         if let Some(prev) = out.last_mut().filter(|_| k > 0) {
             let (pi, pj) = pairs[k - 1];
-            while os < oend && old[os].kind == old[pi].kind && old[os].within(&new[pj]) {
+            while os < oend && old[os].joins(&new[pj], &old[pi]) {
                 os += 1;
             }
-            while ns < nend && new[ns].kind == new[pj].kind && new[ns].within(&old[pi]) {
+            while ns < nend && new[ns].joins(&old[pi], &new[pj]) {
                 ns += 1;
             }
             prev.old.1 = os;
             prev.new.1 = ns;
         }
         if let Some((pi, pj)) = next {
-            while oend > os && old[oend - 1].kind == old[pi].kind && old[oend - 1].within(&new[pj])
-            {
+            while oend > os && old[oend - 1].joins(&new[pj], &old[pi]) {
                 oend -= 1;
             }
-            while nend > ns && new[nend - 1].kind == new[pj].kind && new[nend - 1].within(&old[pi])
-            {
+            while nend > ns && new[nend - 1].joins(&old[pi], &new[pj]) {
                 nend -= 1;
             }
         }

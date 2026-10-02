@@ -70,6 +70,8 @@ pub struct RoundView {
 /// A reply of the reviewer's to one of the agent's notes, or the lack of one.
 #[derive(Clone, Debug)]
 pub struct AnswerLine {
+    /// The reply's own line, which `#N covers` cites; `None` when there is no reply.
+    pub n: Option<u32>,
     /// Whether the agent's note asked something; a reply to any other note is `RE`.
     pub ask: bool,
     pub target: Target,
@@ -256,8 +258,9 @@ fn answer_line(a: &AnswerLine) -> String {
     } else {
         ("RE", "note")
     };
+    let id = a.n.map(|n| format!("#{n} ")).unwrap_or_default();
     format!(
-        "{}your {what} on {} — {reply}",
+        "{}{id}your {what} on {} — {reply}",
         column(label),
         target(&a.target)
     )
@@ -432,6 +435,11 @@ pub fn round(v: &RoundView) -> String {
     out.push(format!(
         "{STEP}For a change no note asked for:  unasked \"<exact new words>\": <why>"
     ));
+    if !v.answers.is_empty() {
+        out.push(format!(
+            "{STEP}To cite an answer:               #N covers \"<new text>\""
+        ));
+    }
     if v.items.iter().any(|i| i.verdict == Some(Verdict::No)) {
         out.push(format!(
             "{STEP}`no` means the reviewer wants that text gone; cut it, or say why not with didnt."
@@ -466,6 +474,7 @@ pub fn approved(v: &ApprovedView) -> String {
     out.extend(v.answers.iter().map(answer_line));
     out.extend(v.unanswered.iter().map(|t| {
         answer_line(&AnswerLine {
+            n: None,
             ask: true,
             target: t.clone(),
             verdict: None,

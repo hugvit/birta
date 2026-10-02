@@ -8,7 +8,7 @@ use std::fmt;
 /// A quote longer than this is not a quote of one spot.
 const QUOTE_MAX: usize = 200;
 /// What `birta review` leaves for the agent to fill in, now and in earlier builds. The
-/// covers one ends in the note's number.
+/// covers one ends in the note's number, and the turn note's in an example.
 const PLACEHOLDERS: &[&str] = &[
     "<your answer>",
     "<one line: what you changed for this whole-doc note>",
@@ -19,6 +19,7 @@ const PLACEHOLDERS: &[&str] = &[
     "<question>",
     "<exact words in the doc>",
     "<exact new words>",
+    "<new text>",
     "<new text you wrote for the whole-doc note>",
     "<two lines: what you did, didn't, ask>",
 ];
@@ -155,11 +156,7 @@ pub fn parse(input: &str) -> Result<Vec<(usize, Entry)>, Vec<ParseError>> {
                 msg: format!("`{}` needs text after its colon", keyword(entry)),
             });
         }
-        if let Some(left) = entry
-            .texts()
-            .iter()
-            .find_map(|t| PLACEHOLDERS.iter().find(|p| t.contains(*p)))
-        {
+        if let Some(left) = entry.texts().iter().find_map(|t| placeholder_in(t)) {
             errors.push(ParseError {
                 line: *no,
                 msg: format!("placeholder left in: {left}"),
@@ -178,6 +175,17 @@ pub fn parse(input: &str) -> Result<Vec<(usize, Entry)>, Vec<ParseError>> {
         errors.sort_by_key(|e| e.line);
         Err(errors)
     }
+}
+
+/// The placeholder a line of `text` still is, so a tag in real text that reads like one
+/// passes. One whose end holds a number or an example only has to start the line.
+fn placeholder_in(text: &str) -> Option<&'static str> {
+    text.lines().map(str::trim).find_map(|line| {
+        PLACEHOLDERS
+            .iter()
+            .copied()
+            .find(|p| line == *p || (!p.ends_with('>') && line.starts_with(p)))
+    })
 }
 
 fn keyword(entry: &Entry) -> &'static str {

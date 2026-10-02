@@ -27,6 +27,8 @@ const REMOVED_CHARS: usize = 2_000;
 const SMALL: usize = 3;
 /// A turn that touches more than this share of the doc's blocks rewrote it.
 const REWRITE_SHARE: f64 = 0.40;
+/// Fewer blocks touched than this is never a rewrite, whatever their share.
+const REWRITE_BLOCKS: u32 = 8;
 
 pub(super) struct Input<'x> {
     pub lines: &'x [Line],
@@ -42,6 +44,8 @@ pub(super) struct Input<'x> {
     pub rounds: &'x [u32],
     /// Ids of hunks that render the same, which make no change.
     pub hidden: &'x HashSet<String>,
+    /// Lines of the reviewer's replies to the agent's notes, asks and turn notes.
+    pub answers: &'x HashSet<u32>,
 }
 
 pub(super) struct Built {
@@ -120,7 +124,8 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
             let new = (new_a + 1, new_a + il);
             let kind = write.as_ref().and_then(|w| w.label(hunks, j));
             let whole = kind.as_ref().is_some_and(|k| k.whole_removal());
-            let placed = place(later, new, il == 0, whole, head);
+            let followed = follow(later, input.hidden, new_a, &reverses[j]);
+            let placed = place(followed.as_ref(), new, whole, head);
             let gone = placed.status == RangeStatus::Superseded;
 
             let asked = match who.attr {
@@ -158,10 +163,7 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
                 ReversibleReason::None
             };
             let ok = reason == ReversibleReason::None;
-            let reverse = ok.then(|| Hunk {
-                a: placed.lines.0 - 1,
-                ..reverses[j].clone()
-            });
+            let reverse = followed.filter(|f| ok && f.exact).map(|f| f.reverse);
 
             if dl > 0 && il == 0 {
                 deletions.push(Deletion {
@@ -182,12 +184,19 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
             for (offset, removed) in gaps {
                 let (row, col) = row_col(&h.i, offset);
                 let at = new.0 + row;
-                let now = mapped(map_line(later, at));
+                let line = Hunk {
+                    a: at - 1,
+                    d: vec![h.i[row as usize].clone()],
+                    i: Vec::new(),
+                };
+                let now = follow(later, input.hidden, at - 1, &line).map(|f| f.reverse.a + 1);
                 deletions.push(Deletion {
                     change: id.clone(),
                     kind: DeletionKind::Words,
                     at_line: now.unwrap_or(at),
-                    at_byte: now.and_then(|l| head.lines.range(l)).map(|r| r.start + col),
+                    at_byte: now
+                        .and_then(|l| head.lines.range(l))
+                        .map(|r| (r.start + col).min(r.end)),
                     removed,
                     after_sp: now.and_then(|l| stop_holding(head, l)),
                     first_line: None,
@@ -254,6 +263,7 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
                 label: kind.map(|k| k.text),
                 removed: (dl > 0 && il < dl).then(|| capped(&h.d.concat())),
                 is_rewrite: false,
+                flagged: quoted.unasked.contains(&j),
                 reverse,
                 reversible: Reversible { ok, reason },
                 op_hunks: hunks.len() as u32,
@@ -293,7 +303,7 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
             let pct = f64::from(changed) / f64::from(all.max(1));
             let mine = || changes.iter().filter(|c: &&Change| c.turn == Some(turn));
             let unseen = mine().any(|c| !c.seen);
-            (pct > REWRITE_SHARE && unseen).then_some(Rewrite {
+            (pct > REWRITE_SHARE && changed >= REWRITE_BLOCKS && unseen).then_some(Rewrite {
                 turn,
                 pct,
                 blocks_changed: changed,
@@ -362,7 +372,11 @@ impl Who {
 }
 
 fn asked(kind: AskedKind, notes: Vec<u32>) -> Asked {
-    Asked { kind, notes }
+    Asked {
+        kind,
+        notes,
+        answers: Vec::new(),
+    }
 }
 
 /// Where in one agent write the turn's `unasked` and `covers` quotes read.
@@ -379,13 +393,26 @@ impl Quoted {
         let Some(turn) = turn else {
             return Self::default();
         };
+        let removals: Vec<(usize, String)> = step
+            .hunks
+            .iter()
+            .flatten()
+            .enumerate()
+            .filter(|(_, h)| h.i.is_empty())
+            .map(|(j, h)| (j, h.d.concat()))
+            .collect();
         let unasked = input
             .turns
             .unasked
             .get(&turn)
             .into_iter()
             .flatten()
-            .flat_map(|q| cited(q, step, texts))
+            .flat_map(|q| {
+                let gone = removals.iter().filter(|(_, d)| quotes_removed(q, d));
+                cited(q, step, texts)
+                    .into_iter()
+                    .chain(gone.map(|(j, _)| *j))
+            })
             .collect();
         let covers = input
             .turns
@@ -433,16 +460,28 @@ fn asked_for(
     if !location.is_empty() {
         return asked(AskedKind::Location, location);
     }
-    let cited: BTreeSet<u32> = quoted
-        .covers
-        .iter()
-        .filter(|(to, hunks)| held.contains(to) && hunks.contains(&j))
-        .map(|(to, _)| *to)
-        .collect();
-    if cited.is_empty() {
+    let cited = |to: &dyn Fn(u32) -> bool| -> Vec<u32> {
+        let quoted = quoted
+            .covers
+            .iter()
+            .filter(|(n, hunks)| to(*n) && hunks.contains(&j));
+        quoted
+            .map(|(n, _)| *n)
+            .collect::<BTreeSet<u32>>()
+            .into_iter()
+            .collect()
+    };
+    let notes = cited(&|n| held.contains(&n));
+    // An answer written before the turn began reached it
+    let answers = cited(&|n| n < turn && input.answers.contains(&n));
+    if notes.is_empty() && answers.is_empty() {
         unasked()
     } else {
-        asked(AskedKind::Cited, cited.into_iter().collect())
+        Asked {
+            kind: AskedKind::Cited,
+            notes,
+            answers,
+        }
     }
 }
 
@@ -473,6 +512,12 @@ pub(super) fn cited(quote: &str, step: &Step, texts: &mut Texts) -> Vec<usize> {
     }
     out.sort_unstable();
     out
+}
+
+/// Whether an `unasked` quote names text a removal took: any run of it, whitespace aside.
+pub fn quotes_removed(quote: &str, removed: &str) -> bool {
+    let q = collapse(quote);
+    !q.is_empty() && collapse(removed).contains(&q)
 }
 
 /// `text` with each whitespace run as one space, and where in `text` each byte is from.
@@ -605,21 +650,27 @@ pub(super) fn hidden(lines: &[Line], texts: &mut Texts) -> HashSet<String> {
 }
 
 /// The HTML a text renders to, without line numbers, and with whitespace runs as one
-/// space outside `<pre>`, as a browser shows it.
+/// space outside `<pre>` and `<code>`, as a browser shows it.
 fn page(text: &str) -> String {
     let mut options = anchor::parse_options();
     options.render.sourcepos = false;
     let html = comrak::markdown_to_html(text, &options);
     let mut out = String::with_capacity(html.len());
     let mut rest = html.as_str();
-    while let Some(at) = rest.find("<pre") {
+    // Code keeps its spaces on the page (`white-space: break-spaces`)
+    let verbatim = [("<pre", "</pre>"), ("<code", "</code>")];
+    while let Some((at, close)) = verbatim
+        .iter()
+        .filter_map(|(open, close)| Some((rest.find(open)?, *close)))
+        .min_by_key(|(at, _)| *at)
+    {
         out.push_str(&squash(&rest[..at]));
-        let end = rest[at..].find("</pre>").map_or(rest.len(), |e| at + e);
+        let end = rest[at..].find(close).map_or(rest.len(), |e| at + e);
         out.push_str(&rest[at..end]);
         rest = &rest[end..];
-        if let Some(close) = rest.strip_prefix("</pre>") {
-            out.push_str("</pre>");
-            rest = close;
+        if let Some(after) = rest.strip_prefix(close) {
+            out.push_str(close);
+            rest = after;
         }
     }
     out.push_str(&squash(rest));
@@ -728,55 +779,114 @@ fn reverted_whole(texts: &mut Texts, op: u32, undo: u32) -> Option<usize> {
     (Rev::of(reverted.as_bytes()) == undo.to).then_some(hunks.len())
 }
 
-/// Lines `new` of a write's text carried through the writes after it. With `gap`, the
-/// hunk removed lines and `new.0` is the line after them; a removal of `whole` blocks
-/// has no block of its own, and any other keeps the block it cut into.
-fn place(later: &[Step], new: (u32, u32), gap: bool, whole: bool, head: &Doc) -> Placed {
+/// A change's lines followed through the writes after it.
+struct Followed {
+    /// Puts back what the change replaced, over the lines its span holds now.
+    reverse: Hunk,
+    /// No later write put lines inside the span, so `reverse` restores it exactly.
+    exact: bool,
+}
+
+/// Follows `reverse`, a change's undo at 0-based line `a` of its write's text, through
+/// `later`. A hunk over its lines supersedes it, unless the hunk renders the same: that
+/// one is taken into the span, and the undo puts back its old lines around the change's.
+/// A removal's gap is written over only by a hunk taking lines on both sides of it.
+fn follow(later: &[Step], hidden: &HashSet<String>, a: u32, reverse: &Hunk) -> Option<Followed> {
+    let (mut s, mut d, mut i) = (a, reverse.d.clone(), reverse.i.clone());
+    let mut exact = true;
+    for step in later {
+        let hunks = step.hunks.as_ref()?;
+        let mut end = s + d.len() as u32;
+        let gap = d.is_empty();
+        let over = |h: &Hunk| {
+            let h_end = h.a + h.d.len() as u32;
+            if gap {
+                h.a < s && s < h_end
+            } else if h.d.is_empty() {
+                s < h.a && h.a < end
+            } else {
+                s.max(h.a) < end.min(h_end)
+            }
+        };
+        let mut shift = 0i64;
+        let mut taken: Vec<(usize, &Hunk)> = Vec::new();
+        for (j, h) in hunks.iter().enumerate() {
+            if over(h) {
+                taken.push((j, h));
+            } else if h.a + h.d.len() as u32 <= s && h.a <= s {
+                shift += h.i.len() as i64 - h.d.len() as i64;
+            }
+        }
+        // From the last, so the lines before each hunk are still the text it was made on
+        for &(j, h) in taken.iter().rev() {
+            let shown = hidden.contains(&format!("{}.{j}", step.n));
+            if !shown && !h.d.is_empty() {
+                return None;
+            }
+            // A line put inside the span is the writer's, and an undo would drop it
+            exact &= shown;
+            let h_end = h.a + h.d.len() as u32;
+            let mut before = d;
+            let after = before.split_off(before.len().min(h_end.saturating_sub(s) as usize));
+            before.truncate(h.a.saturating_sub(s) as usize);
+            d = [before, h.i.clone(), after].concat();
+            let head = &h.d[..s.saturating_sub(h.a) as usize];
+            let tail = &h.d[h.d.len().min(end.saturating_sub(h.a) as usize)..];
+            i = [head, &i, tail].concat();
+            (s, end) = (s.min(h.a), end.max(h_end));
+        }
+        s = (i64::from(s) + shift) as u32;
+    }
+    Some(Followed {
+        reverse: Hunk { a: s, d, i },
+        exact,
+    })
+}
+
+/// Where a followed change is in the current text, from its write's lines `new`; a
+/// removal of `whole` blocks has no block of its own, and any other keeps the block it
+/// cut into.
+fn place(followed: Option<&Followed>, new: (u32, u32), whole: bool, head: &Doc) -> Placed {
     let gone = Placed {
         status: RangeStatus::Superseded,
         lines: new,
         bytes: (0, 0),
         sp: None,
     };
-    let status = |lines: (u32, u32)| {
-        if lines == new {
-            RangeStatus::Ok
-        } else {
-            RangeStatus::Moved
-        }
+    let Some(f) = followed else {
+        return gone;
     };
-    if gap {
-        let Some(at) = mapped(map_line(later, new.0)) else {
-            return gone;
-        };
-        let byte = head.lines.range(at).map_or(head.text.len(), |r| r.start);
-        let sp = (!whole)
+    let at = f.reverse.a + 1;
+    let lines = (at, f.reverse.a + f.reverse.d.len() as u32);
+    let status = if lines == new {
+        RangeStatus::Ok
+    } else {
+        RangeStatus::Moved
+    };
+    let sp = if new.1 < new.0 {
+        (!whole)
             .then(|| stop_holding(head, at).or_else(|| stop_holding(head, at - 1)))
-            .flatten();
+            .flatten()
+    } else {
+        stop_holding(head, at)
+    };
+    if f.reverse.d.is_empty() {
+        let byte = head.lines.range(at).map_or(head.text.len(), |r| r.start);
         return Placed {
-            status: status((at, at - 1)),
-            lines: (at, at - 1),
+            status,
+            lines,
             bytes: (byte, byte),
             sp,
         };
     }
-    // Any later hunk over any of its lines writes over it, not only one at an end
-    let mut now = Vec::with_capacity((new.1 - new.0 + 1) as usize);
-    for line in new.0..=new.1 {
-        match mapped(map_line(later, line)) {
-            Some(l) => now.push(l),
-            None => return gone,
-        }
-    }
-    let lines = (now[0], now[now.len() - 1]);
     let (Some(first), Some(last)) = (head.lines.range(lines.0), head.lines.range(lines.1)) else {
         return gone;
     };
     Placed {
-        status: status(lines),
+        status,
         lines,
         bytes: (first.start, last.end),
-        sp: stop_holding(head, lines.0),
+        sp,
     }
 }
 

@@ -1316,7 +1316,7 @@ test.describe("z", () => {
 // --- the rewrite row -------------------------------------------------------------------------
 
 test.describe("rewrite row", () => {
-  const TURN_CHANGES = ["10.0", "10.1", "10.2", "10.3", "9.0"];
+  const TURN_CHANGES = ["10.0", "10.1", "10.2", "10.3", "11.0", "11.1", "11.2", "9.0"];
 
   test("a rewrite shows one row at the top, and y there marks the turn's changes seen", async ({ page, birta }) => {
     const { mock } = await open(page, birta, fixtureDoc("rewrite"), { state: fixtureState("rewrite") });
@@ -2505,7 +2505,7 @@ test.describe("rewrite row, other turns", () => {
     await expect.poll(async () => (await docSlot(page)).some((h) => h.kind === "rewrite")).toBe(true);
     await page.keyboard.press("y");
     await expect.poll(() => mock.ops().length).toBe(1);
-    expect([...mock.ops()[0].ids].sort()).toEqual(["10.0", "10.1", "10.2", "10.3", "9.0"]);
+    expect([...mock.ops()[0].ids].sort()).toEqual(["10.0", "10.1", "10.2", "10.3", "11.0", "11.1", "11.2", "9.0"]);
   });
 
   test("y with a block focused is that block's verdict, not the rewrite's seen", async ({ page, birta }) => {

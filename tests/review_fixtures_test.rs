@@ -198,6 +198,7 @@ fn full_state() -> ReviewState {
             asked: Asked {
                 kind: AskedKind::Location,
                 notes: vec![12],
+                answers: Vec::new(),
             },
             changes_your_edit: Some("20.0".to_string()),
             reverts_your_edit: false,
@@ -214,6 +215,7 @@ fn full_state() -> ReviewState {
             label: Some("2 words changed".to_string()),
             removed: Some("old text".to_string()),
             is_rewrite: false,
+            flagged: false,
             reverse: None,
             reversible: Reversible {
                 ok: false,
@@ -581,6 +583,7 @@ fn nested_optionals_are_omitted() {
         asked: Asked {
             kind: AskedKind::Outside,
             notes: vec![],
+            answers: Vec::new(),
         },
         changes_your_edit: None,
         reverts_your_edit: false,
@@ -597,6 +600,7 @@ fn nested_optionals_are_omitted() {
         label: None,
         removed: None,
         is_rewrite: false,
+        flagged: false,
         reverse: None,
         reversible: Reversible {
             ok: true,
@@ -863,6 +867,13 @@ fn contract_fixtures() -> Vec<(&'static str, ReviewState, Option<String>)> {
             .replace("- metrics dashboard\n", "- a retry counter\n")
             .replace("Nothing yet.\n", "The S3 client bump.\n");
         s.external(&text);
+        // A rewrite touches eight blocks at least; a second write keeps the first's ids,
+        // and leaves `## Why` as a block the turn didn't touch
+        let text = s
+            .text()
+            .replace("## What changes\n", "## What this changes\n")
+            .replace("## Stacked on\n", "## Stacked on top of\n");
+        s.external(&format!("{text}\nShips behind a flag.\n"));
     });
 
     let (mut approved, _, seen) = replied(|_| {});
@@ -1025,7 +1036,7 @@ fn each_contract_fixture_shows_its_case() {
     assert_eq!(get("hold").hold.as_ref().unwrap().kind, HoldKind::HandBack);
     let rewrite = get("rewrite");
     let r = rewrite.rewrite.as_ref().unwrap();
-    assert_eq!((r.blocks_changed, r.blocks_total), (5, 9));
+    assert_eq!((r.blocks_changed, r.blocks_total), (8, 10));
     assert_eq!(Some(r.turn), rewrite.rounds[0].claim);
     let lost = get("lost");
     let q = lost

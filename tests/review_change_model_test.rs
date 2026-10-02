@@ -932,6 +932,108 @@ fn paragraphs_merged_or_split_in_one_write_are_one_change() {
     assert!(bad.is_empty(), "{bad:#?}");
 }
 
+/// The reviewer asked to fold the second paragraph into the first; the agent wrote one
+/// sentence keeping few of either's words.
+const BACKGROUND: &str = "## Background\n\nReports are rendered by the worker pool and stored in Redis under a key\nbuilt from the report id and the requester's locale.\n\nThe timer was chosen in 2023 because writes were rare. They are not rare\nany more: the billing team writes several times a minute.\n\n## Plan\n\nShip it.\n";
+const MERGED: &str = "## Background\n\nReports are cached in Redis per report and locale; the one-hour timer\ndates from when writes were rare, but billing now writes several times a minute.\n\n## Plan\n\nShip it.\n";
+
+#[test]
+fn two_paragraphs_rewritten_into_one_are_one_change_the_merge_note_asked_for() {
+    let mut s = Scenario::new(BACKGROUND);
+    let at = s.block("The timer was chosen");
+    let merge = s.comment(at, None, Some("fold this into the paragraph above"));
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    let ext = s.external(MERGED);
+    s.done(CLAUDE, merge, turn);
+    s.yield_turn(CLAUDE, turn);
+    let v = wire(&s.fold());
+    let mine = of_write(&v, ext);
+    let got: Vec<(&Value, &Value, &Value)> = mine
+        .iter()
+        .map(|c| (&c["label"], &c["asked"]["kind"], &c["asked"]["notes"]))
+        .collect();
+    assert_eq!(
+        got,
+        [(
+            &json!("2 paragraphs → 1"),
+            &json!("location"),
+            &json!([merge])
+        )]
+    );
+    assert_eq!(v["counts"]["unasked"], 0);
+}
+
+/// A paragraph cut and its neighbour edited share no words, so they stay two changes.
+#[test]
+fn a_paragraph_removed_beside_an_edited_one_stays_two_changes() {
+    let (s, ext) = agent_writes(
+        "# T\n\ngone para here\n\nold para text\n",
+        "# T\n\nnew para text\n",
+    );
+    let v = wire(&s.fold());
+    let labels: Vec<Value> = of_write(&v, ext)
+        .iter()
+        .map(|c| c["label"].clone())
+        .collect();
+    assert_eq!(
+        labels,
+        [json!("paragraph removed"), json!("1 word changed")]
+    );
+}
+
+/// The ux-a write: `## Stacked on` and its item cut, and a blank line added under
+/// `## Testing`.
+const STACKED: &str = "# Add retries\n\n## How\n\n- `UploadClient::send` wraps each attempt\n- Retry-After headers win over the computed delay\n\n## Stacked on\n\n- #412 (error classification in the HTTP layer)\n\n## Testing\n\n- [x] Unit tests for the delay schedule\n- [ ] Ran the integration suite\n";
+const UNSTACKED: &str = "# Add retries\n\n## How\n\n- `UploadClient::send` wraps each attempt\n- Retry-After headers win over the computed delay\n\n## Testing\n\n\n- [x] Unit tests for the delay schedule\n- [ ] Ran the integration suite\n";
+
+/// What the agent's write shows: `(label, first_line of its tombstone)` per change.
+fn shown(v: &Value, ext: u32) -> Vec<(Value, Value)> {
+    of_write(v, ext)
+        .iter()
+        .map(|c| {
+            let first = v["deletions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|d| d["change"] == c["id"] && d["kind"] == "block")
+                .map_or(Value::Null, |d| d["first_line"].clone());
+            (c["label"].clone(), first)
+        })
+        .collect()
+}
+
+#[test]
+fn a_blank_line_added_under_a_heading_is_no_heading_removal() {
+    let (s, ext) = agent_writes(STACKED, UNSTACKED);
+    let v = wire(&s.fold());
+    assert_eq!(
+        shown(&v, ext),
+        [(json!("section removed · 2 blocks"), json!("## Stacked on"))]
+    );
+}
+
+#[test]
+fn a_bare_x_on_a_section_the_agent_cut_is_one_removal_it_asked_for() {
+    let mut s = Scenario::new(STACKED);
+    let x = s.comment(s.section("## Stacked on"), Some("no"), None);
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    let ext = s.external(UNSTACKED);
+    s.done(CLAUDE, x, turn);
+    s.yield_turn(CLAUDE, turn);
+    let v = wire(&s.fold());
+    let mine = of_write(&v, ext);
+    assert_eq!(mine.len(), 1, "{mine:#?}");
+    assert_eq!(mine[0]["label"], "section removed · 2 blocks");
+    assert_eq!(mine[0]["asked"], json!({"kind": "location", "notes": [x]}));
+    assert_eq!(
+        deletion(&v, mine[0]["id"].as_str().unwrap())["label"],
+        "section · 2 blocks"
+    );
+    assert_eq!(item(&v, x)["outcome"]["changes"], json!([mine[0]["id"]]));
+}
+
 /// Patched and rev-only writes of the same text differ only in the cut; a rev-only
 /// write's derived hunks stay whole.
 #[test]
@@ -996,6 +1098,11 @@ fn whitespace_that_renders_the_same_is_no_change_wherever_it_is() {
         ),
         ("a final EOL added", "# T\n\nEnd.", "# T\n\nEnd.\n"),
         (
+            "a reflow across inline code",
+            "# T\n\nRun `cargo\ntest` now.\n",
+            "# T\n\nRun `cargo test` now.\n",
+        ),
+        (
             "one line's CRLF made LF",
             "# T\r\n\r\nEnd.\r\n",
             "# T\r\n\r\nEnd.\n",
@@ -1059,6 +1166,11 @@ fn whitespace_inside_code_or_that_reshapes_blocks_is_a_change() {
             "a reflow that moves a hard break",
             "# T\n\none two  \nthree four\n",
             "# T\n\none  \ntwo three four\n",
+        ),
+        (
+            "a doubled space in inline code",
+            "# T\n\nRun `a b` now.\n",
+            "# T\n\nRun `a  b` now.\n",
         ),
     ];
     let mut bad = Vec::new();

@@ -142,7 +142,7 @@ mod tests {
     use crate::review::log::{AppendCtx, Log};
     use crate::review::ops::{self, Act, At, By, ByKind, Line, Op};
     use crate::review::review_path_for;
-    use crate::review::state::{Attr, Change, ReversibleReason};
+    use crate::review::state::{Attr, Change, RangeStatus, ReversibleReason, ReviewState};
     use crate::review::sync::sync_external;
 
     fn human() -> By {
@@ -300,14 +300,17 @@ mod tests {
                 .cloned()
         }
 
-        /// Change `id` as the fold shows it on the disk text now.
-        fn change(&self, id: &str) -> Change {
+        /// The fold of the log on the disk text now.
+        fn state(&self) -> ReviewState {
             let parsed = self.log.read().unwrap().unwrap();
             let chain = Chain::build(&parsed);
             let text = String::from_utf8(self.disk()).unwrap();
-            let doc = Doc::new(&text);
-            let folded = fold::fold(&parsed, &chain, &doc);
-            let found = folded.state.changes.iter().find(|c| c.id == id).cloned();
+            fold::fold(&parsed, &chain, &Doc::new(&text)).state
+        }
+
+        /// Change `id` as the fold shows it on the disk text now.
+        fn change(&self, id: &str) -> Change {
+            let found = self.state().changes.into_iter().find(|c| c.id == id);
             found.unwrap_or_else(|| panic!("setup: no change {id}"))
         }
 
@@ -997,6 +1000,145 @@ mod tests {
         let restored = "# Plan\n\nintro\n\nmore\n\none\n\ntwo\n\nthree\n\nfour\n";
         assert_eq!(f.disk(), restored.as_bytes());
         assert_undo_edit(&f, &id, moved.as_bytes(), restored.as_bytes());
+    }
+
+    /// Reverting the edit below a removal leaves the removal's gap where it was.
+    #[test]
+    fn a_removal_comes_back_after_the_edit_beside_it_was_reverted() {
+        let base = "# T\n\ngone para here\n\nold para text\n";
+        let changed = "# T\n\nnew para text\n";
+        let mut f = Fixture::claimed(base);
+        let n = f.writes(changed);
+        let (removal, edit) = (format!("{n}.0"), format!("{n}.1"));
+        assert_eq!(f.change(&removal).what.new_lines, 0, "setup");
+
+        f.undo(&edit, changed.as_bytes()).unwrap();
+        let mid = "# T\n\nold para text\n";
+        assert_eq!(String::from_utf8(f.disk()).unwrap(), mid, "setup");
+        let c = f.change(&removal);
+        assert_eq!(
+            (c.reversible.ok, c.reversible.reason, c.range.status),
+            (true, ReversibleReason::None, RangeStatus::Ok),
+            "{c:?}"
+        );
+        f.undo(&removal, mid.as_bytes()).unwrap();
+
+        assert_eq!(f.disk(), base.as_bytes());
+        assert_undo_edit(&f, &removal, mid.as_bytes(), base.as_bytes());
+    }
+
+    /// A later write that renders the same, such as a formatter's, leaves the agent's
+    /// change in place, unseen and revertable, whether it covers the change's lines
+    /// exactly or the whole paragraph around them.
+    #[test]
+    fn a_later_write_that_renders_the_same_never_supersedes_a_change() {
+        let cases = [
+            (
+                "trailing space stripped",
+                "# T\n\nold line\n\nend\n",
+                "# T\n\nnew line \n\nend\n",
+                "# T\n\nnew line\n\nend\n",
+                "# T\n\nold line\n\nend\n",
+            ),
+            (
+                "paragraph reflowed",
+                "# T\n\nalpha beta\ngamma delta\nepsilon zeta\n\nend\n",
+                "# T\n\nalpha beta\nGAMMA delta\nepsilon zeta\n\nend\n",
+                "# T\n\nalpha beta GAMMA delta epsilon zeta\n\nend\n",
+                "# T\n\nalpha beta\ngamma delta\nepsilon zeta\n\nend\n",
+            ),
+        ];
+        for (name, base, agent, formatted, want) in cases {
+            let (mut f, id) = agent_change(base, agent);
+            f.yield_turn();
+            let n = f.writes(formatted);
+            assert!(f.state().changes.iter().all(|c| c.op != n), "setup: {name}");
+
+            let c = f.change(&id);
+            let state = f.state();
+            assert_ne!(c.range.status, RangeStatus::Superseded, "{name}: {c:?}");
+            assert!(c.range.sp.is_some() && !c.seen, "{name}: {c:?}");
+            assert_eq!(
+                (c.reversible.ok, c.reversible.reason),
+                (true, ReversibleReason::None),
+                "{name}"
+            );
+            assert_eq!(state.counts.unseen, 1, "{name}");
+
+            f.undo(&id, formatted.as_bytes())
+                .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert_eq!(String::from_utf8(f.disk()).unwrap(), want, "{name}");
+            assert_undo_edit(&f, &id, formatted.as_bytes(), want.as_bytes());
+        }
+    }
+
+    /// Two changes in one paragraph a formatter reflows both stay; reverting one puts
+    /// back its own words and keeps the other's.
+    #[test]
+    fn two_changes_in_one_reflowed_paragraph_each_stay_revertable() {
+        let base = "# T\n\nalpha beta\ngamma delta\nepsilon zeta\neta theta\niota kappa\n\nend\n";
+        let agent = "# T\n\nALPHA beta\ngamma delta\nepsilon zeta\neta theta\nIOTA kappa\n\nend\n";
+        let formatted = "# T\n\nALPHA beta gamma delta epsilon zeta eta theta IOTA kappa\n\nend\n";
+        let mut f = Fixture::claimed(base);
+        let n = f.writes(agent);
+        let ids = [format!("{n}.0"), format!("{n}.1")];
+        f.yield_turn();
+        f.writes(formatted);
+        for id in &ids {
+            let c = f.change(id);
+            assert_ne!(c.range.status, RangeStatus::Superseded, "{id}: {c:?}");
+            assert!(c.reversible.ok, "{id}: {c:?}");
+        }
+        assert_eq!(f.state().counts.unseen, 2);
+
+        f.undo(&ids[0], formatted.as_bytes()).unwrap();
+
+        let want = "# T\n\nalpha beta\ngamma delta\nepsilon zeta\neta theta\nIOTA kappa\n\nend\n";
+        assert_eq!(String::from_utf8(f.disk()).unwrap(), want);
+        assert_undo_edit(&f, &ids[0], formatted.as_bytes(), want.as_bytes());
+    }
+
+    /// A section cut beside a blank line added under the next heading: each of the
+    /// write's changes reverts without duplicating a line.
+    #[test]
+    fn a_section_cut_beside_an_added_blank_line_reverts_without_a_duplicate() {
+        let base = "# T\n\n- a thing\n\n## Stacked on\n\n- #412 (error classification)\n\n## Testing\n\n- [x] Unit tests\n";
+        let changed = "# T\n\n- a thing\n\n## Testing\n\n\n- [x] Unit tests\n";
+        let want = "# T\n\n- a thing\n\n## Stacked on\n\n- #412 (error classification)\n\n## Testing\n\n\n- [x] Unit tests\n";
+        let mut f = Fixture::claimed(base);
+        let n = f.writes(changed);
+        let shown: Vec<Change> = f
+            .state()
+            .changes
+            .into_iter()
+            .filter(|c| c.op == n)
+            .collect();
+        assert_eq!(
+            shown.len(),
+            1,
+            "one removal, the blank line hidden: {shown:#?}"
+        );
+        for c in &shown {
+            f.undo(&c.id, changed.as_bytes()).unwrap();
+        }
+        let disk = String::from_utf8(f.disk()).unwrap();
+        assert_eq!(disk, want);
+        assert_eq!(disk.matches("## Testing").count(), 1);
+        assert_undo_edit(&f, &shown[0].id, changed.as_bytes(), want.as_bytes());
+    }
+
+    #[test]
+    fn a_change_that_renders_the_same_cannot_be_reverted() {
+        let base = "# T\n\nline \n";
+        let mut f = Fixture::claimed(base);
+        let id = format!("{}.0", f.writes("# T\n\nline\n"));
+        assert!(f.state().changes.is_empty(), "setup");
+        let (disk, log) = (f.disk(), f.log_bytes());
+
+        let result = f.undo(&id, &disk);
+
+        assert!(matches!(result, Err(UndoErr::NotReversible)), "{result:?}");
+        assert_eq!((f.disk(), f.log_bytes()), (disk, log));
     }
 
     #[test]

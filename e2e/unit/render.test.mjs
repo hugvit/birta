@@ -78,8 +78,8 @@ const FIXTURE_PHRASE = {
     title: "Claude replied 14:13 · 4 unseen · 1 of 3 blocks decided · 1 done · 1 answered · 2 without a note · 1 not handled",
   },
   rewrite: {
-    phrase: "Claude replied 14:13 · 6 unseen · 1 of 3 blocks decided · 1 done",
-    title: "Claude replied 14:13 · 6 unseen · 1 of 3 blocks decided · 1 done · 1 answered · 3 without a note",
+    phrase: "Claude replied 14:13 · 9 unseen · 1 of 3 blocks decided · 1 done",
+    title: "Claude replied 14:13 · 9 unseen · 1 of 3 blocks decided · 1 done · 1 answered · 6 without a note",
   },
   lost: {
     phrase: "Claude replied 14:13 · 3 unseen · 1 of 3 blocks decided · 1 done",

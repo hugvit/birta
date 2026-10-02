@@ -502,6 +502,13 @@ pub(crate) fn section_at(doc: &Doc, line: u32) -> Option<String> {
     doc.search().headings.get(&doc.blocks.stops[i].sp).cloned()
 }
 
+/// The heading of the section holding `line`, with its `#` markers: `## Testing`.
+pub(crate) fn section_heading(doc: &Doc, line: u32) -> Option<String> {
+    let stop = &doc.blocks.stops[section_stop(&doc.blocks.stops, line)?];
+    let text = doc.search().headings.get(&stop.sp)?;
+    Some(format!("{} {text}", "#".repeat(stop.level?.into())))
+}
+
 fn same_section(doc: &Doc, a: u32, b: u32) -> bool {
     let stops = &doc.blocks.stops;
     section_stop(stops, a).is_some_and(|i| section_stop(stops, b) == Some(i))

@@ -1,13 +1,13 @@
 {
   "schema": "review-state/1",
   "doc": "pr.md",
-  "rev": "48615b35a50e47910d76d63e06f4665fb5f020c9",
+  "rev": "7aad1b4e75811f13bad27972ecca4c6cff12bb01",
   "server_now": 1790000600000,
   "writable": true,
   "log_writable": true,
   "hand_off": "Take a look at my notes: `birta review /work/pr.md`",
   "log": {
-    "lines": 14,
+    "lines": 15,
     "bad": 0,
     "unknown_ops": 0,
     "read_only": false,
@@ -35,13 +35,13 @@
     },
     "replied": {
       "turn": 8,
-      "ts": 1790000014000,
+      "ts": 1790000015000,
       "by": "claude",
       "done": 1,
       "answered": 1,
       "didnt": 0,
       "asked": 0,
-      "unasked": 3,
+      "unasked": 6,
       "not_handled": 0,
       "note": "Said why the upload fails."
     }
@@ -51,15 +51,15 @@
   "counts": {
     "drafts": 0,
     "sent_unclaimed": 0,
-    "unseen": 5,
-    "unasked": 3,
+    "unseen": 8,
+    "unasked": 6,
     "not_handled": 0,
     "open_asks": 0,
     "later": 0,
     "lost": 0,
     "items": 3,
     "decided": 1,
-    "attention": 6
+    "attention": 9
   },
   "items": [
     {
@@ -134,14 +134,14 @@
           10
         ],
         "range": [
-          186,
-          215
+          191,
+          220
         ],
         "block": [
           10,
           10
         ],
-        "section": "What changes",
+        "section": "What this changes",
         "rev": "7956425b78307ed38a115054d90494e18cff956c",
         "loc": {
           "sp": "10:1-10:29"
@@ -182,8 +182,8 @@
       "amended": [],
       "replies": [
         {
-          "n": 12,
-          "id": "#12",
+          "n": 13,
+          "id": "#13",
           "by": {
             "type": "agent",
             "name": "claude",
@@ -191,7 +191,7 @@
           },
           "kind": "answer",
           "body": "Yes: CI runs it on every push.",
-          "ts": 1790000012000,
+          "ts": 1790000013000,
           "seen": false
         }
       ]
@@ -276,8 +276,8 @@
           10
         ],
         "bytes": [
-          186,
-          215
+          191,
+          220
         ],
         "sp": "10:1-10:29"
       },
@@ -330,8 +330,8 @@
           11
         ],
         "bytes": [
-          216,
-          234
+          221,
+          239
         ],
         "sp": "11:1-11:18"
       },
@@ -381,8 +381,8 @@
           12
         ],
         "bytes": [
-          235,
-          252
+          240,
+          257
         ],
         "sp": "12:1-13:0"
       },
@@ -433,8 +433,8 @@
           16
         ],
         "bytes": [
-          269,
-          288
+          281,
+          300
         ],
         "sp": "16:1-16:19"
       },
@@ -458,6 +458,160 @@
         "reason": "none"
       },
       "op_hunks": 4
+    },
+    {
+      "id": "11.0",
+      "op": 11,
+      "idx": 0,
+      "turn": 8,
+      "attr": "agent",
+      "by": {
+        "type": "agent",
+        "name": "claude"
+      },
+      "old": [
+        8,
+        8
+      ],
+      "new": [
+        8,
+        8
+      ],
+      "range": {
+        "status": "ok",
+        "lines": [
+          8,
+          8
+        ],
+        "bytes": [
+          169,
+          189
+        ],
+        "sp": "8:1-8:20"
+      },
+      "asked": {
+        "kind": "unasked",
+        "notes": []
+      },
+      "reverts_your_edit": false,
+      "breaks_stet": [],
+      "seen": false,
+      "settled": false,
+      "what": {
+        "old_lines": 1,
+        "new_lines": 1,
+        "words": 1,
+        "touches_html": false
+      },
+      "label": "2 words → 3",
+      "is_rewrite": true,
+      "reversible": {
+        "ok": true,
+        "reason": "none"
+      },
+      "op_hunks": 3
+    },
+    {
+      "id": "11.1",
+      "op": 11,
+      "idx": 1,
+      "turn": 8,
+      "attr": "agent",
+      "by": {
+        "type": "agent",
+        "name": "claude"
+      },
+      "old": [
+        14,
+        14
+      ],
+      "new": [
+        14,
+        14
+      ],
+      "range": {
+        "status": "ok",
+        "lines": [
+          14,
+          14
+        ],
+        "bytes": [
+          259,
+          279
+        ],
+        "sp": "14:1-14:20"
+      },
+      "asked": {
+        "kind": "unasked",
+        "notes": []
+      },
+      "reverts_your_edit": false,
+      "breaks_stet": [],
+      "seen": false,
+      "settled": false,
+      "what": {
+        "old_lines": 1,
+        "new_lines": 1,
+        "words": 2,
+        "touches_html": false
+      },
+      "label": "2 words → 4",
+      "is_rewrite": true,
+      "reversible": {
+        "ok": true,
+        "reason": "none"
+      },
+      "op_hunks": 3
+    },
+    {
+      "id": "11.2",
+      "op": 11,
+      "idx": 2,
+      "turn": 8,
+      "attr": "agent",
+      "by": {
+        "type": "agent",
+        "name": "claude"
+      },
+      "old": [
+        17,
+        16
+      ],
+      "new": [
+        17,
+        18
+      ],
+      "range": {
+        "status": "ok",
+        "lines": [
+          17,
+          18
+        ],
+        "bytes": [
+          301,
+          322
+        ]
+      },
+      "asked": {
+        "kind": "unasked",
+        "notes": []
+      },
+      "reverts_your_edit": false,
+      "breaks_stet": [],
+      "seen": false,
+      "settled": false,
+      "what": {
+        "old_lines": 0,
+        "new_lines": 2,
+        "touches_html": false
+      },
+      "label": "paragraph added",
+      "is_rewrite": true,
+      "reversible": {
+        "ok": true,
+        "reason": "none"
+      },
+      "op_hunks": 3
     }
   ],
   "deletions": [
@@ -472,9 +626,9 @@
   ],
   "rewrite": {
     "turn": 8,
-    "pct": 0.5555555555555556,
-    "blocks_changed": 5,
-    "blocks_total": 9
+    "pct": 0.8,
+    "blocks_changed": 8,
+    "blocks_total": 10
   },
   "later": [],
   "lost": [],
@@ -491,7 +645,7 @@
       ],
       "claim": 8,
       "claimed_by": "claude",
-      "yield": 14,
+      "yield": 15,
       "released": false
     }
   ],

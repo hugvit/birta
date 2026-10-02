@@ -20,6 +20,7 @@ use crate::paths::{self, Roots};
 use crate::review::chain::Chain;
 use crate::review::doc::Doc;
 use crate::review::fold::{self, RoundKind, TurnIndex, TurnNote};
+use crate::review::ladder;
 use crate::review::log::{AppendCtx, AppendError, Held, Log};
 use crate::review::ops::{Act, By, ByKind, Line, Op, Parsed, Scope, Verdict, Via};
 use crate::review::state::{
@@ -130,6 +131,8 @@ struct Handed {
     answers: usize,
     /// False for the folder's own review file.
     doc: bool,
+    /// Claimed by whoever runs the view, so it has a turn to wait out.
+    mine: bool,
 }
 
 /// What a review file looks like on disk, to notice a change or a replacement.
@@ -263,7 +266,7 @@ fn folder(handed: &[Handed], opts: &Opts, name: &str, path: Option<&str>, views:
         render::plural(files, "file"),
         render::counts(notes, answers)
     );
-    if !opts.peek {
+    if !opts.peek && handed.iter().any(|h| h.mine) {
         out.push_str(&format!("\n{}\n", render::folder_wait(path)));
     }
     out
@@ -879,6 +882,7 @@ fn block(entry: &Entry, pick: Pick, opts: &Opts, now: u64, inputs: &Inputs) -> B
             notes: view.items.len(),
             answers: view.answers.len(),
             doc: entry.doc.is_some(),
+            mine: matches!(view.stance, Stance::Mine),
         }),
     }
 }
@@ -933,6 +937,7 @@ fn approved(
     Block {
         text: render::approved(&view),
         json: json!({"status": "approved", "doc": entry.name, "approve": approve, "rev": state.rev,
+                     "answers": answers.iter().map(Answer::json).collect::<Vec<_>>(),
                      "unanswered": unanswered}),
         changed,
         handed: None,
@@ -971,6 +976,7 @@ struct Answer<'a> {
 impl Answer<'_> {
     fn line(&self) -> AnswerLine {
         AnswerLine {
+            n: Some(self.reply.n),
             ask: self.ask,
             target: self.at.map_or(Target::Doc, target_of),
             verdict: self.reply.verdict,
@@ -1023,6 +1029,24 @@ fn answers<'a>(
         })
     });
     on_notes.chain(on_turns).collect()
+}
+
+/// The lines of the answers the round view of `round` lists, which `#N covers` may cite.
+pub(super) fn answer_ids(
+    state: &ReviewState,
+    turn_notes: &[TurnNote],
+    index: &TurnIndex,
+    round: u32,
+) -> Vec<u32> {
+    let upto = index
+        .rounds
+        .iter()
+        .find(|r| r.n == round)
+        .map_or(0, |r| r.upto);
+    answers(state, turn_notes, since(index, round), upto)
+        .iter()
+        .map(|a| a.reply.n)
+        .collect()
 }
 
 /// `{to, quote?}`: an agent's note, with its quote when it has one.
@@ -1133,7 +1157,10 @@ fn you_lines(
     let mut out: Vec<String> = mine
         .iter()
         .take(YOU_LINES)
-        .map(|c| format!("{label}: {} (change {})", what_changed(c, lines, doc), c.id))
+        .map(|c| match reverted(state, c, lines, doc) {
+            Some(line) => line,
+            None => format!("{label}: {}", what_changed(c, lines, doc)),
+        })
         .collect();
     if mine.len() > YOU_LINES {
         out.push(format!("+{} more changes", mine.len() - YOU_LINES));
@@ -1141,12 +1168,46 @@ fn you_lines(
     out
 }
 
+/// A revert of the agent's change, named by the text it put back (or, when it only
+/// took text out, the text it took), its section and the change's label.
+fn reverted(
+    state: &ReviewState,
+    change: &Change,
+    lines: &HashMap<u32, &Line>,
+    doc: &Doc,
+) -> Option<String> {
+    let Some(Op::Edit {
+        act: Act::Undo, of, ..
+    }) = lines.get(&change.op).map(|l| &l.op)
+    else {
+        return None;
+    };
+    let (a, b) = change.range.bytes;
+    let text = match doc.text.get(a..b).filter(|t| !t.trim().is_empty()) {
+        Some(text) => text,
+        None => change.removed.as_deref().unwrap_or_default(),
+    };
+    let words = text.lines().map(str::trim).find(|l| !l.is_empty());
+    let mut line = format!(
+        "reverted your change to \"{}\"",
+        render::clip(words.unwrap_or_default())
+    );
+    if let Some(heading) = ladder::section_heading(doc, change.range.lines.0) {
+        line.push_str(&format!(" ({})", render::clip(&heading)));
+    }
+    let label = of
+        .as_deref()
+        .and_then(|of| state.changes.iter().find(|c| c.id == of))
+        .and_then(|c| c.label.as_deref());
+    if let Some(label) = label {
+        line.push_str(&format!(" — {label}"));
+    }
+    Some(line)
+}
+
 fn what_changed(change: &Change, lines: &HashMap<u32, &Line>, doc: &Doc) -> String {
     let (first, last) = change.range.lines;
     match lines.get(&change.op).map(|l| &l.op) {
-        Some(Op::Edit {
-            act: Act::Undo, of, ..
-        }) => format!("undid change {}", of.as_deref().unwrap_or("?")),
         Some(Op::Edit {
             act: Act::Checkbox, ..
         }) => format!("ticked a task on line {first}"),

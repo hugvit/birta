@@ -898,11 +898,10 @@ fn the_you_line_shows_only_after_the_human_wrote_to_the_doc() {
         let you = lines.iter().position(|l| l.starts_with("YOU   "));
         assert_eq!(you.is_some(), edited, "{out}");
         if let (Some(you), Some(edit)) = (you, edit) {
+            assert!(edit > 0, "setup");
             assert_eq!(
                 lines[you],
-                format!(
-                    "YOU   since Claude's last turn: edited line 9 \"- third item, reworded\" (change {edit}.0)"
-                ),
+                "YOU   since Claude's last turn: edited line 9 \"- third item, reworded\"",
                 "{out}"
             );
             let next = lines.iter().position(|l| l.starts_with("next: ")).unwrap();
@@ -914,6 +913,33 @@ fn the_you_line_shows_only_after_the_human_wrote_to_the_doc() {
             insta::assert_snapshot!("you_line", out);
         }
     }
+}
+
+/// The reviewer's `u` on Claude's change reads as text an agent can find, never an id.
+#[test]
+fn the_you_line_names_a_revert_by_its_text_section_and_label() {
+    let mut s = Scenario::drafted_by(DOC, "claude");
+    s.note("first round");
+    s.submit();
+    let turn = s.claim("claude");
+    let before = s.text().to_string();
+    let ext = s.external(&s.replaced("- detail one", "- detail one, reworded"));
+    s.yield_turn("claude", turn);
+    let of = format!("{ext}.0");
+    s.undo(&of, &before);
+    s.comment(s.quote("second item"), None, Some("second round"));
+    s.submit();
+    let tmp = Tmp::new();
+    tmp.put(&s);
+    let (code, out) = tmp.run(&["review", "pr.md", "--as", "claude"], &[]);
+    assert_eq!(code, 0, "{out}");
+    let you: Vec<&str> = out.lines().filter(|l| l.starts_with("YOU   ")).collect();
+    assert_eq!(
+        you,
+        ["YOU   reverted your change to \"- detail one\" (## Details) — 2 words → 3"],
+        "{out}"
+    );
+    assert!(!out.contains(&of), "{out}");
 }
 
 // --- --wait ---

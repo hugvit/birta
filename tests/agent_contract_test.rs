@@ -176,6 +176,17 @@ impl Tmp {
     }
 }
 
+/// An `ANS` or `RE` line without the answer's `#N`, which every one carries.
+fn unid(line: &str) -> String {
+    let (label, rest) = line.split_at(6);
+    let id = rest.split_once(' ').filter(|(id, _)| {
+        id.strip_prefix('#')
+            .is_some_and(|n| n.parse::<u32>().is_ok())
+    });
+    let (_, rest) = id.unwrap_or_else(|| panic!("no #N in {line:?}"));
+    format!("{label}{rest}")
+}
+
 /// The index of the first line starting with `prefix`.
 fn find(lines: &[&str], prefix: &str, out: &str) -> usize {
     lines
@@ -225,7 +236,7 @@ fn a_reply_to_the_agents_ask_reaches_the_round_view() {
     let ans = find(&lines, "ANS ", &out);
     assert_eq!(
         lines[ans],
-        "ANS   your ask on \"Integration suite (not run yet)\" — Keep it open until the integration suite has run.",
+        "ANS   #28 your ask on \"Integration suite (not run yet)\" — Keep it open until the integration suite has run.",
         "{out}"
     );
     assert!(find(&lines, "#27 ", &out) < ans, "{out}");
@@ -283,6 +294,73 @@ fn asked_in_round_one(s: &mut Scenario) -> u32 {
     ask
 }
 
+/// Claude's ask on "detail two" answered `yes: shorten it` and handed back alone; the
+/// reply's line.
+fn answer_only_round(s: &mut Scenario) -> u32 {
+    let ask = asked_in_round_one(s);
+    let reply = s.human_reply(ask, Some("yes"), Some("shorten it"));
+    s.submit();
+    reply
+}
+
+#[test]
+fn an_answer_has_its_own_id_and_covers_can_cite_it() {
+    let mut s = Scenario::drafted_by(DOC, "claude");
+    let reply = answer_only_round(&mut s);
+    let tmp = Tmp::new();
+    tmp.put_doc("pr.md", &s);
+    let out = tmp.review(&["pr.md"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines[find(&lines, "ANS ", &out)],
+        format!("ANS   #{reply} your ask on \"detail two\" — yes: shorten it"),
+        "{out}"
+    );
+    assert!(
+        lines.contains(&"      To cite an answer:               #N covers \"<new text>\""),
+        "{out}"
+    );
+
+    // Covers takes the answer's id; done doesn't
+    let edited = s.replaced("- detail two", "- detail 2");
+    tmp.edit("pr.md", &edited, ts(reply) + 60_000);
+    let (code, _, stderr) = tmp.respond("pr.md", &format!("#{reply} done\n@: shortened.\n"));
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("answer"), "{stderr}");
+    let (code, stdout, stderr) = tmp.respond(
+        "pr.md",
+        &format!("#{reply} covers \"detail 2\"\n@: I shortened it, as you answered.\n"),
+    );
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(warned(&stderr).is_empty(), "{stderr}");
+    let state = folded(&tmp, "pr.md");
+    let change = state
+        .changes
+        .iter()
+        .find(|c| c.attr == birta::review::state::Attr::Agent)
+        .expect("the agent's change");
+    let asked = serde_json::to_value(&change.asked).unwrap();
+    assert_eq!(
+        asked,
+        json!({"kind": "cited", "notes": [], "answers": [reply]})
+    );
+    assert_eq!(state.counts.unasked, 0);
+}
+
+#[test]
+fn a_placeholder_in_the_answer_line_is_refused() {
+    let mut s = Scenario::drafted_by(DOC, "claude");
+    let reply = answer_only_round(&mut s);
+    let tmp = Tmp::new();
+    tmp.put_doc("pr.md", &s);
+    let (code, _, stderr) = tmp.respond(
+        "pr.md",
+        &format!("#{reply} covers \"<new text>\"\n@: shortened.\n"),
+    );
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("placeholder left in"), "{stderr}");
+}
+
 #[test]
 fn a_verdict_only_answer_reads_as_its_verdict() {
     let mut s = Scenario::drafted_by(DOC, "claude");
@@ -294,7 +372,7 @@ fn a_verdict_only_answer_reads_as_its_verdict() {
     let out = tmp.review(&["pr.md"]);
     assert!(
         out.lines()
-            .any(|l| l == "ANS   your ask on \"detail two\" — yes"),
+            .any(|l| l == format!("ANS   #{reply} your ask on \"detail two\" — yes")),
         "{out}"
     );
     let v = tmp.review_json(&["pr.md"]);
@@ -359,7 +437,7 @@ fn an_approve_lists_the_asks_left_unanswered() {
     let answered = s.blank("claude", s.quote("detail one"), "keep this?", turn);
     let open = s.blank("claude", s.quote("detail two"), "and this?", turn);
     s.yield_turn("claude", turn);
-    s.human_reply(answered, Some("yes"), None);
+    let reply = s.human_reply(answered, Some("yes"), None);
     s.approve();
     let tmp = Tmp::new();
     tmp.put_doc("pr.md", &s);
@@ -376,6 +454,18 @@ fn an_approve_lists_the_asks_left_unanswered() {
     let listed = v["unanswered"].as_array().expect("an unanswered array");
     assert_eq!(listed.len(), 1, "{v}");
     assert_eq!(listed[0]["to"], open, "{v}");
+    // The answer the text view prints is in the JSON too
+    assert!(
+        out.lines()
+            .any(|l| l == format!("ANS   #{reply} your ask on \"detail one\" — yes")),
+        "{out}"
+    );
+    let answers = v["answers"].as_array().expect("an answers array");
+    assert_eq!(answers.len(), 1, "{v}");
+    assert_eq!(
+        (&answers[0]["to"], &answers[0]["n"]),
+        (&json!(answered), &json!(reply))
+    );
 }
 
 // --- the `next:` template ---
@@ -755,6 +845,150 @@ fn a_change_that_renders_the_same_is_not_warned_about() {
     );
 }
 
+/// The fold of `rel`'s review file on the doc as it is now.
+fn folded(tmp: &Tmp, rel: &str) -> birta::review::state::ReviewState {
+    let parsed = ops::parse(tmp.read(&format!("{rel}.birta.jsonl")));
+    let text = tmp.read(rel);
+    let doc = birta::review::doc::Doc::new(&text);
+    birta::review::fold::fold(&parsed, &Chain::build(&parsed), &doc).state
+}
+
+#[test]
+fn n16_suggests_quoting_a_removal_and_the_pasted_line_records() {
+    let (_, err) = respond_with(|t| t.replacen("- detail two\n", "", 1));
+    let w = warned(&err);
+    assert_eq!(w.len(), 1, "{err}");
+    let at = w[0].find("unasked \"").expect("a suggested line");
+    let end = w[0][at..].find("<why>").expect("ends in <why>") + at + "<why>".len();
+    let suggested = &w[0][at..end];
+    assert_eq!(suggested, "unasked \"- detail two\": <why>", "{err}");
+
+    // The same round again, the agent pasting the line with its reason filled in
+    let (s, doc, note, claim) = held();
+    let tmp = Tmp::new();
+    tmp.put_doc("pr.md", &s);
+    let text = s
+        .replaced("- second item", "- second item, because S3 flakes")
+        .replacen("- detail two\n", "", 1);
+    tmp.edit("pr.md", &text, ts(claim) + 1_000);
+    let (code, stdout, stderr) = tmp.respond(
+        "pr.md",
+        &format!("#{note} done\n#{doc} done\n@: I said why.\n"),
+    );
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(warned(&stderr).len(), 1, "setup: {stderr}");
+    let pasted = suggested.replace("<why>", "a stray line");
+    let (code, stdout, stderr) = tmp.respond("pr.md", &format!("{pasted}\n"));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let state = folded(&tmp, "pr.md");
+    let removal = state
+        .changes
+        .iter()
+        .find(|c| c.what.new_lines == 0)
+        .expect("the removal");
+    assert!(removal.flagged, "{removal:?}");
+}
+
+/// Every line N16 suggests records once its reason is filled in, an edit's as well as
+/// a removal's.
+#[test]
+fn every_line_n16_suggests_records_when_pasted() {
+    let (s, doc, note, claim) = held();
+    let tmp = Tmp::new();
+    tmp.put_doc("pr.md", &s);
+    let text = s
+        .replaced("- second item", "- second item, because S3 flakes")
+        .replacen("- detail two\n", "- detail 2\n", 1)
+        .replacen("## More\n\n- more item\n", "## More\n\n", 1);
+    tmp.edit("pr.md", &text, ts(claim) + 1_000);
+    let (code, stdout, stderr) = tmp.respond(
+        "pr.md",
+        &format!("#{note} done\n#{doc} done\n@: I said why.\n"),
+    );
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let w = warned(&stderr);
+    assert_eq!(w.len(), 1, "{stderr}");
+    let suggested: Vec<String> = w[0]
+        .match_indices("unasked \"")
+        .map(|(at, _)| {
+            let end = w[0][at..].find("<why>").unwrap() + at;
+            format!("{}a reason", &w[0][at..end])
+        })
+        .collect();
+    assert_eq!(suggested.len(), 2, "{stderr}");
+    let (code, stdout, stderr) = tmp.respond("pr.md", &format!("{}\n", suggested.join("\n")));
+    assert_eq!(code, 0, "{suggested:?}: {stdout}{stderr}");
+    let state = folded(&tmp, "pr.md");
+    let unflagged: Vec<_> = state
+        .changes
+        .iter()
+        .filter(|c| c.asked.kind == birta::review::state::AskedKind::Unasked && !c.flagged)
+        .collect();
+    assert!(unflagged.is_empty(), "{unflagged:?}");
+}
+
+#[test]
+fn an_unasked_quote_of_removed_text_records_and_is_not_warned_about() {
+    for quote in ["detail two", "- detail two", "detail"] {
+        let (s, doc, note, claim) = held();
+        let tmp = Tmp::new();
+        tmp.put_doc("pr.md", &s);
+        let text = s
+            .replaced("- second item", "- second item, because S3 flakes")
+            .replacen("- detail two\n", "", 1);
+        tmp.edit("pr.md", &text, ts(claim) + 1_000);
+        let heredoc = format!(
+            "#{note} done\n#{doc} done\nunasked \"{quote}\": a stray line\n@: I said why.\n"
+        );
+        let (code, stdout, stderr) = tmp.respond("pr.md", &heredoc);
+        assert_eq!(code, 0, "{quote}: {stdout}{stderr}");
+        assert!(warned(&stderr).is_empty(), "{quote}: {stderr}");
+    }
+}
+
+#[test]
+fn n16_credits_an_unasked_quote_the_way_the_fold_does() {
+    // Across a hard wrap, into text the agent didn't change
+    let (s, doc, note, claim) = held();
+    let tmp = Tmp::new();
+    tmp.put_doc("pr.md", &s);
+    let text = s
+        .replaced("- second item", "- second item, because S3 flakes")
+        .replacen("with a second line.", "with a third line.", 1);
+    tmp.edit("pr.md", &text, ts(claim) + 1_000);
+    let heredoc = format!(
+        "#{note} done\n#{doc} done\nunasked \"here, with a third\": wording\n@: I said why.\n"
+    );
+    let (code, stdout, stderr) = tmp.respond("pr.md", &heredoc);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(warned(&stderr).is_empty(), "{stderr}");
+}
+
+#[test]
+fn n16_warns_when_respond_picks_the_round_up_itself() {
+    let mut s = Scenario::drafted_by(DOC, "claude");
+    let note = s.comment(s.quote("second item"), None, Some("say why"));
+    let submit = s.submit();
+    let tmp = Tmp::new();
+    tmp.put_doc("pr.md", &s);
+    let text = s
+        .replaced("- second item", "- second item, because S3 flakes")
+        .replacen("- detail two\n", "- detail 2\n", 1);
+    tmp.edit("pr.md", &text, ts(submit) + 60_000);
+    let (code, stdout, stderr) = tmp.respond("pr.md", &format!("#{note} done\n@: I said why.\n"));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let w = warned(&stderr);
+    assert_eq!(w.len(), 1, "{stderr}");
+    assert!(w[0].contains("detail 2"), "{stderr}");
+    let ops = tmp.ops("pr.md");
+    let claim = ops.iter().position(|op| matches!(op, Op::Claim { .. }));
+    let write = ops.iter().position(|op| matches!(op, Op::External { .. }));
+    assert!(
+        claim < write,
+        "the claim comes before the write it takes: {ops:?}"
+    );
+}
+
 // --- folders ---
 
 /// A review file for `DOC` whose `notes` are handed back in hand-back `batch`. Returns
@@ -874,6 +1108,19 @@ fn a_folder_claim_waits_once_on_the_folder_and_respond_points_there() {
         Some("next: birta review docs --wait"),
         "{stdout}"
     );
+}
+
+#[test]
+fn a_folder_whose_rounds_another_agent_holds_prints_no_wait_step() {
+    let tmp = Tmp::new();
+    for rel in ["docs/a.md", "docs/b.md"] {
+        let (mut s, ns) = batched(&[(None, None, "FROM-OTHER")], 7);
+        s.claim_round("codex", ns[0] + 1);
+        tmp.put_doc(rel, &s);
+    }
+    let out = tmp.review(&["docs"]);
+    assert!(out.contains("read only"), "setup: {out}");
+    assert!(!out.contains("Then wait again"), "{out}");
 }
 
 // --- N2: approved ---
@@ -1005,7 +1252,9 @@ fn two_replies_to_one_ask_give_one_ans_line_with_the_latest() {
     let ans: Vec<&str> = out.lines().filter(|l| l.starts_with("ANS")).collect();
     assert_eq!(
         ans,
-        ["ANS   your ask on \"detail two\" — yes, 15 minutes"],
+        [format!(
+            "ANS   #{latest} your ask on \"detail two\" — yes, 15 minutes"
+        )],
         "{out}"
     );
     let v = tmp.review_json(&["pr.md"]);
@@ -1026,7 +1275,11 @@ fn an_ask_answered_a_round_late_still_reaches_the_agent() {
     let tmp = Tmp::new();
     tmp.put_doc("pr.md", &s);
     let out = tmp.review(&["pr.md"]);
-    let ans: Vec<&str> = out.lines().filter(|l| l.starts_with("ANS")).collect();
+    let ans: Vec<String> = out
+        .lines()
+        .filter(|l| l.starts_with("ANS"))
+        .map(unid)
+        .collect();
     assert_eq!(
         ans,
         ["ANS   your ask on \"detail two\" — LATE-ANSWER"],
@@ -1091,9 +1344,10 @@ fn a_reply_to_the_agents_plain_note_or_turn_note_reaches_it_as_re() {
     let tmp = Tmp::new();
     tmp.put_doc("pr.md", &s);
     let out = tmp.review(&["pr.md"]);
-    let replies: Vec<&str> = out
+    let replies: Vec<String> = out
         .lines()
         .filter(|l| l.starts_with("RE ") || l.starts_with("ANS "))
+        .map(unid)
         .collect();
     assert_eq!(
         replies,
@@ -1137,7 +1391,7 @@ fn ans_lines(s: &Scenario) -> (Vec<String>, Value) {
     let ans = out
         .lines()
         .filter(|l| l.starts_with("ANS"))
-        .map(str::to_string)
+        .map(unid)
         .collect();
     (ans, tmp.review_json(&["pr.md"]))
 }
@@ -1232,14 +1486,18 @@ fn answers_read_as_their_verdict_words_and_doc_asks_name_the_doc() {
     let tmp = Tmp::new();
     tmp.put_doc("pr.md", &s);
     let out = tmp.review(&["pr.md"]);
-    let ans: Vec<&str> = out.lines().filter(|l| l.starts_with("ANS")).collect();
+    let ans: Vec<String> = out
+        .lines()
+        .filter(|l| l.starts_with("ANS"))
+        .map(unid)
+        .collect();
     for want in [
         "ANS   your ask on \"detail one\" — no",
         "ANS   your ask on \"detail two\" — your call",
         "ANS   your ask on \"third item\" — yes: but shorter",
         "ANS   your ask on the whole doc — after review",
     ] {
-        assert!(ans.contains(&want), "{want:?} in\n{out}");
+        assert!(ans.iter().any(|a| a == want), "{want:?} in\n{out}");
     }
     assert!(
         !out.contains("`no` means"),
@@ -1622,7 +1880,7 @@ fn json_only_adds_keys() {
     let v = tmp.review_json(&["pr.md"]);
     assert_eq!(
         keys(&v),
-        ["approve", "doc", "rev", "status", "unanswered"],
+        ["answers", "approve", "doc", "rev", "status", "unanswered"],
         "{v}"
     );
 

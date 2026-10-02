@@ -11,7 +11,7 @@ use anyhow::Context;
 use super::identity;
 use super::render::{self, one_line};
 use super::respond::{self, Entry};
-use super::review_cmd::own_name;
+use super::review_cmd::{answer_ids, own_name};
 use super::{CONTROL_PATH, ExitCode, RespondArgs, hidden_in, relative, say, wait, warn};
 use crate::anchor;
 use crate::paths::Roots;
@@ -19,7 +19,7 @@ use crate::review::chain::Chain;
 use crate::review::doc::Doc;
 use crate::review::fold::{self, RoundKind, TurnIndex};
 use crate::review::log::{AppendCtx, AppendError, Held, Log};
-use crate::review::ops::{AnchorReq, At, By, ByKind, Line, Op, ReplyKind, Verdict, Via};
+use crate::review::ops::{AnchorReq, At, By, ByKind, Line, Op, Parsed, ReplyKind, Verdict, Via};
 use crate::review::state::{AskedKind, Attr, ItemStatus, ReviewState};
 use crate::review::sync::{read_doc, try_sync_bytes};
 use crate::review::{Reject, anchor_from_req, review_path_for};
@@ -149,7 +149,9 @@ fn apply(file: &Path, entries: &[(usize, Entry)], by: &By, now: u64) -> anyhow::
         Ok(mode) => mode,
         Err(refusal) => return Ok(refusal),
     };
-    let state = fold::fold(&parsed, &Chain::build(&parsed), &doc).state;
+    let chain = Chain::build(&parsed);
+    let folded = fold::fold(&parsed, &chain, &doc);
+    let state = &folded.state;
     // A released claim no longer holds its notes, so they are named by their rounds
     let (holder, rounds) = match &mode {
         Mode::Held { claim }
@@ -167,9 +169,31 @@ fn apply(file: &Path, entries: &[(usize, Entry)], by: &By, now: u64) -> anyhow::
         ),
         Mode::Pickup { round } => (None, pending_through(&index, &claims, *round)),
     };
-    let valid = valid_ids(&state, holder, &rounds);
+    let valid = valid_ids(state, holder, &rounds);
+    let round = match &mode {
+        Mode::Held { claim } | Mode::Late { claim, .. } => parsed
+            .lines
+            .iter()
+            .find_map(|l| match l.op {
+                Op::Claim { round, .. } if l.n == *claim => Some(round),
+                _ => None,
+            })
+            .unwrap_or(0),
+        Mode::Pickup { round } => *round,
+    };
+    let answers = answer_ids(state, &folded.turn_notes, &index, round);
+    let removed = removed_by(&parsed, state, &mode, text);
 
-    let checked = check(entries, &valid, &doc, &name);
+    let checked = check(
+        entries,
+        &Ids {
+            notes: &valid,
+            answers: &answers,
+        },
+        &removed,
+        &doc,
+        &name,
+    );
     if !checked.errors.is_empty() {
         let code = if checked.bad_note {
             ExitCode::Usage
@@ -184,16 +208,17 @@ fn apply(file: &Path, entries: &[(usize, Entry)], by: &By, now: u64) -> anyhow::
         return Ok(Finish::refused(code, err));
     }
 
-    try_sync_bytes(&mut held, &doc_path, &bytes, now).context("recording the doc's last write")?;
     let ctx = AppendCtx {
         now_ms: now,
         by: by.clone(),
         cid: None,
     };
+    // Claimed first, so the write it records is this turn's
     let turn = match mode {
         Mode::Held { claim } | Mode::Late { claim, .. } => claim,
         Mode::Pickup { round } => claim_round(&mut held, ctx.clone(), round, &doc_path)?,
     };
+    try_sync_bytes(&mut held, &doc_path, &bytes, now).context("recording the doc's last write")?;
     let late = matches!(mode, Mode::Late { .. });
     let mut ops = to_ops(entries, &checked.anchors, turn, late);
     if !late {
@@ -224,7 +249,7 @@ fn apply(file: &Path, entries: &[(usize, Entry)], by: &By, now: u64) -> anyhow::
         .filter(|i| valid.contains(&i.n) && i.status == ItemStatus::NotHandled)
         .map(|i| format!("warning: not handled: #{}", i.n))
         .collect();
-    err.extend(uncited(&state, turn, entries, &doc));
+    err.extend(uncited(&state, turn, &doc));
     let next = waits_on(&after.lines, turn, &doc_path, &name, by);
     Ok(Finish {
         code: ExitCode::Ok,
@@ -236,52 +261,81 @@ fn apply(file: &Path, entries: &[(usize, Entry)], by: &By, now: u64) -> anyhow::
 }
 
 /// The warning for this turn's changes that no note asked for and no `unasked` line
-/// names. Changes that render the same never reach the fold's list.
-fn uncited(
-    state: &ReviewState,
-    turn: u32,
-    entries: &[(usize, Entry)],
-    doc: &Doc,
-) -> Option<String> {
-    let flagged: Vec<String> = entries
-        .iter()
-        .filter_map(|(_, e)| match e {
-            Entry::Unasked { quote, .. } => Some(squashed(quote)),
-            _ => None,
-        })
-        .collect();
-    let named: Vec<String> = state
+/// names, with the line that would name each. Changes that render the same never reach
+/// the fold's list.
+fn uncited(state: &ReviewState, turn: u32, doc: &Doc) -> Option<String> {
+    let (named, lines): (Vec<String>, Vec<String>) = state
         .changes
         .iter()
         .filter(|c| c.turn == Some(turn) && c.attr == Attr::Agent)
-        .filter(|c| c.asked.kind == AskedKind::Unasked && c.undone_by.is_none())
+        .filter(|c| c.asked.kind == AskedKind::Unasked && !c.flagged && c.undone_by.is_none())
         .filter_map(|c| {
             if c.what.new_lines == 0 {
                 let removed = c.removed.as_deref().unwrap_or_default();
-                return Some(format!("removed \"{}\"", excerpt(removed)));
+                return Some((format!("removed \"{}\"", excerpt(removed)), removed));
             }
             let text = doc.text.get(c.range.bytes.0..c.range.bytes.1)?;
-            let text_flat = squashed(text);
-            if flagged.iter().any(|q| text_flat.contains(q.as_str())) {
-                return None;
-            }
-            Some(format!("\"{}\"", excerpt(text)))
+            Some((format!("\"{}\"", excerpt(text)), text))
         })
-        .collect();
+        .map(|(named, text)| (named, format!("unasked \"{}\": <why>", first_words(text))))
+        .unzip();
     let (count, they) = match named.len() {
         0 => return None,
         1 => ("1 change cites".to_string(), "it shows"),
         n => (format!("{n} changes cite"), "they show"),
     };
     Some(format!(
-        "warning: {count} no note: {}. Add unasked \"…\": why, or {they} as \"without a note\".",
-        named.join(", ")
+        "warning: {count} no note: {}. Add {}, or {they} as \"without a note\".",
+        named.join(", "),
+        lines.join(" and ")
     ))
 }
 
-/// `text` with every run of whitespace as one space, for matching a quote across wraps.
-fn squashed(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+/// The opening words of `text`'s first line with words on it, as a respond quote:
+/// whole words up to 60 code points, with `\` and `"` escaped.
+fn first_words(text: &str) -> String {
+    let line = one_line(
+        text.lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or_default(),
+    );
+    let mut out = String::new();
+    for word in line.split_whitespace() {
+        let len = out.chars().count() + usize::from(!out.is_empty()) + word.chars().count();
+        if !out.is_empty() && len > EXCERPT {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(word);
+    }
+    let cut: String = out.chars().take(EXCERPT).collect();
+    cut.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Text the turn's writes removed, which an `unasked` quote may name: its recorded
+/// removals, and those of the write on disk not yet recorded.
+fn removed_by(parsed: &Parsed, state: &ReviewState, mode: &Mode, text: &str) -> Vec<String> {
+    let turn = match mode {
+        Mode::Held { claim } | Mode::Late { claim, .. } => Some(*claim),
+        Mode::Pickup { .. } => None,
+    };
+    let recorded = state
+        .changes
+        .iter()
+        .filter(|c| turn.is_some() && c.turn == turn && c.attr == Attr::Agent)
+        .filter(|c| c.what.new_lines == 0)
+        .filter_map(|c| c.removed.clone());
+    let pending = Chain::build(parsed)
+        .record(text)
+        .and_then(|r| r.patch)
+        .into_iter()
+        .flatten()
+        .filter(|h| h.i.is_empty())
+        .map(|h| h.d.concat());
+    recorded.chain(pending).collect()
 }
 
 /// The first line of `text` with words on it, cut to 60 code points.
@@ -580,10 +634,26 @@ struct Checked {
     anchors: HashMap<usize, At>,
 }
 
-/// Checks every entry's note and quote. The quotes are resolved on `doc`, the text on disk.
-fn check(entries: &[(usize, Entry)], valid: &BTreeSet<u32>, doc: &Doc, name: &str) -> Checked {
+/// What a respond's `#N` may name.
+struct Ids<'a> {
+    /// The notes the round view lists.
+    notes: &'a BTreeSet<u32>,
+    /// The reviewer's answers it lists, which only `covers` cites.
+    answers: &'a [u32],
+}
+
+/// Checks every entry's note and quote. The quotes are resolved on `doc`, the text on
+/// disk; an `unasked` quote may name text in `removed` instead.
+fn check(
+    entries: &[(usize, Entry)],
+    valid: &Ids,
+    removed: &[String],
+    doc: &Doc,
+    name: &str,
+) -> Checked {
     let mut out = Checked::default();
     let ids = valid
+        .notes
         .iter()
         .map(|n| format!("#{n}"))
         .collect::<Vec<_>>()
@@ -596,11 +666,18 @@ fn check(entries: &[(usize, Entry)], valid: &BTreeSet<u32>, doc: &Doc, name: &st
             | Entry::Covers { n, .. } => Some(*n),
             _ => None,
         };
-        if let Some(n) = n.filter(|n| !valid.contains(n)) {
-            out.bad_note = true;
-            out.errors.push(format!(
-                "line {line}: #{n} is not part of your round (valid: {ids})"
-            ));
+        let covers = matches!(entry, Entry::Covers { .. });
+        if let Some(n) = n.filter(|n| !valid.notes.contains(n)) {
+            out.bad_note |= !covers || !valid.answers.contains(&n);
+            if !valid.answers.contains(&n) {
+                out.errors.push(format!(
+                    "line {line}: #{n} is not part of your round (valid: {ids})"
+                ));
+            } else if !covers {
+                out.errors.push(format!(
+                    "line {line}: #{n} is your reviewer's answer; cite it with #{n} covers \"<new text>\""
+                ));
+            }
         }
         let quote = match entry {
             Entry::Covers { quote, .. }
@@ -608,6 +685,11 @@ fn check(entries: &[(usize, Entry)], valid: &BTreeSet<u32>, doc: &Doc, name: &st
             | Entry::Unasked { quote, .. } => quote,
             _ => continue,
         };
+        let gone = matches!(entry, Entry::Unasked { .. })
+            && removed.iter().any(|r| fold::quotes_removed(quote, r));
+        if gone {
+            continue;
+        }
         if let Err(e) = unique(doc, quote, name) {
             out.errors.push(format!("line {line}: {e}"));
             continue;

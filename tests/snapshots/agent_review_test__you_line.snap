@@ -5,7 +5,7 @@ expression: out
 pr.md · handed back 14:13 by andres · 2 notes · drafted by claude
 DOC   #4 "first round"
 #9    note  "second item" — second round
-YOU   since Claude's last turn: edited line 9 "- third item, reworded" (change 8.0)
+YOU   since Claude's last turn: edited line 9 "- third item, reworded"
 next: 1) Edit pr.md with your Edit tool (not Write). Change only what the notes ask.
       2) Record what you did, one line per note, then run:
 birta respond pr.md <<'EOF'

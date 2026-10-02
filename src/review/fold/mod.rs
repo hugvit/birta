@@ -28,6 +28,8 @@ use items::{Notes, Outcome, cover};
 use texts::{Texts, span_of};
 use turns::{RoundRec, Turns};
 
+pub use changes::quotes_removed;
+
 /// Whether a round view lists `item`: the claim `claim` holds it, or with no claim yet
 /// it was sent in one of `rounds`; and, but for a read-only view, a note an earlier turn
 /// left open, which the fold carries to the next claim.
@@ -542,6 +544,20 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
         .filter(|r| !r.withdrawn)
         .map(|r| r.n)
         .collect();
+    let agents: HashSet<u32> = parsed
+        .lines
+        .iter()
+        .filter(|l| l.by.kind == ByKind::Agent)
+        .filter(|l| matches!(l.op, Op::Comment { .. } | Op::TurnNote { .. }))
+        .map(|l| l.n)
+        .collect();
+    let answers: HashSet<u32> = parsed
+        .lines
+        .iter()
+        .filter(|l| l.by.kind == ByKind::Human)
+        .filter(|l| matches!(&l.op, Op::Reply { to, .. } if agents.contains(to)))
+        .map(|l| l.n)
+        .collect();
     let built = changes::build(
         &changes::Input {
             lines: &parsed.lines,
@@ -552,6 +568,7 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
             seen: &seen_at,
             rounds: &standing,
             hidden: &hidden,
+            answers: &answers,
         },
         &mut texts,
     );

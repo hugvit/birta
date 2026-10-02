@@ -31,9 +31,20 @@ impl std::error::Error for ApplyError {}
 /// The hunks that turn `old` into `new`. Myers with no deadline, so the same texts
 /// always give the same hunks and change ids stay stable.
 pub fn diff(old: &str, new: &str) -> Vec<Hunk> {
+    diff_by(old, new, Algorithm::Myers)
+}
+
+/// [`diff`] anchored on the lines each text has once, as Patience does, for a write
+/// being recorded: a blank line added under a heading is that insert, never the
+/// blocks around it shifted onto other blank lines.
+pub fn diff_anchored(old: &str, new: &str) -> Vec<Hunk> {
+    diff_by(old, new, Algorithm::Patience)
+}
+
+fn diff_by(old: &str, new: &str, algorithm: Algorithm) -> Vec<Hunk> {
     let (old, new) = (lines(old), lines(new));
     let diff = TextDiff::configure()
-        .algorithm(Algorithm::Myers)
+        .algorithm(algorithm)
         .diff_slices(&old, &new);
     diff.ops()
         .iter()

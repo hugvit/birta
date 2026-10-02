@@ -325,6 +325,7 @@ fn only_the_exact_template_placeholders_are_refused() {
         "#1 covers \"<new text you wrote for the whole-doc note>\"",
         "@: <two lines: what you did, didn't, ask>",
         "#14 answer: see below\n<your answer>",
+        "#1 covers \"<new text>\"",
     ] {
         let errs = errors(left);
         assert_eq!(errs.len(), 1, "{left:?}: {errs:?}");
@@ -338,7 +339,20 @@ fn only_the_exact_template_placeholders_are_refused() {
         "#14 answer: use Vec<T> here",
         "@: kept the <details> block",
         "#14 answer: <your own answer>",
-        "#1 covers \"<new text>\"",
+        "#1 covers \"<new text> here\"",
+    ] {
+        assert!(respond::parse(fine).is_ok(), "{fine:?}");
+    }
+}
+
+/// A doc about markup quotes tags that read like the template's placeholders.
+#[test]
+fn a_placeholder_inside_real_text_is_not_refused() {
+    for fine in [
+        "ask \"<question> element\": is it still needed?",
+        "unasked \"the <why> tag\": it was missing",
+        "#14 answer: wrap it in <reply> as before",
+        "#14 didnt: the <why> block stays",
     ] {
         assert!(respond::parse(fine).is_ok(), "{fine:?}");
     }

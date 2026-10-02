@@ -156,6 +156,8 @@ const DERIVED_PORTS: u32 = 8000;
 const WHOAMI_WAIT: Duration = Duration::from_secs(2);
 /// A birta still starting holds its port before it answers, so a silent one gets a second try.
 const WHOAMI_TRIES: u32 = 2;
+/// Bytes of a probe's answer read before giving up on it.
+const WHOAMI_MAX: u64 = 64 * 1024;
 
 /// Options for starting the server.
 pub struct ServerOptions {
@@ -443,7 +445,7 @@ impl AppState {
         let restart = init
             .served
             .as_deref()
-            .map(|served| restart_command(&program(), served, init.review_by_env));
+            .map(|served| restart_command(&program(), served, init.review_by_env, init.port));
         // The entry may sit behind a link the budgeted walk never reaches.
         if let Some(entry) = &init.initial_relpath {
             roots.register_path(StdPath::new(entry));
@@ -580,7 +582,12 @@ async fn whoami(port: u16) -> Option<String> {
     );
     stream.write_all(request.as_bytes()).await.ok()?;
     let mut response = Vec::new();
-    stream.read_to_end(&mut response).await.ok()?;
+    // Whatever else holds the port may answer without end
+    stream
+        .take(WHOAMI_MAX)
+        .read_to_end(&mut response)
+        .await
+        .ok()?;
     let response = String::from_utf8(response).ok()?;
     let (head, body) = response.split_once("\r\n\r\n")?;
     if !head.starts_with("HTTP/1.1 200") {
@@ -591,10 +598,15 @@ async fn whoami(port: u16) -> Option<String> {
 }
 
 /// `birta '<path>'`, quoted for a POSIX shell, led by the env that turned review on
-/// when nothing else did.
-fn restart_command(program: &str, served: &StdPath, by_env: bool) -> String {
+/// when nothing else did, and naming `port` when the path wouldn't derive it.
+fn restart_command(program: &str, served: &StdPath, by_env: bool, port: u16) -> String {
     let env = if by_env { "BIRTA_REVIEW=1 " } else { "" };
-    format!("{env}{program} {}", shell_quote(served))
+    let port = if port == derived_port(served) {
+        String::new()
+    } else {
+        format!(" --port {port}")
+    };
+    format!("{env}{program} {}{port}", shell_quote(served))
 }
 
 fn shell_quote(path: &StdPath) -> String {
@@ -1731,13 +1743,65 @@ mod tests {
     #[test]
     fn restart_command_quotes_the_path_for_a_shell_and_carries_an_env_only_gate() {
         let path = StdPath::new("/tmp/a b'$(x).md");
+        let port = derived_port(path);
         assert_eq!(
-            restart_command("birta", path, false),
+            restart_command("birta", path, false, port),
             r#"birta '/tmp/a b'\''$(x).md'"#
         );
         assert_eq!(
-            restart_command("birta", path, true),
+            restart_command("birta", path, true, port),
             r#"BIRTA_REVIEW=1 birta '/tmp/a b'\''$(x).md'"#
+        );
+    }
+
+    /// A tab whose server wasn't on the derived port polls the port it had, so the
+    /// restart must bind that one again.
+    #[test]
+    fn the_restart_command_names_the_port_unless_it_is_the_derived_one() {
+        let path = StdPath::new("/tmp/doc.md");
+        let derived = derived_port(path);
+        let restart = |port: u16| {
+            let state = test_state(|init| {
+                init.served = Some(path.to_path_buf());
+                init.port = port;
+            });
+            state.restart.clone().unwrap()
+        };
+        assert!(
+            restart(derived).ends_with(" '/tmp/doc.md'"),
+            "{}",
+            restart(derived)
+        );
+        let other = if derived == 5000 { 5001 } else { 5000 };
+        assert!(
+            restart(other).ends_with(&format!(" '/tmp/doc.md' --port {other}")),
+            "{}",
+            restart(other)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_probe_reads_a_bounded_answer() {
+        let listener = TcpListener::bind(local(0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let sent = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await;
+            let chunk = vec![b'x'; 64 * 1024];
+            let mut sent = 0usize;
+            while sent < 1 << 30 && stream.write_all(&chunk).await.is_ok() {
+                sent += chunk.len();
+            }
+            sent
+        });
+
+        let me = tokio::time::timeout(Duration::from_secs(10), whoami(port)).await;
+
+        assert_eq!(me.ok(), Some(None));
+        let sent = sent.await.unwrap();
+        assert!(
+            sent < 16 << 20,
+            "the probe took {sent} bytes of an endless answer"
         );
     }
 

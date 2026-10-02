@@ -555,8 +555,9 @@ fn a_respond_with_nothing_claimed_picks_the_round_up_first() {
 
     let new = tmp.lines_after(last);
     let kinds: Vec<&Op> = new.iter().map(|l| &l.op).collect();
-    let [external, claim, done, note, yielded] = &new[..] else {
-        panic!("external, claim, 2 lines, yield: {kinds:#?}");
+    // Claimed first, so the edit it records is the turn's
+    let [claim, external, done, note, yielded] = &new[..] else {
+        panic!("claim, external, 2 lines, yield: {kinds:#?}");
     };
     assert!(matches!(external.op, Op::External { .. }), "{kinds:#?}");
     assert_eq!(

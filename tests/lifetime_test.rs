@@ -892,9 +892,10 @@ async fn the_restart_names_birta_only_when_path_finds_this_binary() {
     ] {
         let served = site.serve(&["pr.md"], &[GATE_ON, ("PATH", path)]);
         let review = served.boot("pr.md").await["review"].clone();
+        // `--port 0` binds off the derived port, which the restart then has to name
         assert_eq!(
             review["restart"],
-            format!("BIRTA_REVIEW=1 {program} {doc}"),
+            format!("BIRTA_REVIEW=1 {program} {doc} --port {}", served.port),
             "PATH {path}"
         );
         assert_eq!(review["served"], site.path("pr.md").to_str().unwrap());
@@ -915,6 +916,42 @@ async fn the_restart_carries_no_env_when_config_turned_review_on() {
     let served = site.serve(&["pr.md"], &[("PATH", &own)]);
     assert_eq!(
         served.boot("pr.md").await["review"]["restart"],
-        format!("birta {}", quoted(&site.path("pr.md")))
+        format!(
+            "birta {} --port {}",
+            quoted(&site.path("pr.md")),
+            served.port
+        )
+    );
+}
+
+/// A restart binds the derived port unless it names one, so the restart names the port
+/// whenever the server fell back from the derived one.
+#[tokio::test]
+async fn the_restart_names_the_port_only_off_the_derived_one() {
+    let site = Site::new();
+    let a = free_doc(&site, "a", "# A\n");
+    let b = free_doc(&site, "b", "# B\n");
+    let on = site.launch(&[&a], &[GATE_ON]);
+    let restart = |review: &Value| review["restart"].as_str().unwrap().to_string();
+    let review = on.boot(&a).await["review"].clone();
+    assert!(
+        restart(&review).ends_with(&quoted(&site.path(&a))),
+        "{review}"
+    );
+    // b's derived port taken by a birta serving another path: b falls back
+    let d = derived(&site.path(&b));
+    let _holder = site.launch(&[&a, "--port", &d.to_string()], &[GATE_ON]);
+    let mut fell = site.launch_tty(&[&b], &[GATE_ON]);
+    assert_eq!(
+        fell.exit_within(Duration::from_secs(2)),
+        None,
+        "{:?}",
+        fell.stderr
+    );
+    assert_ne!(fell.port, d);
+    let review = fell.boot(&b).await["review"].clone();
+    assert!(
+        restart(&review).ends_with(&format!("{} --port {}", quoted(&site.path(&b)), fell.port)),
+        "{review}"
     );
 }

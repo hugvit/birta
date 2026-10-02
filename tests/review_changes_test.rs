@@ -1371,6 +1371,26 @@ fn exactly_40_percent_is_no_rewrite_and_a_part_seen_rewrite_stands() {
     assert_eq!(state.counts.unseen, 1);
 }
 
+/// Seven of ten blocks is over the share but too few to call a rewrite.
+#[test]
+fn a_rewrite_needs_eight_blocks_touched_as_well_as_the_share() {
+    let doc: String = (1..=10).map(|i| format!("p{i} text\n\n")).collect();
+    for (edited, want) in [(7, false), (8, true)] {
+        let mut s = Scenario::new(&doc);
+        let turn = claimed(&mut s);
+        edit_paragraphs(&mut s, 1..=edited);
+        s.yield_turn(CLAUDE, turn);
+        let state = s.fold();
+        assert_eq!(state.changes.len(), edited, "setup");
+        assert_eq!(
+            state.rewrite.is_some(),
+            want,
+            "{edited} of 10: {:?}",
+            state.rewrite
+        );
+    }
+}
+
 fn edit_paragraphs(s: &mut Scenario, which: std::ops::RangeInclusive<usize>) -> u32 {
     let mut text = s.text().to_string();
     for i in which {

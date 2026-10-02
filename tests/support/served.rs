@@ -5,6 +5,7 @@
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
+use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -92,9 +93,37 @@ impl Site {
 
     /// Starts `birta args… --no-open --port 0` in the served folder.
     pub fn serve(&self, args: &[&str], envs: &[(&str, &str)]) -> Served {
+        let mut all = args.to_vec();
+        all.extend(["--port", "0"]);
+        self.launch(&all, envs)
+    }
+
+    /// Starts `birta args… --no-open` in the served folder, picking no port for it.
+    pub fn launch(&self, args: &[&str], envs: &[(&str, &str)]) -> Served {
+        self.start(args, envs, false).serving()
+    }
+
+    /// [`Site::launch`] with stdout on a terminal, as a person's shell runs it.
+    pub fn launch_tty(&self, args: &[&str], envs: &[(&str, &str)]) -> Served {
+        self.start(args, envs, true).serving()
+    }
+
+    /// Spawns `birta args… --no-open`, stdout on a terminal when `tty`, without waiting
+    /// for its `serving` line.
+    pub fn start(&self, args: &[&str], envs: &[(&str, &str)], tty: bool) -> Served {
+        let stdout = if tty {
+            let (leader, follower) = pty();
+            // Drained to the end, so the process never blocks on a full terminal
+            std::thread::spawn(move || {
+                let _ = std::io::copy(&mut std::fs::File::from(leader), &mut std::io::sink());
+            });
+            Stdio::from(follower)
+        } else {
+            Stdio::null()
+        };
         let mut child = Command::new(assert_cmd::cargo::cargo_bin("birta"))
             .args(args)
-            .args(["--no-open", "--port", "0"])
+            .arg("--no-open")
             .current_dir(&self.root)
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
@@ -102,7 +131,7 @@ impl Site {
             .env("XDG_STATE_HOME", self.base.join("state"))
             .envs(envs.iter().copied())
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(stdout)
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
@@ -114,25 +143,31 @@ impl Site {
                 let _ = tx.send(line.unwrap_or_default());
             }
         });
-        let mut served = Served {
+        Served {
             child,
             port: 0,
             stderr: Vec::new(),
-        };
-        loop {
-            let Ok(line) = rx.recv_timeout(Duration::from_secs(20)) else {
-                panic!(
-                    "no `serving` line from birta {args:?}: {:#?}",
-                    served.stderr
-                );
-            };
-            served.stderr.push(line.clone());
-            if let Some((_, addr)) = line.split_once(" at http://") {
-                served.port = addr.rsplit(':').next().unwrap().trim().parse().unwrap();
-                return served;
-            }
+            lines: rx,
         }
     }
+}
+
+/// A terminal pair: the leader end, and the follower a child writes to.
+fn pty() -> (OwnedFd, OwnedFd) {
+    let (mut leader, mut follower) = (0, 0);
+    // SAFETY: out-pointers to two ints; the optional name, termios and winsize are null.
+    let rc = unsafe {
+        libc::openpty(
+            &mut leader,
+            &mut follower,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
+    // SAFETY: openpty returned two fresh fds that nothing else owns.
+    unsafe { (OwnedFd::from_raw_fd(leader), OwnedFd::from_raw_fd(follower)) }
 }
 
 /// A served `birta` process, killed on drop so a failing test leaves nothing running.
@@ -140,6 +175,7 @@ pub struct Served {
     child: Child,
     pub port: u16,
     pub stderr: Vec<String>,
+    lines: mpsc::Receiver<String>,
 }
 
 impl Drop for Served {
@@ -150,6 +186,50 @@ impl Drop for Served {
 }
 
 impl Served {
+    /// Waits for the `serving … at <url>` line and takes its port.
+    pub fn serving(self) -> Self {
+        self.try_serving()
+            .unwrap_or_else(|stderr| panic!("no `serving` line from birta: {stderr:#?}"))
+    }
+
+    /// [`Served::serving`], or what the process said before it went quiet or exited.
+    pub fn try_serving(mut self) -> Result<Self, Vec<String>> {
+        loop {
+            let Ok(line) = self.lines.recv_timeout(Duration::from_secs(20)) else {
+                return Err(std::mem::take(&mut self.stderr));
+            };
+            self.stderr.push(line.clone());
+            if let Some((_, addr)) = line.split_once(" at http://") {
+                self.port = addr.rsplit(':').next().unwrap().trim().parse().unwrap();
+                return Ok(self);
+            }
+        }
+    }
+
+    /// The exit status, once the process ends within `limit`.
+    pub fn exit_within(&mut self, limit: Duration) -> Option<std::process::ExitStatus> {
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return Some(status);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Kills the process and waits for it, as a crash or a background limit would.
+    pub fn kill(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    pub fn running(&mut self) -> bool {
+        self.child.try_wait().unwrap().is_none()
+    }
+
     pub fn host(&self) -> String {
         format!("127.0.0.1:{}", self.port)
     }

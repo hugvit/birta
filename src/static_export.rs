@@ -179,6 +179,8 @@ pub fn export_bundle(
             extra_boot: None,
             review_token: None,
             review_dir: false,
+            review_served: None,
+            review_restart: None,
             stops: None,
             rev: None,
         });

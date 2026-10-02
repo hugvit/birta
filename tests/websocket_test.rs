@@ -44,6 +44,8 @@ async fn start_server(tmpfile: &NamedTempFile) -> u16 {
             drafted_by: None,
             review: false,
             git_exclude: true,
+            derive_port: false,
+            review_by_env: false,
         };
         birta::server::start(path, listener, opts).await.unwrap();
     });

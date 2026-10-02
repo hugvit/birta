@@ -1,18 +1,20 @@
+use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Extension, Path, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
-use tokio::net::TcpListener;
-use tokio::sync::{Notify, RwLock, broadcast};
+use axum::{Json, Router};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{Notify, RwLock, broadcast, watch};
 
 use crate::anchor::Stop;
 use crate::doc_write::{self, Expect, Via, WriteErr, WriteTarget};
@@ -148,6 +150,12 @@ const HUB_CAPACITY: usize = 64;
 const FAVICON: &[u8] = include_bytes!("../assets/favicon.png");
 /// Inbound WebSocket cap, per message and per frame.
 const WS_MAX_INBOUND: usize = 256 * 1024;
+/// Derived ports sit in `41000..41000 + DERIVED_PORTS`, clear of common dev servers.
+const DERIVED_PORTS: u32 = 8000;
+/// How long the server on a derived port gets to say what it serves, per try.
+const WHOAMI_WAIT: Duration = Duration::from_secs(2);
+/// A birta still starting holds its port before it answers, so a silent one gets a second try.
+const WHOAMI_TRIES: u32 = 2;
 
 /// Options for starting the server.
 pub struct ServerOptions {
@@ -170,6 +178,10 @@ pub struct ServerOptions {
     pub review: bool,
     /// Whether creating a review file in a git worktree adds it to `info/exclude`.
     pub git_exclude: bool,
+    /// Bind the port the served path derives, handing over to a birta already serving it.
+    pub derive_port: bool,
+    /// Review is on through `BIRTA_REVIEW` alone, so a restart command has to carry it.
+    pub review_by_env: bool,
 }
 
 pub(crate) struct AppState {
@@ -202,6 +214,18 @@ pub(crate) struct AppState {
     pub(crate) last_request: AtomicU64,
     /// Review, when the gate is on and a file or folder is served.
     pub(crate) review: Option<ReviewHub>,
+    /// The canonical file, or folder, this server was started on; `None` for stdin.
+    pub(crate) served: Option<PathBuf>,
+    /// The command that serves `served` again, for a page whose server stopped.
+    pub(crate) restart: Option<String>,
+    /// Random per server, so a probe tells two servers of one path apart.
+    pub(crate) id: String,
+    /// A folder was named, so pages are named by their path in it.
+    pub(crate) dir_mode: bool,
+    /// The last tab closed while a review round was open; a review write checks again.
+    pub(crate) held: AtomicBool,
+    /// False while the file watcher starts; every request but the probe waits for it.
+    pub(crate) watching: watch::Sender<bool>,
 }
 
 /// Everything [`AppState::new`] needs; shared channels and counters are created there.
@@ -231,6 +255,8 @@ pub(crate) struct AppInit {
     pub(crate) git_exclude: bool,
     /// A folder was named, so a hand-back of "all" covers every doc under it.
     pub(crate) dir_mode: bool,
+    pub(crate) served: Option<PathBuf>,
+    pub(crate) review_by_env: bool,
 }
 
 impl AppInit {
@@ -264,6 +290,8 @@ impl AppInit {
             drafted_by: opts.drafted_by,
             git_exclude: opts.git_exclude,
             dir_mode: false,
+            served: None,
+            review_by_env: opts.review_by_env,
         })
     }
 
@@ -317,6 +345,7 @@ impl AppInit {
         init.source_file = Some(canonical_file);
         init.initial_relpath = Some(target.entry.clone());
         init.dir_mode = target.dir;
+        init.served = Some(target.served());
         Ok(init)
     }
 }
@@ -334,6 +363,15 @@ pub struct Target {
 }
 
 impl Target {
+    /// The canonical path `birta` was named: the folder, or the file itself.
+    pub fn served(&self) -> PathBuf {
+        if self.dir {
+            self.root.clone()
+        } else {
+            self.root.join(&self.entry)
+        }
+    }
+
     /// A file is served from its canonical folder; a folder is entered at its picked doc.
     pub fn resolve(path: &StdPath) -> anyhow::Result<Self> {
         Self::resolve_with(path, scan::pick_entry)
@@ -388,13 +426,24 @@ impl AppState {
         let (hub, _) = broadcast::channel(HUB_CAPACITY);
         let roots = Roots::new(init.base_dir, dirs::home_dir());
         let review = (init.review && init.mode == Mode::Serve).then(|| {
-            ReviewHub::new(
+            let hub = ReviewHub::new(
                 roots.root(),
                 init.drafted_by,
                 init.git_exclude,
                 init.dir_mode,
-            )
+            );
+            // One file served: only it, and the docs its pages open, are this server's
+            if !init.dir_mode
+                && let Some(entry) = &init.source_file
+            {
+                hub.dir.scope_to(entry);
+            }
+            hub
         });
+        let restart = init
+            .served
+            .as_deref()
+            .map(|served| restart_command(&program(), served, init.review_by_env));
         // The entry may sit behind a link the budgeted walk never reaches.
         if let Some(entry) = &init.initial_relpath {
             roots.register_path(StdPath::new(entry));
@@ -428,6 +477,12 @@ impl AppState {
             variant_explicit: init.variant_explicit,
             last_request: AtomicU64::new(now_secs()),
             review,
+            served: init.served,
+            restart,
+            id: review_ws::new_token(),
+            dir_mode: init.dir_mode,
+            held: AtomicBool::new(false),
+            watching: watch::Sender::new(true),
         })
     }
 
@@ -450,41 +505,127 @@ impl AppState {
 pub async fn run(file: PathBuf, opts: ServerOptions) -> anyhow::Result<()> {
     // Before binding, so a folder without docs never opens a browser.
     let target = Target::resolve(&file)?;
-    let addr = SocketAddr::from(([127, 0, 0, 1], opts.port));
-    let listener = TcpListener::bind(addr).await?;
-    let actual_addr = listener.local_addr()?;
-
     let filename = file
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| file.display().to_string());
+    let listener = if opts.derive_port {
+        match bind_derived(&target.served()).await? {
+            Ok(listener) => listener,
+            Err(port) => {
+                announce(&filename, local(port), opts.no_open);
+                return Ok(());
+            }
+        }
+    } else {
+        TcpListener::bind(local(opts.port)).await?
+    };
+    start_target(&target, listener, opts, Some(&filename)).await
+}
 
-    eprintln!("birta: serving {filename} at http://{actual_addr}");
+fn local(port: u16) -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], port))
+}
 
-    if !opts.no_open {
-        let url = format!("http://{actual_addr}");
+fn announce(name: &str, addr: SocketAddr, no_open: bool) {
+    eprintln!("birta: serving {name} at http://{addr}");
+    if !no_open {
+        let url = format!("http://{addr}");
         if let Err(e) = open::that(&url) {
             eprintln!("birta: could not open browser: {e}");
         }
     }
+}
 
-    start_target(&target, listener, opts).await
+/// The port a served path always gets, so a restarted server lands where its tabs are:
+/// SHA-1 of the canonical path's bytes, its first four bytes big-endian, into 41000–48999.
+pub fn derived_port(served: &StdPath) -> u16 {
+    let digest = sha1_smol::Sha1::from(served.as_os_str().as_encoded_bytes())
+        .digest()
+        .bytes();
+    let n = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
+    41000 + (n % DERIVED_PORTS) as u16
+}
+
+/// Binds `served`'s derived port. When it's taken, `Err` with it if a birta there
+/// already serves `served` and a person ran this one; otherwise any free port.
+async fn bind_derived(served: &StdPath) -> anyhow::Result<Result<TcpListener, u16>> {
+    let port = derived_port(served);
+    if let Ok(listener) = TcpListener::bind(local(port)).await {
+        return Ok(Ok(listener));
+    }
+    // A launcher reading the port off stderr keeps a server of its own, as before
+    if std::io::stdout().is_terminal() && serves(port, served).await {
+        return Ok(Err(port));
+    }
+    Ok(Ok(TcpListener::bind(local(0)).await?))
+}
+
+/// Whether the server on `port` is a birta serving `served`.
+async fn serves(port: u16, served: &StdPath) -> bool {
+    for _ in 0..WHOAMI_TRIES {
+        match tokio::time::timeout(WHOAMI_WAIT, whoami(port)).await {
+            Ok(me) => return me.is_some_and(|me| Some(me.as_str()) == served.to_str()),
+            Err(_) => continue,
+        }
+    }
+    false
+}
+
+/// The `served` path a birta on `port` reports; `None` from anything else.
+async fn whoami(port: u16) -> Option<String> {
+    let mut stream = TcpStream::connect(local(port)).await.ok()?;
+    let request = format!(
+        "GET /birta/whoami HTTP/1.1\r\nhost: 127.0.0.1:{port}\r\nconnection: close\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).await.ok()?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.ok()?;
+    let response = String::from_utf8(response).ok()?;
+    let (head, body) = response.split_once("\r\n\r\n")?;
+    if !head.starts_with("HTTP/1.1 200") {
+        return None;
+    }
+    let me: serde_json::Value = serde_json::from_str(body).ok()?;
+    Some(me.get("served")?.as_str()?.to_string())
+}
+
+/// `birta '<path>'`, quoted for a POSIX shell, led by the env that turned review on
+/// when nothing else did.
+fn restart_command(program: &str, served: &StdPath, by_env: bool) -> String {
+    let env = if by_env { "BIRTA_REVIEW=1 " } else { "" };
+    format!("{env}{program} {}", shell_quote(served))
+}
+
+fn shell_quote(path: &StdPath) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
+
+/// `birta` when a shell would run this very binary by that name, else its own path.
+fn program() -> String {
+    let Ok(me) = std::env::current_exe().and_then(|p| p.canonicalize()) else {
+        return "birta".to_string();
+    };
+    let first = std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join("birta"))
+            .find(|p| is_executable(p))
+    });
+    match first.and_then(|p| p.canonicalize().ok()) {
+        Some(found) if found == me => "birta".to_string(),
+        _ => shell_quote(&me),
+    }
+}
+
+fn is_executable(path: &StdPath) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 /// Serve markdown read from stdin (no file watching).
 pub async fn run_stdin(markdown: &str, opts: ServerOptions) -> anyhow::Result<()> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], opts.port));
-    let listener = TcpListener::bind(addr).await?;
-    let actual_addr = listener.local_addr()?;
-
-    eprintln!("birta: serving stdin at http://{actual_addr}");
-
-    if !opts.no_open {
-        let url = format!("http://{actual_addr}");
-        if let Err(e) = open::that(&url) {
-            eprintln!("birta: could not open browser: {e}");
-        }
-    }
+    let listener = TcpListener::bind(local(opts.port)).await?;
+    announce("stdin", listener.local_addr()?, opts.no_open);
 
     let state = AppState::new(AppInit::stdin(markdown, &listener, opts)?);
 
@@ -502,23 +643,45 @@ pub async fn start(
     listener: TcpListener,
     opts: ServerOptions,
 ) -> anyhow::Result<()> {
-    start_target(&Target::resolve(&file)?, listener, opts).await
+    start_target(&Target::resolve(&file)?, listener, opts, None).await
 }
 
+/// Serves `target` on `listener`, announcing it as `name` once it can answer.
 async fn start_target(
     target: &Target,
     listener: TcpListener,
     opts: ServerOptions,
+    name: Option<&str>,
 ) -> anyhow::Result<()> {
+    let (addr, no_open) = (listener.local_addr()?, opts.no_open);
     let state = AppState::new(AppInit::serve_target(target, &listener, opts)?);
 
-    let _watch = watcher::watch(Arc::clone(&state))?;
-
+    // The OS can take seconds to start a watcher; the probe is answered meanwhile
+    state.watching.send_replace(false);
+    let watcher = tokio::task::spawn_blocking({
+        let state = Arc::clone(&state);
+        move || watcher::watch(state)
+    });
     let app = router(state.clone());
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(state))
-        .await?;
+    let server = tokio::spawn(
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal(Arc::clone(&state)))
+            .into_future(),
+    );
+    // Not before: a second `birta` for this path would probe a server that can't answer yet
+    if let Some(name) = name {
+        announce(name, addr, no_open);
+    }
 
+    let _watch = match watcher.await? {
+        Ok(set) => set,
+        Err(e) => {
+            server.abort();
+            return Err(e);
+        }
+    };
+    state.watching.send_replace(true);
+    server.await??;
     Ok(())
 }
 
@@ -530,47 +693,36 @@ async fn shutdown_signal(state: Arc<AppState>) {
         eprintln!("\nbirta: shutting down...");
     };
 
-    let auto_shutdown = async {
-        loop {
-            state.all_disconnected.notified().await;
-
-            if state.connections.load(Ordering::Relaxed) == 0 {
-                break;
-            }
-        }
-
-        tokio::time::sleep(SHUTDOWN_GRACE_PERIOD).await;
-
-        if state.connections.load(Ordering::Relaxed) == 0
-            && now_secs().saturating_sub(state.last_request.load(Ordering::Relaxed))
-                >= SHUTDOWN_GRACE_PERIOD.as_secs()
-        {
-            eprintln!("birta: all tabs closed, shutting down...");
-        } else {
-            Box::pin(auto_shutdown_loop(state)).await;
-        }
-    };
-
     tokio::select! {
         () = ctrl_c => {},
-        () = auto_shutdown => {},
+        () = idle(state) => {},
     }
 }
 
-async fn auto_shutdown_loop(state: Arc<AppState>) {
+/// Returns once no tab has been open for the grace period and no review round holds the
+/// server; a server no tab ever opened runs on.
+async fn idle(state: Arc<AppState>) {
     loop {
         state.all_disconnected.notified().await;
-
         if state.connections.load(Ordering::Relaxed) > 0 {
             continue;
         }
 
         tokio::time::sleep(SHUTDOWN_GRACE_PERIOD).await;
 
-        if state.connections.load(Ordering::Relaxed) == 0
-            && now_secs().saturating_sub(state.last_request.load(Ordering::Relaxed))
-                >= SHUTDOWN_GRACE_PERIOD.as_secs()
+        if state.connections.load(Ordering::Relaxed) > 0
+            || now_secs().saturating_sub(state.last_request.load(Ordering::Relaxed))
+                < SHUTDOWN_GRACE_PERIOD.as_secs()
         {
+            continue;
+        }
+        // Set before the check, so a review write landing during it wakes this loop again
+        state.held.store(true, Ordering::Relaxed);
+        let app = Arc::clone(&state);
+        let open = tokio::task::spawn_blocking(move || review_ws::round_open(&app))
+            .await
+            .unwrap_or(false);
+        if !open {
             eprintln!("birta: all tabs closed, shutting down...");
             return;
         }
@@ -598,11 +750,14 @@ fn router(state: Arc<AppState>) -> Router {
             post(flush_handler).layer(DefaultBodyLimit::max(WS_MAX_INBOUND)),
         );
     let assets = Router::new().route("/_birta/{*asset}", get(asset_handler));
+    let probe = Router::new().route("/birta/whoami", get(whoami_handler));
 
     pages
         .merge(frags)
         .merge(live)
         .merge(assets)
+        .layer(from_fn_with_state(Arc::clone(&state), after_watching))
+        .merge(probe)
         .with_state(state)
         // The guard wraps every group; base headers sit outside it so rejections carry them too.
         .layer(from_fn_with_state(HostGuard::new(), guard))
@@ -632,6 +787,26 @@ async fn asset_handler(Path(asset): Path<String>, State(state): State<Arc<AppSta
 /// `POST /review/flush`: what a closing page's socket could not send.
 async fn flush_handler(State(state): State<Arc<AppState>>, body: axum::body::Bytes) -> StatusCode {
     review_ws::flush(&state, &body).await
+}
+
+/// Holds every request but the probe until the file watcher runs, as a server not yet
+/// listening would, so no page or socket misses a write.
+async fn after_watching(
+    State(state): State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let _ = state.watching.subscribe().wait_for(|on| *on).await;
+    next.run(request).await
+}
+
+/// `GET /birta/whoami`: what this server serves, so another `birta` for the same path, or
+/// a page whose server restarted, can tell it is the one they want.
+async fn whoami_handler(State(state): State<Arc<AppState>>) -> Response {
+    let Some(served) = &state.served else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    Json(serde_json::json!({"served": served.to_string_lossy(), "id": state.id})).into_response()
 }
 
 async fn favicon_handler() -> Response {
@@ -684,6 +859,8 @@ async fn index_handler(
         extra_boot: None,
         review_token: None,
         review_dir: false,
+        review_served: None,
+        review_restart: None,
         stops: Some(&current.stops),
         rev: None,
     });
@@ -744,10 +921,16 @@ async fn view_handler(
     let source_html = render::render_source(&markdown, syntax_theme.as_ref());
     let file_stats = render::format_file_stats(&markdown);
 
-    let filename = canonical
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "untitled".to_string());
+    // In a folder the path names the doc; one file's name is enough on its own
+    let filename = if state.dir_mode {
+        path.clone()
+    } else {
+        canonical
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "untitled".to_string())
+    };
+    review_ws::opened(&state, &canonical, &path);
 
     let registry = state.registry.read().await;
     let theme = registry.active();
@@ -772,6 +955,8 @@ async fn view_handler(
         extra_boot: None,
         review_token: state.review.as_ref().map(|r| r.token.as_str()),
         review_dir: state.review.as_ref().is_some_and(|r| r.dir_mode),
+        review_served: state.served.as_deref().and_then(StdPath::to_str),
+        review_restart: state.restart.as_deref(),
         stops: Some(&index.stops),
         rev: Some(rev.as_str()),
     });
@@ -1501,6 +1686,8 @@ mod tests {
             drafted_by: None,
             review: false,
             git_exclude: true,
+            derive_port: false,
+            review_by_env: false,
         }
     }
 
@@ -1530,6 +1717,8 @@ mod tests {
             drafted_by: None,
             git_exclude: true,
             dir_mode: false,
+            served: None,
+            review_by_env: false,
         };
         customize(&mut init);
         AppState::new(init)
@@ -1537,6 +1726,19 @@ mod tests {
 
     fn test_router() -> Router {
         router(test_state(|_| {}))
+    }
+
+    #[test]
+    fn restart_command_quotes_the_path_for_a_shell_and_carries_an_env_only_gate() {
+        let path = StdPath::new("/tmp/a b'$(x).md");
+        assert_eq!(
+            restart_command("birta", path, false),
+            r#"birta '/tmp/a b'\''$(x).md'"#
+        );
+        assert_eq!(
+            restart_command("birta", path, true),
+            r#"BIRTA_REVIEW=1 birta '/tmp/a b'\''$(x).md'"#
+        );
     }
 
     #[tokio::test]

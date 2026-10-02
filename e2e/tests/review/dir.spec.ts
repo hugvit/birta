@@ -1080,6 +1080,9 @@ test.describe("on a real server", () => {
       { ...GATE_ON, BIRTA_REVIEW_HOLD_MS: "300" },
     );
     await page.setViewportSize(WIDE);
+    // Opened once, so this one-file server lists the sibling
+    await page.goto(`${served.url}/view/b.md`);
+    await booted(page);
     await page.goto(`${served.url}/view/pr.md`);
     await booted(page);
     await page.keyboard.press("c");

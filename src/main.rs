@@ -244,6 +244,8 @@ async fn serve(cli: Cli, config: birta::config::Config, review_on: bool) -> anyh
             drafted_by: None,
             review: false,
             git_exclude: true,
+            derive_port: false,
+            review_by_env: false,
         };
         return birta::server::run_stdin(&markdown, opts).await;
     }
@@ -297,6 +299,8 @@ async fn serve(cli: Cli, config: birta::config::Config, review_on: bool) -> anyh
         drafted_by: cli.drafted_by.filter(|_| review_on),
         review: review_on,
         git_exclude: config.review.git_exclude,
+        derive_port: review_on && !merged.port_given,
+        review_by_env: review_on && !config.review.enabled,
     };
     birta::server::run(file, opts).await
 }

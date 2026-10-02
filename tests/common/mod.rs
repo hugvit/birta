@@ -37,6 +37,8 @@ pub async fn start_server(file: PathBuf) -> u16 {
         drafted_by: None,
         review: false,
         git_exclude: true,
+        derive_port: false,
+        review_by_env: false,
     };
     // The listener is already bound, so connects queue until the server accepts.
     tokio::spawn(birta::server::start(file, listener, opts));

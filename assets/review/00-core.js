@@ -335,6 +335,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     BR.pointing.init();
     BR.chrome.init();
     BR.dir.init();
+    BR.life.init();
     document.addEventListener('visibilitychange', function () {
       if (document.visibilityState === 'hidden') flush();
     });

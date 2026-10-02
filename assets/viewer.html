@@ -772,6 +772,11 @@
           checkQueue.forEach(revertCheck);
           checkInFlight = null;
           checkQueue = [];
+          // Review redials itself, once it knows the server answering is this page's
+          if (birtaBus.redial) {
+            birtaBus.redial(connect);
+            return;
+          }
           showStatus('Disconnected \u2014 reconnecting\u2026');
           setTimeout(function() {
             reconnectDelay = Math.min(reconnectDelay * 2, maxDelay);

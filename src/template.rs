@@ -78,6 +78,10 @@ pub struct PageOptions<'a> {
     pub review_token: Option<&'a str>,
     /// A folder is served, so review acts on every doc under it.
     pub review_dir: bool,
+    /// The canonical path this server serves, which a page checks a restarted server against.
+    pub review_served: Option<&'a str>,
+    /// The shell command that serves the same path again.
+    pub review_restart: Option<&'a str>,
     /// Focus stops of `content_html`, left out of BOOT when `None`.
     pub stops: Option<&'a [Stop]>,
 }
@@ -164,7 +168,13 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
         "extra": opts.extra_boot,
         "review": match opts.review_token {
             Some(token) => {
-                serde_json::json!({"enabled": true, "token": token, "dir": opts.review_dir})
+                let mut review =
+                    serde_json::json!({"enabled": true, "token": token, "dir": opts.review_dir});
+                if let (Some(served), Some(restart)) = (opts.review_served, opts.review_restart) {
+                    review["served"] = served.into();
+                    review["restart"] = restart.into();
+                }
+                review
             }
             None => serde_json::json!({"enabled": false}),
         },
@@ -300,6 +310,8 @@ mod tests {
             extra_boot: None,
             review_token: None,
             review_dir: false,
+            review_served: None,
+            review_restart: None,
             stops: None,
             rev: None,
         })
@@ -370,6 +382,8 @@ mod tests {
             extra_boot: None,
             review_token: None,
             review_dir: false,
+            review_served: None,
+            review_restart: None,
             stops: None,
             rev: None,
         })
@@ -505,6 +519,8 @@ mod tests {
             extra_boot: None,
             review_token: None,
             review_dir: false,
+            review_served: None,
+            review_restart: None,
             stops: None,
             rev: None,
         })
@@ -592,6 +608,8 @@ mod tests {
             extra_boot: None,
             review_token: None,
             review_dir: false,
+            review_served: None,
+            review_restart: None,
             stops: None,
             rev: None,
         })
@@ -688,6 +706,8 @@ mod tests {
             extra_boot: None,
             review_token: None,
             review_dir: false,
+            review_served: None,
+            review_restart: None,
             stops: None,
             rev: None,
         }
@@ -825,6 +845,8 @@ mod tests {
             nonce: "N0nce",
             review_token: Some("t0ken"),
             review_dir: false,
+            review_served: None,
+            review_restart: None,
             ..base_opts(&theme)
         });
         assert_eq!(
@@ -891,6 +913,8 @@ mod tests {
             extra_boot: Some(&extra),
             review_token: None,
             review_dir: false,
+            review_served: None,
+            review_restart: None,
             stops: None,
             rev: None,
             ..base_opts(&theme)
@@ -926,6 +950,8 @@ mod tests {
             extra_boot: Some(&extra),
             review_token: None,
             review_dir: false,
+            review_served: None,
+            review_restart: None,
             stops: None,
             rev: None,
             ..base_opts(&github)
@@ -1102,6 +1128,8 @@ mod tests {
             extra_boot: Some(&extra),
             review_token: None,
             review_dir: false,
+            review_served: None,
+            review_restart: None,
             stops: None,
             rev: None,
             ..base_opts(&theme)

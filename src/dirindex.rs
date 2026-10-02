@@ -1,6 +1,6 @@
 //! The folder's docs with activity, for the file menu and link dots: `dir_state`.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -119,6 +119,8 @@ struct Inner {
     truncated: bool,
     docs: HashMap<PathBuf, Entry>,
     folder: Option<(Option<FileSig>, Option<Summary>)>,
+    /// With one file served: it and the docs pages opened. `None` covers the whole root.
+    scope: Option<HashSet<PathBuf>>,
 }
 
 /// Every doc under the served root with a review file or news, by canonical path.
@@ -289,6 +291,46 @@ impl DirIndex {
         true
     }
 
+    /// Narrows what is listed to `entry` and the docs pages open later.
+    pub(crate) fn scope_to(&self, entry: &Path) {
+        self.lock().scope = Some(HashSet::from([entry.to_path_buf()]));
+    }
+
+    /// A page opened `doc` at `rel`. Returns whether that brought it into scope.
+    pub(crate) fn opened(&self, doc: &Path, rel: &str) -> bool {
+        let mut inner = self.lock();
+        let Some(scope) = inner.scope.as_mut() else {
+            return false;
+        };
+        if !scope.insert(doc.to_path_buf()) {
+            return false;
+        }
+        let entry = inner.docs.entry(doc.to_path_buf()).or_default();
+        entry.paths.insert(rel.to_string());
+        entry.has_log = review_path_for(doc).is_file();
+        true
+    }
+
+    /// The docs this server answers for: in scope, or under a folder, every one with a
+    /// review file.
+    pub(crate) fn served(&self) -> Vec<PathBuf> {
+        let inner = self.lock();
+        match &inner.scope {
+            Some(scope) => scope.iter().cloned().collect(),
+            None => inner
+                .docs
+                .iter()
+                .filter(|(_, e)| e.has_log)
+                .map(|(doc, _)| doc.clone())
+                .collect(),
+        }
+    }
+
+    /// The stage of the folder's own review, when it has one.
+    pub(crate) fn folder_stage(&self) -> Option<crate::review::state::Stage> {
+        Some(self.lock().folder.as_ref()?.1.as_ref()?.stage)
+    }
+
     /// Every doc with a review file.
     pub(crate) fn logged(&self) -> Vec<PathBuf> {
         let inner = self.lock();
@@ -308,10 +350,13 @@ impl DirIndex {
     /// The current `dir_state` frame.
     pub(crate) fn frame(&self) -> serde_json::Value {
         let inner = self.lock();
+        let in_scope = |doc: &PathBuf| inner.scope.as_ref().is_none_or(|s| s.contains(doc));
         let files = inner
             .docs
             .iter()
-            .filter(|(doc, e)| !e.paths.is_empty() && (e.has_log || e.news) && doc.is_file())
+            .filter(|(doc, e)| {
+                in_scope(doc) && !e.paths.is_empty() && (e.has_log || e.news) && doc.is_file()
+            })
             .map(|(_, e)| Listed {
                 paths: e.paths.iter().cloned().collect(),
                 summary: e.summary.clone(),
@@ -319,7 +364,11 @@ impl DirIndex {
                 activity_ms: e.activity_ms,
             })
             .collect();
-        let folder = inner.folder.as_ref().and_then(|f| f.1.as_ref());
+        let folder = inner
+            .folder
+            .as_ref()
+            .and_then(|f| f.1.as_ref())
+            .filter(|_| inner.scope.is_none());
         dir_state_json("", inner.truncated, folder, files)
     }
 }

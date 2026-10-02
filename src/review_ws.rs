@@ -7,6 +7,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -23,7 +24,7 @@ use crate::review::log::{self, AppendCtx, AppendError, Held, Log};
 use crate::review::ops::{
     self, AnchorReq, At, BlockScope, By, ByKind, CommentKind, Header, Line, Op, Parsed, Verdict,
 };
-use crate::review::state::{ItemStatus, ReviewState};
+use crate::review::state::{ItemStatus, ReviewState, Stage};
 use crate::review::{FOLDER_REVIEW, Reject, fold, review_path_for, sync, undo};
 use crate::server::{AppState, WsEvent};
 
@@ -250,7 +251,7 @@ fn drafts_dir() -> Option<PathBuf> {
     Some(state.join("birta/drafts"))
 }
 
-fn new_token() -> String {
+pub(crate) fn new_token() -> String {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes).expect("the OS random source failed");
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -297,7 +298,12 @@ pub(crate) fn hello_frames(app: &Arc<AppState>, hub: &ReviewHub, doc: &DocRef) -
         frames.push(review_frame(&doc.rel, &state));
         arm_hold(app, hub, &doc.canonical, &state);
     }
-    if hub.dir.viewed(&doc.canonical) {
+    let read = hub.dir.viewed(&doc.canonical);
+    let joined = hub.dir.opened(&doc.canonical, &doc.rel);
+    if joined {
+        hub.dir.refresh(&doc.canonical);
+    }
+    if read || joined {
         push_dir(app);
     }
     frames.push(hub.dir.frame().to_string());
@@ -462,11 +468,38 @@ pub(crate) fn doc_event(app: &Arc<AppState>, rel: &str, canonical: &Path, remove
     }
 }
 
+/// A page opened the doc at `rel`, which joins what a one-file server lists.
+pub(crate) fn opened(app: &Arc<AppState>, canonical: &Path, rel: &str) {
+    if let Some(hub) = &app.review
+        && hub.dir.opened(canonical, rel)
+    {
+        hub.dir.refresh(canonical);
+        push_dir(app);
+    }
+}
+
+/// Whether a doc this server serves is out with the agent: handed back, or claimed and
+/// awaiting its respond.
+pub(crate) fn round_open(app: &AppState) -> bool {
+    let Some(hub) = &app.review else {
+        return false;
+    };
+    let open = |stage: &Stage| matches!(stage, Stage::Sent | Stage::PickedUp);
+    hub.dir.served().iter().any(|doc| {
+        hub.state_of(doc, true)
+            .is_some_and(|s| open(&s.phrase.stage))
+    }) || (hub.dir_mode && hub.dir.folder_stage().is_some_and(|s| open(&s)))
+}
+
 /// A review file changed on disk: an agent's line, or a write of our own.
 pub(crate) fn review_file_event(app: &Arc<AppState>, review: &Path) {
     let Some(hub) = &app.review else {
         return;
     };
+    // A round may have opened or closed while no tab is open
+    if app.held.swap(false, Ordering::Relaxed) {
+        app.all_disconnected.notify_one();
+    }
     let Some(name) = review.file_name().and_then(|n| n.to_str()) else {
         return;
     };
@@ -1587,6 +1620,7 @@ pub(crate) fn review_js() -> &'static str {
             include_str!("../assets/review/40-lane.js"),
             include_str!("../assets/review/60-chrome.js"),
             include_str!("../assets/review/70-dir.js"),
+            include_str!("../assets/review/80-life.js"),
         ];
         let mut js = parts.join("\n");
         let css = include_str!("../assets/review/shadow.css");

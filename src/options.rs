@@ -24,6 +24,8 @@ pub struct CliOptions {
 /// Result of merging CLI options with config file settings.
 pub struct MergedOptions {
     pub port: u16,
+    /// A port came from `--port` or config, so none is derived from the served path.
+    pub port_given: bool,
     pub no_open: bool,
     pub css_path: Option<PathBuf>,
     pub theme_name: Option<String>,
@@ -52,6 +54,7 @@ pub struct MergedOptions {
 /// Variant preference: CLI `--light`/`--dark` flags take priority over
 /// `theme.variant` in config. When neither is set, the theme default applies.
 pub fn merge(cli: CliOptions, config: &Config) -> MergedOptions {
+    let port_given = cli.port.or(config.port).is_some();
     let port = cli.port.or(config.port).unwrap_or(0);
     let no_open = cli.no_open || config.no_open.unwrap_or(false);
 
@@ -89,6 +92,7 @@ pub fn merge(cli: CliOptions, config: &Config) -> MergedOptions {
 
     MergedOptions {
         port,
+        port_given,
         no_open,
         css_path,
         theme_name,

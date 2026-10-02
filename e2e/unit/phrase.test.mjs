@@ -42,13 +42,16 @@ const MIN = 60_000;
 // Results come from the vm context, whose objects have their own prototypes
 const plain = (v) => (v == null ? v : JSON.parse(JSON.stringify(v)));
 
-/** Everything the chrome says for `s` at server time `now`. */
+/** Everything the chrome says for `s` at server time `now`; the menu without its closing keys row. */
 function chrome(BR, s, now = s.server_now, dir = null) {
+  const menu = plain(BR.pure.menuRows(s, { now, dir })).map((r) => r.text);
+  // Every menu review can act in ends with the key sheet's row
+  if (s.log_writable !== false) assert.equal(menu.pop(), "keys");
   return {
     phrase: BR.pure.formatPhrase(s, { now, dir }),
     button: plain(BR.pure.turnButton(s, { now, dir })),
     pill: BR.pure.holdPill(s, { now }),
-    menu: plain(BR.pure.menuRows(s, { now, dir })).map((r) => r.text),
+    menu,
   };
 }
 
@@ -567,10 +570,12 @@ for (const [label, s, want, nowOf] of CRAFTED) {
 // --- Directory mode ------------------------------------------------------------------------------
 
 test("in a folder the button counts every file's drafts and the files with unseen changes", () => {
-  const dir = { type: "dir_state", root: ".", truncated: false, folder: null, files: [], totals: { drafts: 3, unseen_files: 2, decided: 1, items: 5 } };
-  const BR = load();
   const s = bent("drafts", (x) => (x.counts.drafts = 1));
-  assert.deepEqual(plain(BR.pure.turnButton(s, { now: s.server_now, dir })), B("Hand back · 3 · 2 files unseen", false));
+  // The totals count this doc's own draft, which the listing holds
+  const here = { paths: ["pr.md"], summary: { stage: "drafts", phrase: s.phrase, counts: s.counts }, news: false };
+  const dir = { type: "dir_state", root: ".", truncated: false, folder: null, files: [here], totals: { drafts: 3, unseen_files: 2, decided: 1, items: 5 } };
+  const BR = load();
+  assert.deepEqual(plain(BR.pure.turnButton(s, { now: s.server_now, dir, path: "pr.md" })), B("Hand back · 3 · 2 files unseen", false));
 });
 
 // --- Never a blank name, never a leaked value ------------------------------------------------------

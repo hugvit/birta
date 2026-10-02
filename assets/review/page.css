@@ -57,7 +57,8 @@ html[data-review] ::highlight(birta-quote) {
   text-underline-offset: 3px;
 }
 
-a[data-br-news]::after {
+a[data-br-news]::after,
+a[data-br-notes]::after {
   content: "";
   display: inline-block;
   width: 6px;
@@ -70,8 +71,17 @@ a[data-br-news]::after {
 
 /* Dots are marks: m and reading mode hide them with the lane */
 html[data-br-marks="off"] a[data-br-news]::after,
-body.reading-mode a[data-br-news]::after {
+html[data-br-marks="off"] a[data-br-notes]::after,
+body.reading-mode a[data-br-news]::after,
+body.reading-mode a[data-br-notes]::after {
   display: none;
+}
+
+/* The link Tab picked in the focused block: review's own ring, whatever the theme's focus style */
+html[data-review] #content a[data-br-pick] {
+  outline: 2px solid var(--review-you);
+  outline-offset: 2px;
+  border-radius: 3px;
 }
 
 /* The narrow lane needs a glyph, a bar and a gap from the text */

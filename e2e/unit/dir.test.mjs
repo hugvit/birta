@@ -72,6 +72,7 @@ const B = (text, kbd = true, disabled = false) => ({ text, kbd, disabled });
 const COPY = "copy hand-off line";
 const MINE = "drafted by Claude · mark as yours";
 const FOLDER_ROW = "note on this folder";
+const KEYS = "keys";
 
 test("70-dir.js starts by reusing the shared BR namespace", () => {
   assert.equal(fs.readFileSync(path.join(ASSETS, "70-dir.js"), "utf-8").split("\n")[0], SHARED_BR);
@@ -151,16 +152,12 @@ test("in a folder the button hands back every file's drafts", () => {
   const BR = load();
   const btn = (s, dir) => plain(BR.pure.turnButton(s, { now: s.server_now, dir, path: "pr.md" }));
   const mine = bent("drafts", (s) => (s.counts.drafts = 1));
-  assert.deepEqual(btn(mine, dirState([listed("b.md", summary("drafts"))], { drafts: 4 })), B("Hand back · 4"));
+  // The totals count this doc's draft, so the listing holds it too
+  const files = [listed("b.md", summary("drafts")), listed("pr.md", summary("drafts", (x) => (x.counts.drafts = 1)))];
+  assert.deepEqual(btn(mine, dirState(files, { drafts: 4 })), B("Hand back · 4"));
   // The carry-forward label: unseen files elsewhere drop the key hint
-  assert.deepEqual(
-    btn(mine, dirState([listed("b.md", summary("drafts"))], { drafts: 4, unseen_files: 2 })),
-    B("Hand back · 4 · 2 files unseen", false),
-  );
-  assert.deepEqual(
-    btn(mine, dirState([listed("b.md", summary("drafts"))], { drafts: 4, unseen_files: 1 })),
-    B("Hand back · 4 · 1 file unseen", false),
-  );
+  assert.deepEqual(btn(mine, dirState(files, { drafts: 4, unseen_files: 2 })), B("Hand back · 4 · 2 files unseen", false));
+  assert.deepEqual(btn(mine, dirState(files, { drafts: 4, unseen_files: 1 })), B("Hand back · 4 · 1 file unseen", false));
 });
 
 test("drafts in other files make the button a hand-back even with none here", () => {
@@ -191,7 +188,7 @@ test("in a folder the menu adds the folder note and one row per other file, afte
   const rows = plain(BR.pure.menuRows(s, { now: s.server_now, dir: TWO_OTHERS, path: "pr.md", folder: true }));
   assert.deepEqual(
     rows.map((r) => r.text),
-    [COPY, MINE, FOLDER_ROW, "b.md", "sub/c.md"],
+    [COPY, MINE, FOLDER_ROW, "b.md", "sub/c.md", KEYS],
   );
   const [folder, b, c] = rows.slice(2);
   assert.equal(folder.id, "folder");
@@ -220,7 +217,7 @@ test("serving one file the menu has no folder row, but keeps the other files' ro
   const BR = load();
   const s = state("drafts");
   const rows = plain(BR.pure.menuRows(s, { now: s.server_now, dir: TWO_OTHERS, path: "pr.md", folder: false }));
-  assert.deepEqual(rows.map((r) => r.text), [COPY, MINE, "b.md", "sub/c.md"]);
+  assert.deepEqual(rows.map((r) => r.text), [COPY, MINE, "b.md", "sub/c.md", KEYS]);
 });
 
 test("drafts elsewhere make a hand-back on a sent or approved doc, but never where review is off", () => {

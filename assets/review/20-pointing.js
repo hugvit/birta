@@ -59,6 +59,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var focus = null;
   // A click landed outside the focused block since it took focus
   var pointedAway = false;
+  // The link Tab picked inside the focused block; ⏎ follows it natively while it has DOM focus
+  var picked = null;
   // What the focused block looked like, to find it again when a patch replaces its node
   var focusWas = null;
   var active = false;
@@ -161,7 +163,45 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     BR.chrome.render();
   }
 
+  /** The block's links a reader can follow; a heading's anchor icon is not one of them. */
+  function linksIn(block) {
+    return Array.prototype.filter.call(block.querySelectorAll('a[href]'), function (a) {
+      return !a.classList.contains('anchor') && a.getClientRects().length > 0;
+    });
+  }
+
+  function unpick() {
+    var a = picked;
+    if (!a) return false;
+    picked = null;
+    a.removeAttribute('data-br-pick');
+    if (document.activeElement === a) a.blur();
+    return true;
+  }
+
+  function pick(a) {
+    unpick();
+    picked = a;
+    a.setAttribute('data-br-pick', '');
+    a.focus();
+  }
+
+  /** Tab and Shift+Tab: steps the pick through the focused block's links, round the end. False when it has none. */
+  function tab(step) {
+    var links = focus && !isSummary(focus) ? linksIn(focus) : [];
+    if (!links.length) return false;
+    var at = links.indexOf(picked);
+    pick(links[at < 0 ? (step > 0 ? 0 : links.length - 1) : (at + step + links.length) % links.length]);
+    return true;
+  }
+
+  // Focus leaving the picked link, by a click or the browser, ends the pick
+  function onFocusOut(e) {
+    if (picked && e.target === picked) unpick();
+  }
+
   function setFocus(el, all) {
+    unpick();
     // A row or blank left behind would keep the keys
     if (document.activeElement !== el) BR.flow.release(document.activeElement);
     focus = el;
@@ -607,12 +647,14 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       paintDoc();
       document.addEventListener('selectionchange', onSelection);
       document.addEventListener('click', onClick);
+      document.addEventListener('focusout', onFocusOut);
       window.addEventListener('scroll', onScroll, { passive: true });
       birtaBus.on(onFrame);
     },
     /** Runs a review action; false leaves the key to the page. */
     act: function (action) {
       if (ACTIVATES[action]) activate();
+      if (action === 'focus_next' || action === 'focus_prev' || action === 'next_item' || action === 'prev_item') unpick();
       if (action !== 'no') BR.flow.disarm();
       // The clean view hides the rows, so its keys come before theirs
       if (BR.chrome.clean()) {
@@ -671,10 +713,16 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         return true;
       }
       if (action === 'open') {
-        // Enter on a link, summary or button keeps its own meaning
+        // A focused blank opens its own field first; then the picked link, a dot or half-typed words, the only link, else a pill
+        // Enter on a link, summary or button keeps its own meaning, so a picked link opens natively
         var active = document.activeElement;
         if (active && active !== document.body && active.closest && active.closest('a, summary, button, input, select, textarea')) return false;
-        return !isSummary(focus) && BR.flow.openAt(focus);
+        if (isSummary(focus)) return false;
+        if (BR.flow.openAt(focus)) return true;
+        var links = focus ? linksIn(focus) : [];
+        if (links.length === 1) links[0].click();
+        else if (links.length > 1) showPill(links.length + ' links · Tab to pick');
+        return links.length > 0;
       }
       return false;
     },
@@ -709,7 +757,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     },
     /** Puts an act of this page's on the z stack: `{cid, undo(n) -> op fields, item?, created?}`. */
     remember: remember,
-    /** Drops one Esc layer: the phrase menu, the composer, the selection, then the focus. False when none is there. */
+    tab: tab,
+    /** Drops one Esc layer: the phrase menu or key sheet, the composer, the selection, a picked link, then the focus. False when none is there. */
     escape: function () {
       if (BR.chrome.escape()) return true;
       if (BR.flow.escape()) return true;
@@ -719,6 +768,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         onSelection();
         return true;
       }
+      if (unpick()) return true;
       if (focus) {
         setFocus(null);
         return true;

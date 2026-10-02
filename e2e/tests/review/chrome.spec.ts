@@ -195,6 +195,8 @@ const glyphRoles = async (page: Page) =>
 const WITHDRAW = "withdraw";
 const COPY = "copy hand-off line";
 const MINE = "drafted by Claude · mark as yours";
+// The row's label and its key, which this probe reads as one run of text
+const KEYS = "keys?";
 
 // --- The phrase and the turn button ----------------------------------------------------------
 
@@ -580,7 +582,7 @@ test.describe("menu", () => {
     await expect.poll(() => phraseOf(page)).not.toBeNull();
     expect(await menuOf(page)).toBeNull();
     await page.locator(".file-header birta-phrase").click();
-    await expect.poll(() => menuOf(page)).toEqual([WITHDRAW, COPY, MINE]);
+    await expect.poll(() => menuOf(page)).toEqual([WITHDRAW, COPY, MINE, KEYS]);
   });
 
   test("the phrase opens its menu on every click while states keep arriving", async ({ page, birta }) => {
@@ -928,7 +930,7 @@ test.describe("killers: menu and turn", () => {
     await openMenu(page);
     expect(await menuOf(page)).toContain(WITHDRAW);
     swap(mock, state, withRev(fixtureState("picked"), state.rev));
-    await expect.poll(() => menuOf(page)).toEqual([COPY, MINE]);
+    await expect.poll(() => menuOf(page)).toEqual([COPY, MINE, KEYS]);
   });
 
   test("Approve with something unseen sends no approve at first; a press past the guard's dwell does", async ({ page, birta }) => {

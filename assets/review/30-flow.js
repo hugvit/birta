@@ -360,7 +360,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       h.fold = null;
     }
     if (e.meta) h.box.appendChild(el('div', 'muted', e.meta));
-    if (e.focusable) h.box.tabIndex = 0;
+    // Reached by n, p and a click, never by Tab, which walks the focused block's links
+    if (e.focusable) h.box.tabIndex = -1;
     else h.box.removeAttribute('tabindex');
   }
 

@@ -213,7 +213,8 @@
 }
 
 .pill,
-.menu {
+.menu,
+.sheet {
   margin: 0;
   font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--birta-fg);
@@ -296,6 +297,36 @@
   background: var(--review-wash);
 }
 
+.sheet {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  height: fit-content;
+  padding: 12px 16px;
+}
+
+.sheet .row {
+  display: grid;
+  grid-template-columns: 160px auto 1fr;
+  gap: 12px;
+  align-items: baseline;
+  padding: 2px 0;
+}
+
+.sheet .label,
+.sheet .note {
+  color: var(--birta-fg-muted);
+}
+
+.sheet kbd {
+  font: inherit;
+  white-space: nowrap;
+}
+
+.sheet kbd + kbd {
+  margin-left: 6px;
+}
+
 /* A note's rule: dashed while a draft, solid once sent or asked for, dotted when the agent began it */
 .rule.solid {
   background-color: var(--review-agent);
@@ -360,7 +391,8 @@
 .phrase,
 .turn,
 .pill,
-.menu {
+.menu,
+.sheet {
   -webkit-text-fill-color: currentColor;
 }
 

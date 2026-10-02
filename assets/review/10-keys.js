@@ -8,6 +8,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var ONCE = { yes: 1, no: 1, later: 1, your_call: 1, undo: 1, turn: 1, hide_marks: 1, revert_change: 1 };
   // What a composing IME or a dead key reports instead of a character
   var NOT_KEYS = { Dead: 1, Process: 1, Unidentified: 1 };
+  // Held on their way to another key, so they never close the key sheet
+  var MODIFIERS = { Shift: 1, Control: 1, Alt: 1, Meta: 1, CapsLock: 1, AltGraph: 1 };
+  // Letters that already pilled `? for keys` in this tab
+  var UNBOUND_KEY = 'birta-unbound-pilled';
 
   function has(parts, mod) { return parts.indexOf(mod) >= 0; }
 
@@ -108,6 +112,28 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     handle(e, false);
   }
 
+  function plain(e) { return !e.altKey && !e.ctrlKey && !e.metaKey; }
+
+  // A key from a note or a blank may cycle links; one from the header's controls keeps Tab's own meaning
+  function inFlow(e) {
+    return e.composedPath().some(function (n) { return n.localName === 'birta-flow'; });
+  }
+
+  /** Pills `? for keys` for a letter no binding uses, once per letter per tab, while review shows. */
+  function unbound(e) {
+    if (!plain(e) || e.shiftKey || e.repeat || !/^[a-z]$/i.test(e.key) || !BR.chrome.shown()) return;
+    var letter = e.key.toLowerCase();
+    var bindings = typeof KEYBINDINGS === 'undefined' ? {} : KEYBINDINGS;
+    for (var action in bindings) {
+      if (typeof bindings[action] === 'string' && bindings[action].toLowerCase() === letter) return;
+    }
+    var done = [];
+    try { done = JSON.parse(sessionStorage.getItem(UNBOUND_KEY) || '[]'); } catch (err) {}
+    if (done.indexOf(letter) >= 0) return;
+    try { sessionStorage.setItem(UNBOUND_KEY, JSON.stringify(done.concat([letter]))); } catch (err) {}
+    BR.chrome.pill('? for keys');
+  }
+
   /** Acts on a key; `own` is for a key from inside a review host, whose controls are review's. */
   function handle(e, own) {
     if (BR.chrome.menuKey(e)) {
@@ -115,6 +141,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       e.stopPropagation();
       return;
     }
+    // Any other key closes the sheet, then acts as it would
+    if (e.key !== '?' && e.key !== 'Escape' && !MODIFIERS[e.key]) BR.chrome.closeKeys();
     if (e.key === 'Escape') {
       if (e.isComposing || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
       // One layer per press; an unconsumed Esc falls through to the viewer's reading mode
@@ -125,7 +153,18 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       return;
     }
     if (!own && onControl(e.target)) return;
+    // Shift or not, as layouts differ on whether ? needs it
+    if (e.key === '?' && plain(e)) {
+      BR.chrome.toggleKeys();
+      e.preventDefault();
+      return;
+    }
+    if (e.key === 'Tab' && plain(e)) {
+      if ((!own || inFlow(e)) && BR.pointing.tab(e.shiftKey ? -1 : 1)) e.preventDefault();
+      return;
+    }
     if (run(e)) e.preventDefault();
+    else unbound(e);
   }
 
   BR.keys = {

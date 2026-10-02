@@ -408,6 +408,7 @@ test.describe("the menu in a folder", () => {
       "sub/c.md changed",
       "notes/plan.md your turn · 3 notes",
       "my notes.md changed",
+      "keys ?",
     ]);
   });
 
@@ -649,7 +650,7 @@ test.describe("link dots, more", () => {
 // --- Shift+J and Shift+K -----------------------------------------------------------------------
 
 test.describe("Shift+J and Shift+K", () => {
-  test("go to the next and the previous file with news", async ({ page, birta }) => {
+  test("go to the next and the previous file with news or drafts", async ({ page, birta }) => {
     const { served } = await openFolder(page, birta);
     await expect.poll(() => phraseOf(page)).not.toBeNull();
     await page.keyboard.press("Shift+J");
@@ -658,18 +659,20 @@ test.describe("Shift+J and Shift+K", () => {
     await page.goto(`${served.url}/view/pr.md`);
     await booted(page);
     await expect.poll(() => phraseOf(page)).not.toBeNull();
+    // plan.md has no news, but its drafts make it a file to go to
     await page.keyboard.press("Shift+K");
-    await page.waitForURL(`${served.url}/view/sub/c.md`);
+    await page.waitForURL(`${served.url}/view/notes/plan.md`);
   });
 
-  test("with no other file with news they stay put", async ({ page, birta }) => {
-    const dir = dirState([listed("pr.md", summary("drafts"), true), listed("b.md", summary("sent"))], { drafts: 3 });
+  test("with no other file with news or notes they stay put, and pill why", async ({ page, birta }) => {
+    const dir = dirState([listed("pr.md", summary("drafts"), true), listed("b.md", summary("approved"))], { drafts: 3 });
     const { mock } = await openFolder(page, birta, { dir });
     await expect.poll(() => phraseOf(page)).not.toBeNull();
     await page.keyboard.press("Shift+J");
     await page.keyboard.press("Shift+K");
     await page.waitForTimeout(SETTLE_MS);
     expect(viewing(page)).toBe("/view/pr.md");
+    expect(await pillOf(page)).toBe("no other file has notes or news");
     expect(mock.ops()).toEqual([]);
   });
 

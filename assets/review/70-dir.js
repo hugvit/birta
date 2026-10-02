@@ -25,8 +25,18 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return '/view/' + path.split('/').map(encodeURIComponent).join('/');
   };
 
-  /** The next (`step` 1) or previous (-1) file with news after `path`, round the end; null for none. */
-  BR.pure.nextFile = function (dir, path, step) {
+  /** Whether a listed file holds notes still open: drafts, or live notes on a round not yet approved. */
+  BR.pure.hasNotes = function (f) {
+    var s = f && f.summary;
+    if (!s) return false;
+    return (s.counts && s.counts.drafts > 0) || (s.notes > 0 && s.stage !== 'approved');
+  };
+
+  /**
+   * The next (`step` 1) or previous (-1) file with news after `path`, round the end; null for none.
+   * `withNotes` takes files with open notes too.
+   */
+  BR.pure.nextFile = function (dir, path, step, withNotes) {
     var files = (dir && dir.files) || [];
     var n = files.length;
     var at = -1;
@@ -34,7 +44,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var start = at >= 0 ? at : step > 0 ? -1 : n;
     for (var k = 1; k <= n; k++) {
       var f = files[(((start + step * k) % n) + n) % n];
-      if (f.news && !has(f, path)) return f.paths[0];
+      if ((f.news || (withNotes && BR.pure.hasNotes(f))) && !has(f, path)) return f.paths[0];
     }
     return null;
   };
@@ -55,13 +65,20 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var content = document.getElementById('content');
     if (!content) return;
     var news = {};
+    var notes = {};
     ((dir && dir.files) || []).forEach(function (f) {
       if (f.news) f.paths.forEach(function (p) { news[p] = true; });
+      if (BR.pure.hasNotes(f)) f.paths.forEach(function (p) { notes[p] = true; });
     });
     content.querySelectorAll('a[href^="/view/"]').forEach(function (a) {
-      var on = !!news[target(a.getAttribute('href'))];
-      if (on !== a.hasAttribute('data-br-news')) a.toggleAttribute('data-br-news', on);
+      var to = target(a.getAttribute('href'));
+      mark(a, 'data-br-news', !!news[to]);
+      mark(a, 'data-br-notes', !!notes[to]);
     });
+  }
+
+  function mark(a, attr, on) {
+    if (on !== a.hasAttribute(attr)) a.toggleAttribute(attr, on);
   }
 
   function go(path, landing) {
@@ -101,10 +118,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       dots();
     },
     listing: function () { return dir; },
-    /** Shift+J and Shift+K. */
+    /** Shift+J and Shift+K: the next file with news or open notes. */
     step: function (step) {
-      var path = BR.pure.nextFile(dir, CURRENT_PATH, step);
+      var path = BR.pure.nextFile(dir, CURRENT_PATH, step, true);
       if (path) go(path);
+      else BR.chrome.pill('no other file has notes or news');
     },
     /**
      * n past this page's last stop, or p before its first: the next file with news, at its first

@@ -10,6 +10,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   // Keys that only modify the next one never count as "another key"
   var MODIFIERS = { Meta: 1, Control: 1, Shift: 1, Alt: 1, AltGraph: 1, CapsLock: 1, Fn: 1 };
   var COPY = 'copy hand-off line';
+  // How long a folder's hand-back sits unclaimed before the phrase points at the hand-off line
+  var CUE_MS = 10000;
   var NACKS = {
     changed_since: 'changed since · try again',
     nothing_to_send: 'nothing to hand back',
@@ -123,8 +125,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       return v.decided > 0 ? v.decided + ' of ' + v.items + ' decided' : 'your turn · ' + plural(v.drafts, 'note', 'notes');
     }
     switch (p.stage) {
-      case 'sent':
-        return 'sent ' + hhmm(p.sent.ts) + ' · not picked up yet';
+      case 'sent': {
+        var sent = 'sent ' + hhmm(p.sent.ts) + ' · not picked up yet';
+        return cue(s, p, opts) ? sent + ' · ' + COPY : sent;
+      }
       case 'picked_up': {
         var out = [cap(p.picked_up.by) + ' picked up ' + hhmm(p.picked_up.ts)];
         if (v.drafts) {
@@ -165,6 +169,17 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return BR.pure.formatPhrase(s, all);
   };
 
+  /** A folder with no drafter has no agent waiting on it: a hand-back left unclaimed needs the line. */
+  function cue(s, p, opts) {
+    return !!opts.folder && !(s.owner && s.owner.drafted_by) && !!s.hand_off && opts.now - p.sent.ts >= CUE_MS;
+  }
+
+  /** This page's drafts as the listing last counted them; none while it doesn't list the page. */
+  function listedHere(dir, path) {
+    var f = (dir.files || []).filter(function (x) { return (x.paths || []).indexOf(path) >= 0; })[0];
+    return (f && f.summary && f.summary.counts.drafts) || 0;
+  }
+
   function button(text, kbd, disabled) { return { text: text, kbd: !!kbd, disabled: !!disabled }; }
 
   /** The turn button's label, whether it shows the key hint, and whether it acts; null for no button. */
@@ -182,7 +197,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var t = opts.dir && opts.dir.totals;
     // Notes the page kept that no state shows yet still count: ⌘⏎ must never approve past them
     var mine = v.drafts + (opts.pending || 0);
-    var total = t ? Math.max(t.drafts + (opts.pending || 0), mine) : mine;
+    // This doc's own state can be ahead of the throttled listing, which may not count its newest note
+    var total = t ? Math.max(t.drafts + (opts.pending || 0), t.drafts - listedHere(opts.dir, opts.path) + mine) : mine;
     if (opts.busy && total === 0) total = 1;
     if (total > 0) {
       if (t && t.unseen_files) return button('Hand back · ' + total + ' · ' + plural(t.unseen_files, 'file', 'files') + ' unseen');
@@ -194,6 +210,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     }
     // Text that moved on since the approve can be approved again
     if (p.stage === 'approved' && !s.approve.changed_since) return button('Approved', false, true);
+    // A folder doc of yours that no agent has taken up has nothing to approve
+    if (opts.folder && !(s.owner && s.owner.drafted_by) && !anyAgent(s)) return null;
     return approve();
   };
 
@@ -249,7 +267,45 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         rows.push({ id: 'file', text: x.paths[0], note: BR.pure.fileNote(x, opts), href: BR.pure.fileHref(x.paths[0]) });
       });
     }
+    rows.push({ id: 'keys', text: 'keys', note: '?' });
     return rows;
+  };
+
+  // Literal keys in the sheet, which no binding names
+  var TAB = { key: 'Tab' };
+  // The sheet's groups: each row is `[actions, note?]`
+  var SHEET = [
+    ['decide', [[['yes', 'no', 'later', 'your_call']]]],
+    ['write', [[['note', 'ask']]]],
+    ['move', [[['focus_next', 'focus_prev', 'next_item', 'prev_item', 'next_file', 'prev_file', TAB]]]],
+    ['take back', [[['undo']]]],
+    ["Claude's changes", [[['revert_change'], "revert Claude's change (open row)"]]],
+    ['hand back / approve', [[['turn']]]],
+    ['view', [[['toggle_reading', 'toggle_dark', 'focus_theme', 'hide_marks']], [['toggle_raw'], 'source view']]]
+  ];
+  var KEY_NAMES = { Enter: '⏎', Escape: 'Esc', ' ': 'Space', ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→' };
+
+  /** A binding as the sheet prints it: `Shift+J` is `⇧J`, `Mod+Enter` is `⌘⏎` on a Mac and `Ctrl⏎` elsewhere. */
+  function keyName(binding, mac) {
+    var parts = binding.split('+');
+    var key = parts.pop();
+    var shift = parts.indexOf('Shift') >= 0;
+    var name = KEY_NAMES[key] || (key.length === 1 ? (shift ? key.toUpperCase() : key.toLowerCase()) : key);
+    var mods = { Mod: mac ? '⌘' : 'Ctrl', Meta: '⌘', Ctrl: 'Ctrl', Alt: mac ? '⌥' : 'Alt', Shift: '⇧' };
+    return parts.map(function (m) { return mods[m] || m; }).join('') + name;
+  }
+
+  /** The `?` sheet for `bindings`: `[{label, rows: [{keys, note?}]}]`, leaving out unbound keys and what they empty. */
+  BR.pure.keySheet = function (bindings, mac) {
+    var b = bindings || {};
+    return SHEET.map(function (g) {
+      var rows = g[1].map(function (r) {
+        var keys = r[0].map(function (a) { return a === TAB ? TAB.key : b[a] ? keyName(b[a], mac) : ''; })
+          .filter(function (k) { return k; });
+        return r[1] ? { keys: keys, note: r[1] } : { keys: keys };
+      }).filter(function (r) { return r.keys.length; });
+      return { label: g[0], rows: rows };
+    }).filter(function (g) { return g.rows.length; });
   };
 
   /** A refused op in words. `claimed` names whoever holds the turn in `s`. */
@@ -263,7 +319,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   // --- The header, the popovers and the tab ---
 
-  var phrase, phraseText, phraseWords, turn, turnBtn, turnWords, turnKbd, pop, menu, pill;
+  var phrase, phraseText, phraseWords, turn, turnBtn, turnWords, turnKbd, pop, menu, pill, sheet;
   // Server time minus this page's clock; it only moves forward, so a passed hold never comes back
   var skew = null;
   var dir = null;
@@ -291,10 +347,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   function opts(t) { return { now: t, dir: dir, path: CURRENT_PATH, folder: folderMode() }; }
 
+  function mac() { return /Mac/.test(navigator.platform); }
+
   /** The button's options: only in a folder do its count and hand-back take in every file. */
   function turnOpts(t) {
     var p = BR.pending;
-    return { now: t, dir: folderMode() ? dir : null, path: CURRENT_PATH, pending: p ? p.adds() : 0, busy: !!p && p.any() };
+    return { now: t, dir: folderMode() ? dir : null, path: CURRENT_PATH, folder: folderMode(), pending: p ? p.adds() : 0, busy: !!p && p.any() };
   }
 
   /** The active hand-back of all, from its ack: `{batch, n, count, not_before}`, or null. */
@@ -433,6 +491,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       waits.push(due > t ? due - t : MIN - ((t - quiet.since_ts) % MIN));
     }
     if (message && message.until) waits.push(message.until - Date.now());
+    if (folderMode() && p.stage === 'sent' && p.sent && p.sent.ts + CUE_MS > t) waits.push(p.sent.ts + CUE_MS - t);
     if (!waits.length) return;
     timer = setTimeout(function () {
       render();
@@ -546,6 +605,48 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (r.copy && navigator.clipboard) navigator.clipboard.writeText(r.copy);
     if (r.href) BR.dir.open(r.href);
     if (r.id === 'folder') BR.flow.open('note', { k: 'dir' }, null);
+    if (r.id === 'keys') openKeys();
+  }
+
+  // --- The key sheet ---
+
+  function keysOpen() {
+    try { return sheet.matches(':popover-open'); } catch (e) { return false; }
+  }
+
+  function openKeys() {
+    closeMenu();
+    sheet.textContent = '';
+    var bindings = typeof KEYBINDINGS === 'undefined' ? null : KEYBINDINGS;
+    BR.pure.keySheet(bindings, mac()).forEach(function (g) {
+      g.rows.forEach(function (r, i) {
+        var row = document.createElement('div');
+        row.className = 'row';
+        var label = document.createElement('span');
+        label.className = 'label';
+        label.textContent = i === 0 ? g.label : '';
+        var keys = document.createElement('span');
+        keys.className = 'keys';
+        r.keys.forEach(function (k) {
+          var kbd = document.createElement('kbd');
+          kbd.textContent = k;
+          keys.appendChild(kbd);
+        });
+        var note = document.createElement('span');
+        note.className = 'note';
+        note.textContent = r.note || '';
+        row.append(label, keys, note);
+        sheet.appendChild(row);
+      });
+    });
+    popover(sheet, true);
+  }
+
+  /** Closes the key sheet; false when it wasn't open. */
+  function closeKeys() {
+    if (!keysOpen()) return false;
+    popover(sheet, false);
+    return true;
   }
 
   /** j, k and ⏎ move and pick rows while the menu is open; true when the key was the menu's. */
@@ -763,12 +864,18 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       menu.setAttribute('popover', 'manual');
       menu.tabIndex = -1;
       menu.addEventListener('keydown', onMenuKey);
-      pop.root.append(pill, menu);
+      sheet = document.createElement('div');
+      sheet.className = 'sheet';
+      sheet.setAttribute('role', 'dialog');
+      sheet.setAttribute('aria-label', 'keys');
+      sheet.setAttribute('popover', 'manual');
+      pop.root.append(pill, menu, sheet);
       document.body.appendChild(pop.el);
       // Pointer only: a scripted click elsewhere (the theme menu's) leaves it open
       document.addEventListener('pointerdown', function (e) {
         var path = e.composedPath();
         if (path.indexOf(pop.el) < 0 && path.indexOf(phrase) < 0) closeMenu();
+        if (path.indexOf(pop.el) < 0) closeKeys();
       }, true);
 
       birtaBus.on(onFrame);
@@ -792,8 +899,16 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     openMenu: openMenu,
     menuKey: menuKey,
     closeMenu: closeMenu,
-    /** Esc's menu layer: true when it closed the menu. */
-    escape: closeMenu,
+    /** Esc's layer: true when it closed the key sheet or the menu. */
+    escape: function () { return closeKeys() || closeMenu(); },
+    /** `?`: opens the key sheet, or closes it. */
+    toggleKeys: function () {
+      if (!closeKeys()) openKeys();
+    },
+    keysOpen: keysOpen,
+    closeKeys: closeKeys,
+    /** Whether the review chrome shows on this page (design call 4). */
+    shown: function () { return shown(BR.currentState()); },
     /**
      * Shows `text` in the pill, or clears it for ''. An armed pill passes `arm`: `{until?, keep(e),
      * off()}`; it goes when `until` passes or on any key `keep` doesn't claim, and `off` runs then.

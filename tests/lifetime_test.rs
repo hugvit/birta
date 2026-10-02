@@ -232,9 +232,16 @@ async fn a_derived_port_held_by_a_birta_serving_another_path_falls_back_to_auto_
 #[tokio::test]
 async fn a_derived_port_held_by_a_listener_that_never_answers_falls_back_within_seconds() {
     let site = Site::new();
-    let name = free_doc(&site, "pr", DOC);
-    let d = derived(&site.path(&name));
-    let hog = TcpListener::bind(("127.0.0.1", d)).unwrap();
+    // A parallel test can take the derived port between the free check and this bind
+    let (name, d, hog) = (0..)
+        .find_map(|i| {
+            let name = free_doc(&site, &format!("pr{i}"), DOC);
+            let d = derived(&site.path(&name));
+            TcpListener::bind(("127.0.0.1", d))
+                .ok()
+                .map(|hog| (name, d, hog))
+        })
+        .unwrap();
     std::thread::spawn(move || {
         let held: Vec<_> = hog.incoming().collect();
         drop(held);

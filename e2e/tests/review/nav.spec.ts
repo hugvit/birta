@@ -228,6 +228,25 @@ test.describe("links in the focused block", () => {
     await expect.poll(() => hash(page)).toBe("#to-beta");
   });
 
+  test("a link the browser's Tab reaches outside the focused block takes the focus with it, as its pick", async ({ page, birta }) => {
+    await open(page, birta, LINK_DOC);
+    await focusOn(page, await stopSp(page, "No links"));
+    // Where the browser's own Tab lands from a block with no links
+    await page.locator("#content a", { hasText: "gamma" }).focus();
+    await expect.poll(() => focused(page)).toBe(await stopSp(page, "Only gamma"));
+    expect(await picked(page)).toEqual({ text: "gamma", ring: true });
+  });
+
+  test("j past a link the browser focused leaves it behind, so ⏎ acts on the focused block", async ({ page, birta }) => {
+    await open(page, birta, LINK_DOC);
+    await page.locator("#content a", { hasText: "gamma" }).focus();
+    await focusOn(page, await stopSp(page, "Three: one"));
+    expect(await page.evaluate(() => document.activeElement?.localName)).not.toBe("a");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => pillOf(page)).toBe("3 links · Tab to pick");
+    expect(await hash(page)).toBe("");
+  });
+
   test("Shift+Tab from no pick starts at the last link", async ({ page, birta }) => {
     await open(page, birta, LINK_DOC);
     await focusOn(page, await stopSp(page, "See alpha"));
@@ -376,15 +395,24 @@ const DOT2_DOC = fixtureDoc("flow").replace(
 
 const dotCount = async (page: Page) => (await marks(page)).filter((m) => m.mark === "dot").length;
 
+/** The text of the note hosts alone: the change row under the block quotes the note too. */
+function noteText(page: Page): Promise<string> {
+  return page.evaluate(() =>
+    Array.from(document.querySelectorAll('birta-flow[data-kind="note"]'))
+      .map((h) => (h.shadowRoot ?? h).textContent ?? "")
+      .join("\n"),
+  );
+}
+
 test.describe("⏎ order on a focused block", () => {
   test("a dot opens before the block's only link", async ({ page, birta }) => {
     expect(DOT_DOC).not.toBe(fixtureDoc("flow"));
     await open(page, birta, DOT_DOC, { state: dotState() });
     await expect.poll(() => dotCount(page)).toBe(1);
-    expect(await flowText(page)).not.toContain("cap it");
+    expect(await noteText(page)).not.toContain("cap it");
     await focusOn(page, DOT_SP);
     await page.keyboard.press("Enter");
-    await expect.poll(() => flowText(page)).toContain("cap it");
+    await expect.poll(() => noteText(page)).toContain("cap it");
     expect(await hash(page)).toBe("");
   });
 
@@ -396,7 +424,7 @@ test.describe("⏎ order on a focused block", () => {
     await expect.poll(() => dotCount(page)).toBe(1);
     await focusOn(page, DOT_SP);
     await page.keyboard.press("Enter");
-    await expect.poll(() => flowText(page)).toContain("cap it");
+    await expect.poll(() => noteText(page)).toContain("cap it");
     await page.waitForTimeout(SETTLE_MS);
     expect(await pillOf(page)).toBeNull();
     expect(await hash(page)).toBe("");
@@ -410,7 +438,7 @@ test.describe("⏎ order on a focused block", () => {
     expect((await picked(page))?.text).toBe("1, 2 and 4");
     await page.keyboard.press("Enter");
     await expect.poll(() => hash(page)).toBe("#b");
-    expect(await flowText(page)).not.toContain("cap it");
+    expect(await noteText(page)).not.toContain("cap it");
   });
 });
 
@@ -750,6 +778,15 @@ test.describe("an unbound letter", () => {
     expect(await pillOf(page)).toBeNull();
     await page.keyboard.press("f");
     await expect.poll(() => pillOf(page)).toBe("? for keys");
+  });
+
+  test("a status pill goes by itself after 4 s", async ({ page, birta }) => {
+    await open(page, birta, STOPS_DOC, { state: bare("drafts", STOPS_DOC) });
+    await page.keyboard.press("h");
+    await expect.poll(() => pillOf(page)).toBe("? for keys");
+    await page.waitForTimeout(3_000);
+    expect(await pillOf(page)).toBe("? for keys");
+    await expect.poll(() => pillOf(page), { timeout: 3_000 }).toBeNull();
   });
 
   test("a new tab is a new session, so it pills again", async ({ page, context, birta }) => {

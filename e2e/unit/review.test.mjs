@@ -125,7 +125,18 @@ const FIXTURE_MARKS = {
   ],
   // An asked and a later outside change share the paragraph: the newest unseen one's bar wins
   lost: [glyph("10:1-10:16", "no", "agent"), bar("5:1-6:68", "dotted", "agent"), wash("5:1-6:68")],
-  rewrite: [glyph("5:1-6:68", "no", "agent"), glyph("10:1-10:29", "no", "agent")],
+  // A rewrite keeps its bars, so its places show, but no washes: its own row is the news
+  rewrite: [
+    glyph("5:1-6:68", "no", "agent"),
+    glyph("10:1-10:29", "no", "agent"),
+    bar("5:1-6:68", "solid", "agent"),
+    bar("10:1-10:29", "solid", "agent"),
+    bar("11:1-11:18", "dotted", "agent"),
+    bar("12:1-13:0", "dotted", "agent"),
+    bar("16:1-16:19", "dotted", "agent"),
+    bar("8:1-8:20", "dotted", "agent"),
+    bar("14:1-14:20", "dotted", "agent"),
+  ],
   // Cited and asked fixes are solid; the unasked change and both outside writes are dotted
   flow: [
     glyph("11:1-11:44", "no", "agent"),
@@ -293,11 +304,21 @@ test("laneMarks: a withdrawn item draws as a draft", () => {
   assertMarks(BR.pure.laneMarks(s), [glyph("5:1-6:54", "no", "agent"), glyph("10:1-10:16", "no", "you")], "withdrawn");
 });
 
-test("laneMarks: a rewrite keeps only the glyphs, ticks included", () => {
+test("laneMarks: a rewrite keeps its bars and ticks, so every place shows, and drops the washes", () => {
   const { BR } = load();
   const s = state("unseen");
   s.rewrite = state("rewrite").rewrite;
-  assertMarks(BR.pure.laneMarks(s), [glyph("5:1-6:68", "no", "agent"), glyph("10:1-10:16", "no", "agent")], "rewrite");
+  assertMarks(
+    BR.pure.laneMarks(s),
+    [
+      glyph("5:1-6:68", "no", "agent"),
+      glyph("10:1-10:16", "no", "agent"),
+      bar("5:1-6:68", "solid", "agent"),
+      bar("11:1-11:44", "dotted", "agent"),
+      tick("14:1-14:13"),
+    ],
+    "rewrite",
+  );
 });
 
 test("laneMarks: glyphs on one block come in note order", () => {

@@ -17,6 +17,7 @@ import {
   mockReview,
   revOf,
   reviewLog,
+  seededRound,
 } from "./harness";
 
 test.use({ timezoneId: "UTC" });
@@ -148,6 +149,14 @@ const composerText = (page: Page) =>
           ? ""
           : Array.from(((n as Element).shadowRoot ?? n).childNodes).map(text).join("");
     return text(h).replace(/\s+/g, " ").trim();
+  });
+
+/** The open composer's label line and target line, or null with no composer. */
+const composerLines = (page: Page) =>
+  page.evaluate(() => {
+    const root = document.querySelector('birta-flow[data-kind="composer"]')?.shadowRoot;
+    if (!root) return null;
+    return { label: root.querySelector(".label")?.textContent ?? null, target: root.querySelector(".target")?.textContent ?? null };
   });
 
 /** unseen.json with its doc-level reply seen, so only its three changes are unseen. */
@@ -450,6 +459,23 @@ test.describe("approve guard", () => {
     await expect.poll(() => pillOf(page)).toBe(`4 unseen · n walk · ${key} again approves anyway`);
   });
 
+  test("a pill with no stop to jump to never approves silently: it pills and arms in place", async ({ page, birta }) => {
+    // The counts say unseen, yet no change is: the walk has nowhere to land
+    const { mock } = await openFixture(page, birta, "unseen", (s) => {
+      changesOnly(s);
+      for (const c of s.changes) c.seen = true;
+    });
+    const key = await hint(page);
+    await press(page);
+    await page.waitForTimeout(SETTLE_MS);
+    expect(opsNamed(mock, "approve")).toEqual([]);
+    expect(seenIds(mock)).toEqual([]);
+    expect(await pillOf(page)).toBe(`3 unseen · n walk · ${key} again approves anyway`);
+    await page.waitForTimeout(DWELL_MS);
+    await press(page);
+    await expect.poll(() => opsNamed(mock, "approve")).toHaveLength(1);
+  });
+
   test("a held ⌘⏎'s repeats neither approve nor disarm", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "unseen", changesOnly);
     const key = await hint(page);
@@ -503,55 +529,6 @@ test.describe("approve guard", () => {
 
 // --- On a real server ------------------------------------------------------------------------
 
-const ORIG = [
-  "# Upload retries",
-  "",
-  "## Why",
-  "",
-  "When the upload hits a 503 we just fail and the user has to start again.",
-  "S3 answers 503 under load; retrying three times fixes most of these.",
-  "",
-  "## What changes",
-  "",
-  "- retries on 503",
-  "- backoff of 1, 2 and 4 seconds",
-  "- metrics dashboard",
-  "",
-];
-
-/** A round whose agent rewrote `hunks` lines (one or two) with no note asking for either. */
-function seededRound(hunks = 2): { doc: string; log: string } {
-  const orig = ORIG.join("\n");
-  const lines = [...ORIG];
-  lines[4] = "When the upload hits a 503 we just fail, and the user starts again.";
-  if (hunks > 1) lines[10] = "- backoff of 1, 2 and 4 seconds, capped at 8";
-  const doc = lines.join("\n");
-  const T0 = Date.now() - 600_000;
-  const human = { type: "human", via: "browser" };
-  const agent = { type: "agent", name: "claude", via: "cli" };
-  const ops: State[] = [
-    { birta: "review/1", doc: "pr.md", about: "ops after the last hand-back are drafts; don't act on them" },
-    { by: { type: "birta" }, op: "snap", rev: revOf(orig), text: orig },
-    { by: { type: "birta" }, op: "owner", drafted_by: null },
-    { by: human, cid: "c-4", op: "comment", at: "doc", body: "tighten it" },
-    { by: human, op: "submit", upto: 4, not_before: T0 + 5_000, hold_ms: 0, to: "*" },
-    { by: agent, op: "claim", round: 5 },
-    {
-      by: { type: "birta" },
-      op: "external",
-      rev: revOf(orig),
-      to_rev: revOf(doc),
-      patch: [
-        { a: 4, d: [ORIG[4] + "\n"], i: [lines[4] + "\n"] },
-        { a: 10, d: [ORIG[10] + "\n"], i: [lines[10] + "\n"] },
-      ].slice(0, hunks),
-    },
-    { by: agent, op: "done", to: 4, turn: 6 },
-    { by: agent, op: "yield", turn: 6 },
-  ];
-  return { doc, log: ops.map((l, i) => JSON.stringify(i ? { ...l, ts: T0 + (i + 1) * 1_000 } : l) + "\n").join("") };
-}
-
 test.describe("approve guard on a real server", () => {
   test("a burst inside the dwell never approves though the server's echo leaves nothing unseen", async ({ page, birta }) => {
     const s = seededRound(1);
@@ -591,6 +568,55 @@ test.describe("approve guard on a real server", () => {
     await expect.poll(() => reviewLog(served.root)!.some((l) => l.op === "approve")).toBe(true);
     await expect.poll(() => pillOf(page)).toBe("approving · z to undo");
     expect(reviewLog(served.root)!.filter((l) => l.op === "seen").length).toBe(1);
+  });
+});
+
+test.describe("reopen after approve on a real server", () => {
+  test("a note written after approve shows as a draft, the header turns to it, and hand-back pills", async ({ page, birta }) => {
+    const s = seededRound(1);
+    const ts = Date.now() - 60_000;
+    const human = { type: "human", via: "browser" };
+    // The round's one change, seen, and then the approve
+    const seen = { by: human, op: "seen", ids: ["7.0"], ts };
+    const approve = { by: human, op: "approve", rev: revOf(s.doc), not_before: ts, hold_ms: 0, ts };
+    const log = s.log + [seen, approve].map((l) => JSON.stringify(l) + "\n").join("");
+    const served = await birta({ "pr.md": s.doc, "pr.md.birta.jsonl": log }, GATE_ON);
+    await page.setViewportSize(WIDE);
+    await page.goto(`${served.url}/view/pr.md`);
+    await booted(page);
+    await expect.poll(() => phraseOf(page)).toMatch(/c to reopen$/);
+    await page.keyboard.press("c");
+    await expect.poll(() => composerText(page)).toContain("new round · whole doc");
+    expect((await composerText(page))!.split("new round").length).toBe(2);
+    await page.keyboard.type("one more pass on the title");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => reviewLog(served.root)!.filter((l) => l.op === "comment").length).toBe(2);
+    await expect.poll(() => phraseOf(page)).toBe("your turn · 1 note");
+    await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Hand back · 1");
+    await expect.poll(() => shownHosts(page)).toContain("note");
+    await press(page);
+    await expect.poll(() => pillOf(page)).toBe("handing back · 1 note · z to undo");
+  });
+});
+
+test.describe("approve guard on a real server: text that lands after the jump", () => {
+  test("a change written after the jump's seen echo disarms: the next ⌘⏎ jumps again", async ({ page, birta }) => {
+    const s = seededRound(1);
+    const served = await birta({ "pr.md": s.doc, "pr.md.birta.jsonl": s.log }, GATE_ON);
+    await page.setViewportSize(WIDE);
+    await page.goto(`${served.url}/view/pr.md`);
+    await booted(page);
+    await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve · 1 unseen");
+    await press(page);
+    // The echo of the jump's seen: nothing unseen, so the count reads as it did before the jump
+    await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve");
+    served.write("pr.md", s.doc.replace("- metrics dashboard", "- metrics dashboard, per region"));
+    await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve · 1 unseen");
+    await page.waitForTimeout(DWELL_MS + 200);
+    await press(page);
+    await page.waitForTimeout(SETTLE_MS);
+    expect(reviewLog(served.root)!.filter((l) => l.op === "approve")).toEqual([]);
+    await expect.poll(() => pillOf(page)).toMatch(/^1 unseen · n walk · /);
   });
 });
 
@@ -640,6 +666,21 @@ test.describe("clean view", () => {
     await expect.poll(() => shownHosts(page)).toEqual([]);
     expect(await laneMarks(page)).toEqual([]);
     expect(await dotsOn(page)).toEqual(expect.arrayContaining(["10:1-10:16", "5:1-6:68"]));
+  });
+
+  test("⏎ on a dotted block opens its note to read, and ⏎ again folds it, sending nothing", async ({ page, birta }) => {
+    const { mock } = await openFixture(page, birta, "approved", approved);
+    await expect.poll(() => phraseOf(page)).toMatch(/c to reopen$/);
+    for (let i = 0; i < 4 && (await focused(page)) !== "5:1-6:68"; i++) await page.keyboard.press("j");
+    await expect.poll(() => focused(page)).toBe("5:1-6:68");
+    await page.keyboard.press("Enter");
+    await expect.poll(async () => (await shownHosts(page)).length).toBeGreaterThan(0);
+    await expect.poll(() => dotsOn(page)).not.toContain("5:1-6:68");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => shownHosts(page)).toEqual([]);
+    await expect.poll(() => dotsOn(page)).toContain("5:1-6:68");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(mock.ops()).toEqual([]);
   });
 
   for (const where of ["on a block", "at the doc"] as const) {
@@ -712,6 +753,9 @@ test.describe("clean view", () => {
     await expect.poll(() => phraseOf(page)).toMatch(/c to reopen$/);
     await page.keyboard.press("c");
     await expect.poll(() => composerText(page)).toContain("new round · whole doc");
+    // The label prints once: the target line under it stays empty until a typed quote fills it
+    expect(await composerLines(page)).toEqual({ label: "new round · whole doc", target: "" });
+    expect((await composerText(page))!.split("new round").length).toBe(2);
     await page.keyboard.type("one more pass on the title");
     await page.keyboard.press("Enter");
     await expect.poll(() => opsNamed(mock, "comment")).toHaveLength(1);
@@ -728,6 +772,20 @@ test.describe("clean view", () => {
     await page.keyboard.press("Enter");
     await expect.poll(() => opsNamed(mock, "comment")).toHaveLength(1);
     expect(opsNamed(mock, "comment")[0]).toMatchObject({ at: { k: "block", sp: "3:1-3:6" } });
+  });
+
+  test("a new round's label names a block as every label does: a section, or its first words", async ({ page, birta }) => {
+    await openFixture(page, birta, "approved", approved);
+    await expect.poll(() => phraseOf(page)).toMatch(/c to reopen$/);
+    await focusOn(page, "3:1-3:6");
+    await page.keyboard.press("c");
+    await expect.poll(() => composerLines(page)).toEqual({ label: "new round · ## Why (section)", target: "" });
+    await page.keyboard.press("Escape");
+    await expect.poll(() => composerLines(page)).toBeNull();
+    await page.keyboard.press("j");
+    await expect.poll(() => focused(page)).toBe("5:1-6:68");
+    await page.keyboard.press("c");
+    await expect.poll(() => composerLines(page)).toEqual({ label: 'new round · "When the upload hits a 503…"', target: "" });
   });
 
   test("inside the approve's hold the page is not clean yet, and z withdraws", async ({ page, birta }) => {

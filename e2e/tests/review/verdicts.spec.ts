@@ -812,6 +812,48 @@ test.describe("blanks", () => {
     expect(writes(mock)).toEqual([]);
   });
 
+  test("? on a closed blank opens the key sheet, and a digit pills nothing", async ({ page, birta }) => {
+    const { mock } = await openFixture(page, birta, "flow", blanksOnly);
+    await walkToBlank(page, OPEN_Q);
+    await page.keyboard.press("1");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await pillOf(page)).not.toBe("⏎ to type an answer");
+    // As a US keyboard types it, with the blank holding the keys
+    await page.keyboard.press("Shift+Slash");
+    const sheetOpen = () =>
+      page.evaluate(() => {
+        const sheet = document.querySelector("birta-pop")?.shadowRoot?.querySelector(".sheet");
+        try {
+          return !!sheet && sheet.matches(":popover-open");
+        } catch {
+          return false;
+        }
+      });
+    await expect.poll(sheetOpen).toBe(true);
+    expect(await pillOf(page)).not.toBe("⏎ to type an answer");
+    expect(writes(mock)).toEqual([]);
+  });
+
+  test("Space on a closed blank keeps its default and scrolls the page", async ({ page, birta }) => {
+    await openFixture(page, birta, "flow", blanksOnly);
+    await page.setViewportSize({ width: 1280, height: 320 });
+    await walkToBlank(page, OPEN_Q);
+    const y = await page.evaluate(() => scrollY);
+    await page.keyboard.press("Space");
+    await expect.poll(() => page.evaluate(() => scrollY)).toBeGreaterThan(y);
+    expect(await pillOf(page)).not.toBe("⏎ to type an answer");
+  });
+
+  test("⏎ after the how-to-type pill takes the pill away with it", async ({ page, birta }) => {
+    await openFixture(page, birta, "flow", blanksOnly);
+    await walkToBlank(page, OPEN_Q);
+    await page.keyboard.press("h");
+    await expect.poll(() => pillOf(page)).toBe("⏎ to type an answer");
+    await page.keyboard.press("Enter");
+    await expect(answerField(page)).toBeFocused();
+    await expect.poll(() => pillOf(page)).toBeNull();
+  });
+
   test("Esc saves a blank's typed answer, and an empty field writes nothing", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow", blanksOnly);
     await walkToBlank(page, OPEN_Q);

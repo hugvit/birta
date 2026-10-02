@@ -38,12 +38,13 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         out.push({ mark: 'glyph', sp: i.at.loc.sp, verdict: i.verdict, role: yours ? 'you' : 'agent', n: i.n });
         if (i.verdict === 'no') out.push({ mark: 'veil', sp: i.at.loc.sp, section: i.at.scope === 'section' });
       });
-    // A rewrite speaks through its own row, so per-block marks would only repeat it
-    if (state.rewrite) return out;
 
     var bySp = {};
     var order = [];
     var settled = {};
+    // Your revert of a change you have seen is no news: by the op of the write that reverted it
+    var seenRevert = {};
+    (state.changes || []).forEach(function (c) { if (c.undone_by != null && c.seen) seenRevert[c.undone_by] = true; });
     (state.changes || []).forEach(function (c) {
       if (c.settled) settled[c.id] = true;
       var sp = c.range && c.range.sp;
@@ -57,12 +58,13 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     order.forEach(function (sp) {
       var all = bySp[sp].slice().sort(newest);
       var live = all.filter(function (c) { return !c.settled; });
-      var unseen = live.filter(function (c) { return !c.seen; });
+      var unseen = live.filter(function (c) { return !c.seen && !(c.attr === 'human' && seenRevert[c.op]); });
       var pick = unseen.length ? unseen : live.length ? live : all;
       var win = pick[pick.length - 1];
       out.push({ mark: 'bar', sp: sp, style: barStyle(win), role: win.attr === 'human' ? 'you' : 'agent',
         weight: live.length ? 3 : 1, fresh: unseen.some(function (c) { return c.attr !== 'human'; }) });
-      if (unseen.length) out.push({ mark: 'wash', sp: sp });
+      // A rewrite's own row is its news, so its blocks keep their bars and drop the wash
+      if (unseen.length && !state.rewrite) out.push({ mark: 'wash', sp: sp });
     });
 
     var ticks = {};

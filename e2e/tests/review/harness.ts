@@ -252,6 +252,57 @@ export async function startBirta(
   };
 }
 
+// --- A seeded round ---------------------------------------------------------------------
+
+export const SEEDED_ORIG = [
+  "# Upload retries",
+  "",
+  "## Why",
+  "",
+  "When the upload hits a 503 we just fail and the user has to start again.",
+  "S3 answers 503 under load; retrying three times fixes most of these.",
+  "",
+  "## What changes",
+  "",
+  "- retries on 503",
+  "- backoff of 1, 2 and 4 seconds",
+  "- metrics dashboard",
+  "",
+];
+
+/** A round whose agent rewrote `hunks` lines (one or two) with no note asking for either. */
+export function seededRound(hunks = 2): { doc: string; log: string } {
+  const orig = SEEDED_ORIG.join("\n");
+  const lines = [...SEEDED_ORIG];
+  lines[4] = "When the upload hits a 503 we just fail, and the user starts again.";
+  if (hunks > 1) lines[10] = "- backoff of 1, 2 and 4 seconds, capped at 8";
+  const doc = lines.join("\n");
+  const T0 = Date.now() - 600_000;
+  const human = { type: "human", via: "browser" };
+  const agent = { type: "agent", name: "claude", via: "cli" };
+  const ops: State[] = [
+    { birta: "review/1", doc: "pr.md", about: "ops after the last hand-back are drafts; don't act on them" },
+    { by: { type: "birta" }, op: "snap", rev: revOf(orig), text: orig },
+    { by: { type: "birta" }, op: "owner", drafted_by: null },
+    { by: human, cid: "c-4", op: "comment", at: "doc", body: "tighten it" },
+    { by: human, op: "submit", upto: 4, not_before: T0 + 5_000, hold_ms: 0, to: "*" },
+    { by: agent, op: "claim", round: 5 },
+    {
+      by: { type: "birta" },
+      op: "external",
+      rev: revOf(orig),
+      to_rev: revOf(doc),
+      patch: [
+        { a: 4, d: [SEEDED_ORIG[4] + "\n"], i: [lines[4] + "\n"] },
+        { a: 10, d: [SEEDED_ORIG[10] + "\n"], i: [lines[10] + "\n"] },
+      ].slice(0, hunks),
+    },
+    { by: agent, op: "done", to: 4, turn: 6 },
+    { by: agent, op: "yield", turn: 6 },
+  ];
+  return { doc, log: ops.map((l, i) => JSON.stringify(i ? { ...l, ts: T0 + (i + 1) * 1_000 } : l) + "\n").join("") };
+}
+
 // --- CDN cache ----------------------------------------------------------------------------
 
 const cdn = new Map<string, { status: number; headers: Record<string, string>; body: Buffer }>();

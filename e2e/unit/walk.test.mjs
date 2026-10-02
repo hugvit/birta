@@ -394,3 +394,48 @@ test("a blank answered by a verdict alone is answered: the guard doesn't stop fo
   });
   assert.ok(!walk(load(), sent).includes("blank #21 @3:1-3:6"));
 });
+
+// --- Your revert -------------------------------------------------------------------------------
+
+/** flow.json after your revert of 13.0 by write 40, which put the paragraph's words back. */
+function reverted(s) {
+  const c = s.changes.find((c) => c.id === "13.0");
+  Object.assign(c, { undone_by: 40, settled: true, seen: true, range: { ...c.range, status: "superseded", sp: null } });
+  s.changes.push({
+    ...JSON.parse(JSON.stringify(c)),
+    id: "40.0",
+    op: 40,
+    turn: null,
+    attr: "human",
+    undone_by: undefined,
+    settled: false,
+    seen: false,
+    range: { status: "ok", lines: [5, 6], bytes: [99, 167], sp: "5:1-6:68" },
+  });
+}
+
+test("a change you reverted stays a stop, at the block your revert put back, until a hand-back covers the revert", () => {
+  const BR = load();
+  const s = bent("flow", reverted);
+  assert.ok(walk(BR, s).includes("change 13.0 @5:1-6:68"));
+  // Never news: the guard and the tab's dot pass it by
+  assert.equal(plain(BR.pure.walk(s)).find((e) => e.id === "13.0").unseen, false);
+  assert.ok(!plain(BR.pure.attention(s)).some((e) => e.id === "13.0" || e.id === "40.0"));
+  const after = bent("flow", (x) => {
+    reverted(x);
+    handedBack(x, 41);
+  });
+  assert.ok(!walk(BR, after).some((e) => e.includes("13.0")));
+});
+
+test("your revert's block keeps no wash once the change it reverted was seen", () => {
+  const BR = load();
+  const washes = (s) => plain(BR.pure.laneMarks(s, { now: s.server_now })).filter((m) => m.mark === "wash").map((m) => m.sp);
+  assert.ok(!washes(bent("flow", reverted)).includes("5:1-6:68"));
+  // Reverted before it was seen: the write still washes
+  const unseen = bent("flow", (s) => {
+    reverted(s);
+    s.changes.find((c) => c.id === "13.0").seen = false;
+  });
+  assert.ok(washes(unseen).includes("5:1-6:68"));
+});

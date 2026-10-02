@@ -17,7 +17,6 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   // What a change row takes before the block under it does
   var ROW_KEYS = { yes: 1, no: 1, note: 1, revert_change: 1 };
   var WORD = { yes: 'yes', no: 'no', later: 'later', your_call: 'your call' };
-  var KIND = { p: 'paragraph', li: 'list item', tr: 'table row', td: 'table row', th: 'table row', pre: 'code block' };
   var LABEL_WORDS = 6;
 
   /**
@@ -71,6 +70,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var cursor = null;
   // The round the cursor walked; a new one starts the walk from the top
   var cursorRound = null;
+  // The focus a landing left: once focus moves off it, the walk goes on from the focus
+  var cursorAt = null;
 
   // Each stop's element, or the summary of a closed details for those it hides, until the doc changes
   var placed = null;
@@ -200,13 +201,27 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (picked && e.target === picked) unpick();
   }
 
+  // The browser's own Tab out of a block with no links: the block focus follows it, and the link is the pick
+  function onFocusIn(e) {
+    var a = e.target;
+    if (!focus || a === picked || !a || a.localName !== 'a' || !content().contains(a)) return;
+    var stop = stopAt(a);
+    if (!stop || isSummary(stop) || linksIn(stop).indexOf(a) < 0) return;
+    if (stop !== focus) setFocus(stop);
+    picked = a;
+    a.setAttribute('data-br-pick', '');
+  }
+
   function setFocus(el, all) {
     unpick();
+    // A doc link the browser focused would take ⏎ from the block the keys are on now
+    var held = document.activeElement;
+    if (held && held.localName === 'a' && content().contains(held) && !(el && el.contains(held))) held.blur();
     // A row or blank left behind would keep the keys
     if (document.activeElement !== el) BR.flow.release(document.activeElement);
     focus = el;
     pointedAway = false;
-    focusWas = el && { name: el.localName, text: el.textContent, at: (all || targets()).indexOf(el) };
+    focusWas = el && { name: el.localName, text: el.textContent, sp: el.getAttribute('data-sourcepos'), at: (all || targets()).indexOf(el) };
     BR.lane.focus(el);
     BR.flow.focusBlock(el);
     paintDoc();
@@ -297,13 +312,36 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       setFocus(host);
       reveal(host);
     }
+    cursorAt = focus;
     showPill((all.indexOf(stop) + 1) + ' of ' + all.length + ' · n next · p back');
+  }
+
+  /** Where the walk goes on from once focus left its last stop: past the focused block, or the viewport's top with none. */
+  function cursorFromFocus() {
+    if (!focus) return cursorFromView();
+    var sp = focus.getAttribute && focus.getAttribute('data-sourcepos');
+    // A blank or a summary has no line of its own, so the walk keeps its place
+    return sp ? [lineOf(sp), Infinity, Infinity] : cursor;
+  }
+
+  /**
+   * The walk's place with nothing focused: n goes on from the first stop at or below the viewport's
+   * top, p from the last above it, so a scroll never sends the reader back to the first stop.
+   */
+  function cursorFromView() {
+    var top = headerBottom() - 1;
+    var blocks = targets().filter(function (el) { return !!el.getAttribute('data-sourcepos'); });
+    // The doc's top in view: the walk starts at its very top, the doc slot included
+    if (!blocks.length || blocks[0].getBoundingClientRect().top >= top) return null;
+    var below = blocks.filter(function (el) { return el.getBoundingClientRect().top >= top; })[0];
+    return below ? [lineOf(below.getAttribute('data-sourcepos')), -Infinity, -Infinity] : [Infinity, 0, 0];
   }
 
   function walk(step) {
     var state = BR.currentState();
     if (!state || state.log_writable === false) return;
     if (cursorRound !== roundOf(state)) cursor = null;
+    if (cursor && focus !== cursorAt) cursor = cursorFromFocus();
     var all = walkOf(state);
     var next = step > 0
       ? all.filter(function (x) { return !cursor || before(cursor, keyOf(x)); })[0]
@@ -356,16 +394,6 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return at;
   }
 
-  /** A block anchor in words, for a composer's label: a heading as its section, else its text. */
-  function named(at) {
-    var el = at.sp ? blockOf(at.sp) : null;
-    var text = el ? el.textContent.replace(/\s+/g, ' ').trim() : '';
-    if (at.k === 'block' && el && /^h[1-6]$/.test(el.localName)) {
-      return new Array(Number(el.localName[1]) + 1).join('#') + ' ' + text + ' (section)';
-    }
-    return '"' + (at.k === 'quote' ? at.q : text).slice(0, 40) + '"';
-  }
-
   /** What a verdict points at: the selection, else the focus, else the whole doc. */
   function target() {
     var range = selectedRange();
@@ -396,20 +424,31 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return els.filter(function (el) { return el && details.contains(el); })[0] || null;
   }
 
-  /** The block that replaced the focused one: same tag and text, nearest its old place. */
+  /**
+   * The block that replaced the focused one: same tag and text, nearest its old place; else, as
+   * when a revert rewrote it, the same tag starting on the same line.
+   */
   function refind() {
     if (!focusWas) return null;
     var best = null;
     var gap = Infinity;
-    targets().forEach(function (el, i) {
+    var all = targets();
+    all.forEach(function (el, i) {
       if (el.localName !== focusWas.name || el.textContent !== focusWas.text) return;
       if (Math.abs(i - focusWas.at) < gap) {
         gap = Math.abs(i - focusWas.at);
         best = el;
       }
     });
-    return best;
+    if (best || !focusWas.sp) return best;
+    var line = lineOf(focusWas.sp);
+    return all.filter(function (el) {
+      var sp = el.getAttribute('data-sourcepos');
+      return el.localName === focusWas.name && !!sp && lineOf(sp) === line;
+    })[0] || null;
   }
+
+  function lineOf(sp) { return parseInt(sp, 10); }
 
   // --- the pill, which the chrome shows ---
 
@@ -466,24 +505,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     undos.push(entry);
   }
 
-  /** Words of `el` that are its own: a list item's nested list and review's hosts left out. */
-  function ownText(el) {
-    var out = '';
-    el.childNodes.forEach(function (n) {
-      if (n.nodeType === 3) out += n.data;
-      else if (n.nodeType === 1 && !BR.isHost(n) && !/^(ul|ol)$/.test(n.localName)) out += n.textContent;
-    });
-    return out;
-  }
-
   /** What a verdict on `at` is on, as its pill names it. */
   function scopeLabel(at) {
     if (at.k === 'quote') return '"' + BR.pure.fewWords(at.q) + '"';
     var el = at.sp ? blockOf(at.sp) : null;
-    if (!el) return 'this block';
-    var level = /^h([1-6])$/.exec(el.localName);
-    if (level) return new Array(Number(level[1]) + 1).join('#') + ' ' + el.textContent.trim() + ' (section)';
-    return '"' + BR.pure.fewWords(ownText(el)) + '" (' + (KIND[el.localName] || 'block') + ')';
+    return el ? BR.flow.blockLabel(el, true) : 'this block';
   }
 
   function verdict(name) {
@@ -630,7 +656,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (msg.type === 'content') {
       if (msg.path && msg.path !== CURRENT_PATH) return;
       if (msg.stops) stops = msg.stops;
-      if (focus && !focus.isConnected) setFocus(refind());
+      if (focus && !focus.isConnected) {
+        var landedHere = focus === cursorAt;
+        setFocus(refind());
+        // The block n landed on, rebuilt, is still where the walk is
+        if (landedHere) cursorAt = focus;
+      }
     } else if (msg.type === 'ack' || msg.type === 'nack') {
       var entry = undos.filter(function (u) { return u.cid === msg.cid; })[0];
       if (!entry) return;
@@ -665,6 +696,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       document.addEventListener('selectionchange', onSelection);
       document.addEventListener('click', onClick);
       document.addEventListener('focusout', onFocusOut);
+      document.addEventListener('focusin', onFocusIn);
       window.addEventListener('scroll', onScroll, { passive: true });
       birtaBus.on(onFrame);
     },
@@ -681,7 +713,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         }
         if (action === 'note') {
           var on = target();
-          BR.flow.open('note', on, null, 'new round · ' + (on.k === 'doc' ? 'whole doc' : named(on)));
+          BR.flow.open('note', on, null, 'new round · ' + BR.flow.label(on));
           return true;
         }
       }
@@ -732,8 +764,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       if (action === 'open') {
         // A focused blank opens its own field first; then the picked link, a dot or half-typed words, the only link, else a pill
         // Enter on a link, summary or button keeps its own meaning, so a picked link opens natively
-        var active = document.activeElement;
-        if (active && active !== document.body && active.closest && active.closest('a, summary, button, input, select, textarea')) return false;
+        var held = document.activeElement;
+        if (held && held !== document.body && held.closest && held.closest('a, summary, button, input, select, textarea')) return false;
         if (isSummary(focus)) return false;
         if (BR.flow.openAt(focus)) return true;
         var links = focus ? linksIn(focus) : [];

@@ -389,9 +389,22 @@ test.describe("lane overlay", () => {
     expect(await misaligned(page)).toEqual([]);
   });
 
-  test("a rewrite draws no per-block bars or washes", async ({ page, birta }) => {
+  test("a rewrite keeps a bar on every changed block, and draws no washes", async ({ page, birta }) => {
     await open(page, birta, fixtureDoc("rewrite"), { state: fixtureState("rewrite") });
-    await expect.poll(() => markKeys(page)).toEqual(["glyph 10:1-10:29 no", "glyph 5:1-6:68 no"]);
+    await expect
+      .poll(() => markKeys(page))
+      .toEqual([
+        "bar 10:1-10:29 solid",
+        "bar 11:1-11:18 dotted",
+        "bar 12:1-13:0 dotted",
+        "bar 14:1-14:20 dotted",
+        "bar 16:1-16:19 dotted",
+        "bar 5:1-6:68 solid",
+        "bar 8:1-8:20 dotted",
+        "glyph 10:1-10:29 no",
+        "glyph 5:1-6:68 no",
+      ]);
+    expect((await marks(page)).filter((m) => m.mark === "wash")).toEqual([]);
   });
 
   test("your own change is the accent and a change to your edit is a double rule", async ({ page, birta }) => {

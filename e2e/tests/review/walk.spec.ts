@@ -10,6 +10,8 @@ import {
   fixtureState,
   focused,
   mockReview,
+  revOf,
+  withRev,
 } from "./harness";
 
 const WIDE = { width: 1280, height: 900 };
@@ -178,6 +180,80 @@ test.describe("the n walk", () => {
     expect(await pillOf(page)).toBe(END);
     expect(await focused(page)).toBe("14:1-14:13");
     expect(seenIds(mock)).toHaveLength(before);
+  });
+
+  test("after the end, Esc and n start the walk again from the top", async ({ page, birta }) => {
+    await openFixture(page, birta, "unseen");
+    for (let i = 0; i < UNSEEN_WALK.length; i++) await page.keyboard.press("n");
+    await page.keyboard.press("n");
+    await expect.poll(() => pillOf(page)).toBe(END);
+    while ((await focused(page)) !== null) await page.keyboard.press("Escape");
+    await page.keyboard.press("n");
+    await expect.poll(() => pillOf(page)).toBe(at(1, 5));
+    await page.keyboard.press("n");
+    await expect.poll(() => pillOf(page)).toBe(at(2, 5));
+    expect(await focused(page)).toBe("5:1-6:68");
+  });
+
+  for (const [key, want] of [
+    ["n", at(4, 5)],
+    ["p", at(3, 5)],
+  ] as const) {
+    test(`with nothing focused, ${key} goes on from the top of the viewport, never from the top of the doc`, async ({ page, birta }) => {
+      await openFixture(page, birta, "unseen", undefined, { width: 1280, height: 320 });
+      for (let i = 0; i < 2; i++) await page.keyboard.press("n");
+      await expect.poll(() => focused(page)).toBe("5:1-6:68");
+      while ((await focused(page)) !== null) await page.keyboard.press("Escape");
+      // Scrolled so 10.0's bullet is the first block at or below the header
+      await page.evaluate(() => {
+        const el = document.querySelector('#content [data-sourcepos="11:1-11:44"]')!;
+        const header = document.querySelector(".file-header")!.getBoundingClientRect().bottom;
+        scrollBy(0, el.getBoundingClientRect().top - header - 2);
+      });
+      await page.waitForTimeout(100);
+      await page.keyboard.press(key);
+      await expect.poll(() => pillOf(page)).toBe(want);
+    });
+  }
+
+  test("with focus moved off the walk, n goes on from the first stop after the focused block", async ({ page, birta }) => {
+    await openFixture(page, birta, "unseen");
+    for (let i = 0; i < 2; i++) await page.keyboard.press("n");
+    await expect.poll(() => focused(page)).toBe("5:1-6:68");
+    for (let i = 0; i < 8 && (await focused(page)) !== "10:1-10:16"; i++) await page.keyboard.press("j");
+    await expect.poll(() => focused(page)).toBe("10:1-10:16");
+    await page.keyboard.press("n");
+    await expect.poll(() => pillOf(page)).toBe(at(4, 5));
+    expect(await focused(page)).toBe("11:1-11:44");
+  });
+
+  test("a write that replaces the landed block keeps the walk's place on it: n goes on to its next stop", async ({ page, birta }) => {
+    // A reply on the paragraph too, so the block holds two stops: change 9.0, then reply #14
+    const withReply = (s: State) => {
+      s.items.find((i: State) => i.n === 4).replies = [
+        { n: 14, id: "#14", by: { type: "agent", name: "claude" }, body: "said why", ts: s.server_now, seen: false },
+      ];
+    };
+    const doc = fixtureDoc("unseen");
+    // Same length, so every sp holds
+    const doc2 = doc.replace("we just fail and the user", "we just fail, and the user").replace("start again.", "start over.");
+    const first = fixtureState("unseen");
+    withReply(first);
+    const second = withRev(JSON.parse(JSON.stringify(first)), revOf(doc2));
+    const served = await birta({ "pr.md": doc }, GATE_ON);
+    await page.setViewportSize(WIDE);
+    await mockReview(page, { states: [first, second] });
+    await page.goto(`${served.url}/view/pr.md`);
+    await booted(page);
+    await page.keyboard.press("n");
+    await page.keyboard.press("n");
+    await expect.poll(() => pillOf(page)).toBe(at(2, 6));
+    expect(await focused(page)).toBe("5:1-6:68");
+    served.write("pr.md", doc2);
+    await expect.poll(() => page.evaluate(() => document.getElementById("content")!.textContent!.includes("start over."))).toBe(true);
+    await expect.poll(() => focused(page)).toBe("5:1-6:68");
+    await page.keyboard.press("n");
+    await expect.poll(() => pillOf(page)).toBe(at(3, 6));
   });
 
   test("p walks back stop by stop, and before the first stop says so; it never wraps", async ({ page, birta }) => {

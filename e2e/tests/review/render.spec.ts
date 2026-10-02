@@ -22,6 +22,7 @@ import {
   near,
   pixelsOf,
   reviewLog,
+  seededRound,
   shot,
   spAt,
   stopSp,
@@ -185,6 +186,26 @@ test.describe("rows on focus", () => {
     expect((await styleOf(page, "2 words → 3", ["color"]))?.color).not.toBe(MUTED);
     await page.keyboard.press("j");
     await expect.poll(() => hostWith(page, "without a note")).toBeNull();
+  });
+
+  test("the row's keys and the rewrite row's name the keys as rebound", async ({ page, birta }) => {
+    await open(page, birta, FLOW, bent("flow", (s) => (s.rewrite = { turn: 12, pct: 0.8, blocks_changed: 8, blocks_total: 10 })));
+    await page.evaluate(() => {
+      const kb = (window as unknown as { KEYBINDINGS: Record<string, string> }).KEYBINDINGS;
+      Object.assign(kb, { yes: "g", revert_change: "v", note: "b" });
+    });
+    await focusOn(page, "14:1-14:21");
+    await expect.poll(async () => (await hostWith(page, "without a note"))?.text).toBe("Claude · without a note · 2 words → 3 · g keep · v revert · b note");
+    expect((await hostWith(page, "rewrote most of it"))?.text).toBe("Claude rewrote most of it · g mark seen");
+  });
+
+  test("a change that cites your answer says what you answered", async ({ page, birta }) => {
+    // #25 is your answer to Claude's question 22; `#25 covers` credits change 19.0
+    await open(page, birta, FLOW, bent("flow", (s) => (s.changes.find((c: State) => c.id === "19.0").asked = { kind: "cited", notes: [], answers: [25] })));
+    await focusOn(page, "14:1-14:21");
+    await expect
+      .poll(async () => (await hostWith(page, "because you"))?.text)
+      .toBe(`Claude · because you answered "yes, keep it" · 2 words → 3 · ${KEYS}`);
   });
 
   test("a cited change's row says what you said and how big the change is", async ({ page, birta }) => {
@@ -444,9 +465,115 @@ test.describe("reverted row", () => {
   });
 });
 
+test.describe("reverted row on a real server", () => {
+  /** Serves a round whose agent rewrote one line with no note, and walks onto that change. */
+  async function onChange(page: Page, birta: Start) {
+    const s = seededRound(1);
+    const served = await birta({ "pr.md": s.doc, "pr.md.birta.jsonl": s.log }, GATE_ON);
+    await page.setViewportSize(WIDE);
+    await page.goto(`${served.url}/view/pr.md`);
+    await booted(page);
+    // The state comes after the page boots
+    await expect.poll(() => page.evaluate(() => !!(window as unknown as W).BR.currentState())).toBe(true);
+    const c = await page.evaluate(() => (window as unknown as W).BR.currentState().changes[0]);
+    await walkTo(page, c.id);
+    const sp = (await focused(page))!;
+    expect(sp).toMatch(/^5:1-/);
+    return { served, c, sp };
+  }
+
+  test("u keeps focus on the block, shows the reverted row at once, and pills what it did", async ({ page, birta }) => {
+    const { served, c } = await onChange(page, birta);
+    await page.keyboard.press("u");
+    await expect.poll(() => reviewLog(served.root)!.filter((l) => l.op === "edit").length).toBe(1);
+    await expect.poll(() => hostWith(page, "reverted")).toMatchObject({ text: `reverted · ${c.label}`, kbd: [] });
+    expect((await hostWith(page, "reverted"))!.sp).toMatch(/^5:1-/);
+    expect(await focused(page)).toMatch(/^5:1-/);
+    await expect.poll(() => pillOf(page)).toBe(`reverted · ${c.label}`);
+  });
+
+  test("the reverted change stays a walk stop until the round ends, and its wash clears once seen", async ({ page, birta }) => {
+    const { served, c } = await onChange(page, birta);
+    await page.keyboard.press("u");
+    await expect.poll(() => reviewLog(served.root)!.filter((l) => l.op === "edit").length).toBe(1);
+    await expect.poll(async () => (await page.evaluate(() => (window as unknown as W).BR.currentState().changes)).length).toBe(2);
+    while ((await focused(page)) !== null) await page.keyboard.press("Escape");
+    await page.keyboard.press("n");
+    await expect.poll(() => focused(page)).toMatch(/^5:1-/);
+    await expect.poll(() => hostWith(page, "reverted")).toMatchObject({ text: `reverted · ${c.label}` });
+    await expect.poll(() => pillOf(page)).toBe("1 of 1 · n next · p back");
+    await page.waitForTimeout(SETTLE_MS);
+    expect((await marks(page)).filter((m) => m.mark === "wash" && m.width > 0)).toEqual([]);
+  });
+});
+
 // --- Tombstones (C7, N10) ---------------------------------------------------------------------
 
 test.describe("tombstones", () => {
+  /** unseen.json where a bare x on ## Stacked on asked for the section's removal, and change 11.0 did it. */
+  function bareSectionNo(): State {
+    return bent("unseen", (s) => {
+      Object.assign(s.changes.find((c: State) => c.id === "11.0"), { asked: { kind: "location", notes: [30] }, label: "section removed · 2 blocks" });
+      Object.assign(s.deletions.find((d: State) => d.change === "11.0"), { first_line: "## Stacked on", label: "section · 2 blocks" });
+      s.items.push({
+        n: 30,
+        op: "comment",
+        by: { type: "human", via: "browser" },
+        cid: "c-30",
+        ts: s.items[0].ts,
+        at: { kind: "anchor", status: "orphaned", scope: "section", quote: "## Stacked on", lines: [14, 14], section: "Stacked on", change: "11.0", loc: null },
+        verdict: "no",
+        status: "handled",
+        sent_in: 7,
+        turn: 8,
+        amended: [],
+        replies: [],
+        outcome: { done: true, no_change: false, changes: ["11.0"] },
+      });
+    });
+  }
+
+  test("a section a bare x asked to remove is one row at its tick: what went, with no done row and no empty quote", async ({
+    page,
+    birta,
+  }) => {
+    await open(page, birta, UNSEEN, bareSectionNo());
+    await expect
+      .poll(async () => (await hosts(page)).filter((h) => h.sp === "14:1-14:13").map((h) => h.text))
+      .toEqual(["Claude · removed: ## Stacked on (section · 2 blocks)"]);
+    expect((await hosts(page)).map((h) => h.text).filter((t) => /done · section|""/.test(t))).toEqual([]);
+    await walkTo(page, "11.0");
+    await expect
+      .poll(async () => (await hosts(page)).filter((h) => h.sp === "14:1-14:13").map((h) => h.text))
+      .toEqual([`Claude · removed: ## Stacked on (section · 2 blocks) · ${KEYS}`]);
+    expect((await hosts(page)).map((h) => h.text).filter((t) => /done · section|""/.test(t))).toEqual([]);
+  });
+
+  test("a change a bare verdict asked for says which verdict on what, never an empty quote", async ({ page, birta }) => {
+    await open(
+      page,
+      birta,
+      FLOW,
+      bent("flow", (s) => {
+        // Note 10 as a bare x on the paragraph, which change 13.0 cites
+        const i = s.items.find((i: State) => i.n === 10);
+        delete i.body;
+        i.verdict = "no";
+        i.at = {
+          kind: "anchor",
+          status: "ok",
+          scope: "block",
+          quote: "When the upload hits a 503 we just fail and the user has to start again.",
+          loc: { sp: "5:1-6:68" },
+        };
+      }),
+    );
+    await focusOn(page, "5:1-6:68");
+    await expect
+      .poll(async () => (await hostWith(page, "because you said"))?.text)
+      .toBe(`Claude · because you said no to "When the upload hits a 503…" · 6 words changed · ${KEYS}`);
+  });
+
   test("a removal's row opens where n lands on its tick, and shows its first line struck", async ({ page, birta }) => {
     await open(page, birta, UNSEEN, fixtureState("unseen"));
     await page.waitForTimeout(SETTLE_MS);
@@ -536,6 +663,15 @@ function folded(): State {
 }
 
 test.describe("dots", () => {
+  test("a folded note's unseen change still opens its own row, keys and all, where n lands", async ({ page, birta }) => {
+    await open(page, birta, FLOW, folded());
+    await expect.poll(async () => (await dots(page)).length).toBe(1);
+    await walkTo(page, "15.0");
+    await expect
+      .poll(async () => (await hosts(page)).filter((h) => h.sp === "11:1-11:44" && h.text.includes("7 words → 10")))
+      .toEqual([expect.objectContaining({ kbd: ["y", "u", "c"] })]);
+  });
+
   test("a dot says whose settled note it is when hovered", async ({ page, birta }) => {
     // 22 is the agent's question, answered, and the answer handed back
     const state = bent("flow", (s) => {
@@ -574,11 +710,13 @@ test.describe("dots", () => {
     await open(page, birta, FLOW, folded());
     await expect.poll(async () => (await dots(page)).length).toBe(1);
     await focusOn(page, "11:1-11:44");
+    // The change's own row quotes the note too, so only the note's host counts
+    const note = async () => (await hosts(page)).find((h) => h.kind === "note" && h.text.includes("cap it")) ?? null;
     await page.keyboard.press("Enter");
-    await expect.poll(() => hostWith(page, "cap it")).not.toBeNull();
+    await expect.poll(note).not.toBeNull();
     await expect.poll(async () => (await dots(page)).length).toBe(0);
     await page.keyboard.press("Enter");
-    await expect.poll(() => hostWith(page, "cap it")).toBeNull();
+    await expect.poll(note).toBeNull();
     await expect.poll(async () => (await dots(page)).length).toBe(1);
   });
 
@@ -749,7 +887,7 @@ test.describe("replies", () => {
     expect(slot[0]).toBe("↳ Claude · Capped the backoff.");
   });
 
-  test("a bare verdict the agent acted on shows its done reply at the change's tick", async ({ page, birta }) => {
+  test("a bare verdict the agent acted on by a removal shows the removal at the change's tick", async ({ page, birta }) => {
     const state = bent("unseen", (s) => {
       const c = s.changes.find((c: State) => c.id === "11.0");
       c.asked = { kind: "location", notes: [30] };
@@ -767,7 +905,7 @@ test.describe("replies", () => {
       });
     });
     await open(page, birta, UNSEEN, state);
-    await expect.poll(() => hostWith(page, "paragraph removed")).toMatchObject({ text: "↳ Claude · done · paragraph removed", sp: "14:1-14:13" });
+    await expect.poll(() => hostWith(page, "removed")).toMatchObject({ text: "Claude · removed: Nothing yet. (paragraph)", sp: "14:1-14:13" });
   });
 
   test("a handled note whose words the agent rewrote sits at its change", async ({ page, birta }) => {

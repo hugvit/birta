@@ -5,6 +5,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var MIN = 60000;
   var NAME_CHARS = 24;
   var NACK_MS = 4000;
+  // A status pill that stayed would sit over what the reader looks at next
+  var PILL_MS = 4000;
   // A ⌘⏎ this soon after the approve guard's jump is a reflex, not a second press
   var DWELL_MS = 1000;
   // Keys that only modify the next one never count as "another key"
@@ -39,10 +41,14 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   function view(s, now) {
     var held = holding(s, now);
     var c = s.counts || {};
+    var drafts = (c.drafts || 0) + (held && s.hold.kind === 'hand_back' ? s.hold.count : 0);
+    var p = (held && s.phrase_before_hold) || s.phrase || { stage: 'idle' };
+    // A note written after approve reopens the round: until it goes back, it is your turn again
+    if (p.stage === 'approved' && drafts > 0) p = { stage: 'drafts' };
     return {
       held: held,
-      p: (held && s.phrase_before_hold) || s.phrase || { stage: 'idle' },
-      drafts: (c.drafts || 0) + (held && s.hold.kind === 'hand_back' ? s.hold.count : 0),
+      p: p,
+      drafts: drafts,
       decided: c.decided || 0,
       items: c.items || 0,
       notHandled: c.not_handled || 0,
@@ -349,7 +355,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var withdrawing = null;
   // The pill's own message: {text, until?, arm?} from pointing, or {nack, until} for a refused op
   var message = null;
-  // The approve guard's jump, until a key other than ⌘⏎ or its pill going disarms it: {at}
+  // The approve guard's jump, until a key other than ⌘⏎ or its pill going disarms it: {at, ids, unseen}
   var guard = null;
   var heldN = null;
   var rows = [];
@@ -748,13 +754,35 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       return;
     }
     var text = BR.pure.guardPill(s, { key: turnKbd.textContent });
-    if (!text || !BR.pointing.guard()) {
+    if (!text) {
       BR.op({ op: 'approve' });
       return;
     }
-    var mine = guard = { at: Date.now(), unseen: view(s, now()).unseen };
+    // Counts that say unseen with no stop to land on still arm: approve is never silent
+    BR.pointing.guard();
+    var mine = guard = { at: Date.now(), ids: unseenIds(s), unseen: view(s, now()).unseen };
     say({ text: text, arm: { keep: turnKey, off: function () { if (guard === mine) guard = null; } } });
     render();
+  }
+
+  /** The unseen changes and replies in `s`, by the id their seen op names. */
+  function unseenIds(s) {
+    var out = {};
+    BR.pure.attention(s).forEach(function (x) { if (x.kind === 'change' || x.kind === 'reply') out[x.id] = 1; });
+    return out;
+  }
+
+  /**
+   * Whether `s` brings unseen text the arm never covered: an id outside its set, or a count
+   * above the lowest one since, which the jump's own seen echo lowers.
+   */
+  function newUnseen(s) {
+    var ids = unseenIds(s);
+    for (var id in ids) if (!guard.ids[id]) return true;
+    var n = view(s, now()).unseen;
+    if (n > guard.unseen) return true;
+    guard.unseen = n;
+    return false;
   }
 
   function turnKey(e) {
@@ -775,7 +803,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
           skew = skew === null ? d : Math.max(skew, d);
         }
         // New unseen text must be seen before approve anyway counts for it
-        if (guard && msg.path === CURRENT_PATH && msg.state && view(msg.state, now()).unseen > guard.unseen) say(null);
+        if (guard && msg.path === CURRENT_PATH && msg.state && newUnseen(msg.state)) say(null);
         break;
       case 'dir_state':
         dir = msg;
@@ -928,11 +956,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     /** Whether the review chrome shows on this page (design call 4). */
     shown: function () { return shown(BR.currentState()); },
     /**
-     * Shows `text` in the pill, or clears it for ''. An armed pill passes `arm`: `{until?, keep(e),
-     * off()}`; it goes when `until` passes or on any key `keep` doesn't claim, and `off` runs then.
+     * Shows `text` in the pill, or clears it for ''; it goes after 4 s. An armed pill passes `arm`:
+     * `{until?, keep(e), off()}`; it goes when `until` passes or on any key `keep` doesn't claim, and `off` runs then.
      */
     pill: function (text, arm) {
-      say(text ? { text: text, until: arm && arm.until, arm: arm || null } : null);
+      say(text ? { text: text, until: arm ? arm.until : Date.now() + PILL_MS, arm: arm || null } : null);
       render();
     },
     pillSays: function (text) { return !!message && message.text === text; },

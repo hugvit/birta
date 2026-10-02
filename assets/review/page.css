@@ -5,6 +5,10 @@
   --review-new: #fff8c5;
   --review-wash: #818b981f;
   --review-quiet: color-mix(in srgb, var(--review-you) 40%, transparent);
+  --review-new-bar: #bf8700;
+  --review-no: #d1242f;
+  --review-yes: #1a7f37;
+  --review-card: var(--birta-bg-secondary);
 }
 
 /* On the root alone: .markdown-body carries data-theme too, and must inherit, not reset */
@@ -13,6 +17,9 @@
   --review-new: #bb800926;
   --review-wash: #656c7633;
   --review-quiet: color-mix(in srgb, var(--review-you) 40%, transparent);
+  --review-new-bar: #d29922;
+  --review-no: #f85149;
+  --review-yes: #3fb950;
 }
 
 /* Custom themes already ship alert slots, so review borrows them; later, so it beats dark */
@@ -20,6 +27,12 @@
   --review-you: var(--alert-note);
   --review-new: var(--bgColor-attention-muted);
   --review-quiet: color-mix(in srgb, var(--review-you) 40%, transparent);
+  /* Some themes' warning is too pale for a 3 px bar; the theme's own ink deepens it */
+  --review-new-bar: color-mix(in srgb, var(--alert-warning) 60%, var(--birta-fg));
+  --review-no: var(--alert-caution);
+  --review-yes: var(--alert-tip);
+  /* Half way to the page, so a card costs the theme's muted text little contrast */
+  --review-card: color-mix(in srgb, var(--birta-bg-secondary) 50%, var(--birta-bg));
 }
 
 /* The doc's own heading links sit in the clipped padding; the overlay draws them, and they stay tabbable */
@@ -43,12 +56,17 @@ html[data-review] #content .katex-display {
   overflow-y: hidden;
 }
 
-/* The doc stop: a wash on the filename while focus is on the whole doc */
+/* The doc stop: the filename takes the focus outline while focus is on the whole doc */
 html[data-review] .file-header-name[data-review-focus] {
-  background-color: var(--review-wash);
+  outline: 1px solid var(--review-you);
   border-radius: 6px;
   padding: 0 8px;
   margin: 0 -8px;
+}
+
+/* The words a composer's note is on, while it is open */
+html[data-review] ::highlight(birta-pending) {
+  background-color: color-mix(in srgb, var(--review-you) 18%, transparent);
 }
 
 /* A quote note's words, painted from the server's offsets */

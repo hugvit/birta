@@ -394,7 +394,7 @@ test.describe("m and reading mode", () => {
 
   // Reading mode hides every real note and mark, so anything note-like left is the doc's own
   test("in reading mode a doc's note-like HTML stays while the real notes hide", async ({ page, birta }) => {
-    const doc = LINKED + '\n<div class="lookalike">↳ Claude · done · 1 line → 1 · y keep  x undo  c instead</div>\n';
+    const doc = LINKED + '\n<div class="lookalike">↳ Claude · done · 7 words → 10 · y keep · u revert · c note</div>\n';
     await openLinked(page, birta, { state: withRev(fixtureState("unseen"), revOf(doc)) }, doc);
     const lookalike = page.locator("#content .lookalike");
     await expect(lookalike).toBeVisible();
@@ -689,6 +689,19 @@ function roles(name: string, variant: Variant, p: Palette) {
 
 type Rgba = [number, number, number, number];
 
+/** WCAG contrast of two colours. */
+function contrast(a: Rgb, b: Rgb): number {
+  const lum = (c: Rgb) => {
+    const [r, g, bl] = c.map((v) => {
+      const x = v / 255;
+      return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * bl;
+  };
+  const [hi, lo] = [lum(a), lum(b)].sort((p, q) => q - p);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
 function rgba(css: string): Rgba {
   const n = (css.match(/[\d.]+/g) ?? []).map(Number);
   // color(srgb r g b / a) carries 0–1 channels
@@ -737,9 +750,13 @@ for (const { name, variant, p } of THEMES) {
       const want = roles(name, variant, p);
       const doc = THEME_DOC;
       await page.emulateMedia({ colorScheme: variant });
+      // A seen bar keeps the agent's colour and an unseen one lays the wash; an ask is the accent, a sent no a disc
       const state = laneState(doc, {
-        bars: [{ sp: "5:1-6:68" }],
-        glyphs: [{ sp: "10:1-10:16", verdict: "no" }],
+        bars: [{ sp: "5:1-6:68" }, { sp: "11:1-11:44", seen: true }],
+        glyphs: [
+          { sp: "10:1-10:16", verdict: "ask" },
+          { sp: "14:1-14:13", verdict: "no", status: "sent" },
+        ],
       });
       await open(page, birta, doc, {
         state,
@@ -747,7 +764,7 @@ for (const { name, variant, p } of THEMES) {
         files: { "b.md": "# B\n" },
         args: ["pr.md", "--theme", name, `--${variant}`],
       });
-      await expect.poll(async () => (await marks(page)).filter((m) => m.mark === "glyph").length).toBe(1);
+      await expect.poll(async () => (await marks(page)).filter((m) => m.mark === "glyph").length).toBe(2);
       await expect.poll(() => page.locator("#content birta-flow").count()).toBeGreaterThan(0);
       await expect.poll(() => paintedDots(page)).toEqual(["/view/b.md"]);
       expect(await page.evaluate(() => document.documentElement.getAttribute("data-theme"))).toBe(variant);
@@ -768,9 +785,9 @@ for (const { name, variant, p } of THEMES) {
       const s = await shot(page, frame);
       const bg = hex(want.bg);
       expect(near(s.at(frame.left + 2, frame.top + 2), bg), "frame background").toBe(true);
-      const bar = ms.find((m) => m.mark === "bar")!;
+      const bar = ms.find((m) => m.mark === "bar" && m.sp === "11:1-11:44")!;
       expect(near(s.at((bar.left + bar.right) / 2, (bar.top + bar.bottom) / 2), hex(want.agent), 8), "bar").toBe(true);
-      const glyph = ms.find((m) => m.mark === "glyph")!;
+      const glyph = ms.find((m) => m.mark === "glyph" && m.sp === "10:1-10:16")!;
       const glyphInk = ink(pixelsOf(s, glyph), bg);
       expect(glyphInk && distance(glyphInk, hex(want.you)) <= 16, `glyph ink ${glyphInk} vs ${want.you}`).toBe(true);
       const wash = ms.find((m) => m.mark === "wash")!;
@@ -792,6 +809,33 @@ for (const { name, variant, p } of THEMES) {
       expect(distance(hex(want.you), bg)).toBeGreaterThanOrEqual(32);
       expect(distance(hex(want.you), hex(want.agent))).toBeGreaterThanOrEqual(32);
       expect(distance(over(want.new, bg), bg)).toBeGreaterThanOrEqual(16);
+
+      // The fresh bar, a sent no and a card's words read in every theme
+      const fresh = ms.find((m) => m.mark === "bar" && m.sp === "5:1-6:68")!;
+      const freshPx = s.at((fresh.left + fresh.right) / 2, (fresh.top + fresh.bottom) / 2);
+      expect(contrast(freshPx, bg), `fresh bar ${freshPx}`).toBeGreaterThanOrEqual(3);
+      const painted = await page.evaluate(() => {
+        const g = document.querySelector("#lane-frame > birta-over")!.shadowRoot!.querySelector('[data-mark="glyph"][data-verdict="no"]')!;
+        const host = Array.from(document.querySelectorAll("#content birta-flow")).find((h) => h.shadowRoot!.querySelector(".lead"))!;
+        const root = host.shadowRoot!;
+        const cs = (el: Element) => getComputedStyle(el);
+        return {
+          no: cs(g).backgroundColor,
+          lead: cs(root.querySelector(".lead")!).color,
+          text: cs(root.querySelector(".text")!).color,
+          card: cs(root.querySelector(".flow")!).backgroundColor,
+        };
+      });
+      const rgb = (css: string) => rgba(css).slice(0, 3) as Rgb;
+      expect(rgba(painted.no)[3], `no fill ${painted.no}`).toBe(1);
+      expect(contrast(rgb(painted.no), bg), `no fill ${painted.no}`).toBeGreaterThanOrEqual(3);
+      expect(rgba(painted.card)[3], `card ${painted.card}`).toBe(1);
+      // The lead is the theme's own muted ink, which some themes keep under 4.5:1 even on the page; a card costs it little
+      const onPage = contrast(rgb(painted.lead), bg);
+      expect(contrast(rgb(painted.lead), rgb(painted.card)), `lead ${painted.lead} on ${painted.card}, ${onPage} on the page`).toBeGreaterThanOrEqual(
+        Math.min(4.5, onPage * 0.85),
+      );
+      expect(contrast(rgb(painted.text), rgb(painted.card)), `text ${painted.text} on ${painted.card}`).toBeGreaterThanOrEqual(4.5);
     });
   });
 }
@@ -937,7 +981,7 @@ test.describe("the header at a narrow width", () => {
     expect(h.name.scroll, "the file name is cut").toBeLessThanOrEqual(h.name.client);
     expect(h.phrase.scroll, "the phrase is not cut").toBeGreaterThan(h.phrase.client);
     expect(h.phrase.ellipsis).toBe("ellipsis");
-    expect(h.phrase.title).toBe("Claude replied 14:13 · 1 done · 1 answered · 2 unasked · 1 not handled");
+    expect(h.phrase.title).toBe("Claude replied 14:13 · 4 unseen · 1 of 3 blocks decided · 1 done · 1 answered · 2 without a note · 1 not handled");
     expect(h.phrase.left).toBeGreaterThanOrEqual(h.name.right);
     expect(h.phrase.right).toBeLessThanOrEqual(h.turn.left);
     expect(h.turn.width).toBeGreaterThanOrEqual(112);

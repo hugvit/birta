@@ -284,14 +284,14 @@ const viewing = (page: Page) => decodeURIComponent(new URL(page.url()).pathname)
 test.describe("the phrase in a folder", () => {
   test("names the other files with activity, and follows the listing", async ({ page, birta }) => {
     const { mock, dir } = await openFolder(page, birta);
-    await expect.poll(() => phraseOf(page)).toBe("1 of 3 decided · 4 other files ▾");
-    expect((await chrome(page)).title).toBe("1 of 3 decided · 4 other files ▾");
+    await expect.poll(() => phraseOf(page)).toBe("your turn · 3 notes · 1 of 3 blocks decided · 4 other files ▾");
+    expect((await chrome(page)).title).toBe("your turn · 3 notes · 1 of 3 blocks decided · 4 other files ▾");
 
     swapDir(mock, dir, dirState([listed("pr.md", summary("drafts")), listed("b.md", null, true)], { drafts: 3 }));
-    await expect.poll(() => phraseOf(page)).toBe("1 of 3 decided · 1 other file ▾");
+    await expect.poll(() => phraseOf(page)).toBe("your turn · 3 notes · 1 of 3 blocks decided · 1 other file ▾");
 
     swapDir(mock, dir, dirState([listed("pr.md", summary("drafts"))], { drafts: 3 }));
-    await expect.poll(() => phraseOf(page)).toBe("1 of 3 decided");
+    await expect.poll(() => phraseOf(page)).toBe("your turn · 3 notes · 1 of 3 blocks decided");
   });
 
   test("a page under a linked doc's other spelling is not one of the other files", async ({ page, birta }) => {
@@ -302,7 +302,7 @@ test.describe("the phrase in a folder", () => {
     await mockReview(page, { state: plan, dir: folderDir() });
     await page.goto(`${served.url}/view/plan.md`);
     await booted(page);
-    await expect.poll(() => phraseOf(page)).toBe("1 of 3 decided · 4 other files ▾");
+    await expect.poll(() => phraseOf(page)).toBe("your turn · 3 notes · 1 of 3 blocks decided · 4 other files ▾");
   });
 
 });
@@ -318,13 +318,13 @@ const noFile = () =>
 test.describe("when the chrome shows in a folder", () => {
   test("a review file on another listed doc shows it on a doc with none", async ({ page, birta }) => {
     await openFolder(page, birta, { state: noFile() });
-    await expect.poll(() => phraseOf(page)).toBe("3 items · your turn · 4 other files ▾");
+    await expect.poll(() => phraseOf(page)).toBe("your turn · 4 other files ▾");
   });
 
   test("the folder's own review file shows it too", async ({ page, birta }) => {
     const dir = dirState([listed("b.md", null, true)], { drafts: 3 }, { summary: summary("drafts") });
     await openFolder(page, birta, { state: noFile(), dir });
-    await expect.poll(() => phraseOf(page)).toBe("3 items · your turn · 1 other file ▾");
+    await expect.poll(() => phraseOf(page)).toBe("your turn · 1 other file ▾");
   });
 
   test("files listed only for news show nothing to a plain reader", async ({ page, birta }) => {
@@ -404,7 +404,7 @@ test.describe("the menu in a folder", () => {
       "copy hand-off line",
       "drafted by Claude · mark as yours",
       "note on this folder",
-      "b.md Claude replied 14:13 · 1 done · 1 answered · 1 not handled",
+      "b.md Claude replied 14:13 · 1 unseen · 1 of 3 blocks decided · 1 done",
       "sub/c.md changed",
       "notes/plan.md your turn · 3 notes",
       "my notes.md changed",
@@ -417,7 +417,7 @@ test.describe("the menu in a folder", () => {
     await openMenu(page);
     const row = (await chrome(page)).menu!.find((r) => r.text.startsWith("b.md"))!;
     const pathPart = row.parts.find((p) => p.text === "b.md")!;
-    const note = row.parts.find((p) => p.text === "Claude replied 14:13 · 1 done · 1 answered · 1 not handled")!;
+    const note = row.parts.find((p) => p.text === "Claude replied 14:13 · 1 unseen · 1 of 3 blocks decided · 1 done")!;
     expect(pathPart, JSON.stringify(row.parts)).toBeTruthy();
     expect(note, JSON.stringify(row.parts)).toBeTruthy();
     expect(pathPart.fontSize).toBe("14px");
@@ -936,7 +936,7 @@ test.describe("a listing that comes before review starts", () => {
   test("still drives the phrase, the menu, the dots and Shift+J", async ({ page, birta }) => {
     await holdReviewScript(page);
     const { served } = await openFolder(page, birta);
-    await expect.poll(() => phraseOf(page)).toBe("1 of 3 decided · 4 other files ▾");
+    await expect.poll(() => phraseOf(page)).toBe("your turn · 3 notes · 1 of 3 blocks decided · 4 other files ▾");
     await expect.poll(() => turnOf(page)).toEqual({ text: "Hand back · 6", kbd: await hint(page), disabled: false });
     await expect.poll(async () => (await dotted(page)).length).toBe(4);
     await openMenu(page);
@@ -1300,7 +1300,7 @@ test("with no folder listing the chrome is what it was", async ({ page, birta })
   const mock = await mockReview(page, { state: pageState("drafts") });
   await page.goto(`${served.url}/view/pr.md`);
   await booted(page);
-  await expect.poll(() => phraseOf(page)).toBe("1 of 3 decided");
+  await expect.poll(() => phraseOf(page)).toBe("your turn · 3 notes · 1 of 3 blocks decided");
   expect(await turnOf(page)).toEqual({ text: "Hand back · 3", kbd: await hint(page), disabled: false });
   expect(await dotted(page)).toEqual([]);
   await page.keyboard.press("Shift+J");

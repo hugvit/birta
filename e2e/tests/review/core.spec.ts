@@ -11,6 +11,7 @@ import {
   cacheCdn,
   fixtureDoc,
   fixtureState,
+  focused,
   markKeys,
   misaligned,
   mockReview,
@@ -374,7 +375,9 @@ test.describe("outbox, only notes and only this tab's", () => {
     const mock = await mockReview(page, { state: fixtureState("unseen"), acks: "manual" });
     await page.goto(`${served.url}/view/pr.md`);
     await booted(page);
-    const receipt = page.locator("birta-flow", { hasText: "nobody asked" }).filter({ hasText: "x undo" }).first();
+    // The row opens while its block has focus
+    for (let i = 0; i < 20 && (await focused(page)) !== "11:1-11:44"; i++) await page.keyboard.press("j");
+    const receipt = page.locator("birta-flow", { hasText: "without a note" }).filter({ hasText: "u revert" }).first();
     await receipt.click();
     await page.keyboard.press("u");
     await expect.poll(() => mock.ops().filter((o) => o.op === "undo_change").length).toBe(1);

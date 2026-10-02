@@ -12,8 +12,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   /**
    * What the lane draws for a state, before any geometry:
-   * `{mark:'glyph', sp, verdict, role, n}`, `{mark:'bar', sp, style, role}`, `{mark:'wash', sp}`
-   * and `{mark:'tick', after, count}`, where `after` is null above the first block.
+   * `{mark:'glyph', sp, verdict, role, n}`, `{mark:'veil', sp, section}` over a block or section
+   * told no, `{mark:'bar', sp, style, role, weight, fresh}`, `{mark:'wash', sp}` and
+   * `{mark:'tick', after, count}`, where `after` is null above the first block. A bar is 3 px
+   * while its change is this round's, 1 px once settled, and fresh until seen.
    */
   BR.pure.laneMarks = function (state, opts) {
     // Inside a hand-back's hold nothing has left yet, so its verdicts keep your colour
@@ -34,6 +36,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         // A withdrawn round hands its notes back as drafts
         var yours = i.status === 'draft' || i.status === 'withdrawn' || !!held[i.n];
         out.push({ mark: 'glyph', sp: i.at.loc.sp, verdict: i.verdict, role: yours ? 'you' : 'agent', n: i.n });
+        if (i.verdict === 'no') out.push({ mark: 'veil', sp: i.at.loc.sp, section: i.at.scope === 'section' });
       });
     // A rewrite speaks through its own row, so per-block marks would only repeat it
     if (state.rewrite) return out;
@@ -44,7 +47,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     (state.changes || []).forEach(function (c) {
       if (c.settled) settled[c.id] = true;
       var sp = c.range && c.range.sp;
-      if (!sp || c.settled) return;
+      if (!sp) return;
       if (!bySp[sp]) {
         bySp[sp] = [];
         order.push(sp);
@@ -53,10 +56,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     });
     order.forEach(function (sp) {
       var all = bySp[sp].slice().sort(newest);
-      var unseen = all.filter(function (c) { return !c.seen; });
-      var pick = unseen.length ? unseen : all;
+      var live = all.filter(function (c) { return !c.settled; });
+      var unseen = live.filter(function (c) { return !c.seen; });
+      var pick = unseen.length ? unseen : live.length ? live : all;
       var win = pick[pick.length - 1];
-      out.push({ mark: 'bar', sp: sp, style: barStyle(win), role: win.attr === 'human' ? 'you' : 'agent' });
+      out.push({ mark: 'bar', sp: sp, style: barStyle(win), role: win.attr === 'human' ? 'you' : 'agent',
+        weight: live.length ? 3 : 1, fresh: unseen.some(function (c) { return c.attr !== 'human'; }) });
       if (unseen.length) out.push({ mark: 'wash', sp: sp });
     });
 
@@ -76,22 +81,28 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return out;
   };
 
-  // Octicons: check, x, question, clock, arrow-right, and link for heading anchors
+  // Octicons: check, x, question, clock and link for heading anchors; your call is a dot
   var ICONS = {
     yes: 'M13.78 4.22a.75.75 0 0 1 0 1.06l-7.25 7.25a.75.75 0 0 1-1.06 0L2.22 9.28a.751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018L6 10.94l6.72-6.72a.75.75 0 0 1 1.06 0Z',
     no: 'M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.749.749 0 0 1 1.275.326.749.749 0 0 1-.215.734L9.06 8l3.22 3.22a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215L8 9.06l-3.22 3.22a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z',
     ask: 'M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.92 6.085h.001a.749.749 0 1 1-1.342-.67c.169-.339.436-.701.849-.977C6.845 4.16 7.369 4 8 4a2.756 2.756 0 0 1 1.637.525c.503.377.863.965.863 1.725 0 .448-.115.83-.329 1.15-.205.307-.47.513-.692.662-.109.072-.22.138-.313.195l-.006.004a6.24 6.24 0 0 0-.26.16.952.952 0 0 0-.276.245.75.75 0 0 1-1.248-.832c.184-.264.42-.489.692-.661.103-.067.207-.132.313-.195l.007-.004c.1-.061.182-.11.258-.161a.969.969 0 0 0 .277-.245C8.96 6.514 9 6.427 9 6.25a.612.612 0 0 0-.262-.525A1.27 1.27 0 0 0 8 5.5c-.369 0-.595.09-.74.187a1.01 1.01 0 0 0-.34.398ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z',
     later: 'M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Zm7-3.25v2.992l2.028.812a.75.75 0 0 1-.557 1.392l-2.5-1A.751.751 0 0 1 7 8.25v-3.5a.75.75 0 0 1 1.5 0Z',
-    your_call: 'M8.22 2.97a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042l2.97-2.97H3.75a.75.75 0 0 1 0-1.5h7.44L8.22 4.03a.75.75 0 0 1 0-1.06Z',
+    your_call: 'M8 5.5a2.5 2.5 0 1 1 0 5 2.5 2.5 0 0 1 0-5Z',
     link: 'm7.775 3.275 1.25-1.25a3.5 3.5 0 1 1 4.95 4.95l-2.5 2.5a3.5 3.5 0 0 1-4.95 0 .751.751 0 0 1 .018-1.042.751.751 0 0 1 1.042-.018 1.998 1.998 0 0 0 2.83 0l2.5-2.5a2.002 2.002 0 0 0-2.83-2.83l-1.25 1.25a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042Zm-4.69 9.64a1.998 1.998 0 0 0 2.83 0l1.25-1.25a.751.751 0 0 1 1.042.018.751.751 0 0 1 .018 1.042l-1.25 1.25a3.5 3.5 0 1 1-4.95-4.95l2.5-2.5a3.5 3.5 0 0 1 4.95 0 .751.751 0 0 1-.018 1.042.751.751 0 0 1-1.042.018 1.998 1.998 0 0 0-2.83 0l-2.5 2.5a2.002 2.002 0 0 0 0 2.83Z'
   };
 
+  // What each glyph says to a screen reader, as the page's copy names it
+  var VERDICT_LABELS = { yes: 'yes ✓', no: 'no ×', ask: 'ask ?', later: 'later ◷', your_call: 'your call ·' };
+  // A note's rule keeps this far from every glyph
+  var GLYPH_CLEAR = 4;
   var HEADINGS = 'h1,h2,h3,h4,h5,h6';
   var frame = null;
   var content = null;
   var under = null;
   // The focus wash has its own layer: m hides the marks but not where the keys will act
   var focusLayer = null;
+  // The focus outline, above the doc so no block's background hides it
+  var focusOver = null;
   var focused = null;
   var hidden = false;
   var over = null;
@@ -232,11 +243,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     // The narrow lane is only as wide as a glyph, a gap and a bar, so a shared bar moves to its
     // edge, and a double rule there narrows to the agent's single rule to leave the glyph room
     function squeezed(m) { return narrow && glyphs[m.sp] && m.style === 'double'; }
-    function barWidth(m) { return m.style === 'double' && !squeezed(m) ? 6 : 2; }
+    function barWidth(m) { return m.style === 'double' ? (squeezed(m) ? 2 : 6) : m.weight || 2; }
     function barX(sp, w) {
       return narrow && glyphs[sp] ? laneX + 8 - w : laneX - w / 2;
     }
     var stacked = {};
+    var glyphBoxes = [];
     var underOut = document.createDocumentFragment();
     var overOut = document.createDocumentFragment();
 
@@ -260,8 +272,15 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       var r = ownRect(el);
       if (m.mark === 'bar') {
         var w = barWidth(m);
-        overOut.appendChild(box({ 'data-mark': 'bar', 'data-sp': m.sp, 'data-style': m.style, 'data-role': m.role },
-          'bar ' + m.style + ' ' + m.role + (squeezed(m) ? ' squeezed' : ''), barX(m.sp, w), r.top - F.top, w, r.height));
+        overOut.appendChild(box({ 'data-mark': 'bar', 'data-sp': m.sp, 'data-style': m.style, 'data-role': m.role, 'data-weight': m.weight },
+          'bar ' + m.style + ' ' + m.role + (squeezed(m) ? ' squeezed' : '') + (m.fresh ? ' fresh' : '') + (m.weight === 1 ? ' thin' : ''),
+          barX(m.sp, w), r.top - F.top, w, r.height));
+      } else if (m.mark === 'veil') {
+        // Dims the words a no asks to cut, without touching the doc's own nodes
+        var vr = m.section ? sectionRect(el, C) : r;
+        var vl = Math.max(el.localName === 'li' ? el.parentElement.getBoundingClientRect().left : vr.left, C.left) - 2;
+        var vright = Math.min(vr.right, C.right) + 2;
+        overOut.appendChild(box({ 'data-mark': 'veil', 'data-sp': m.sp }, 'veil', vl - F.left, vr.top - F.top, vright - vl, vr.bottom - vr.top));
       } else if (m.mark === 'wash') {
         // An item's wash reaches over its marker, and a wide table's stops at the doc's edge
         var left = Math.max(el.localName === 'li' ? el.parentElement.getBoundingClientRect().left : r.left, C.left) - 8;
@@ -271,25 +290,33 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       } else if (m.mark === 'glyph') {
         var k = stacked[m.sp] = (stacked[m.sp] || 0) + 1;
         var line = firstLine(el);
-        var g = box({ 'data-mark': 'glyph', 'data-sp': m.sp, 'data-verdict': m.verdict, 'data-role': m.role, 'data-n': m.n },
-          'glyph ' + m.role, barred[m.sp] ? barX(m.sp, barWidth(barred[m.sp])) - 2 - size : laneX - size / 2, (line.top + line.bottom) / 2 - size / 2 + (k - 1) * (size + 2) - F.top, size, size);
+        var gx = barred[m.sp] ? barX(m.sp, barWidth(barred[m.sp])) - 2 - size : laneX - size / 2;
+        var gy = (line.top + line.bottom) / 2 - size / 2 + (k - 1) * (size + 2) - F.top;
+        var g = box({ 'data-mark': 'glyph', 'data-sp': m.sp, 'data-verdict': m.verdict, 'data-role': m.role, 'data-n': m.n,
+          'aria-label': VERDICT_LABELS[m.verdict] || m.verdict, role: 'img' }, 'glyph ' + m.role, gx, gy, size, size);
         g.appendChild(svg(ICONS[m.verdict] || ICONS.no));
         overOut.appendChild(g);
+        glyphBoxes.push({ left: gx, right: gx + size, top: gy, bottom: gy + size });
       }
     });
 
     // A note's rule runs down the lane beside it, and a folded note leaves a dot in the right padding
+    // A rule breaks around a glyph in its way, so the two never touch
+    var ruleX = laneX - 1;
+    var inWay = glyphBoxes.filter(function (g) { return g.left < ruleX + 2 + GLYPH_CLEAR && g.right > ruleX - GLYPH_CLEAR; });
     BR.flow.rules().forEach(function (f) {
       var r = f.el.getBoundingClientRect();
       if (!r.height) return;
-      overOut.appendChild(box({ 'data-mark': 'rule', 'data-style': f.style, 'data-role': f.role },
-        'rule ' + f.style + ' ' + f.role, laneX - 1, r.top - F.top, 2, r.height));
+      clear(r.top - F.top, r.bottom - F.top, inWay).forEach(function (seg) {
+        overOut.appendChild(box({ 'data-mark': 'rule', 'data-style': f.style, 'data-role': f.role },
+          'rule ' + f.style + ' ' + f.role, ruleX, seg[0], 2, seg[1] - seg[0]));
+      });
     });
     BR.flow.dots().forEach(function (d) {
       var el = BR.blocks.of(d.sp);
       if (!rendered(el)) return;
       var line = firstLine(el);
-      overOut.appendChild(box({ 'data-mark': 'dot', 'data-sp': d.sp, 'data-role': d.role }, 'dot ' + d.role,
+      overOut.appendChild(box({ 'data-mark': 'dot', 'data-sp': d.sp, 'data-role': d.role, title: d.title }, 'dot ' + d.role,
         F.width - 24, (line.top + line.bottom) / 2 - 4 - F.top, 8, 8));
     });
 
@@ -310,18 +337,43 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     placeAnchors(places);
   }
 
-  // The wash where the keys act, which a move redraws on its own
+  /** The parts of `top`..`bottom` at least GLYPH_CLEAR from every box in `boxes`. */
+  function clear(top, bottom, boxes) {
+    var segs = [[top, bottom]];
+    boxes.forEach(function (b) {
+      var a = b.top - GLYPH_CLEAR;
+      var z = b.bottom + GLYPH_CLEAR;
+      segs = segs.reduce(function (out, s) {
+        if (z <= s[0] || a >= s[1]) out.push(s);
+        else {
+          if (a > s[0]) out.push([s[0], a]);
+          if (z < s[1]) out.push([z, s[1]]);
+        }
+        return out;
+      }, []);
+    });
+    return segs.filter(function (s) { return s[1] - s[0] >= 1; });
+  }
+
+  // The outline where the keys act, and a heading's section washed as its scope; a move redraws them on its own
   function drawFocus(F, C) {
-    var out = document.createDocumentFragment();
+    var scope = document.createDocumentFragment();
+    var outline = document.createDocumentFragment();
     if (focused && focused.isConnected && rendered(focused)) {
-      var fr = sectionRect(focused, C);
-      var fl = Math.max(focused.localName === 'li' ? focused.parentElement.getBoundingClientRect().left : fr.left, C.left) - 8;
-      var fright = Math.min(fr.right, C.right) + 8;
-      out.appendChild(box({ 'data-mark': 'focus', 'data-sp': focused.getAttribute('data-sourcepos'),
+      var own = ownRect(focused);
+      var fl = Math.max(focused.localName === 'li' ? focused.parentElement.getBoundingClientRect().left : own.left, C.left) - 8;
+      var fright = Math.min(own.right, C.right) + 8;
+      outline.appendChild(box({ 'data-mark': 'focus', 'data-sp': focused.getAttribute('data-sourcepos'),
         'data-target': focused.localName === 'summary' ? 'summary' : null }, 'focus',
-        fl - F.left, fr.top - F.top, fright - fl, fr.bottom - fr.top));
+        fl - F.left, own.top - 2 - F.top, fright - fl, own.bottom - own.top + 4));
+      if (/^h[1-6]$/.test(focused.localName)) {
+        var sr = sectionRect(focused, C);
+        scope.appendChild(box({ 'data-mark': 'scope', 'data-sp': focused.getAttribute('data-sourcepos') }, 'scope',
+          fl - F.left, sr.top - F.top, fright - fl, sr.bottom - sr.top));
+      }
     }
-    focusLayer.replaceChildren(out);
+    focusLayer.replaceChildren(scope);
+    focusOver.replaceChildren(outline);
   }
 
   // Icons are kept across redraws, so a click that spans one still lands on the same element
@@ -431,6 +483,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       focusLayer.className = 'layer';
       under.parentNode.insertBefore(focusLayer, under);
       over = makeHost('birta-over', 2);
+      focusOver = document.createElement('div');
+      focusOver.className = 'layer';
+      over.parentNode.appendChild(focusOver);
       overMarks = document.createElement('div');
       overAnchors = document.createElement('div');
       overMarks.className = overAnchors.className = 'group';
@@ -461,7 +516,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       // Reading mode hides marks and notes; m is its own toggle and survives leaving it
       var syncReading = function () {
         var on = reading();
-        [under, focusLayer, over].forEach(function (layer) { layer.classList.toggle('reading', on); });
+        [under, focusLayer, over, focusOver].forEach(function (layer) { layer.classList.toggle('reading', on); });
         BR.flow.hide(on);
         highlight();
         schedule();

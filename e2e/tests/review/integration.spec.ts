@@ -272,7 +272,8 @@ test.describe("content before review_state", () => {
     });
     await saveAgainAndAgain(page, birta);
     await expect.poll(() => page.evaluate(() => document.getElementById("content")!.textContent)).toContain("Saved paragraph 6.");
-    await expect.poll(() => phraseOf(page)).toBe("your turn · 1 note");
+    // Its own saves are outside writes, which count as unseen before your note
+    await expect.poll(() => phraseOf(page)).toMatch(/^(\d+ unseen · )?your turn · 1 note$/);
     await expect(page.locator("birta-flow").filter({ hasText: "first" })).toBeVisible();
     await expect.poll(() => misaligned(page)).toEqual([]);
     expect(await page.evaluate(() => (window as unknown as { __mismatch: string[] }).__mismatch)).toEqual([]);

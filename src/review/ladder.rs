@@ -497,7 +497,7 @@ fn section_stop(stops: &[Stop], line: u32) -> Option<usize> {
         .find(|&i| stops[i].section.is_some_and(|(_, end)| end >= line))
 }
 
-fn section_at(doc: &Doc, line: u32) -> Option<String> {
+pub(crate) fn section_at(doc: &Doc, line: u32) -> Option<String> {
     let i = section_stop(&doc.blocks.stops, line)?;
     doc.search().headings.get(&doc.blocks.stops[i].sp).cloned()
 }

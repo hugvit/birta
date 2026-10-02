@@ -30,14 +30,14 @@ test("the lane's shadow roots are closed and still paint", async ({ page, birta 
     { root: true, lightChildren: 0 },
     { root: true, lightChildren: 0 },
   ]);
-  // The unasked item is a dotted bar and the paragraph a solid one, both in the lane at x=20
+  // The unasked item is a dotted bar and the paragraph a solid one, both fresh, in the lane at x=20
   const frame = await frameBox(page);
   const p = (await blockBox(page, "5:1-6:68"))!;
   const x = frame.left + 20;
   await expect
     .poll(async () => {
       const s = await shot(page, { left: x - 1, top: p.top, width: 3, height: p.height });
-      return near(s.at(x - 0.5, p.bottom - 3), hex("#59636e"), 12);
+      return near(s.at(x - 0.5, p.bottom - 3), hex("#bf8700"), 12);
     })
     .toBe(true);
   const li = (await blockBox(page, "11:1-11:44"))!;

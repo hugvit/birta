@@ -107,27 +107,46 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return chars.length > NAME_CHARS ? chars.slice(0, NAME_CHARS).join('') + '…' : name;
   }
 
+  // Counts the phrase shows before the rest go to its tooltip
+  var SHOWN_COUNTS = 3;
+
   /** The header phrase for `s` at server time `opts.now` (design call 5, r-frontend §11). */
   BR.pure.formatPhrase = function (s, opts) {
-    if (s.log_writable === false) return 'review unavailable · folder not writable';
-    var base = docPhrase(s, opts, !!opts.full);
-    var others = opts.dir ? BR.pure.otherFiles(opts.dir, opts.path).length : 0;
-    return others ? base + ' · ' + plural(others, 'other file', 'other files') + ' ▾' : base;
+    return phraseOf(s, opts, !!opts.full);
   };
 
-  /** The phrase; `full` keeps the facts the clean view leaves to the tooltip. */
-  function docPhrase(s, opts, full) {
-    if (s.writable === false) return 'read-only · notes only';
+  /** The phrase; `full` keeps every count and fact the header leaves to the tooltip. */
+  function phraseOf(s, opts, full) {
+    if (s.log_writable === false) return 'review unavailable · folder not writable';
+    var parts = docPhrase(s, opts);
+    var counts = full ? parts.counts : parts.counts.slice(0, SHOWN_COUNTS);
+    var base = parts.head.concat(counts, full ? parts.rest : [], parts.tail).join(' · ');
+    var others = opts.dir ? BR.pure.otherFiles(opts.dir, opts.path).length : 0;
+    return others ? base + ' · ' + plural(others, 'other file', 'other files') + ' ▾' : base;
+  }
+
+  /**
+   * The phrase in parts: `head`, then `counts` in priority order (unseen, notes, decided, then a
+   * reply's tallies), then `rest`, which only the tooltip shows, then `tail`. Only the first few
+   * counts show; the tooltip has them all.
+   */
+  function docPhrase(s, opts) {
     var v = view(s, opts.now);
     var p = v.p;
-    // Mode flips on the first item verdict; doc-level notes never flip it
+    function parts(head, counts, tail, rest) { return { head: head, counts: counts || [], tail: tail || [], rest: rest || [] }; }
+    if (s.writable === false) return parts(['read-only · notes only']);
+    // Unseen, then your notes, then decided blocks: a new count never pushes an old one out
     function yours() {
-      return v.decided > 0 ? v.decided + ' of ' + v.items + ' decided' : 'your turn · ' + plural(v.drafts, 'note', 'notes');
+      var out = [];
+      if (v.unseen) out.push(v.unseen + ' unseen');
+      if (v.drafts) out.push('your turn · ' + plural(v.drafts, 'note', 'notes'));
+      if (v.decided > 0) out.push(v.decided + ' of ' + plural(v.items, 'block', 'blocks') + ' decided');
+      return out;
     }
     switch (p.stage) {
       case 'sent': {
         var sent = 'sent ' + hhmm(p.sent.ts) + ' · not picked up yet';
-        return cue(s, p, opts) ? sent + ' · ' + COPY : sent;
+        return parts([cue(s, p, opts) ? sent + ' · ' + COPY : sent]);
       }
       case 'picked_up': {
         var out = [cap(p.picked_up.by) + ' picked up ' + hhmm(p.picked_up.ts)];
@@ -136,27 +155,26 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         }
         var quiet = silence(p, opts.now);
         if (quiet != null) out.push('no reply in ' + quiet + ' min', 'release');
-        return out.join(' · ');
+        return parts(out);
       }
       case 'replied': {
-        if (v.drafts) return yours() + (v.notHandled ? ' · ' + v.notHandled + ' not handled' : '');
         var r = p.replied;
-        var tally = [[r.done, 'done'], [r.answered, 'answered'], [r.asked, 'for you'], [r.unasked, 'unasked'],
+        var tally = [[r.done, 'done'], [r.answered, 'answered'], [r.asked, 'for you'], [r.unasked, 'without a note'],
           [r.not_handled, 'not handled']];
-        return [cap(r.by) + ' replied ' + hhmm(r.ts)].concat(
+        return parts([cap(r.by) + ' replied ' + hhmm(r.ts)], yours().concat(
           tally.filter(function (t) { return t[0] > 0; }).map(function (t) { return t[0] + ' ' + t[1]; })
-        ).join(' · ');
+        ));
       }
       case 'approved': {
         var a = s.approve;
-        return 'approved ' + hhmm(a.ts) + (a.changed_since ? ' · changed since' : '') +
-          (full && a.later ? ' · ' + a.later + ' later' : '') + ' · c to reopen';
+        var head = ['approved ' + hhmm(a.ts)].concat(a.changed_since ? ['changed since'] : []);
+        return parts(head, [], ['c to reopen'], a.later ? [a.later + ' later'] : []);
       }
       case 'drafts':
-        return yours();
+        return parts([], yours());
       default: {
-        var drafter = s.owner && s.owner.drafted_by ? 'drafted by ' + cap(s.owner.drafted_by) + ' · ' : '';
-        return drafter + (v.items ? v.items + ' items · your turn' : 'your turn');
+        var drafter = s.owner && s.owner.drafted_by ? ['drafted by ' + cap(s.owner.drafted_by)] : [];
+        return parts(drafter, yours(), ['your turn']);
       }
     }
   }
@@ -400,8 +418,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     // Text changes in place: WebKit drops a click whose pressed node was replaced before release
     if (on) {
       var text = BR.pure.formatPhrase(s, opts(t));
-      if (phraseWords.data !== text) phraseWords.data = text;
       var title = BR.pure.phraseTitle(s, opts(t));
+      if (phraseWords.data !== text) phraseWords.data = text;
       if (phrase.getAttribute('title') !== title) phrase.setAttribute('title', title);
     }
     if (b) {

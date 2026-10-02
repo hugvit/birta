@@ -272,8 +272,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   // --- Shadow roots ---
 
   // The colours shadow CSS reads, set inside every root, where the doc's CSS can't reach them
-  var THEME_VARS = ['--review-you', '--review-agent', '--review-new', '--review-wash', '--review-quiet', '--birta-fg',
-    '--birta-fg-muted', '--birta-bg', '--birta-border', '--bgColor-default', '--borderColor-muted'];
+  var THEME_VARS = ['--review-you', '--review-agent', '--review-new', '--review-wash', '--review-quiet', '--review-new-bar',
+    '--review-no', '--review-yes', '--review-card', '--birta-fg', '--birta-fg-muted', '--birta-bg', '--birta-border',
+    '--bgColor-default', '--borderColor-muted'];
   var themeSheet = null;
 
   /** Takes the theme's colours from the page's own style sheets, with the doc's switched off. */

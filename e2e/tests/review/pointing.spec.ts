@@ -16,12 +16,13 @@ import {
   fixtureState,
   focusMark,
   focused,
+  hex,
   highlighted,
   longDoc,
   markKeys,
+  marks,
   mockReview,
   near,
-  over,
   revOf,
   reviewLog,
   shot,
@@ -36,8 +37,8 @@ const WIDE = { width: 1280, height: 900 };
 const SETTLE_MS = 400;
 const ANCHOR_MD = path.join(REPO, "e2e", "fixtures", "anchor.md");
 const GESTURES_JSON = path.join(REPO, "tests", "fixtures", "anchor_gestures.json");
-/** `--review-wash` in the light theme. */
-const WASH = "#818b981f";
+/** The focus outline, `--review-you` in the light theme. */
+const ACCENT = hex("#0969da");
 
 type Start = (
   files: Record<string, string>,
@@ -96,12 +97,24 @@ function near1(a: number, b: number) {
   return Math.abs(a - b) <= 1;
 }
 
-/** The colour 4px left of a block's box: inside its wash, clear of text and the lane. */
+/** The colour 8px left of a block's box, where the focus outline runs, clear of text and the lane. */
 async function washEdge(page: Page, sp: string): Promise<Rgb> {
   const b = (await blockBox(page, sp))!;
   const y = b.top + b.height / 2;
-  const s = await shot(page, { left: b.left - 6, top: y - 1, width: 4, height: 2 });
-  return s.at(b.left - 4, y);
+  const s = await shot(page, { left: b.left - 10, top: y - 1, width: 4, height: 2 });
+  return s.at(b.left - 7.5, y);
+}
+
+/** The colour just outside the filename's box, where its outline runs. */
+async function filenameOutline(page: Page): Promise<Rgb> {
+  const b = (await page.locator(".file-header-name").boundingBox())!;
+  const s = await shot(page, { left: b.x - 3, top: b.y, width: 4, height: b.height });
+  return s.at(b.x - 0.5, b.y + b.height / 2);
+}
+
+/** The wash a focused heading lays over its section. */
+async function scopeMark(page: Page) {
+  return (await marks(page)).find((m) => m.mark === "scope") ?? null;
 }
 
 /** Every outbox key the page holds, so a spec can wait for acks to land. */
@@ -155,28 +168,30 @@ test.describe("focus", () => {
     expect(await focused(page)).toBe(all[0].sp);
   });
 
-  test("the doc stop washes the filename once review is active in the tab", async ({ page, birta, context }) => {
+  test("the doc stop outlines the filename once review is active in the tab", async ({ page, birta, context }) => {
     // With no H1 spanning the doc, the file chip is the doc stop
     const { served } = await open(page, birta, "Intro words.\n\n" + STOPS_DOC);
     const bg = await filenameEdge(page);
     // Nothing shows until a review key is pressed
     await page.waitForTimeout(SETTLE_MS);
-    expect(near(await filenameEdge(page), bg)).toBe(true);
+    expect(near(await filenameOutline(page), bg)).toBe(true);
     await page.keyboard.press("j");
     await expect.poll(() => focused(page)).not.toBeNull();
-    expect(near(await filenameEdge(page), bg)).toBe(true);
+    expect(near(await filenameOutline(page), bg)).toBe(true);
     await page.keyboard.press("k");
-    await expect.poll(async () => near(await filenameEdge(page), over(WASH, bg), 4)).toBe(true);
+    await expect.poll(async () => near(await filenameOutline(page), ACCENT, 24)).toBe(true);
+    // An outline, not a wash
+    expect(near(await filenameEdge(page), bg)).toBe(true);
     // Activation lasts for the tab, and a new tab starts inactive
     await page.reload();
     await booted(page);
-    await expect.poll(async () => near(await filenameEdge(page), over(WASH, bg), 4)).toBe(true);
+    await expect.poll(async () => near(await filenameOutline(page), ACCENT, 24)).toBe(true);
     const other = await context.newPage();
     await other.setViewportSize(WIDE);
     await other.goto(`${served.url}/view/pr.md`);
     await booted(other);
     await other.waitForTimeout(SETTLE_MS);
-    expect(near(await filenameEdge(other), bg)).toBe(true);
+    expect(near(await filenameOutline(other), bg)).toBe(true);
   });
 
   test("a heading's wash covers its section, down to the next heading of its level or higher", async ({
@@ -195,7 +210,7 @@ test.describe("focus", () => {
       const sp = await stopSp(page, heading);
       const h = (await blockBox(page, sp))!;
       await focusOn(page, sp);
-      const m = (await focusMark(page))!;
+      const m = (await scopeMark(page))!;
       expect(near1(m.top, h.top) && near1(m.bottom, last.bottom), `${heading}: ${m.top}-${m.bottom}`).toBe(true);
       expect(near1(m.left, content.left - 8) && near1(m.right, content.right + 8), `${heading}: ${m.left}-${m.right}`).toBe(
         true,
@@ -203,19 +218,20 @@ test.describe("focus", () => {
     }
   });
 
-  test("a list item's wash covers the whole item, its nested list and its marker", async ({ page, birta }) => {
+  test("a list item's outline covers the whole item, its nested list and its marker", async ({ page, birta }) => {
     await open(page, birta, STOPS_DOC);
     for (const text of ["backoff of 1, 2 and 4 seconds", "capped at 8 seconds"]) {
       const sp = await stopSp(page, text);
       const li = (await blockBox(page, sp))!;
       await focusOn(page, sp);
       const m = (await focusMark(page))!;
-      expect(near1(m.top, li.top) && near1(m.bottom, li.bottom), `${text}: ${m.top}-${m.bottom}`).toBe(true);
+      // The outline keeps 2px off the item's lines
+      expect(near1(m.top, li.top - 2) && near1(m.bottom, li.bottom + 2), `${text}: ${m.top}-${m.bottom}`).toBe(true);
       expect(near1(m.left, li.list!.left - 8) && near1(m.right, li.right + 8), `${text}: ${m.left}-${m.right}`).toBe(true);
     }
   });
 
-  test("a paragraph, a table row and a code block wash their own box", async ({ page, birta }) => {
+  test("a paragraph, a table row and a code block outline their own box", async ({ page, birta }) => {
     await open(page, birta, STOPS_DOC);
     const content = await contentBox(page);
     for (const text of ["When the upload", "503", "retry(upload, 3);"]) {
@@ -223,7 +239,7 @@ test.describe("focus", () => {
       const b = (await blockBox(page, sp))!;
       await focusOn(page, sp);
       const m = (await focusMark(page))!;
-      expect(near1(m.top, b.top) && near1(m.bottom, b.bottom), `${text}: ${m.top}-${m.bottom}`).toBe(true);
+      expect(near1(m.top, b.top - 2) && near1(m.bottom, b.bottom + 2), `${text}: ${m.top}-${m.bottom}`).toBe(true);
       const left = Math.max(b.left, content.left) - 8;
       const right = Math.min(b.right, content.right) + 8;
       expect(near1(m.left, left) && near1(m.right, right), `${text}: ${m.left}-${m.right}`).toBe(true);
@@ -288,14 +304,14 @@ test.describe("focus", () => {
     const moved = (await liveSp(page, "Detail words."))!;
     await expect.poll(() => focused(page)).toBe(moved);
     const b = (await blockBox(page, moved))!;
-    await expect.poll(async () => near1((await focusMark(page))!.top, b.top)).toBe(true);
+    await expect.poll(async () => near1((await focusMark(page))!.top, b.top - 2)).toBe(true);
 
     served.write("pr.md", STOPS_DOC.replace("Detail words.\n", ""));
     await expect.poll(() => liveSp(page, "Detail words.")).toBeNull();
     await expect.poll(() => focused(page)).toBeNull();
   });
 
-  test("the focus wash is painted; r hides it and keeps focus, and m leaves it", async ({ page, birta }) => {
+  test("the focus outline is painted; r hides it and keeps focus, and m leaves it", async ({ page, birta }) => {
     await open(page, birta, STOPS_DOC);
     const sp = await stopSp(page, "Detail words.");
     const bg = await washEdge(page, sp);
@@ -313,13 +329,13 @@ test.describe("focus", () => {
     await page.keyboard.press("m");
   });
 
-  test("the focus wash is re-measured when the page reflows", async ({ page, birta }) => {
+  test("the focus outline is re-measured when the page reflows", async ({ page, birta }) => {
     await open(page, birta, STOPS_DOC);
     const sp = await stopSp(page, "When the upload");
     const onBlock = async () => {
       const b = (await blockBox(page, sp))!;
       const m = await focusMark(page);
-      return !!m && near1(m.top, b.top) && near1(m.bottom, b.bottom) && near1(m.left, b.left - 8);
+      return !!m && near1(m.top, b.top - 2) && near1(m.bottom, b.bottom + 2) && near1(m.left, b.left - 8);
     };
     // Focused in reading mode; leaving it brings back the file header and pushes the doc down
     await page.keyboard.press("r");
@@ -340,7 +356,7 @@ test.describe("focus", () => {
     );
     await expect.poll(() => liveSp(page, "More detail.")).not.toBeNull();
     const last = (await blockBox(page, (await liveSp(page, "More detail."))!))!;
-    await expect.poll(async () => near1((await focusMark(page))!.bottom, last.bottom)).toBe(true);
+    await expect.poll(async () => near1((await scopeMark(page))!.bottom, last.bottom)).toBe(true);
     while ((await focused(page)) !== null) await page.keyboard.press("Escape");
     for (const _ of [0, 1, 2]) await page.keyboard.press("j");
     await expect.poll(() => focused(page)).toBe(await liveSp(page, "A new first paragraph."));

@@ -79,20 +79,25 @@ const MINE = "drafted by Claude · mark as yours";
 
 const FIXTURE_CHROME = {
   fresh: {
-    phrase: "drafted by Claude · 3 items · your turn",
+    phrase: "drafted by Claude · your turn",
     button: B("Approve"),
     pill: null,
     menu: [COPY, MINE],
   },
-  // One list item carries a verdict; the paragraph's doesn't count toward items
-  drafts: { phrase: "1 of 3 decided", button: B("Hand back · 3"), pill: null, menu: [COPY, MINE] },
+  // One list item carries a verdict; the paragraph's doesn't count toward the blocks
+  drafts: { phrase: "your turn · 3 notes · 1 of 3 blocks decided", button: B("Hand back · 3"), pill: null, menu: [COPY, MINE] },
   // The doc can't be written, so notes are all it takes
   dir: { phrase: "read-only · notes only", button: B("Hand back · 2"), pill: null, menu: [COPY] },
-  // Writing again after a reply: the walk's tally, with what the turn left alone
-  flow: { phrase: "2 of 3 decided · 3 not handled", button: B("Hand back · 1"), pill: null, menu: [COPY, MINE] },
+  // Writing again after a reply keeps the reply: unseen, notes and decided, the rest in the tooltip
+  flow: {
+    phrase: "Claude replied 14:13 · 6 unseen · your turn · 1 note · 2 of 3 blocks decided",
+    button: B("Hand back · 1"),
+    pill: null,
+    menu: [COPY, MINE],
+  },
   // Inside the hold nothing has left yet: the phrase and button keep what they said before
   hold: {
-    phrase: "1 of 3 decided",
+    phrase: "your turn · 3 notes · 1 of 3 blocks decided",
     button: B("Hand back · 3"),
     pill: "handing back · 3 notes · z to undo",
     menu: [COPY, MINE],
@@ -105,25 +110,25 @@ const FIXTURE_CHROME = {
   },
   picked: { phrase: "Claude picked up 14:13", button: B("With Claude", false, true), pill: null, menu: [COPY, MINE] },
   replied: {
-    phrase: "Claude replied 14:13 · 1 done · 1 answered · 1 not handled",
+    phrase: "Claude replied 14:13 · 2 unseen · 1 of 3 blocks decided · 1 done",
     button: B("Approve · 2 unseen", false),
     pill: null,
     menu: [COPY, MINE],
   },
   unseen: {
-    phrase: "Claude replied 14:13 · 1 done · 1 answered · 2 unasked · 1 not handled",
+    phrase: "Claude replied 14:13 · 4 unseen · 1 of 3 blocks decided · 1 done",
     button: B("Approve · 4 unseen", false),
     pill: null,
     menu: [COPY, MINE],
   },
   rewrite: {
-    phrase: "Claude replied 14:13 · 1 done · 1 answered · 3 unasked",
+    phrase: "Claude replied 14:13 · 6 unseen · 1 of 3 blocks decided · 1 done",
     button: B("Approve · 6 unseen", false),
     pill: null,
     menu: [COPY, MINE],
   },
   lost: {
-    phrase: "Claude replied 14:13 · 1 done · 1 answered · 1 not handled",
+    phrase: "Claude replied 14:13 · 3 unseen · 1 of 3 blocks decided · 1 done",
     button: B("Approve · 3 unseen", false),
     pill: null,
     menu: [COPY, MINE],
@@ -161,7 +166,7 @@ const notesOnly = (s) => {
 
 const CRAFTED = [
   // The phrase's state machine before any hand-back (design call 5)
-  ["a fresh doc of yours counts its items", bent("fresh", (s) => (s.owner.drafted_by = null)), { phrase: "3 items · your turn" }],
+  ["a fresh doc of yours says only whose turn", bent("fresh", (s) => (s.owner.drafted_by = null)), { phrase: "your turn" }],
   [
     "a fresh agent draft with no items says only whose turn",
     bent("fresh", (s) => (s.counts.items = 0)),
@@ -201,14 +206,14 @@ const CRAFTED = [
   [
     "the drafter's name comes from the state",
     bent("fresh", (s) => (s.owner.drafted_by = "codex")),
-    { phrase: "drafted by Codex · 3 items · your turn", menu: [COPY, "drafted by Codex · mark as yours"] },
+    { phrase: "drafted by Codex · your turn", menu: [COPY, "drafted by Codex · mark as yours"] },
   ],
 
   // The hold, by the server's clock
   [
     "a millisecond before not_before the hold still speaks",
     state("hold"),
-    { phrase: "1 of 3 decided", button: B("Hand back · 3"), pill: "handing back · 3 notes · z to undo" },
+    { phrase: "your turn · 3 notes · 1 of 3 blocks decided", button: B("Hand back · 3"), pill: "handing back · 3 notes · z to undo" },
     (s) => s.hold.not_before - 1,
   ],
   [
@@ -242,7 +247,7 @@ const CRAFTED = [
     "a held approve keeps the phrase from before it, and its button",
     state("approved"),
     {
-      phrase: "Claude replied 14:13 · 1 done · 1 answered · 1 not handled",
+      phrase: "Claude replied 14:13 · 2 of 3 blocks decided · 1 done · 1 answered",
       button: B("Approve"),
       pill: "approving · z to undo",
     },
@@ -272,7 +277,7 @@ const CRAFTED = [
       s.phrase.picked_up.ts = at(10, 20);
       s.phrase.replied.ts = at(11, 45);
     }),
-    { phrase: "Claude replied 11:45 · 1 done · 1 answered · 1 not handled" },
+    { phrase: "Claude replied 11:45 · 2 unseen · 1 of 3 blocks decided · 1 done" },
   ],
   [
     "approved names the approve's time",
@@ -311,7 +316,7 @@ const CRAFTED = [
       s.phrase.replied.by = "codex";
       s.rounds[0].claimed_by = "codex";
     }),
-    { phrase: "Codex replied 14:13 · 1 done · 1 answered · 1 not handled" },
+    { phrase: "Codex replied 14:13 · 2 unseen · 1 of 3 blocks decided · 1 done" },
   ],
 
   // A long silence after pickup is stated at 15 minutes, by the server's clock
@@ -357,31 +362,39 @@ const CRAFTED = [
     { phrase: "Claude picked up 14:13 · 1 note for next hand-back", button: B("Hand back · 1") },
   ],
 
-  // The reply's tally: zeros are left out, the agent's questions are "for you"
+  // The reply's tally fills the slots unseen, notes and decided leave: zeros are left out, the agent's questions are "for you"
   [
     "the reply counts done, questions for you and not handled, in that order",
-    bent("replied", (s) => Object.assign(s.phrase.replied, { done: 4, answered: 0, asked: 1, unasked: 0, not_handled: 1 })),
+    bent("replied", (s) => {
+      Object.assign(s.counts, { unseen: 0, decided: 0 });
+      for (const i of s.items) for (const r of i.replies ?? []) r.seen = true;
+      Object.assign(s.phrase.replied, { done: 4, answered: 0, asked: 1, unasked: 0, not_handled: 1 });
+    }),
     { phrase: "Claude replied 14:13 · 4 done · 1 for you · 1 not handled" },
   ],
   [
-    "a reply with every count",
-    bent("replied", (s) => Object.assign(s.phrase.replied, { done: 3, answered: 1, asked: 2, unasked: 1, not_handled: 2 })),
-    { phrase: "Claude replied 14:13 · 3 done · 1 answered · 2 for you · 1 unasked · 2 not handled" },
+    "a reply with every count shows the first three",
+    bent("replied", (s) => {
+      Object.assign(s.counts, { unseen: 0, decided: 0 });
+      for (const i of s.items) for (const r of i.replies ?? []) r.seen = true;
+      Object.assign(s.phrase.replied, { done: 3, answered: 1, asked: 2, unasked: 1, not_handled: 2 });
+    }),
+    { phrase: "Claude replied 14:13 · 3 done · 1 answered · 2 for you" },
   ],
 
   // Writing again after a reply
   [
-    "notes after a reply count notes, with what the turn left alone",
+    "notes after a reply keep the reply and count notes",
     bent("replied", (s) => {
       s.counts.drafts = 1;
       s.counts.decided = 0;
     }),
-    { phrase: "your turn · 1 note · 1 not handled", button: B("Hand back · 1") },
+    { phrase: "Claude replied 14:13 · 2 unseen · your turn · 1 note · 1 done", button: B("Hand back · 1") },
   ],
   [
-    "a verdict after a reply counts decided, with what the turn left alone",
+    "a verdict after a reply keeps the reply and counts notes and decided",
     bent("replied", (s) => (s.counts.drafts = 1)),
-    { phrase: "1 of 3 decided · 1 not handled" },
+    { phrase: "Claude replied 14:13 · 2 unseen · your turn · 1 note · 1 of 3 blocks decided" },
   ],
 
   // Approve
@@ -484,7 +497,7 @@ const CRAFTED = [
   [
     "a reply ends the silence, however long ago the pickup was",
     state("replied"),
-    { phrase: "Claude replied 14:13 · 1 done · 1 answered · 1 not handled", menu: [COPY, MINE] },
+    { phrase: "Claude replied 14:13 · 2 unseen · 1 of 3 blocks decided · 1 done", menu: [COPY, MINE] },
     (s) => s.phrase.picked_up.silence.since_ts + 20 * MIN,
   ],
   [
@@ -522,7 +535,11 @@ const CRAFTED = [
   // Ruling 9: "didnt" is not part of the tally
   [
     "what the agent says it didn't do stays out of the tally",
-    bent("replied", (s) => (s.phrase.replied.didnt = 2)),
+    bent("replied", (s) => {
+      Object.assign(s.counts, { unseen: 0, decided: 0 });
+      for (const i of s.items) for (const r of i.replies ?? []) r.seen = true;
+      s.phrase.replied.didnt = 2;
+    }),
     { phrase: "Claude replied 14:13 · 1 done · 1 answered · 1 not handled" },
   ],
 

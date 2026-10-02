@@ -330,7 +330,7 @@ test.describe("approve guard", () => {
     // #22 above it is answered, so the first open one is #21 under ## Why; a blank is its own stop
     expect(await page.evaluate(() => {
       const a = document.activeElement;
-      return a?.getAttribute("data-kind") === "blank" ? (a.shadowRoot?.querySelector(".text")?.textContent ?? "") : null;
+      return a?.getAttribute("data-kind") === "blank" ? (a.shadowRoot?.querySelector(".text bdi")?.textContent ?? "") : null;
     })).toBe("is 503 the only code?");
     expect(await page.evaluate(() =>
       Array.from(document.querySelectorAll('birta-flow[data-kind="blank"]')).some((h) => !!h.shadowRoot?.querySelector("textarea")),

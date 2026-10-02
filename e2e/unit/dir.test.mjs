@@ -115,26 +115,26 @@ test("in a folder the phrase names how many other files have activity", () => {
   const BR = load();
   const s = state("drafts");
   const phrase = (dir, p = "pr.md") => BR.pure.formatPhrase(s, { now: s.server_now, dir, path: p });
-  assert.equal(phrase(TWO_OTHERS), "1 of 3 decided · 2 other files ▾");
-  assert.equal(phrase(dirState([listed("pr.md"), listed("b.md")])), "1 of 3 decided · 1 other file ▾");
+  assert.equal(phrase(TWO_OTHERS), "your turn · 3 notes · 1 of 3 blocks decided · 2 other files ▾");
+  assert.equal(phrase(dirState([listed("pr.md"), listed("b.md")])), "your turn · 3 notes · 1 of 3 blocks decided · 1 other file ▾");
   // Only this doc, or nothing, listed: no suffix
-  assert.equal(phrase(dirState([listed("pr.md", summary("drafts"))])), "1 of 3 decided");
-  assert.equal(phrase(dirState([])), "1 of 3 decided");
-  assert.equal(phrase(null), "1 of 3 decided");
+  assert.equal(phrase(dirState([listed("pr.md", summary("drafts"))])), "your turn · 3 notes · 1 of 3 blocks decided");
+  assert.equal(phrase(dirState([])), "your turn · 3 notes · 1 of 3 blocks decided");
+  assert.equal(phrase(null), "your turn · 3 notes · 1 of 3 blocks decided");
 });
 
 test("the folder's own review file is not one of the other files", () => {
   const BR = load();
   const s = state("fresh");
   const dir = dirState([listed("pr.md")], {}, { summary: summary("drafts") });
-  assert.equal(BR.pure.formatPhrase(s, { now: s.server_now, dir, path: "pr.md" }), "drafted by Claude · 3 items · your turn");
+  assert.equal(BR.pure.formatPhrase(s, { now: s.server_now, dir, path: "pr.md" }), "drafted by Claude · your turn");
 });
 
 test("the suffix follows every phrase but the one for a folder birta can't write", () => {
   const BR = load();
   const at = (s) => BR.pure.formatPhrase(s, { now: s.server_now, dir: TWO_OTHERS, path: "pr.md" });
   assert.equal(at(state("sent")), "sent 14:13 · not picked up yet · 2 other files ▾");
-  assert.equal(at(state("replied")), "Claude replied 14:13 · 1 done · 1 answered · 1 not handled · 2 other files ▾");
+  assert.equal(at(state("replied")), "Claude replied 14:13 · 2 unseen · 1 of 3 blocks decided · 1 done · 2 other files ▾");
   assert.equal(at(bent("drafts", (s) => (s.writable = false))), "read-only · notes only · 2 other files ▾");
   assert.equal(at(bent("drafts", (s) => (s.log_writable = false))), "review unavailable · folder not writable");
 });
@@ -143,7 +143,7 @@ test("inside a hold the phrase from before it keeps the suffix", () => {
   const BR = load();
   const s = state("hold");
   const inside = BR.pure.formatPhrase(s, { now: s.hold.not_before - 1, dir: TWO_OTHERS, path: "pr.md" });
-  assert.equal(inside, "1 of 3 decided · 2 other files ▾");
+  assert.equal(inside, "your turn · 3 notes · 1 of 3 blocks decided · 2 other files ▾");
 });
 
 // --- The turn button -----------------------------------------------------------------------------
@@ -194,7 +194,7 @@ test("in a folder the menu adds the folder note and one row per other file, afte
   assert.equal(folder.id, "folder");
   assert.equal(b.id, "file");
   assert.equal(b.href, "/view/b.md");
-  assert.equal(b.note, "Claude replied 14:13 · 1 done · 1 answered · 1 not handled");
+  assert.equal(b.note, "Claude replied 14:13 · 1 unseen · 1 of 3 blocks decided · 1 done");
   assert.equal(c.href, "/view/sub/c.md");
   assert.equal(c.note, "changed");
   // Rows a page can't act on carry no op
@@ -261,13 +261,13 @@ test("a file row's note is its summary's phrase", () => {
   const BR = load();
   const note = (sum, news = false) =>
     BR.pure.fileNote(listed("b.md", sum, news), { now: state("drafts").server_now });
-  assert.equal(note(summary("drafts")), "1 of 3 decided");
+  assert.equal(note(summary("drafts")), "your turn · 3 notes · 1 of 3 blocks decided");
   assert.equal(note(summary("drafts", (x) => (x.counts.decided = 0))), "your turn · 3 notes");
   assert.equal(note(summary("sent")), "sent 14:13 · not picked up yet");
   assert.equal(note(summary("picked")), "Claude picked up 14:13");
-  assert.equal(note(summary("replied")), "Claude replied 14:13 · 1 done · 1 answered · 1 not handled");
+  assert.equal(note(summary("replied")), "Claude replied 14:13 · 1 unseen · 1 of 3 blocks decided · 1 done");
   // The summary names no drafter
-  assert.equal(note(summary("fresh")), "3 items · your turn");
+  assert.equal(note(summary("fresh")), "your turn");
   // The summary carries no approve time
   assert.equal(note(summary("approved")), "approved");
   assert.equal(note(null, true), "changed");

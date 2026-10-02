@@ -877,6 +877,13 @@ fn at_state(note: &items::Note, texts: &mut Texts, locator: &anchor::Locator) ->
     };
     let head = texts.head;
     let located = texts.located(note.n, anchor).clone();
+    // A note the text no longer holds says where it was made
+    let section = match located.lines {
+        Some(_) => located.section,
+        None => texts
+            .with_doc(&anchor.rev, |doc| ladder::section_at(doc, anchor.lines.0))
+            .flatten(),
+    };
     let loc = match (anchor.scope, &located.bytes, located.lines) {
         (Scope::Quote, Some(bytes), _) => locator.locate(bytes.clone()).map(|l| Loc {
             sp: l.sp,
@@ -904,7 +911,7 @@ fn at_state(note: &items::Note, texts: &mut Texts, locator: &anchor::Locator) ->
         lines: located.lines,
         range: located.bytes.map(|b| (b.start, b.end)),
         block: located.block,
-        section: located.section,
+        section,
         rev: Some(anchor.rev.as_str().to_string()),
         change: None,
         loc,

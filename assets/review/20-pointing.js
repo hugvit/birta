@@ -8,7 +8,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var ACTIVE_KEY = 'birta-review-active';
   var HINT = 'c note · q ask · x cut';
   var CLAMPED = 'selection clamped to this paragraph';
-  var CREATED = 'review file created · z to undo';
+  var CREATED = 'note saved · z to undo';
   var END = 'no more · j/k to move';
   var REOPEN = 'approved · c to reopen';
   // After approve these only say how to start again
@@ -208,6 +208,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     pointedAway = false;
     focusWas = el && { name: el.localName, text: el.textContent, at: (all || targets()).indexOf(el) };
     BR.lane.focus(el);
+    BR.flow.focusBlock(el);
     paintDoc();
   }
 
@@ -311,6 +312,19 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     else if (!BR.dir.cross(step)) showPill(END);
   }
 
+  /** Whether review is under way in this tab: started here, or a review file the state shows. */
+  function engaged() {
+    var s = BR.currentState();
+    return active || !!(s && s.log && s.log.lines > 0);
+  }
+
+  /** The innermost focus stop holding `node`, or null. */
+  function stopAt(node) {
+    var hit = null;
+    targets().forEach(function (el) { if (el.contains(node)) hit = el; });
+    return hit;
+  }
+
   function onClick(e) {
     var t = e.target;
     if (!t || !t.closest || BR.isHost(t) || !content().contains(t)) return;
@@ -319,6 +333,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     // A drag that selects text is pointing, not looking
     var s = getSelection();
     if (s && !s.isCollapsed) return;
+    // A click on a block focuses it, as j would, so a mouse opens its rows; links and controls keep their own click
+    var stop = engaged() && !t.closest('a, button, input, select, textarea, summary, label') ? stopAt(t) : null;
+    if (stop && stop !== focus) setFocus(stop);
     for (var el = t; el && el !== content(); el = el.parentElement) {
       if (el.hasAttribute('data-sourcepos') && see(el)) return;
     }

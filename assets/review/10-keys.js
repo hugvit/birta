@@ -89,7 +89,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var row = action === 'revert_change' && reviewable() && BR.flow.openRow();
     // A held revert acts once, and its repeats never flip the view either
     if (e.repeat && kb && matches(e, kb.revert_change) && reviewable() && BR.flow.openRow()) return true;
-    if (!row && action === 'revert_change' && reviewable() && BR.flow.revertedRow()) {
+    var shown = !row && action === 'revert_change' && reviewable() && BR.flow.focusedRow();
+    if (shown && shown.undone_by != null) {
       BR.chrome.pill('already reverted · ' + BR.keyName('note') + ' note to ask for it back');
       return true;
     }

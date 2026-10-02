@@ -593,7 +593,7 @@ test.describe("files and activation", () => {
     expect(draftFiles(served.root)).toEqual([]);
   });
 
-  test("a verdict on a doc that already has a review file does not claim to create it", async ({ page, birta }) => {
+  test("a verdict on a doc that already has a review file says nothing of saving it", async ({ page, birta }) => {
     const served = await birta({ "pr.md": STOPS_DOC }, GATE_ON);
     await page.setViewportSize(WIDE);
     await page.goto(`${served.url}/view/pr.md`);
@@ -610,7 +610,7 @@ test.describe("files and activation", () => {
     await page.keyboard.press("y");
     await expect.poll(() => reviewLog(served.root)?.length ?? 0).toBe(5);
     await page.waitForTimeout(SETTLE_MS);
-    await expect(page.getByText("review file created")).toHaveCount(0);
+    await expect(page.getByText("note saved")).toHaveCount(0);
   });
 
   test("an empty composer opened and closed with Esc writes nothing", async ({ page, birta }) => {

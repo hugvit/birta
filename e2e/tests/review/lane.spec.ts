@@ -12,6 +12,7 @@ import {
   distance,
   fixtureDoc,
   fixtureState,
+  focused,
   frameBox,
   hex,
   ink,
@@ -36,6 +37,13 @@ const YOU = hex("#0969da");
 const YOU_DARK = hex("#4493f8");
 const NEW = hex("#fff8c5");
 const WHITE: Rgb = [255, 255, 255];
+/** A bar for a change of this round, until it is seen. */
+const FRESH = hex("#bf8700");
+const FRESH_DARK = hex("#d29922");
+const DANGER = hex("#d1242f");
+const DANGER_DARK = hex("#f85149");
+/** The wash under a block a no veils: its words, and the wash with them, at 70 %. */
+const NEW_VEILED = NEW.map((v) => Math.round(v * 0.7 + 255 * 0.3)) as Rgb;
 
 const UNSEEN_KEYS = [
   "bar 5:1-6:68 solid",
@@ -300,7 +308,8 @@ test.describe("lane overlay", () => {
     await expect.poll(() => markKeys(page)).toEqual(UNSEEN_KEYS);
     expect(await misaligned(page)).toEqual([]);
     for (const m of await marks(page)) {
-      if (m.mark === "bar") expect(Math.abs(m.width - 2), `${m.sp} bar width`).toBeLessThanOrEqual(0.5);
+      // Both changes are this round's
+      if (m.mark === "bar") expect(Math.abs(m.width - 3), `${m.sp} bar width`).toBeLessThanOrEqual(0.5);
       if (m.mark === "glyph") {
         expect(Math.abs(m.width - 16), `${m.sp} glyph width`).toBeLessThanOrEqual(1);
         expect(Math.abs(m.height - 16), `${m.sp} glyph height`).toBeLessThanOrEqual(1);
@@ -312,7 +321,7 @@ test.describe("lane overlay", () => {
     }
   });
 
-  test("an asked change is a solid grey bar and an unasked one is dotted", async ({ page, birta }) => {
+  test("an asked change is a solid bar and an unasked one is dotted, fresh until seen", async ({ page, birta }) => {
     await open(page, birta, fixtureDoc("unseen"), { state: fixtureState("unseen") });
     await expect.poll(() => markKeys(page)).toEqual(UNSEEN_KEYS);
     const ms = await marks(page);
@@ -325,10 +334,10 @@ test.describe("lane overlay", () => {
     // Below the glyph, where only the bar paints
     const solidPx = await column(page, x, glyph.bottom + 2, solid.bottom - 1);
     expect(solidPx.length).toBeGreaterThan(8);
-    expect(solidPx.filter((p) => !near(p, AGENT, 12)), "every pixel is the agent grey").toEqual([]);
+    expect(solidPx.filter((p) => !near(p, FRESH, 12)), "every pixel is the fresh colour").toEqual([]);
     const dottedPx = await column(page, x, dotted.top + 1, dotted.bottom - 1);
-    expect(dottedPx.some((p) => near(p, AGENT, 12)), "dots").toBe(true);
-    expect(dottedPx.some((p) => distance(p, AGENT) > 60), "gaps").toBe(true);
+    expect(dottedPx.some((p) => near(p, FRESH, 12)), "dots").toBe(true);
+    expect(dottedPx.some((p) => distance(p, FRESH) > 60), "gaps").toBe(true);
   });
 
   test("the new wash shows through the doc and covers a list marker", async ({ page, birta }) => {
@@ -337,8 +346,8 @@ test.describe("lane overlay", () => {
     const p = (await blockBox(page, "5:1-6:68"))!;
     const li = (await blockBox(page, "11:1-11:44"))!;
     const s = await shot(page, await frameBox(page));
-    // Inside the paragraph, past the end of its short last line
-    expect(near(s.at(p.right - 4, p.bottom - 4), NEW)).toBe(true);
+    // Inside the paragraph, past the end of its short last line, under its no's veil
+    expect(near(s.at(p.right - 4, p.bottom - 4), NEW_VEILED)).toBe(true);
     // In the 8px the wash reaches past the block
     expect(near(s.at(p.right + 4, p.top + 4), NEW)).toBe(true);
     // Left of the bullet, which only a wash reaching to the list edge covers
@@ -349,17 +358,23 @@ test.describe("lane overlay", () => {
     expect(near(s.at(other.right - 4, (other.top + other.bottom) / 2), WHITE)).toBe(true);
   });
 
-  test("a draft verdict is the accent and a sent one is grey", async ({ page, birta }) => {
+  test("a draft verdict is a ring and a sent one a disc, both in the verdict's colour", async ({ page, birta }) => {
     const { mock } = await open(page, birta, fixtureDoc("fresh"), { state: fixtureState("drafts") });
     await expect.poll(() => markKeys(page)).toEqual(["glyph 10:1-10:16 no", "glyph 5:1-6:54 no"]);
     expect(await misaligned(page)).toEqual([]);
     const glyph = () => marks(page).then((ms) => only(ms, "glyph", "10:1-10:16"));
     expect((await glyph()).role).toBe("you");
-    expect(near((await inkIn(page, await glyph(), WHITE))!, YOU, 10)).toBe(true);
+    const draft = await glyph();
+    expect(near((await inkIn(page, draft, WHITE))!, DANGER, 10)).toBe(true);
+    // A ring: the disc's middle-left is the page, not the colour
+    const ds = await shot(page, draft);
+    expect(near(ds.at(draft.left + 3.5, draft.top + draft.height / 2), WHITE, 40)).toBe(true);
     mock.pushState(fixtureState("sent"));
     await expect.poll(async () => (await glyph()).role).toBe("agent");
-    const sent = (await inkIn(page, await glyph(), WHITE))!;
-    expect(near(sent, AGENT, 10), `${sent}`).toBe(true);
+    const sent = await glyph();
+    expect(near((await inkIn(page, sent, WHITE))!, DANGER, 10)).toBe(true);
+    const ss = await shot(page, sent);
+    expect(near(ss.at(sent.left + 3.5, sent.top + sent.height / 2), DANGER, 30)).toBe(true);
   });
 
   test("two changes on one block draw one bar and one wash", async ({ page, birta }) => {
@@ -471,14 +486,14 @@ test.describe("lane overlay", () => {
     const bar = only(ms, "bar", "5:1-6:68");
     const glyph = only(ms, "glyph", "5:1-6:68");
     const px = await column(page, await laneX(page), glyph.bottom + 2, bar.bottom - 1);
-    expect(px.filter((p) => !near(p, AGENT_DARK, 12))).toEqual([]);
+    expect(px.filter((p) => !near(p, FRESH_DARK, 12))).toEqual([]);
     const p = (await blockBox(page, "5:1-6:68"))!;
     expect(near(s.at(p.right + 4, p.top + 4), over("#bb800926", bg))).toBe(true);
     // The x has a crossing wide enough to hold the full colour in both engines
     mock.pushState(laneState(doc, { glyphs: [{ sp: "10:1-10:16", verdict: "no" }] }));
     await expect.poll(() => markKeys(page)).toEqual(["glyph 10:1-10:16 no"]);
     const g = only(await marks(page), "glyph", "10:1-10:16");
-    expect(near((await inkIn(page, g, bg))!, YOU_DARK, 10)).toBe(true);
+    expect(near((await inkIn(page, g, bg))!, DANGER_DARK, 10)).toBe(true);
   });
 
   test("under 768px the lane sits at x=12 with 12px glyphs, clear of the text", async ({ page, birta }) => {
@@ -640,7 +655,7 @@ test.describe("the doc cannot reach the lane", () => {
     const bar = only(ms, "bar", "5:1-6:68");
     const glyph = only(ms, "glyph", "5:1-6:68");
     const px = await column(page, await laneX(page), glyph.bottom + 2, bar.bottom - 1);
-    expect(px.filter((p) => !near(p, AGENT, 12))).toEqual([]);
+    expect(px.filter((p) => !near(p, FRESH, 12))).toEqual([]);
     const p = (await blockBox(page, "5:1-6:68"))!;
     const s = await shot(page, await frameBox(page));
     expect(near(s.at(p.right + 4, p.top + 4), NEW)).toBe(true);
@@ -684,7 +699,7 @@ test.describe("the doc cannot reach the lane, however hard it tries", () => {
     await expect.poll(() => markKeys(page)).toEqual(UNSEEN_KEYS);
     const p = (await blockBox(page, "5:1-6:68"))!;
     const s = await shot(page, await frameBox(page));
-    expect(near(s.at(p.right - 4, p.bottom - 4), NEW)).toBe(true);
+    expect(near(s.at(p.right - 4, p.bottom - 4), NEW_VEILED)).toBe(true);
   });
 
   test("doc CSS cannot lift the doc over the lane", async ({ page, birta }) => {
@@ -697,7 +712,7 @@ test.describe("the doc cannot reach the lane, however hard it tries", () => {
     const bar = only(ms, "bar", "5:1-6:68");
     const glyph = only(ms, "glyph", "5:1-6:68");
     const px = await column(page, await laneX(page), glyph.bottom + 2, bar.bottom - 1);
-    expect(px.filter((p) => !near(p, AGENT, 12))).toEqual([]);
+    expect(px.filter((p) => !near(p, FRESH, 12))).toEqual([]);
   });
 
   test("doc CSS cannot shrink, clip or filter the lane hosts", async ({ page, birta }) => {
@@ -710,7 +725,7 @@ test.describe("the doc cannot reach the lane, however hard it tries", () => {
     const bar = only(ms, "bar", "5:1-6:68");
     const glyph = only(ms, "glyph", "5:1-6:68");
     const px = await column(page, await laneX(page), glyph.bottom + 2, bar.bottom - 1);
-    expect(px.filter((p) => !near(p, AGENT, 12))).toEqual([]);
+    expect(px.filter((p) => !near(p, FRESH, 12))).toEqual([]);
     const p = (await blockBox(page, "5:1-6:68"))!;
     const s = await shot(page, await frameBox(page));
     expect(near(s.at(p.right + 4, p.top + 4), NEW)).toBe(true);
@@ -732,17 +747,18 @@ test.describe("the doc cannot hide or recolour the notes", () => {
   test("doc CSS cannot hide, move or blend away a note, the lane or their colours", async ({ page, birta }) => {
     await open(page, birta, doc, { state: withRev(fixtureState("unseen"), revOf(doc)) });
     await expect.poll(() => markKeys(page)).toEqual(UNSEEN_KEYS);
-    // The lane: the agent's bar in its grey, and the new block's wash
+    // The lane: the agent's fresh bar, and the new block's wash
     const ms = await marks(page);
     const bar = only(ms, "bar", "5:1-6:68");
     const glyph = only(ms, "glyph", "5:1-6:68");
     const px = await column(page, await laneX(page), glyph.bottom + 2, bar.bottom - 1);
-    expect(px.filter((p) => !near(p, AGENT, 12))).toEqual([]);
+    expect(px.filter((p) => !near(p, FRESH, 12))).toEqual([]);
     const p = (await blockBox(page, "5:1-6:68"))!;
     const s = await shot(page, await frameBox(page));
     expect(near(s.at(p.right + 4, p.top + 4), NEW)).toBe(true);
-    // The receipt under the item: laid out where it belongs, and painted there
-    const host = page.locator(`#content [data-sourcepos="${ITEM}"] > birta-flow`, { hasText: "nobody asked" });
+    // The row under the item, open while it has focus: laid out where it belongs, and painted there
+    for (let i = 0; i < 20 && (await focused(page)) !== ITEM; i++) await page.keyboard.press("j");
+    const host = page.locator(`#content [data-sourcepos="${ITEM}"] > birta-flow`, { hasText: "without a note" });
     await expect(host).toHaveCount(1);
     const styles = await host.evaluate((h) => {
       const cs = getComputedStyle(h);
@@ -886,8 +902,9 @@ test.describe("lane edges", () => {
       const b = (await blockBox(page, sp))!;
       expect(Math.abs(bar.top - b.top) <= 1 && Math.abs(bar.bottom - b.bottom) <= 1, `${JSON.stringify(bar)}`).toBe(true);
       expect(await misaligned(page)).toEqual([]);
+      // A verdict with no colour of its own is muted, drawn or sent
       const glyphInk = (await inkIn(page, glyph, WHITE))!;
-      expect(near(glyphInk, status === "draft" ? YOU : AGENT, 10), `${glyphInk}`).toBe(true);
+      expect(near(glyphInk, AGENT, 10), `${glyphInk}`).toBe(true);
       const grey = async (x: number) => {
         const px = await column(page, x, bar.top + 1, bar.bottom - 1);
         expect(px.length).toBeGreaterThan(8);
@@ -900,7 +917,7 @@ test.describe("lane edges", () => {
         expect(await grey(bar.right - 1), "every pixel is the agent grey").toEqual([]);
       } else {
         // One rule the whole block long; a double rule squeezed beside a glyph keeps the agent's half
-        expect(bar.width).toBeLessThanOrEqual(2);
+        expect(bar.width).toBeLessThanOrEqual(double ? 2 : 3);
         expect(await grey((bar.left + bar.right) / 2), "every pixel is the agent grey").toEqual([]);
       }
     });

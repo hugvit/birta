@@ -115,9 +115,14 @@ const FIXTURE_MARKS = {
     wash("11:1-11:44"),
     tick("14:1-14:13"),
   ],
-  // The agent's change has settled, so it keeps no bar and no wash
+  // The agent's change has settled, so it keeps a 1 px bar and no wash
   // A later item has been sent and carries across rounds, so it is grey
-  approved: [glyph("5:1-6:68", "no", "agent"), glyph("10:1-10:16", "no", "agent"), glyph("12:1-13:0", "later", "agent")],
+  approved: [
+    glyph("5:1-6:68", "no", "agent"),
+    glyph("10:1-10:16", "no", "agent"),
+    glyph("12:1-13:0", "later", "agent"),
+    { ...bar("5:1-6:68", "solid", "agent"), weight: 1, fresh: false },
+  ],
   // An asked and a later outside change share the paragraph: the newest unseen one's bar wins
   lost: [glyph("10:1-10:16", "no", "agent"), bar("5:1-6:68", "dotted", "agent"), wash("5:1-6:68")],
   rewrite: [glyph("5:1-6:68", "no", "agent"), glyph("10:1-10:29", "no", "agent")],
@@ -166,9 +171,9 @@ const replace = (list, at, ...marks) => [...list.filter((m) => where(m) !== at),
 
 const CRAFTED = [
   [
-    "a settled change has no bar and no wash",
+    "a settled change keeps a 1 px bar and no wash",
     bent((s) => (s.changes[0].settled = true)),
-    replace(replace(UNSEEN, "bar 5:1-6:68"), "wash 5:1-6:68"),
+    replace(replace(UNSEEN, "wash 5:1-6:68"), "bar 5:1-6:68", { ...bar("5:1-6:68", "solid", "agent"), weight: 1, fresh: false }),
   ],
   [
     "a seen change keeps its bar and loses its wash",

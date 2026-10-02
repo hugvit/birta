@@ -164,11 +164,6 @@ async function openReal(page: Page, birta: Start, doc: string, env: Record<strin
   return served;
 }
 
-/** The doc's own item stops, which the fresh phrase counts. */
-async function itemCount(page: Page): Promise<number> {
-  return (await stops(page)).filter((s) => s.kind === "list_item" || s.kind === "table_row").length;
-}
-
 /** A second tab on the same server, able to read the chrome's roots. */
 async function secondPage(page: Page, url: string): Promise<Page> {
   const other = await page.context().newPage();
@@ -202,12 +197,12 @@ const KEYS = "keys?";
 
 test.describe("phrase and button", () => {
   const SHOWN: [string, string, string, "hint" | null, boolean][] = [
-    ["fresh", "drafted by Claude · 3 items · your turn", "Approve", "hint", false],
-    ["drafts", "1 of 3 decided", "Hand back · 3", "hint", false],
+    ["fresh", "drafted by Claude · your turn", "Approve", "hint", false],
+    ["drafts", "your turn · 3 notes · 1 of 3 blocks decided", "Hand back · 3", "hint", false],
     ["dir", "read-only · notes only", "Hand back · 2", "hint", false],
     ["sent", "sent 14:13 · not picked up yet", "With Claude", null, true],
     // The button counts unseen replies with unseen changes
-    ["replied", "Claude replied 14:13 · 1 done · 1 answered · 1 not handled", "Approve · 2 unseen", null, false],
+    ["replied", "Claude replied 14:13 · 2 unseen · 1 of 3 blocks decided · 1 done", "Approve · 2 unseen", null, false],
     ["approved", "approved 14:13 · c to reopen", "Approved", null, true],
   ];
   for (const [name, phrase, label, kbd, disabled] of SHOWN) {
@@ -219,11 +214,14 @@ test.describe("phrase and button", () => {
   }
 
   test("a long phrase gives way before the button, and keeps its full text as its title", async ({ page, birta }) => {
-    const full = "Claude replied 14:13 · 12 done · 3 answered · 2 for you · 4 unasked · 5 not handled";
+    // A name long enough that three counts no longer fit
+    const name = "an-agent-with-a-name-far-longer-than-any-header-has-room-for";
+    const shown = "An-agent-with-a-name-far-longer-than-any-header-has-room-for replied 14:13 · 2 unseen · 1 of 3 blocks decided · 12 done";
+    const full = `${shown} · 3 answered · 2 for you · 4 without a note · 5 not handled`;
     await openFixture(page, birta, "replied", (s) =>
-      Object.assign(s.phrase.replied, { done: 12, answered: 3, asked: 2, unasked: 4, not_handled: 5 }),
+      Object.assign(s.phrase.replied, { by: name, done: 12, answered: 3, asked: 2, unasked: 4, not_handled: 5 }),
     );
-    await expect.poll(() => phraseOf(page)).toBe(full);
+    await expect.poll(() => phraseOf(page)).toBe(shown);
     const c = await chrome(page);
     expect(c.phrase!.title).toBe(full);
     expect(c.phrase!.box.right).toBeLessThanOrEqual(c.turn!.box.left);
@@ -259,9 +257,9 @@ test.describe("phrase and button", () => {
         expect(c.turn!.box.width, label).toBeGreaterThanOrEqual(112);
         expect(c.turn!.box.right, label).toBeLessThanOrEqual(copy);
         expect(c.phrase!.box.right, label).toBeLessThanOrEqual(c.turn!.box.left);
-        // The clean view leaves what waits for later to the tooltip
+        // The clean view leaves what waits for later to the tooltip, and a reply's tallies past three go there too
         if (label === "Approved") expect(c.phrase!.title, label).toBe("approved 14:13 · 1 later · c to reopen");
-        else expect(c.phrase!.title, label).toBe(c.phrase!.text);
+        else expect(c.phrase!.title!.startsWith(c.phrase!.text), label).toBe(true);
         rights.push(c.turn!.box.right);
       }
       for (const r of rights) expect(Math.abs(r - rights[0])).toBeLessThanOrEqual(0.5);
@@ -274,7 +272,7 @@ test.describe("phrase and button", () => {
     await page.keyboard.press("m");
     await page.waitForTimeout(SETTLE_MS);
     const c = await chrome(page);
-    expect(c.phrase?.text).toBe("Claude replied 14:13 · 1 done · 1 answered · 2 unasked · 1 not handled");
+    expect(c.phrase?.text).toBe("Claude replied 14:13 · 4 unseen · 1 of 3 blocks decided · 1 done");
     expect(c.turn?.text).toBe("Approve · 4 unseen");
   });
 });
@@ -300,12 +298,11 @@ test.describe("when the chrome shows", () => {
     await expect(page.locator(".file-header birta-phrase")).toBeHidden();
     await expect(page.locator(".file-header birta-turn")).toBeHidden();
     await page.keyboard.press("j");
-    const n = await itemCount(page);
-    await expect.poll(() => phraseOf(page)).toBe(`${n} items · your turn`);
+    await expect.poll(() => phraseOf(page)).toBe("your turn");
     expect(await turnOf(page)).toEqual({ text: "Approve", kbd: await hint(page), disabled: false });
     await page.reload();
     await booted(page);
-    await expect.poll(() => phraseOf(page)).toBe(`${n} items · your turn`);
+    await expect.poll(() => phraseOf(page)).toBe("your turn");
     // Another tab hasn't started a review
     const other = await secondPage(page, `${served.url}/view/pr.md`);
     await other.waitForTimeout(SETTLE_MS);
@@ -315,15 +312,14 @@ test.describe("when the chrome shows", () => {
 
   test("an agent's draft shows its phrase and Approve on load, and viewing writes nothing", async ({ page, birta }) => {
     const served = await openReal(page, birta, STOPS_DOC, {}, ["pr.md", "--drafted-by", "claude"]);
-    const n = await itemCount(page);
-    await expect.poll(() => phraseOf(page)).toBe(`drafted by Claude · ${n} items · your turn`);
+    await expect.poll(() => phraseOf(page)).toBe("drafted by Claude · your turn");
     expect(await turnOf(page)).toEqual({ text: "Approve", kbd: await hint(page), disabled: false });
     expect(reviewLog(served.root)).toBeNull();
   });
 
   test("a review file of yours shows the chrome on load", async ({ page, birta }) => {
     await openFixture(page, birta, "fresh", (s) => (s.owner.drafted_by = null));
-    await expect.poll(() => phraseOf(page)).toBe("3 items · your turn");
+    await expect.poll(() => phraseOf(page)).toBe("your turn");
   });
 });
 
@@ -467,7 +463,7 @@ test.describe("hold", () => {
     await openFixture(page, birta, "hold", (s) => (s.hold.not_before = s.server_now + 20_000));
     await expect.poll(() => pillOf(page)).toBe("handing back · 3 notes · z to undo");
     const c = await chrome(page);
-    expect(c.phrase?.text).toBe("1 of 3 decided");
+    expect(c.phrase?.text).toBe("your turn · 3 notes · 1 of 3 blocks decided");
     expect(c.turn).toMatchObject({ text: "Hand back · 3", kbd: await hint(page), disabled: false });
     expect(await glyphRoles(page)).toEqual(["you", "you"]);
     await page.waitForTimeout(1_000);
@@ -492,7 +488,7 @@ test.describe("hold", () => {
     await openFixture(page, birta, "approved", (s) => (s.hold.not_before = s.server_now + 20_000));
     await expect.poll(() => pillOf(page)).toBe("approving · z to undo");
     const c = await chrome(page);
-    expect(c.phrase?.text).toBe("Claude replied 14:13 · 1 done · 1 answered · 1 not handled");
+    expect(c.phrase?.text).toBe("Claude replied 14:13 · 2 of 3 blocks decided · 1 done · 1 answered");
     expect(c.turn).toMatchObject({ text: "Approve", kbd: await hint(page), disabled: false });
   });
 
@@ -700,15 +696,14 @@ test.describe("menu", () => {
 
   test("on a real server the owner row marks an agent's draft as yours", async ({ page, birta }) => {
     const served = await openReal(page, birta, STOPS_DOC, {}, ["pr.md", "--drafted-by", "claude"]);
-    const n = await itemCount(page);
-    await expect.poll(() => phraseOf(page)).toBe(`drafted by Claude · ${n} items · your turn`);
+    await expect.poll(() => phraseOf(page)).toBe("drafted by Claude · your turn");
     await openMenu(page);
     await page.locator('birta-pop [role="menuitem"]', { hasText: MINE }).click();
     await expect.poll(() => reviewLog(served.root)?.length ?? 0).toBe(4);
     const log = reviewLog(served.root)!;
     expect(log[2]).toMatchObject({ op: "owner", drafted_by: "claude" });
     expect(log[3]).toMatchObject({ op: "owner", drafted_by: null });
-    await expect.poll(() => phraseOf(page)).toBe(`${n} items · your turn`);
+    await expect.poll(() => phraseOf(page)).toBe("your turn");
   });
 
   test("Esc drops one layer per press: theme menu, phrase menu, composer, then focus", async ({ page, birta }) => {
@@ -808,14 +803,14 @@ test.describe("pill", () => {
     await expect.poll(() => pillOf(page)).toBeNull();
   });
 
-  test("the review-file-created pill is a popover in the top layer", async ({ page, birta }) => {
+  test("the note-saved pill is a popover in the top layer", async ({ page, birta }) => {
     const served = await openReal(page, birta, STOPS_DOC);
     // A verdict pills its scope instead, so the first note is what creates the file here
     await page.keyboard.press("c");
     await page.keyboard.type("first");
     await page.keyboard.press("Enter");
     await expect.poll(() => reviewLog(served.root)?.length ?? 0).toBe(4);
-    await expect.poll(() => pillOf(page)).toBe("review file created · z to undo");
+    await expect.poll(() => pillOf(page)).toBe("note saved · z to undo");
   });
 });
 
@@ -967,12 +962,12 @@ test.describe("killers: menu and turn", () => {
 });
 
 test.describe("killers: pill and socket", () => {
-  test("the hold pill replaces review-file-created, which doesn't come back after", async ({ page, birta }) => {
+  test("the hold pill replaces note-saved, which doesn't come back after", async ({ page, birta }) => {
     const served = await openReal(page, birta, STOPS_DOC, { BIRTA_REVIEW_HOLD_MS: "1500" });
     await page.keyboard.press("c");
     await page.keyboard.type("first");
     await page.keyboard.press("Enter");
-    await expect.poll(() => pillOf(page)).toBe("review file created · z to undo");
+    await expect.poll(() => pillOf(page)).toBe("note saved · z to undo");
     await page.keyboard.press("ControlOrMeta+Enter");
     await expect.poll(() => pillOf(page)).toBe("handing back · 1 note · z to undo");
     await expect.poll(() => phraseOf(page), { timeout: 4_000 }).toMatch(/^sent \d\d:\d\d · not picked up yet$/);
@@ -1003,8 +998,7 @@ test.describe("killers: names and tab", () => {
   test("a drafter's name with markup is text, never elements", async ({ page, birta }) => {
     const evil = '<img src=x onerror="window.__pwned=1"><b>bold</b>';
     await openReal(page, birta, STOPS_DOC, {}, ["pr.md", "--drafted-by", evil]);
-    const n = await itemCount(page);
-    await expect.poll(() => phraseOf(page)).toBe(`drafted by ${evil} · ${n} items · your turn`);
+    await expect.poll(() => phraseOf(page)).toBe(`drafted by ${evil} · your turn`);
     await openMenu(page);
     expect(await menuOf(page)).toContain(`drafted by ${evil} · mark as yours`);
     const injected = await page.evaluate(() =>
@@ -1037,9 +1031,13 @@ test.describe("killers: names and tab", () => {
 
   test("the phrase's title follows every push", async ({ page, birta }) => {
     const { mock, state } = await openFixture(page, birta, "fresh");
-    for (const name of ["drafts", "sent"]) {
+    for (const [name, title] of [
+      ["drafts", "your turn · 3 notes · 1 of 3 blocks decided"],
+      ["sent", "sent 14:13 · not picked up yet"],
+      ["approved", "approved 14:13 · 1 later · c to reopen"],
+    ]) {
       swap(mock, state, withRev(fixtureState(name), state.rev));
-      await expect.poll(async () => (await chrome(page)).phrase?.title).toBe(await phraseOf(page));
+      await expect.poll(async () => (await chrome(page)).phrase?.title).toBe(title);
     }
     // The clean view's phrase leaves what waits for later to the title
     swap(mock, state, withRev(fixtureState("approved"), state.rev));

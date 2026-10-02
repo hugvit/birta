@@ -390,6 +390,8 @@ test.describe("⏎ order on a focused block", () => {
 
   test("a dot opens before the pill for a block's two links", async ({ page, birta }) => {
     expect(DOT2_DOC).not.toBe(fixtureDoc("flow"));
+    // The first dot ever says what it is once; that pill is not the one this checks for
+    await page.addInitScript(() => localStorage.setItem("birta-dot-hint", "1"));
     await open(page, birta, DOT2_DOC, { state: dotState(DOT2_DOC) });
     await expect.poll(() => dotCount(page)).toBe(1);
     await focusOn(page, DOT_SP);

@@ -1279,6 +1279,122 @@ fn a_note_whose_text_an_outside_write_rewrote_stays_lost() {
     assert_eq!(lost(&v), [u64::from(x)]);
 }
 
+const WHY: &str = "# T\n\n## Why\n\nCosts have doubled since the CDN migration.\n\n## Plan\n\nShip it.\n\nWatch it.\n\nWrite it up.\n\nRest.\n";
+const COST: &str = "Costs have doubled since the CDN migration.";
+
+/// A lost note says where it was: the section that held it on the text it was made on.
+#[test]
+fn a_lost_note_names_the_section_it_was_made_in() {
+    // name, the write, the anchor (quote or section heading), the section it was in
+    let cases = [
+        (
+            "its words went",
+            WHY.replace(COST, "Egress spend rose."),
+            "quote",
+            "Why",
+        ),
+        (
+            "its whole section went",
+            WHY.replace(&format!("## Why\n\n{COST}\n\n"), ""),
+            "quote",
+            "Why",
+        ),
+        (
+            "its own heading went",
+            WHY.replace("## Why\n\n", ""),
+            "section",
+            "Why",
+        ),
+    ];
+    for (name, write, kind, want) in cases {
+        let mut s = Scenario::new(WHY);
+        let at = if kind == "quote" {
+            s.quote("have doubled since")
+        } else {
+            s.section("## Why")
+        };
+        let x = s.comment(at, None, Some("say the cost"));
+        s.submit();
+        s.external(&write);
+        let v = wire(&s.fold());
+        assert_eq!(
+            lost(&v),
+            [u64::from(x)],
+            "{name}: setup {}",
+            item(&v, x)["at"]
+        );
+        assert_eq!(item(&v, x)["at"]["section"], want, "{name}");
+    }
+}
+
+/// The section a lost note names is the one on the text it was made on, not where it last stood.
+#[test]
+fn a_lost_note_names_its_section_as_made_even_after_a_rename() {
+    let mut s = Scenario::new(WHY);
+    let at = s.quote("have doubled since");
+    let x = s.comment(at, None, Some("say the cost"));
+    s.submit();
+    let renamed = WHY.replace("## Why", "## Reasons");
+    s.external(&renamed);
+    assert_eq!(
+        item(&wire(&s.fold()), x)["at"]["section"],
+        "Reasons",
+        "setup"
+    );
+    s.external(&renamed.replace(COST, "Egress rose."));
+    let v = wire(&s.fold());
+    assert_eq!(lost(&v), [u64::from(x)], "setup");
+    assert_eq!(item(&v, x)["at"]["section"], "Why");
+}
+
+#[test]
+fn a_lost_note_outside_any_section_names_none_and_a_nested_one_names_its_own() {
+    let doc = "Preamble words here.\n\n# T\n\n## Why\n\n### Sub\n\nDeep words here.\n";
+    let mut s = Scenario::new(doc);
+    let pre = s.quote("Preamble words");
+    let pre = s.comment(pre, None, Some("a"));
+    let deep = s.quote("Deep words");
+    let deep = s.comment(deep, None, Some("b"));
+    s.submit();
+    s.external("Other.\n\n# T\n\n## Why\n\n### Sub\n\nShallow.\n");
+    let v = wire(&s.fold());
+    assert_eq!(lost(&v), [u64::from(pre), u64::from(deep)], "setup");
+    assert!(
+        item(&v, pre)["at"].get("section").is_none(),
+        "{}",
+        item(&v, pre)["at"]
+    );
+    assert_eq!(item(&v, deep)["at"]["section"], "Sub");
+}
+
+#[test]
+fn a_lost_note_names_a_marked_up_heading_as_a_placed_one_did() {
+    let doc = WHY.replace("## Why", "## Why *now*");
+    let mut s = Scenario::new(&doc);
+    let at = s.quote("have doubled since");
+    let x = s.comment(at, None, Some("say the cost"));
+    s.submit();
+    let placed = item(&wire(&s.fold()), x)["at"]["section"].clone();
+    assert!(placed.is_string(), "setup: {placed}");
+    s.external(&doc.replace(COST, "Egress rose."));
+    let v = wire(&s.fold());
+    assert_eq!(lost(&v), [u64::from(x)], "setup");
+    assert_eq!(item(&v, x)["at"]["section"], placed);
+}
+
+/// A note still in place keeps the section it is in now, not the one it was made in.
+#[test]
+fn a_placed_note_names_the_section_it_is_in_now() {
+    let mut s = Scenario::new(WHY);
+    let at = s.quote("have doubled since");
+    let x = s.comment(at, None, Some("say the cost"));
+    s.submit();
+    s.external(&WHY.replace("## Why", "## Reasons"));
+    let v = wire(&s.fold());
+    assert_ne!(item(&v, x)["at"]["status"], "orphaned", "setup");
+    assert_eq!(item(&v, x)["at"]["section"], "Reasons");
+}
+
 #[test]
 fn a_covers_quote_across_two_pieces_credits_and_cites_both() {
     let base = "# T\n\n## Old heading\nBody text here.\n\nEnd.\n";

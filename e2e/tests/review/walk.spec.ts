@@ -321,11 +321,19 @@ test.describe("killers: the walk", () => {
 
 /** On an open change row the first x arms a second, which says no to its text. */
 const CITED = "because you said";
+
+/** Walks j to `sp`, whose change rows open while it has focus. */
+async function openRowOn(page: Page, sp: string) {
+  while ((await focused(page)) !== null) await page.keyboard.press("Escape");
+  for (let i = 0; i < 20 && (await focused(page)) !== sp; i++) await page.keyboard.press("j");
+  await expect.poll(() => focused(page)).toBe(sp);
+}
 const ARMED = "x = no to this text · u reverts Claude's change · x again for no";
 
 test.describe("pill lifetime", () => {
   test("an armed pill clears when its window ends", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow");
+    await openRowOn(page, "5:1-6:68");
     await receipt(page, CITED).click();
     await page.keyboard.press("x");
     await expect.poll(() => pillOf(page)).toBe(ARMED);
@@ -336,12 +344,14 @@ test.describe("pill lifetime", () => {
 
   test("an armed pill clears on any other key, and that key disarms it", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow");
+    await openRowOn(page, "5:1-6:68");
     await receipt(page, CITED).click();
     await page.keyboard.press("x");
     await expect.poll(() => pillOf(page)).toBe(ARMED);
     await page.keyboard.press("j");
     await expect.poll(() => pillOf(page), { timeout: 500 }).toBeNull();
     // Back on the receipt inside the old window, x arms again instead of saying no
+    await openRowOn(page, "5:1-6:68");
     await receipt(page, CITED).click();
     await page.keyboard.press("x");
     await expect.poll(() => pillOf(page)).toBe(ARMED);
@@ -351,6 +361,7 @@ test.describe("pill lifetime", () => {
 
   test("only another key disarms: x straight to the receipt after j arms again", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow");
+    await openRowOn(page, "5:1-6:68");
     await receipt(page, CITED).click();
     await page.keyboard.press("x");
     await expect.poll(() => pillOf(page)).toBe(ARMED);

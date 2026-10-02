@@ -39,8 +39,8 @@ const SETTLE_MS = 400;
 /** Moves the composer's pick to the next or previous candidate; j and k stay text there. */
 const PICK_NEXT = "ArrowDown";
 const PICK_PREV = "ArrowUp";
-/** The receipt keys as the copy writes them, with any run of spaces between the groups. */
-const KEYS = /y keep\s+x undo\s+c instead/;
+/** An open row's keys as the copy writes them. */
+const KEYS = /y keep · u revert · c note/;
 
 type Start = (
   files: Record<string, string>,
@@ -363,7 +363,7 @@ test.describe("composer", () => {
     await focusOn(page, item);
     await page.keyboard.press("q");
     await expect(composer(page)).toBeFocused();
-    await expect(composer(page)).toHaveAttribute("placeholder", "explain (optional words)");
+    await expect(composer(page)).toHaveAttribute("placeholder", "question for Claude…");
     await page.keyboard.type("why 4 seconds");
     await page.keyboard.press("Enter");
     await expect.poll(() => mock.ops().length).toBe(1);
@@ -375,17 +375,17 @@ test.describe("composer", () => {
     });
   });
 
-  test("each composer says how to keep and close it, and only c's says how to hand back", async ({ page, birta }) => {
+  test("each composer says how to save, break a line, hand back and close", async ({ page, birta }) => {
     await open(page, birta, STOPS_DOC);
     const host = page.locator('birta-flow[data-kind="composer"]');
     const mac = await page.evaluate(() => /Mac/.test(navigator.platform));
+    const hint = `⏎ save · ⇧⏎ new line · ${mac ? "⌘⏎" : "Ctrl⏎"} save & hand back · esc save & close`;
     await page.keyboard.press("c");
-    await expect(host.getByText(`⏎ keep · esc close · ${mac ? "⌘⏎" : "Ctrl⏎"} hand back`, { exact: true })).toBeVisible();
+    await expect(host.getByText(hint, { exact: true })).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(composer(page)).toHaveCount(0);
     await page.keyboard.press("q");
-    await expect(host.getByText(/^⏎ keep · esc close$/)).toBeVisible();
-    await expect(host.getByText(/hand back/)).toHaveCount(0);
+    await expect(host.getByText(hint, { exact: true })).toBeVisible();
   });
 
   test("review and viewer keys typed in the composer are text, and ⇧⏎ is a new line", async ({ page, birta }) => {
@@ -677,17 +677,20 @@ test.describe("placement", () => {
     const item = "11:1-11:44";
     await expect.poll(async () => (await hostsAt(page, item)).length).toBe(2);
     const noteTop = Math.min(...(await hostsAt(page, item)).map((h) => h.box.top));
+    // The note's no veils the item's words
     await expect.poll(async () => (await marks(page)).filter((m) => m.sp === item).map((m) => m.mark).sort()).toEqual([
       "bar",
       "glyph",
+      "veil",
       "wash",
     ]);
     for (const m of (await marks(page)).filter((m) => m.sp === item && m.mark !== "glyph"))
       expect(m.bottom, `${m.mark} bottom`).toBeLessThanOrEqual(noteTop);
     expect(await misaligned(page)).toEqual([]);
     await focusOn(page, item);
+    // The outline keeps a 2 px gap round the item's own lines, still above the notes
     const focus = (await marks(page)).find((m) => m.mark === "focus")!;
-    expect(focus.bottom).toBeLessThanOrEqual(noteTop);
+    expect(focus.bottom).toBeLessThanOrEqual(noteTop + 2);
   });
 
   test("a whole-doc note sits above the doc's first block", async ({ page, birta }) => {
@@ -860,6 +863,7 @@ test.describe("replies and receipts", () => {
     birta,
   }) => {
     await open(page, birta, FLOW_DOC, { state: fixtureState("flow") });
+    await focusOn(page, "11:1-11:44");
     await expect.poll(async () => (await hostsAt(page, "11:1-11:44")).length).toBe(2);
     const [note, reply] = await hostsAt(page, "11:1-11:44");
     expect(note.text).toContain("cap it");
@@ -870,10 +874,11 @@ test.describe("replies and receipts", () => {
 
   test("a fix cited from a note elsewhere carries a receipt on its own block", async ({ page, birta }) => {
     await open(page, birta, FLOW_DOC, { state: fixtureState("flow") });
+    await focusOn(page, "5:1-6:68");
     await expect.poll(async () => (await hostsAt(page, "5:1-6:68")).length).toBe(1);
     const [receipt] = await hostsAt(page, "5:1-6:68");
     expect(receipt.kind).toBe("receipt");
-    expect(receipt.text).toMatch(/^Claude · because you said "say why it fails" · 1 line → 1\s+·?\s*y keep\s+x undo\s+c instead$/);
+    expect(receipt.text).toBe('Claude · because you said "say why it fails" · 6 words changed · y keep · u revert · c note');
   });
 
   test("a note the agent's turn left alone says so, with the time the turn ended", async ({ page, birta }) => {
@@ -912,7 +917,10 @@ test.describe("replies and receipts", () => {
 
   test("writes from outside birta say so, and name git when git made them", async ({ page, birta }) => {
     await open(page, birta, FLOW_DOC, { state: fixtureState("flow") });
+    await focusOn(page, "8:1-8:15");
     await expect.poll(async () => texts(await hostsAt(page, "8:1-8:15")).join("\n")).toContain("changed outside birta (git)");
+    await focusOn(page, "16:1-16:19");
+    await expect.poll(async () => texts(await hostsAt(page, "16:1-16:19")).join("\n")).toContain("changed outside birta");
     const plain = texts(await hostsAt(page, "16:1-16:19")).join("\n");
     expect(plain).toContain("changed outside birta");
     expect(plain).not.toContain("(git)");
@@ -1637,6 +1645,9 @@ test.describe("names, verdicts and z", () => {
     const state = JSON.parse(JSON.stringify(fixtureState("flow")).replaceAll('"claude"', '"codex"'));
     await open(page, birta, FLOW_DOC, { state });
     await expect.poll(async () => texts(await hostsAt(page, "11:1-11:44")).join("\n")).toMatch(/↳ codex · done/i);
+    // A receipt is a row, which opens on its block
+    await focusOn(page, "5:1-6:68");
+    await expect.poll(async () => texts(await hostsAt(page, "5:1-6:68")).join("\n")).toMatch(/because you said/);
     const all = texts(await hosts(page)).join("\n");
     expect(all).toMatch(/not handled in codex's/i);
     expect(all).toMatch(/codex · because you said/i);
@@ -2297,15 +2308,15 @@ test.describe("placement, harder cases", () => {
     await expect.poll(async () => texts(await docSlot(page)).join("\n")).toContain("placeless");
   });
 
-  test("the doc slot holds whole-doc notes, the turn note, the lost row, then the rewrite row", async ({ page, birta }) => {
+  test("the doc slot holds whole-doc notes with the turn note under the first, the lost row, then the rewrite row", async ({ page, birta }) => {
     const state = fixtureState("flow");
     state.rewrite = { turn: 12, pct: 0.6, blocks_changed: 5, blocks_total: 8 };
     await open(page, birta, FLOW_DOC, { state });
     await expect.poll(async () => (await docSlot(page)).map((h) => h.kind)).toEqual([
       "note",
       "reply",
-      "note",
       "turn_note",
+      "note",
       "lost",
       "rewrite",
     ]);
@@ -2346,22 +2357,27 @@ test.describe("copy, harder cases", () => {
     const state = fixtureState("flow");
     await open(page, birta, FLOW_DOC, { state });
     const reply = async () => texts(await hostsAt(page, "11:1-11:44")).find((t) => t.startsWith("↳")) ?? "";
-    await expect.poll(reply).toMatch(/^↳ Claude · done · 1 line → 1\s+·?\s*y keep\s+x undo\s+c instead$/);
+    await expect.poll(reply).toBe("↳ Claude · done · 7 words → 10");
+    await focusOn(page, "11:1-11:44");
+    await expect.poll(reply).toBe("↳ Claude · done · 7 words → 10 · y keep · u revert · c note");
   });
 
-  test("a fix that changed words says how many", async ({ page, birta }) => {
+  test("a fix says what kind of change it was, as the server words it", async ({ page, birta }) => {
     const state = fixtureState("flow");
-    state.changes.find((c: State) => c.id === "15.0").what.words = 3;
+    state.changes.find((c: State) => c.id === "15.0").label = "3 words changed";
     await open(page, birta, FLOW_DOC, { state });
     const reply = async () => texts(await hostsAt(page, "11:1-11:44")).find((t) => t.startsWith("↳")) ?? "";
-    await expect.poll(reply).toMatch(/^↳ Claude · done · 3 words changed\s+·?\s*y keep/);
+    await expect.poll(reply).toBe("↳ Claude · done · 3 words changed");
   });
 
-  test("a receipt counts lines in the plural", async ({ page, birta }) => {
+  test("a change with no label counts lines, in the plural", async ({ page, birta }) => {
     const state = fixtureState("flow");
-    Object.assign(state.changes.find((c: State) => c.id === "13.0").what, { old_lines: 9, new_lines: 4 });
+    const c = state.changes.find((c: State) => c.id === "13.0");
+    delete c.label;
+    Object.assign(c.what, { old_lines: 9, new_lines: 4 });
     await open(page, birta, FLOW_DOC, { state });
-    await expect.poll(async () => texts(await hostsAt(page, "5:1-6:68")).join("\n")).toMatch(/· 9 lines → 4\s/);
+    await focusOn(page, "5:1-6:68");
+    await expect.poll(async () => texts(await hostsAt(page, "5:1-6:68")).join("\n")).toMatch(/· 9 lines → 4 ·/);
   });
 
   test("one lost note reads in the singular, and ▸ opens it", async ({ page, birta }) => {
@@ -2440,20 +2456,13 @@ test.describe("copy, harder cases", () => {
     const state = fixtureState("flow");
     state.items.find((i: State) => i.n === 10).body = "‮say why it fails";
     await open(page, birta, FLOW_DOC, { state });
+    await focusOn(page, "5:1-6:68");
     await expect.poll(async () => (await hostsAt(page, "5:1-6:68")).length).toBe(1);
     const lefts = await page.evaluate(() => {
       const root = document.querySelector('birta-flow[data-kind="receipt"]')!.shadowRoot!;
-      return ["y keep", "x undo", "c instead"].map((word) => {
-        const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-        for (let n = w.nextNode() as Text | null; n; n = w.nextNode() as Text | null) {
-          const at = n.data.indexOf(word);
-          if (at < 0) continue;
-          const r = document.createRange();
-          r.setStart(n, at);
-          r.setEnd(n, at + 1);
-          return r.getBoundingClientRect().left;
-        }
-        return NaN;
+      return ["y", "u", "c"].map((key) => {
+        const kbd = Array.from(root.querySelectorAll("kbd")).find((k) => k.textContent === key);
+        return kbd ? kbd.getBoundingClientRect().left : NaN;
       });
     });
     expect(lefts[0]).toBeLessThan(lefts[1]);

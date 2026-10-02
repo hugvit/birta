@@ -2,5 +2,5 @@
 source: tests/agent_review_test.rs
 expression: out
 ---
-pr.md · handed back 14:13 by andres · 1 item · picked up by pi 14:13 · read only
+pr.md · handed back 14:13 by andres · 1 note · picked up by pi 14:13 · read only
 #4    note  "second item" — say why

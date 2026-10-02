@@ -131,7 +131,7 @@ impl Chain {
                         patch(rev, to_rev, hunks, cause)
                     }
                     // Only a claim the fold lets win opens a turn
-                    Op::Claim { round } if index.opens_turn(*round, line.n) => {
+                    Op::Claim { round, .. } if index.opens_turn(*round, line.n) => {
                         claims.open.push(OpenClaim {
                             n: line.n,
                             name: line.by.name.clone(),

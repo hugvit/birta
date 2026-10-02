@@ -196,6 +196,10 @@ pub enum Op {
     },
     Claim {
         round: u32,
+        /// What was claimed, relative to the doc's folder: a folder, or the doc's own
+        /// name (1.x).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
     },
     Done {
         to: u32,

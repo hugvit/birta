@@ -4,4 +4,4 @@ expression: out
 ---
 pr.md · approved 14:13 by andres · drafted by claude
 APPROVED rev 21e4c725 (current: 5fa2610d  CHANGED)
-next: tmp=$(mktemp) && birta show pr.md@21e4c725 > "$tmp" && gh pr create --body-file "$tmp"
+next: birta show pr.md@21e4c725 prints the approved text. Use exactly that text; ask your user before publishing it anywhere.

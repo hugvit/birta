@@ -485,7 +485,7 @@ fn the_heredoc_from_review_unfilled_is_refused_for_its_placeholders() {
         .lines()
         .skip_while(|l| !l.contains("<<'EOF'"))
         .skip(1)
-        .take_while(|l| !l.contains("birta review"))
+        .take_while(|l| *l != "EOF")
         .map(|l| format!("{l}\n"))
         .collect();
     assert!(heredoc.contains("<your answer>"), "{view}");
@@ -493,7 +493,7 @@ fn the_heredoc_from_review_unfilled_is_refused_for_its_placeholders() {
     assert_eq!(code, 2, "{stderr}");
     assert_eq!(
         stderr.matches("placeholder").count(),
-        3,
+        4,
         "one error per placeholder:\n{stderr}"
     );
 }
@@ -559,7 +559,13 @@ fn a_respond_with_nothing_claimed_picks_the_round_up_first() {
         panic!("external, claim, 2 lines, yield: {kinds:#?}");
     };
     assert!(matches!(external.op, Op::External { .. }), "{kinds:#?}");
-    assert_eq!(claim.op, Op::Claim { round: r.submit });
+    assert_eq!(
+        claim.op,
+        Op::Claim {
+            round: r.submit,
+            target: Some("pr.md".to_string())
+        }
+    );
     assert!(is_claude(claim));
     let turn = claim.n;
     assert_eq!(
@@ -831,7 +837,13 @@ fn a_respond_after_its_yield_picks_up_a_newer_round_instead_of_writing_late() {
     let [claim, done, yielded] = &new[..] else {
         panic!("claim, done, yield: {new:#?}");
     };
-    assert_eq!(claim.op, Op::Claim { round: submit });
+    assert_eq!(
+        claim.op,
+        Op::Claim {
+            round: submit,
+            target: Some("pr.md".to_string())
+        }
+    );
     assert_eq!(
         done.op,
         Op::Done {

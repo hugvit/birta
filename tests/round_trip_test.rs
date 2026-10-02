@@ -374,7 +374,14 @@ fn a_full_round_from_notes_to_an_approve() {
     assert_eq!(claims.len(), 1, "step 2: one claim: {claims:#?}");
     let claim = claims[0].n;
     assert!(is_claude(&claims[0]), "step 2: {:?}", claims[0]);
-    assert_eq!(claims[0].op, Op::Claim { round: submit }, "step 2");
+    assert_eq!(
+        claims[0].op,
+        Op::Claim {
+            round: submit,
+            target: Some("pr.md".to_string())
+        },
+        "step 2"
+    );
     let new = trip.lines_after(before);
     assert!(
         matches!(new[0].op, Op::External { .. }) && new[0].n < claim,
@@ -384,16 +391,17 @@ fn a_full_round_from_notes_to_an_approve() {
     assert_eq!(
         lines[0],
         format!(
-            "pr.md · handed back {} by andres · 4 items · drafted by claude",
+            "pr.md · handed back {} by andres · 4 notes · drafted by claude",
             hhmm(trip.ts(submit))
         ),
         "step 2: {view}"
     );
     for want in [
-        format!("  #{note} done"),
-        format!("  #{no} done"),
-        format!("  #{ask} answer: <your answer>"),
-        format!("  #{doc} covers \"<new text you wrote for the whole-doc note>\""),
+        format!("#{note} done"),
+        format!("#{no} done"),
+        format!("#{ask} answer: <your answer>"),
+        format!("#{doc} done: <one line: what you changed for this whole-doc note>"),
+        format!("#{doc} covers \"<a sentence you wrote for #{doc}>\""),
     ] {
         assert!(
             lines.contains(&want.as_str()),
@@ -627,7 +635,14 @@ ask \"Log each retry at warn level\": should this be info?
         "step 6: one claim for round two: {claims:#?}"
     );
     let claim2 = claims[1].n;
-    assert_eq!(claims[1].op, Op::Claim { round: second }, "step 6");
+    assert_eq!(
+        claims[1].op,
+        Op::Claim {
+            round: second,
+            target: Some("pr.md".to_string())
+        },
+        "step 6"
+    );
     let item = |state: &ReviewState, n: u32| state.items.iter().find(|i| i.n == n).unwrap().status;
     for n in [doc, note, no, ask] {
         assert_eq!(
@@ -638,7 +653,9 @@ ask \"Log each retry at warn level\": should this be info?
     }
     let listed: BTreeSet<&str> = view
         .lines()
-        .filter(|l| l.starts_with("  #"))
+        .skip_while(|l| !l.ends_with("<<'EOF'"))
+        .take_while(|l| *l != "EOF")
+        .filter(|l| l.starts_with('#'))
         .map(|l| l.split_whitespace().next().unwrap())
         .collect();
     assert_eq!(
@@ -767,7 +784,10 @@ ask \"Log each retry at warn level\": should this be info?
     assert_eq!(claims.len(), 3, "step 7: {claims:#?}");
     assert_eq!(
         claims[2].op,
-        Op::Claim { round: approve },
+        Op::Claim {
+            round: approve,
+            target: Some("pr.md".to_string())
+        },
         "step 7: the approve is picked up"
     );
     let log = trip.read(LOG);

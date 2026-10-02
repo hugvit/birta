@@ -322,7 +322,7 @@ fn the_round_view_lists_what_was_handed_back_in_order() {
     assert_eq!(
         lines[0],
         format!(
-            "pr.md · handed back {} by andres · 4 items · drafted by claude",
+            "pr.md · handed back {} by andres · 5 notes · drafted by claude",
             hhmm(ts(h.submit))
         )
     );
@@ -366,26 +366,31 @@ fn the_round_view_lists_what_was_handed_back_in_order() {
 
     assert_eq!(
         lines[next],
-        "next: Edit (not Write) pr.md. For any change outside the quoted spots, cite the note it serves. Then:"
+        "next: 1) Edit pr.md with your Edit tool (not Write). Change only what the notes ask."
     );
     let heredoc = [
-        "  birta respond pr.md <<'EOF'".to_string(),
-        format!("  #{} done", h.note),
-        format!("  #{} done", h.no),
-        format!("  #{} answer: <your answer>", h.ask),
+        "birta respond pr.md <<'EOF'".to_string(),
+        format!("#{} done", h.note),
+        format!("#{} done", h.no),
+        format!("#{} answer: <your answer>", h.ask),
         format!(
-            "  #{} covers \"<new text you wrote for the whole-doc note>\"",
+            "#{} done: <one line: what you changed for this whole-doc note>",
             h.doc
         ),
-        "  @: <two lines: what you did, didn't, ask>".to_string(),
-        "  EOF".to_string(),
+        format!(
+            "#{} covers \"<a sentence you wrote for #{}>\"",
+            h.doc, h.doc
+        ),
+        "@: <one or two lines to the reviewer in first person (\"I cut…\"); no questions here>"
+            .to_string(),
+        "EOF".to_string(),
     ];
-    assert_eq!(lines[next + 1..next + 8], heredoc, "{out}");
-    assert!(
-        lines[next + 8].starts_with("  birta review pr.md --wait"),
+    assert_eq!(lines[next + 2..next + 10], heredoc, "{out}");
+    assert_eq!(
+        lines.last().copied(),
+        Some("      3) Then wait again: birta review pr.md --wait"),
         "{out}"
     );
-    assert_eq!(lines.len(), next + 9, "nothing after the wait line:\n{out}");
 
     // A stet asks for nothing; a draft is never shown; the view is plain text.
     assert!(!out.contains(&format!("#{} ", h.stet)), "{out}");
@@ -453,7 +458,7 @@ fn a_hand_back_from_the_page_is_by_your_reviewer() {
     assert_eq!(code, 0, "{out}");
     assert!(
         out.starts_with(&format!(
-            "pr.md · handed back {} by your reviewer · 1 item",
+            "pr.md · handed back {} by your reviewer · 1 note",
             hhmm(ts(submit))
         )),
         "{out}"
@@ -475,7 +480,7 @@ fn a_hand_back_with_no_author_is_by_someone() {
     assert_eq!(code, 0, "{out}");
     assert!(
         out.starts_with(&format!(
-            "pr.md · handed back {} by someone · 1 item",
+            "pr.md · handed back {} by someone · 1 note",
             hhmm(ts(submit))
         )),
         "{out}"
@@ -520,9 +525,9 @@ fn with_no_doc_note_the_heredoc_has_no_covers_line() {
     assert!(!out.contains("covers"), "{out}");
     assert!(!out.contains("DOC "), "{out}");
     for n in [note, no] {
-        assert!(out.contains(&format!("\n  #{n} done\n")), "{out}");
+        assert!(out.contains(&format!("\n#{n} done\n")), "{out}");
     }
-    assert!(out.lines().next().unwrap().ends_with("· 2 items"), "{out}");
+    assert!(out.lines().next().unwrap().ends_with("· 2 notes"), "{out}");
 }
 
 #[test]
@@ -543,13 +548,18 @@ fn a_long_view_stops_at_20_items_and_all_shows_the_rest() {
     s.submit();
     let tmp = Tmp::new();
     tmp.put(&s);
-    let item_lines = |out: &str| out.lines().filter(|l| l.starts_with('#')).count();
+    let item_lines = |out: &str| {
+        out.lines()
+            .take_while(|l| !l.starts_with("next:"))
+            .filter(|l| l.starts_with('#'))
+            .count()
+    };
     // The heredoc asks only about the items shown.
     let asked = |out: &str| -> Vec<u32> {
         notes
             .iter()
             .copied()
-            .filter(|n| out.contains(&format!("\n  #{n} done\n")))
+            .filter(|n| out.contains(&format!("\n#{n} done\n")))
             .collect()
     };
 
@@ -561,10 +571,14 @@ fn a_long_view_stops_at_20_items_and_all_shows_the_rest() {
     assert_eq!(asked(&out), notes[..20], "{out}");
     let lines: Vec<&str> = out.lines().collect();
     assert!(
-        lines[0].ends_with("· 25 items"),
+        lines[0].ends_with("· 25 notes"),
         "the count is of all items:\n{out}"
     );
-    let last_item = lines.iter().rposition(|l| l.starts_with('#')).unwrap();
+    let next = lines.iter().position(|l| l.starts_with("next: ")).unwrap();
+    let last_item = lines[..next]
+        .iter()
+        .rposition(|l| l.starts_with('#'))
+        .unwrap();
     assert_eq!(
         lines[last_item + 1],
         "+5 more · birta review pr.md --all",
@@ -701,7 +715,7 @@ fn a_round_claimed_by_another_agent_is_read_only() {
         lines,
         [
             format!(
-                "pr.md · handed back {} by andres · 1 item · picked up by pi {} · read only",
+                "pr.md · handed back {} by andres · 1 note · picked up by pi {} · read only",
                 hhmm(ts(sub)),
                 hhmm(ts(claim))
             ),
@@ -729,7 +743,7 @@ fn a_round_a_nameless_agent_claimed_is_picked_up_by_an_agent() {
     assert_eq!(code, 0, "{out}");
     assert!(
         out.starts_with(&format!(
-            "pr.md · handed back {} by andres · 1 item · picked up by an agent {} · read only",
+            "pr.md · handed back {} by andres · 1 note · picked up by an agent {} · read only",
             hhmm(ts(sub)),
             hhmm(ts(claim))
         )),
@@ -798,7 +812,7 @@ fn the_claim_is_by_the_detected_agent_or_a_nameless_one() {
 }
 
 #[test]
-fn an_approved_doc_gets_the_pr_hint_and_its_approve_is_claimed() {
+fn an_approved_doc_gets_the_show_hint_and_its_approve_is_claimed() {
     let mut s = Scenario::drafted_by(DOC, "claude");
     s.note("first");
     s.submit();
@@ -821,7 +835,7 @@ fn an_approved_doc_gets_the_pr_hint_and_its_approve_is_claimed() {
             ),
             format!("APPROVED rev {short} (current ✓)"),
             format!(
-                "next: tmp=$(mktemp) && birta show pr.md@{short} > \"$tmp\" && gh pr create --body-file \"$tmp\""
+                "next: birta show pr.md@{short} prints the approved text. Use exactly that text; ask your user before publishing it anywhere."
             ),
         ],
         "{out}"
@@ -892,7 +906,10 @@ fn the_you_line_shows_only_after_the_human_wrote_to_the_doc() {
                 "{out}"
             );
             let next = lines.iter().position(|l| l.starts_with("next: ")).unwrap();
-            let last_item = lines.iter().rposition(|l| l.starts_with('#')).unwrap();
+            let last_item = lines[..next]
+                .iter()
+                .rposition(|l| l.starts_with('#'))
+                .unwrap();
             assert!(last_item < you && you < next, "{out}");
             insta::assert_snapshot!("you_line", out);
         }
@@ -2013,13 +2030,11 @@ fn paths_with_spaces_or_quotes_are_single_quoted() {
     assert_eq!(code, 0, "{out}");
     let lines: Vec<&str> = out.lines().collect();
     assert!(
-        lines.contains(&r"  birta respond 'it'\''s.md' <<'EOF'"),
+        lines.contains(&r"birta respond 'it'\''s.md' <<'EOF'"),
         "{out}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|l| l.starts_with(r"  birta review 'it'\''s.md' --wait")),
+        lines.contains(&r"      3) Then wait again: birta review 'it'\''s.md' --wait"),
         "{out}"
     );
 }
@@ -2262,7 +2277,7 @@ fn a_human_submit_with_no_name_is_handed_back_by_your_reviewer() {
     assert_eq!(code, 0, "{out}");
     assert!(
         out.starts_with(&format!(
-            "pr.md · handed back {} by your reviewer · 1 item",
+            "pr.md · handed back {} by your reviewer · 1 note",
             hhmm(ts(sub))
         )),
         "{out}"
@@ -2545,8 +2560,13 @@ fn a_batch_losing_one_file_to_another_agent_claims_none_of_it() {
         },
         cid: None,
     };
-    held.append_with(ctx, |_, _| Ok(vec![Op::Claim { round: round_c }]))
-        .unwrap();
+    held.append_with(ctx, |_, _| {
+        Ok(vec![Op::Claim {
+            round: round_c,
+            target: None,
+        }])
+    })
+    .unwrap();
     drop(held);
     let (code, out) = w.expect_exit_within(Duration::from_secs(10), "the lock was let go");
     assert_eq!(code, 0, "{out}");

@@ -214,7 +214,13 @@ mod tests {
                     batch: None,
                 },
             );
-            f.claim = f.append(agent(), Op::Claim { round });
+            f.claim = f.append(
+                agent(),
+                Op::Claim {
+                    round,
+                    target: None,
+                },
+            );
             f
         }
 

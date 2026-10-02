@@ -339,7 +339,7 @@ fn the_approved_next_line_from_review_runs_as_is() {
         .env("HOME", tmp.path("home"))
         .env("TZ", "UTC")
         .env("BIRTA_REVIEW", "1")
-        .args(["review", "pr.md", "--peek"])
+        .args(["review", "pr.md", "--as", "claude"])
         .current_dir(&tmp.base)
         .timeout(Duration::from_secs(20))
         .output()

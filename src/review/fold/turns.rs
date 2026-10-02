@@ -103,7 +103,7 @@ impl Turns {
             Op::Approve { rev, .. } => {
                 self.push_round(line, index, line.n, None, None, Some(rev.clone()));
             }
-            Op::Claim { round } => {
+            Op::Claim { round, .. } => {
                 let won = index
                     .rounds
                     .iter()

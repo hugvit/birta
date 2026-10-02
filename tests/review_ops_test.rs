@@ -154,7 +154,10 @@ fn turn_ops_parse_to_their_fields() {
     ));
     assert!(matches!(
         ok(3, r#"{"op":"claim","round":31}"#).op,
-        Op::Claim { round: 31 }
+        Op::Claim {
+            round: 31,
+            target: None
+        }
     ));
     assert!(matches!(
         ok(3, r#"{"op":"yield","turn":33}"#).op,
@@ -504,7 +507,13 @@ fn a_built_line_serializes_to_the_envelope() {
 #[test]
 fn unknown_fields_on_a_known_op_are_ignored() {
     let line = ok(3, r#"{"op":"claim","round":31,"future":{"x":1}}"#);
-    assert!(matches!(line.op, Op::Claim { round: 31 }));
+    assert!(matches!(
+        line.op,
+        Op::Claim {
+            round: 31,
+            target: None
+        }
+    ));
 }
 
 // --- Ok / Unknown / Bad ---

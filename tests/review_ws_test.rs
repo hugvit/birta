@@ -2903,6 +2903,76 @@ async fn every_reachable_nack_reason_is_sent() {
 }
 
 #[tokio::test]
+async fn a_reply_to_the_agent_can_be_amended_or_taken_back_until_it_is_handed_back() {
+    let mut s = Scenario::new(DOC);
+    let note = s.note("a");
+    s.submit();
+    let claim = s.claim("claude");
+    let blank = s.blank("claude", s.block("## Details"), "Which one?", claim);
+    let agents = s.agent_reply("claude", note, "note", "for what it's worth");
+    let turn_note = s.turn_note("claude", "I cut it.", claim);
+    s.yield_turn("claude", claim);
+    let sent = s.human_reply(blank, None, Some("sent"));
+    s.submit();
+    let site = Site::new();
+    site.write(PR, DOC);
+    site.write(LOG, &s.log());
+    let served = site.serve(&[PR], &[GATE_ON]);
+    let (mut ws, _) = served.viewing(PR).await;
+    let r = rev(DOC);
+
+    let live = acked(
+        &mut ws,
+        op("a1", &r, "reply", json!({"to": blank, "body": "nn"})),
+    )
+    .await["n"]
+        .as_u64()
+        .unwrap();
+    acked(
+        &mut ws,
+        op("a2", &r, "amend", json!({"to": live, "body": "yes, 15"})),
+    )
+    .await;
+    acked(
+        &mut ws,
+        op(
+            "a3",
+            &r,
+            "reply",
+            json!({"to": turn_note, "body": "good call"}),
+        ),
+    )
+    .await;
+    acked(&mut ws, op("a4", &r, "retract", json!({"to": live}))).await;
+    let cases = [
+        (
+            "retract it twice",
+            op("n1", &r, "retract", json!({"to": live})),
+            "no_such_note",
+        ),
+        (
+            "amend a handed-back reply",
+            op("n2", &r, "amend", json!({"to": sent, "body": "x"})),
+            "not_editable",
+        ),
+        (
+            "amend the agent's reply",
+            op("n3", &r, "amend", json!({"to": agents, "body": "x"})),
+            "not_editable",
+        ),
+    ];
+    for (what, frame, want) in cases {
+        assert_eq!(nacked(&mut ws, frame).await, want, "{what}");
+    }
+    let amends = ops_named(&review_file(&site), "amend");
+    assert_eq!(amends.len(), 1);
+    assert_eq!(amends[0]["to"], json!(live));
+    let retracts = ops_named(&review_file(&site), "retract");
+    assert_eq!(retracts.len(), 1);
+    assert_eq!(retracts[0]["to"], json!(live));
+}
+
+#[tokio::test]
 async fn a_log_from_a_later_schema_is_read_only() {
     let site = Site::new();
     site.write(PR, DOC);

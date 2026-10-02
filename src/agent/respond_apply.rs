@@ -4,28 +4,33 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{self, IsTerminal, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 
 use super::identity;
 use super::render::{self, one_line};
 use super::respond::{self, Entry};
-use super::{CONTROL_PATH, ExitCode, RespondArgs, hidden_in, say, wait, warn};
+use super::review_cmd::own_name;
+use super::{CONTROL_PATH, ExitCode, RespondArgs, hidden_in, relative, say, wait, warn};
 use crate::anchor;
+use crate::paths::Roots;
 use crate::review::chain::Chain;
 use crate::review::doc::Doc;
 use crate::review::fold::{self, RoundKind, TurnIndex};
 use crate::review::log::{AppendCtx, AppendError, Held, Log};
 use crate::review::ops::{AnchorReq, At, By, ByKind, Line, Op, ReplyKind, Verdict, Via};
-use crate::review::state::{ItemStatus, ReviewState};
+use crate::review::state::{AskedKind, Attr, ItemStatus, ReviewState};
 use crate::review::sync::{read_doc, try_sync_bytes};
 use crate::review::{Reject, anchor_from_req, review_path_for};
+use crate::scan::{self, ScanBudget};
 
 /// Places an ambiguous quote's error lists.
 const PLACES: usize = 5;
 /// Code points of a place's line shown beside it.
 const EXCERPT: usize = 60;
+/// Folders above the doc an old folder claim is looked for in.
+const WALK_UP: usize = 3;
 
 pub fn run(args: &RespondArgs) -> ExitCode {
     if io::stdin().is_terminal() {
@@ -187,7 +192,7 @@ fn apply(file: &Path, entries: &[(usize, Entry)], by: &By, now: u64) -> anyhow::
     };
     let turn = match mode {
         Mode::Held { claim } | Mode::Late { claim, .. } => claim,
-        Mode::Pickup { round } => claim_round(&mut held, ctx.clone(), round)?,
+        Mode::Pickup { round } => claim_round(&mut held, ctx.clone(), round, &doc_path)?,
     };
     let late = matches!(mode, Mode::Late { .. });
     let mut ops = to_ops(entries, &checked.anchors, turn, late);
@@ -213,16 +218,177 @@ fn apply(file: &Path, entries: &[(usize, Entry)], by: &By, now: u64) -> anyhow::
     let after = held.parsed().clone();
     drop(held);
     let state = fold::fold(&after, &Chain::build(&after), &doc).state;
-    let err = state
+    let mut err: Vec<String> = state
         .items
         .iter()
         .filter(|i| valid.contains(&i.n) && i.status == ItemStatus::NotHandled)
         .map(|i| format!("warning: not handled: #{}", i.n))
         .collect();
+    err.extend(uncited(&state, turn, entries, &doc));
+    let next = waits_on(&after.lines, turn, &doc_path, &name, by);
     Ok(Finish {
         code: ExitCode::Ok,
-        out: Some(format!("recorded: {tally} · yielded")),
+        out: Some(format!(
+            "recorded: {tally} · yielded\nnext: birta review {next} --wait"
+        )),
         err,
+    })
+}
+
+/// The warning for this turn's changes that no note asked for and no `unasked` line
+/// names. Changes that render the same never reach the fold's list.
+fn uncited(
+    state: &ReviewState,
+    turn: u32,
+    entries: &[(usize, Entry)],
+    doc: &Doc,
+) -> Option<String> {
+    let flagged: Vec<String> = entries
+        .iter()
+        .filter_map(|(_, e)| match e {
+            Entry::Unasked { quote, .. } => Some(squashed(quote)),
+            _ => None,
+        })
+        .collect();
+    let named: Vec<String> = state
+        .changes
+        .iter()
+        .filter(|c| c.turn == Some(turn) && c.attr == Attr::Agent)
+        .filter(|c| c.asked.kind == AskedKind::Unasked && c.undone_by.is_none())
+        .filter_map(|c| {
+            if c.what.new_lines == 0 {
+                let removed = c.removed.as_deref().unwrap_or_default();
+                return Some(format!("removed \"{}\"", excerpt(removed)));
+            }
+            let text = doc.text.get(c.range.bytes.0..c.range.bytes.1)?;
+            let text_flat = squashed(text);
+            if flagged.iter().any(|q| text_flat.contains(q.as_str())) {
+                return None;
+            }
+            Some(format!("\"{}\"", excerpt(text)))
+        })
+        .collect();
+    let (count, they) = match named.len() {
+        0 => return None,
+        1 => ("1 change cites".to_string(), "it shows"),
+        n => (format!("{n} changes cite"), "they show"),
+    };
+    Some(format!(
+        "warning: {count} no note: {}. Add unasked \"…\": why, or {they} as \"without a note\".",
+        named.join(", ")
+    ))
+}
+
+/// `text` with every run of whitespace as one space, for matching a quote across wraps.
+fn squashed(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The first line of `text` with words on it, cut to 60 code points.
+fn excerpt(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or_default();
+    let line = one_line(line);
+    match line.char_indices().nth(EXCERPT) {
+        Some((cut, _)) => format!("{}…", &line[..cut]),
+        None => line,
+    }
+}
+
+/// What the agent waits on next, as one shell word: the folder its claim was made on,
+/// else this doc as named.
+fn waits_on(lines: &[Line], turn: u32, doc: &Path, name: &str, by: &By) -> String {
+    let claim = lines.iter().find(|l| l.n == turn);
+    let folder = match claim.map(|l| &l.op) {
+        Some(Op::Claim {
+            target: Some(target),
+            ..
+        }) => doc
+            .parent()
+            .and_then(|parent| parent.join(target).canonicalize().ok())
+            .filter(|claimed| claimed.is_dir()),
+        Some(Op::Claim {
+            round,
+            target: None,
+        }) => {
+            let batch = lines.iter().find_map(|l| match l.op {
+                Op::Submit { batch, .. } if l.n == *round => batch,
+                _ => None,
+            });
+            batch.and_then(|batch| claimed_with(doc, batch, claim?.ts, &by.name))
+        }
+        _ => None,
+    };
+    match folder {
+        Some(folder) => render::shell_quote(&shown(&folder).to_string_lossy()),
+        None => render::shell_quote(name),
+    }
+}
+
+/// `path` from the working folder, or absolute when they share nothing but the root.
+fn shown(path: &Path) -> PathBuf {
+    let Ok(cwd) = std::env::current_dir().and_then(|d| d.canonicalize()) else {
+        return path.to_path_buf();
+    };
+    let shared = cwd
+        .components()
+        .zip(path.components())
+        .take_while(|(a, b)| a == b)
+        .count();
+    if shared > 1 {
+        relative(&cwd, path)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// For a folder claim from before claims named their folder: the nearest folder, a few
+/// above the doc, holding another doc of `batch` this agent claimed in the same instant.
+fn claimed_with(
+    doc: &Path,
+    batch: u64,
+    ts: Option<u64>,
+    agent: &Option<String>,
+) -> Option<PathBuf> {
+    let home = dirs::home_dir();
+    let own = review_path_for(doc);
+    for dir in doc.parent()?.ancestors().take(WALK_UP + 1) {
+        if dir.parent().is_none() || home.as_deref() == Some(dir) {
+            break;
+        }
+        let roots = Roots::new(dir.to_path_buf(), home.clone());
+        let listed = scan::walk(dir, &roots, ScanBudget::default());
+        let hit = listed
+            .review_files
+            .iter()
+            .filter_map(|rel| dir.join(rel).canonicalize().ok())
+            .filter(|log| *log != own)
+            .any(|log| claimed_in(&log, batch, ts, agent));
+        if hit {
+            return Some(dir.to_path_buf());
+        }
+    }
+    None
+}
+
+/// Whether `log` holds a claim by `agent` at `ts` of a submit in `batch`.
+fn claimed_in(log: &Path, batch: u64, ts: Option<u64>, agent: &Option<String>) -> bool {
+    let Ok(Some(parsed)) = Log::open(log).read() else {
+        return false;
+    };
+    let rounds: HashSet<u32> = parsed
+        .lines
+        .iter()
+        .filter(|l| matches!(l.op, Op::Submit { batch: Some(b), .. } if b == batch))
+        .map(|l| l.n)
+        .collect();
+    parsed.lines.iter().any(|l| {
+        matches!(l.op, Op::Claim { round, .. } if rounds.contains(&round))
+            && l.ts == ts
+            && l.by.name == *agent
     })
 }
 
@@ -325,7 +491,7 @@ pub(super) fn replay(lines: &[Line]) -> Vec<ClaimRec> {
                     untaken.remove(to);
                 }
             }
-            Op::Claim { round } if index.opens_turn(*round, line.n) => {
+            Op::Claim { round, .. } if index.opens_turn(*round, line.n) => {
                 let later = untaken.split_off(&(round + 1));
                 let rounds: Vec<u32> = std::mem::replace(&mut untaken, later).into_iter().collect();
                 at.insert(line.n, claims.len());
@@ -500,11 +666,14 @@ fn unique(doc: &Doc, quote: &str, name: &str) -> Result<(), String> {
 }
 
 /// Claims `round` for this respond; the claim's line is the turn the lines belong to.
-fn claim_round(held: &mut Held, ctx: AppendCtx, round: u32) -> anyhow::Result<u32> {
+fn claim_round(held: &mut Held, ctx: AppendCtx, round: u32, doc: &Path) -> anyhow::Result<u32> {
     let landed = held
         .append_with(ctx, |parsed, now| {
             match fold::scan(parsed, now).claimable_round(now) {
-                Some(r) if r == round => Ok(vec![Op::Claim { round }]),
+                Some(r) if r == round => Ok(vec![Op::Claim {
+                    round,
+                    target: own_name(doc),
+                }]),
                 _ => Err(Reject::AlreadyClaimed),
             }
         })
@@ -632,7 +801,14 @@ mod tests {
                 batch: None,
             };
             lines.push(line(n, ByKind::Human, submit));
-            lines.push(line(n + 1, ByKind::Agent, Op::Claim { round: n }));
+            lines.push(line(
+                n + 1,
+                ByKind::Agent,
+                Op::Claim {
+                    round: n,
+                    target: None,
+                },
+            ));
             let end = Op::Yield {
                 turn: Some(n + 1),
                 release: false,

@@ -2,17 +2,23 @@
 source: tests/round_trip_test.rs
 expression: stable
 ---
-pr.md · handed back HH:MM by andres · 4 items · drafted by claude
+pr.md · handed back HH:MM by andres · 4 notes · drafted by claude
 DOC   #4 "too long overall; say how the retries back off"
 #5    note  "we just fail" — say why: flaky S3 503s
 #6    no    ## Stacked on (whole section)
 #7    ask   "Ran the integration suite" — is 5 retries enough?   (answer only; don't edit)
-next: Edit (not Write) pr.md. For any change outside the quoted spots, cite the note it serves. Then:
-  birta respond pr.md <<'EOF'
-  #5 done
-  #6 done
-  #7 answer: <your answer>
-  #4 covers "<new text you wrote for the whole-doc note>"
-  @: <two lines: what you did, didn't, ask>
-  EOF
-  birta review pr.md --wait     # background it if your host supports that
+next: 1) Edit pr.md with your Edit tool (not Write). Change only what the notes ask.
+      2) Record what you did, one line per note, then run:
+birta respond pr.md <<'EOF'
+#5 done
+#6 done
+#7 answer: <your answer>
+#4 done: <one line: what you changed for this whole-doc note>
+#4 covers "<a sentence you wrote for #4>"
+@: <one or two lines to the reviewer in first person ("I cut…"); no questions here>
+EOF
+      Per note you can write instead:  #N didnt: <why>   or   #N answer: <reply>
+      To ask the reviewer:             ask "<exact words in the doc>": <question>
+      For a change no note asked for:  unasked "<exact new words>": <why>
+      `no` means the reviewer wants that text gone; cut it, or say why not with didnt.
+      3) Then wait again: birta review pr.md --wait

@@ -2,14 +2,19 @@
 source: tests/agent_review_test.rs
 expression: out
 ---
-pr.md · handed back 14:13 by andres · 2 items · drafted by claude
+pr.md · handed back 14:13 by andres · 2 notes · drafted by claude
 DOC   #4 "first round"
 #9    note  "second item" — second round
 YOU   since Claude's last turn: edited line 9 "- third item, reworded" (change 8.0)
-next: Edit (not Write) pr.md. For any change outside the quoted spots, cite the note it serves. Then:
-  birta respond pr.md <<'EOF'
-  #9 done
-  #4 covers "<new text you wrote for the whole-doc note>"
-  @: <two lines: what you did, didn't, ask>
-  EOF
-  birta review pr.md --wait     # background it if your host supports that
+next: 1) Edit pr.md with your Edit tool (not Write). Change only what the notes ask.
+      2) Record what you did, one line per note, then run:
+birta respond pr.md <<'EOF'
+#9 done
+#4 done: <one line: what you changed for this whole-doc note>
+#4 covers "<a sentence you wrote for #4>"
+@: <one or two lines to the reviewer in first person ("I cut…"); no questions here>
+EOF
+      Per note you can write instead:  #N didnt: <why>   or   #N answer: <reply>
+      To ask the reviewer:             ask "<exact words in the doc>": <question>
+      For a change no note asked for:  unasked "<exact new words>": <why>
+      3) Then wait again: birta review pr.md --wait

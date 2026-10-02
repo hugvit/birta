@@ -71,7 +71,7 @@ fn claims_in(log: &Path) -> Vec<(u32, u32, Option<String>)> {
         .lines
         .iter()
         .filter_map(|l| match l.op {
-            Op::Claim { round } => Some((l.n, round, l.by.name.clone())),
+            Op::Claim { round, .. } => Some((l.n, round, l.by.name.clone())),
             _ => None,
         })
         .collect()

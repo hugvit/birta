@@ -992,7 +992,7 @@ fn a_tailer_waits_for_a_partial_line_to_end() {
         panic!("expected Appended")
     };
     assert!(
-        matches!(&lines[..], [ParsedLine::Ok(line)] if line.n == 4 && line.op == Op::Claim { round: 5 }),
+        matches!(&lines[..], [ParsedLine::Ok(line)] if line.n == 4 && line.op == Op::Claim { round: 5, target: None }),
         "{lines:?}"
     );
 }
@@ -1152,7 +1152,10 @@ fn log_child() {
                 };
                 let result = open(&claim_log(&dir, k)).append(
                     ctx,
-                    vec![Op::Claim { round: 5 }],
+                    vec![Op::Claim {
+                        round: 5,
+                        target: None,
+                    }],
                     |parsed, now| {
                         // Widens the race a lock taken too late would lose.
                         thread::sleep(Duration::from_millis(3));

@@ -16,7 +16,7 @@ use super::Reject;
 use super::chain::Chain;
 use super::doc::Doc;
 use super::ladder;
-use super::ops::{At, ByKind, Line, Op, Parsed, Scope, Verdict};
+use super::ops::{At, By, ByKind, Line, Op, Parsed, Scope, Verdict};
 use super::state::{
     AnchorStatus, ApproveState, AskedKind, AtKind, AtState, Attr, Change, Counts, Hold, HoldKind,
     Item, ItemOutcome, ItemStatus, Loc, LogInfo, OwnerState, Phrase, PickedUp, RangeStatus,
@@ -133,7 +133,7 @@ impl TurnIndex {
                 self.rounds
                     .push(round(RoundKind::Approve, *not_before, line.n));
             }
-            Op::Claim { round } => {
+            Op::Claim { round, .. } => {
                 if let Some(r) = self.open_round(*round) {
                     r.claim = Some(line.n);
                     r.claimed_by.clone_from(&line.by.name);
@@ -284,11 +284,21 @@ impl TurnIndex {
 /// A folded review log, and what the CLI and server ask of it beyond the state.
 pub struct Folded<'a> {
     pub state: ReviewState,
+    /// The agent's turn notes and the reviewer's replies to them.
+    pub turn_notes: Vec<TurnNote>,
     index: TurnIndex,
     chain: &'a Chain,
     doc: &'a Doc,
     /// Items each hand-back or approve covers, by its line.
     covered: HashMap<u32, Vec<usize>>,
+}
+
+/// An agent's turn note, with the replies the reviewer kept.
+#[derive(Clone, Debug)]
+pub struct TurnNote {
+    pub n: u32,
+    pub by: By,
+    pub replies: Vec<ReplyState>,
 }
 
 /// How the current text ends its lines.
@@ -727,8 +737,18 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
         rounds,
         warnings,
     };
+    let turn_notes = notes
+        .turn_notes
+        .iter()
+        .map(|note| TurnNote {
+            n: note.n,
+            by: note.by.clone(),
+            replies: reply_states(note, &seen),
+        })
+        .collect();
     Folded {
         state,
+        turn_notes,
         index,
         chain,
         doc,
@@ -1034,6 +1054,27 @@ impl Fold<'_> {
     }
 }
 
+/// A note's replies as the state shows them; one taken back is gone.
+fn reply_states(note: &items::Note, seen: &HashSet<String>) -> Vec<ReplyState> {
+    note.replies
+        .iter()
+        .filter(|r| !r.retracted)
+        .map(|r| {
+            let id = format!("#{}", r.n);
+            ReplyState {
+                n: r.n,
+                seen: seen.contains(&id),
+                id,
+                by: r.by.clone(),
+                kind: r.kind,
+                verdict: r.verdict,
+                body: r.body.clone(),
+                ts: r.ts,
+            }
+        })
+        .collect()
+}
+
 fn item(note: &items::Note, f: &Facts, seen: &HashSet<String>, at: AtState) -> Item {
     let out = &f.out;
     Item {
@@ -1052,23 +1093,7 @@ fn item(note: &items::Note, f: &Facts, seen: &HashSet<String>, at: AtState) -> I
         sent_in: f.sent_in,
         turn: f.turn,
         amended: note.amended.clone(),
-        replies: note
-            .replies
-            .iter()
-            .map(|r| {
-                let id = format!("#{}", r.n);
-                ReplyState {
-                    n: r.n,
-                    seen: seen.contains(&id),
-                    id,
-                    by: r.by.clone(),
-                    kind: r.kind,
-                    verdict: r.verdict,
-                    body: r.body.clone(),
-                    ts: r.ts,
-                }
-            })
-            .collect(),
+        replies: reply_states(note, seen),
         outcome: (out.done || !out.changes.is_empty()).then(|| ItemOutcome {
             done: out.done,
             no_change: out.done && out.no_change,

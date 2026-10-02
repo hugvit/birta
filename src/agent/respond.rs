@@ -7,9 +7,18 @@ use std::fmt;
 
 /// A quote longer than this is not a quote of one spot.
 const QUOTE_MAX: usize = 200;
-/// What `birta review` leaves for the agent to fill in.
+/// What `birta review` leaves for the agent to fill in, now and in earlier builds. The
+/// covers one ends in the note's number.
 const PLACEHOLDERS: &[&str] = &[
     "<your answer>",
+    "<one line: what you changed for this whole-doc note>",
+    "<a sentence you wrote for #",
+    "<one or two lines to the reviewer in first person",
+    "<why>",
+    "<reply>",
+    "<question>",
+    "<exact words in the doc>",
+    "<exact new words>",
     "<new text you wrote for the whole-doc note>",
     "<two lines: what you did, didn't, ask>",
 ];

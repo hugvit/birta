@@ -2,18 +2,24 @@
 source: tests/agent_review_test.rs
 expression: out
 ---
-pr.md · handed back 14:13 by andres · 4 items · drafted by claude
+pr.md · handed back 14:13 by andres · 5 notes · drafted by claude
 STET  "Intro paragraph here" — do not change
 DOC   #5 "too long overall"
 #6    note  "second item" — say why
 #7    no    ## Details (whole section)
 #8    ask   "detail one" — is this right?   (answer only; don't edit)
-next: Edit (not Write) pr.md. For any change outside the quoted spots, cite the note it serves. Then:
-  birta respond pr.md <<'EOF'
-  #6 done
-  #7 done
-  #8 answer: <your answer>
-  #5 covers "<new text you wrote for the whole-doc note>"
-  @: <two lines: what you did, didn't, ask>
-  EOF
-  birta review pr.md --wait     # background it if your host supports that
+next: 1) Edit pr.md with your Edit tool (not Write). Change only what the notes ask.
+      2) Record what you did, one line per note, then run:
+birta respond pr.md <<'EOF'
+#6 done
+#7 done
+#8 answer: <your answer>
+#5 done: <one line: what you changed for this whole-doc note>
+#5 covers "<a sentence you wrote for #5>"
+@: <one or two lines to the reviewer in first person ("I cut…"); no questions here>
+EOF
+      Per note you can write instead:  #N didnt: <why>   or   #N answer: <reply>
+      To ask the reviewer:             ask "<exact words in the doc>": <question>
+      For a change no note asked for:  unasked "<exact new words>": <why>
+      `no` means the reviewer wants that text gone; cut it, or say why not with didnt.
+      3) Then wait again: birta review pr.md --wait

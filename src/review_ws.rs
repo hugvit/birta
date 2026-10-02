@@ -885,7 +885,7 @@ fn build(
             vec![Op::Retract { to: *to }]
         }
         WsOp::Reply { to, verdict, body } => {
-            if !live_note(parsed, *to) {
+            if !live_note(parsed, *to) && !turn_note(parsed, *to) {
                 return Err("no_such_note");
             }
             vec![Op::Reply {
@@ -954,13 +954,25 @@ fn live_note(parsed: &Parsed, n: u32) -> bool {
     note && !retracted
 }
 
-/// A human note an agent hasn't picked up: only those can be amended or taken back.
+/// Whether line `n` is an agent's turn note, which takes replies like a note.
+fn turn_note(parsed: &Parsed, n: u32) -> bool {
+    parsed
+        .lines
+        .iter()
+        .any(|l| l.n == n && l.by.kind == ByKind::Agent && matches!(l.op, Op::TurnNote { .. }))
+}
+
+/// A human note an agent hasn't picked up, or a human reply no hand-back has sent: only
+/// those can be amended or taken back.
 fn editable(parsed: &Parsed, text: &str, n: u32) -> Result<(), Nack> {
     let line = parsed
         .lines
         .iter()
-        .find(|l| l.n == n && matches!(l.op, Op::Comment { .. }))
+        .find(|l| l.n == n && matches!(l.op, Op::Comment { .. } | Op::Reply { .. }))
         .ok_or("no_such_note")?;
+    if matches!(line.op, Op::Reply { .. }) {
+        return editable_reply(parsed, line);
+    }
     if line.by.kind != ByKind::Human {
         return Err("not_editable");
     }
@@ -975,6 +987,25 @@ fn editable(parsed: &Parsed, text: &str, n: u32) -> Result<(), Nack> {
         ItemStatus::Retracted => Err("no_such_note"),
         _ => Err("not_editable"),
     }
+}
+
+/// A reply the page can change: its own, as the nameless human, until a hand-back sends it.
+fn editable_reply(parsed: &Parsed, line: &Line) -> Result<(), Nack> {
+    let retracted = parsed
+        .lines
+        .iter()
+        .any(|l| matches!(l.op, Op::Retract { to } if to == line.n));
+    if retracted {
+        return Err("no_such_note");
+    }
+    let sent = fold::scan(parsed, 0)
+        .rounds
+        .iter()
+        .any(|r| r.withdrawn.is_none() && r.n > line.n && r.upto >= line.n);
+    if line.by.kind != ByKind::Human || line.by.name != human().name || sent {
+        return Err("not_editable");
+    }
+    Ok(())
 }
 
 /// A hand-back or approve can be taken back until an agent claims it or a later one.

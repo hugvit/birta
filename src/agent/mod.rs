@@ -20,6 +20,29 @@ use crate::config::Config;
 pub const GATE_OFF: &str =
     "review is off: set [review] enabled = true in ~/.config/birta/config.toml";
 
+/// The heredoc `respond` reads, one example per kind of line.
+const RESPOND_GRAMMAR: &str = "\
+Stdin holds one line per entry, as `birta review` prints them under next:
+
+  #4 done
+      you did what note #4 asked
+  #4 done: I cut the intro to one line.
+      the same, with a word on how
+  #5 answer: Yes, five retries is plenty.
+      a reply, for a note that asks or one you'd rather answer
+  #6 didnt: The table is generated, so I left it.
+      why you didn't do what the note asked
+  #7 covers \"Retries now use jitter\"
+      cites a whole-doc note for text you wrote; quote it exactly
+  ask \"Retries now use jitter\": Is jitter enough here?
+      a question for the reviewer, on words in the doc
+  unasked \"more items\": I fixed a typo on the way.
+      a change no note asked for, and why
+  @: I cut the intro and kept the table.
+      one or two lines to the reviewer, in first person; no questions
+
+A line that starts no entry continues the one above it. End the heredoc with EOF.";
+
 /// Every exit status an agent verb can end with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExitCode {
@@ -39,7 +62,7 @@ pub enum Cmd {
     #[command(hide = true)]
     Review(ReviewArgs),
     /// Answer the notes picked up, from a heredoc on stdin
-    #[command(hide = true)]
+    #[command(hide = true, after_help = RESPOND_GRAMMAR)]
     Respond(RespondArgs),
     /// Leave a note or question on a doc
     #[command(hide = true)]
@@ -150,6 +173,20 @@ pub(crate) fn hidden_in(path: &Path) -> bool {
     path.to_string_lossy()
         .chars()
         .any(|c| render::is_hidden(c) || matches!(c, '\u{2028}' | '\u{2029}'))
+}
+
+/// `to` as seen from the folder `from`, both canonical: `.`, `docs` or `../..`.
+pub(crate) fn relative(from: &Path, to: &Path) -> PathBuf {
+    let from: Vec<_> = from.components().collect();
+    let to: Vec<_> = to.components().collect();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    let mut out: PathBuf = from[common..].iter().map(|_| "..").collect();
+    out.extend(&to[common..]);
+    if out.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        out
+    }
 }
 
 pub fn run(cmd: Cmd, config: &Config) -> ExitCode {

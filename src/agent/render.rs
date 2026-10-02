@@ -9,7 +9,11 @@ const ITEM_LINES: usize = 20;
 /// Width of the label and verdict columns.
 const COLUMN: usize = 6;
 const ASK_HINT: &str = "   (answer only; don't edit)";
-const COVERS: &str = "\"<new text you wrote for the whole-doc note>\"";
+/// Where `next:`'s numbered steps after the first start, under `1)`.
+const STEP: &str = "      ";
+const DOC_DONE: &str = "<one line: what you changed for this whole-doc note>";
+const TURN_NOTE: &str =
+    "@: <one or two lines to the reviewer in first person (\"I cut…\"); no questions here>";
 
 /// A note as a view line shows it.
 #[derive(Clone, Debug)]
@@ -53,8 +57,24 @@ pub struct RoundView {
     pub drafted_by: Option<String>,
     pub stance: Stance,
     pub items: Vec<ItemLine>,
+    /// The reviewer's replies to the agent's own notes and asks, handed back with the round.
+    pub answers: Vec<AnswerLine>,
     pub you: Vec<String>,
     pub all: bool,
+    /// Whether to print `next:`; a peek only looks.
+    pub next: bool,
+    /// Whether `next:` ends by waiting on this doc; a folder claim waits once, on the folder.
+    pub wait: bool,
+}
+
+/// A reply of the reviewer's to one of the agent's notes, or the lack of one.
+#[derive(Clone, Debug)]
+pub struct AnswerLine {
+    /// Whether the agent's note asked something; a reply to any other note is `RE`.
+    pub ask: bool,
+    pub target: Target,
+    pub verdict: Option<Verdict>,
+    pub body: Option<String>,
 }
 
 /// An approve, ready to print.
@@ -68,6 +88,12 @@ pub struct ApprovedView {
     pub rev: String,
     /// The doc's rev now, when it isn't the approved one.
     pub changed_to: Option<String>,
+    /// Replies to the agent's notes since its last round.
+    pub answers: Vec<AnswerLine>,
+    /// The agent's asks nobody answered.
+    pub unanswered: Vec<Target>,
+    /// Whether to print `next:`; a peek only looks.
+    pub next: bool,
 }
 
 /// `path` as one shell word: as it is when plainly safe, else in single quotes.
@@ -180,12 +206,59 @@ fn column(text: &str) -> String {
     format!("{text:<width$} ", width = COLUMN - 1)
 }
 
-fn count(n: usize) -> String {
+/// `1 note`, `2 notes`.
+pub fn plural(n: usize, what: &str) -> String {
     if n == 1 {
-        "1 item".to_string()
+        format!("1 {what}")
     } else {
-        format!("{n} items")
+        format!("{n} {what}s")
     }
+}
+
+/// The counts a header shows, leaving out those at zero.
+pub fn counts(notes: usize, answers: usize) -> String {
+    [(notes, "note"), (answers, "answer")]
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|&(n, what)| format!(" · {}", plural(n, what)))
+        .collect()
+}
+
+/// The label of a verdict that asks the agent for nothing, and what it tells the agent.
+fn asks_nothing(verdict: Option<Verdict>) -> Option<(&'static str, &'static str)> {
+    match verdict? {
+        Verdict::Stet => Some(("STET", "do not change")),
+        Verdict::Later => Some(("LATER", "parked by the reviewer; leave it")),
+        Verdict::Yes => Some(("YES", "keep as is")),
+        _ => None,
+    }
+}
+
+/// A verdict as a reply reads it.
+fn said(verdict: Verdict) -> &'static str {
+    match verdict {
+        Verdict::YourCall => "your call",
+        v => verdict_word(Some(v)),
+    }
+}
+
+fn answer_line(a: &AnswerLine) -> String {
+    let reply = match (a.verdict, &a.body) {
+        (Some(v), Some(body)) => format!("{}: {}", said(v), clip(body)),
+        (Some(v), None) => said(v).to_string(),
+        (None, Some(body)) => clip(body),
+        (None, None) => "unanswered".to_string(),
+    };
+    let (label, what) = if a.ask {
+        ("ANS", "ask")
+    } else {
+        ("RE", "note")
+    };
+    format!(
+        "{}your {what} on {} — {reply}",
+        column(label),
+        target(&a.target)
+    )
 }
 
 fn target(t: &Target) -> String {
@@ -193,7 +266,8 @@ fn target(t: &Target) -> String {
         Target::Doc => "the whole doc".to_string(),
         Target::Dir => "the whole folder".to_string(),
         Target::Quote(q) => format!("\"{}\"", clip(q)),
-        Target::Block(b) => clip(b.lines().next().unwrap_or_default()),
+        // Hard wraps and the cut at the quote's end leave no double space
+        Target::Block(b) => clip(b.trim()),
         Target::Section(h) => format!(
             "{} (whole section)",
             clip(h.lines().next().unwrap_or_default())
@@ -234,28 +308,26 @@ fn level_line(label: &str, item: &ItemLine) -> String {
     line
 }
 
-/// The respond line an item asks for, if any.
-fn asked(item: &ItemLine) -> Option<String> {
+/// The respond lines an item asks for.
+fn asked(item: &ItemLine) -> Vec<String> {
     let n = item.n;
     match (item.verdict, &item.target) {
-        (Some(Verdict::Stet | Verdict::Yes | Verdict::Later), _) => None,
-        (Some(Verdict::Ask), _) => Some(format!("#{n} answer: <your answer>")),
-        (_, Target::Doc) => Some(format!("#{n} covers {COVERS}")),
-        _ => Some(format!("#{n} done")),
+        (Some(Verdict::Ask), _) => vec![format!("#{n} answer: <your answer>")],
+        (_, Target::Doc) => vec![
+            format!("#{n} done: {DOC_DONE}"),
+            format!("#{n} covers \"<a sentence you wrote for #{n}>\""),
+        ],
+        _ => vec![format!("#{n} done")],
     }
 }
 
 pub fn round(v: &RoundView) -> String {
-    let stets: Vec<&ItemLine> = v
+    let (labelled, asking): (Vec<&ItemLine>, Vec<&ItemLine>) = v
         .items
         .iter()
-        .filter(|i| i.verdict == Some(Verdict::Stet))
-        .collect();
-    let (levels, notes): (Vec<&ItemLine>, Vec<&ItemLine>) = v
-        .items
-        .iter()
-        .filter(|i| i.verdict != Some(Verdict::Stet))
-        .partition(|i| is_level(&i.target));
+        .partition(|i| asks_nothing(i.verdict).is_some());
+    let (levels, notes): (Vec<&ItemLine>, Vec<&ItemLine>) =
+        asking.into_iter().partition(|i| is_level(&i.target));
     let shown = if v.all {
         notes.len()
     } else {
@@ -263,11 +335,11 @@ pub fn round(v: &RoundView) -> String {
     };
 
     let mut header = format!(
-        "{} · handed back {} by {} · {}",
+        "{} · handed back {} by {}{}",
         one_line(&v.name),
         hhmm(v.handed_at),
         who(&v.handed_by),
-        count(levels.len() + notes.len())
+        counts(v.items.len(), v.answers.len())
     );
     if let Some(drafter) = &v.drafted_by {
         header.push_str(&format!(" · drafted by {}", one_line(drafter)));
@@ -288,12 +360,16 @@ pub fn round(v: &RoundView) -> String {
     }
 
     let mut out = vec![header];
-    for stet in &stets {
-        out.push(format!(
-            "{}{} — do not change",
-            column("STET"),
-            target(&stet.target)
-        ));
+    for item in &labelled {
+        let Some((label, what)) = asks_nothing(item.verdict) else {
+            continue;
+        };
+        let mut line = format!("{}{}", column(label), target(&item.target));
+        if let Some(body) = &item.body {
+            line.push_str(&format!(" — {}", clip(body)));
+        }
+        line.push_str(&format!(" — {what}"));
+        out.push(line);
     }
     for level in &levels {
         let label = if matches!(level.target, Target::Dir) {
@@ -323,29 +399,48 @@ pub fn round(v: &RoundView) -> String {
             v.path
         ));
     }
+    out.extend(v.answers.iter().map(answer_line));
     if matches!(v.stance, Stance::ReadOnly { .. }) {
         return lines(out);
     }
     for you in &v.you {
         out.push(format!("{}{}", column("YOU"), one_line(you)));
     }
+    if !v.next {
+        return lines(out);
+    }
 
     out.push(format!(
-        "next: Edit (not Write) {}. For any change outside the quoted spots, cite the note it serves. Then:",
+        "next: 1) Edit {} with your Edit tool (not Write). Change only what the notes ask.",
         v.path
     ));
-    out.push(format!("  birta respond {} <<'EOF'", v.path));
-    let asks = notes[..shown]
-        .iter()
-        .chain(&levels)
-        .filter_map(|i| asked(i));
-    out.extend(asks.map(|line| format!("  {line}")));
-    out.push("  @: <two lines: what you did, didn't, ask>".to_string());
-    out.push("  EOF".to_string());
     out.push(format!(
-        "  birta review {} --wait     # background it if your host supports that",
-        v.path
+        "{STEP}2) Record what you did, one line per note, then run:"
     ));
+    out.push(format!("birta respond {} <<'EOF'", v.path));
+    out.extend(notes[..shown].iter().chain(&levels).flat_map(|i| asked(i)));
+    out.push(TURN_NOTE.to_string());
+    out.push("EOF".to_string());
+    out.push(format!(
+        "{STEP}Per note you can write instead:  #N didnt: <why>   or   #N answer: <reply>"
+    ));
+    out.push(format!(
+        "{STEP}To ask the reviewer:             ask \"<exact words in the doc>\": <question>"
+    ));
+    out.push(format!(
+        "{STEP}For a change no note asked for:  unasked \"<exact new words>\": <why>"
+    ));
+    if v.items.iter().any(|i| i.verdict == Some(Verdict::No)) {
+        out.push(format!(
+            "{STEP}`no` means the reviewer wants that text gone; cut it, or say why not with didnt."
+        ));
+    }
+    if v.wait {
+        out.push(format!(
+            "{STEP}3) Then wait again: {}",
+            rerun(Some(&v.path))
+        ));
+    }
     lines(out)
 }
 
@@ -365,14 +460,23 @@ pub fn approved(v: &ApprovedView) -> String {
         None => "current ✓".to_string(),
         Some(now) => format!("current: {}  CHANGED", short(now)),
     };
-    lines(vec![
-        header,
-        format!("APPROVED rev {rev} ({current})"),
-        format!(
-            "next: tmp=$(mktemp) && birta show {}@{rev} > \"$tmp\" && gh pr create --body-file \"$tmp\"",
+    let mut out = vec![header, format!("APPROVED rev {rev} ({current})")];
+    out.extend(v.answers.iter().map(answer_line));
+    out.extend(v.unanswered.iter().map(|t| {
+        answer_line(&AnswerLine {
+            ask: true,
+            target: t.clone(),
+            verdict: None,
+            body: None,
+        })
+    }));
+    if v.next {
+        out.push(format!(
+            "next: birta show {}@{rev} prints the approved text. Use exactly that text; ask your user before publishing it anywhere.",
             v.path
-        ),
-    ])
+        ));
+    }
+    lines(out)
 }
 
 /// What a doc or folder with nothing handed back shows. `path` is shell-quoted, and
@@ -382,6 +486,14 @@ pub fn nothing(name: &str, path: Option<&str>) -> String {
         format!("{} · nothing handed back yet", one_line(name)),
         format!("next: {}", rerun(path)),
     ])
+}
+
+/// The step a folder's views end with: one wait for all of its docs.
+pub fn folder_wait(path: Option<&str>) -> String {
+    format!(
+        "{STEP}3) Then wait again, once every file is recorded: {}",
+        rerun(path)
+    )
 }
 
 /// The command that waits again.
@@ -424,14 +536,20 @@ mod tests {
                     target: Target::Quote(format!("item {i}")),
                 })
                 .collect(),
+            answers: vec![],
             you: vec![],
             all: false,
+            next: true,
+            wait: true,
         }
     }
 
-    /// The item lines of a view: those that start with a note label.
+    /// The item lines of a view: those before `next:` that start with a note label.
     fn item_lines(out: &str) -> Vec<&str> {
-        out.lines().filter(|l| l.starts_with('#')).collect()
+        out.lines()
+            .take_while(|l| !l.starts_with("next:"))
+            .filter(|l| l.starts_with('#'))
+            .collect()
     }
 
     #[test]
@@ -501,6 +619,9 @@ mod tests {
                 drafted_by: None,
                 rev: "0123456789abcdef".into(),
                 changed_to: None,
+                answers: vec![],
+                unanswered: vec![],
+                next: true,
             };
             let out = approved(&a);
             assert!(

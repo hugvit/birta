@@ -13,16 +13,18 @@ use anyhow::Context;
 use serde_json::{Value, json};
 
 use super::identity::{self, Identity};
-use super::render::{self, ApprovedView, ItemLine, RoundView, Stance, Target};
-use super::{CONTROL_PATH, ExitCode, ReviewArgs, hidden_in, wait, warn};
+use super::render::{self, AnswerLine, ApprovedView, ItemLine, RoundView, Stance, Target};
+use super::{CONTROL_PATH, ExitCode, ReviewArgs, hidden_in, relative, wait, warn};
 use crate::config::Config;
 use crate::paths::{self, Roots};
 use crate::review::chain::Chain;
 use crate::review::doc::Doc;
-use crate::review::fold::{self, RoundKind, TurnIndex};
+use crate::review::fold::{self, RoundKind, TurnIndex, TurnNote};
 use crate::review::log::{AppendCtx, AppendError, Held, Log};
-use crate::review::ops::{Act, By, ByKind, Line, Op, Parsed, Scope, Via};
-use crate::review::state::{AtKind, AtState, Attr, Change, Item, ReviewState};
+use crate::review::ops::{Act, By, ByKind, Line, Op, Parsed, Scope, Verdict, Via};
+use crate::review::state::{
+    AtKind, AtState, Attr, Change, Item, ItemStatus, ReplyState, ReviewState,
+};
 use crate::review::sync::{read_doc, try_sync_bytes};
 use crate::review::{FOLDER_REVIEW, Reject, review_path_for};
 use crate::scan::{self, ScanBudget};
@@ -46,6 +48,7 @@ pub fn claim(doc: &Path, by: &By, now_ms: u64) -> anyhow::Result<Option<u32>> {
         doc: Some(doc.to_path_buf()),
         name: doc.display().to_string(),
         path: String::new(),
+        target: own_name(doc),
     };
     Ok(claim_file(&entry, by, now_ms)?.map(|(line, ..)| line))
 }
@@ -69,6 +72,9 @@ struct Entry {
     name: String,
     /// `name` as one shell word.
     path: String,
+    /// What a claim of it names: the folder it's listed under, or the doc itself,
+    /// relative to the doc's real folder.
+    target: Option<String>,
 }
 
 enum Place {
@@ -87,6 +93,8 @@ struct Opts {
     peek: bool,
     all: bool,
     json: bool,
+    /// Whether the target is a folder, which is waited on once for all its docs.
+    dir: bool,
 }
 
 /// What a view shows: a round, as whose, or an approve.
@@ -110,6 +118,18 @@ struct Block {
     text: String,
     json: Value,
     changed: bool,
+    /// Set on a round's view, for a folder's batch line.
+    handed: Option<Handed>,
+}
+
+/// A round as a folder's batch line counts it.
+#[derive(Clone, Copy)]
+struct Handed {
+    at: u64,
+    notes: usize,
+    answers: usize,
+    /// False for the folder's own review file.
+    doc: bool,
 }
 
 /// What a review file looks like on disk, to notice a change or a replacement.
@@ -134,8 +154,13 @@ fn review(args: &ReviewArgs, config: &Config) -> anyhow::Result<ExitCode> {
         peek: args.peek,
         all: args.all,
         json: args.json,
+        dir: false,
     };
     let place = resolve(args.target.as_deref())?;
+    let opts = Opts {
+        dir: matches!(place, Place::Dir { .. }),
+        ..opts
+    };
     let limit = wait::timeout(args.timeout);
 
     let out = match &place {
@@ -205,11 +230,16 @@ fn output(
         ExitCode::Ok
     };
     let text = if !opts.json {
-        blocks
+        let views = blocks
             .iter()
             .map(|b| b.text.as_str())
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("\n");
+        let handed: Vec<Handed> = blocks.iter().filter_map(|b| b.handed).collect();
+        match (dir, handed.is_empty()) {
+            (true, false) => folder(&handed, opts, name, path, &views),
+            _ => views,
+        }
     } else if let ([one], false) = (&blocks[..], dir) {
         json_line(&one.json)
     } else {
@@ -217,6 +247,26 @@ fn output(
         json_line(&json!({"status": "round", "docs": docs}))
     };
     (code, text)
+}
+
+/// A folder's views under one batch line, then, unless only looking, the one wait for all
+/// of them, as the last step of every doc's `next:`.
+fn folder(handed: &[Handed], opts: &Opts, name: &str, path: Option<&str>, views: &str) -> String {
+    let at = handed.iter().map(|h| h.at).max().unwrap_or(0);
+    let files = handed.iter().filter(|h| h.doc).count();
+    let notes = handed.iter().map(|h| h.notes).sum();
+    let answers = handed.iter().map(|h| h.answers).sum();
+    let mut out = format!(
+        "{}/ · handed back {} · {}{}\n{views}",
+        render::one_line(name.trim_end_matches('/')),
+        render::hhmm(at),
+        render::plural(files, "file"),
+        render::counts(notes, answers)
+    );
+    if !opts.peek {
+        out.push_str(&format!("\n{}\n", render::folder_wait(path)));
+    }
+    out
 }
 
 fn json_line(value: &Value) -> String {
@@ -255,10 +305,17 @@ fn resolve(target: Option<&Path>) -> anyhow::Result<Place> {
     }
     Ok(Place::File(Entry {
         log: review_path_for(&canonical),
+        target: own_name(&canonical),
         doc: Some(canonical),
         name: typed,
         path,
     }))
+}
+
+/// A doc's name in its real folder, which a file claim records as what it claimed.
+pub(super) fn own_name(doc: &Path) -> Option<String> {
+    let real = doc.canonicalize().ok()?;
+    Some(real.file_name()?.to_string_lossy().into_owned())
 }
 
 /// Makes the review file for a doc its drafter waits on, so the page shows who drafted
@@ -303,11 +360,12 @@ impl Locked<'_> {
             by: by.clone(),
             cid: None,
         };
+        let target = self.entry.target.clone();
         let landed = self
             .held
             .append_with(ctx, |parsed, now| {
                 match fold::scan(parsed, now).claimable_round(now) {
-                    Some(r) if r == round => Ok(vec![Op::Claim { round }]),
+                    Some(r) if r == round => Ok(vec![Op::Claim { round, target }]),
                     _ => Err(Reject::AlreadyClaimed),
                 }
             })
@@ -534,6 +592,7 @@ fn entries(
             doc: None,
             name: name.to_string(),
             path: path.unwrap_or(".").to_string(),
+            target: Some(".".to_string()),
         });
     }
     for rel in &found.review_files {
@@ -553,11 +612,18 @@ fn entries(
             }
             continue;
         }
+        // From the doc's real folder, so a respond through any link finds this one
+        let target = doc
+            .canonicalize()
+            .ok()
+            .and_then(|real| Some(relative(real.parent()?, root)))
+            .map(|rel| rel.to_string_lossy().into_owned());
         out.push(Entry {
             log: root.join(rel),
             doc: Some(doc),
             name: shown(doc_rel),
             path: render::shell_quote(&shown(doc_rel)),
+            target,
         });
     }
     out
@@ -723,19 +789,33 @@ fn block(entry: &Entry, pick: Pick, opts: &Opts, now: u64, inputs: &Inputs) -> B
     let parsed = &inputs.parsed;
     let index = fold::scan(parsed, now);
     let lines: HashMap<u32, &Line> = parsed.lines.iter().map(|l| (l.n, l)).collect();
-    let (state, doc) = match &inputs.text {
+    let (state, turn_notes, doc) = match &inputs.text {
         Some(text) => {
             let doc = Doc::new(text);
-            let state = fold::fold(parsed, &Chain::build(parsed), &doc).state;
-            (state, Some(doc))
+            let chain = Chain::build(parsed);
+            let (state, turn_notes) = {
+                let folded = fold::fold(parsed, &chain, &doc);
+                (folded.state, folded.turn_notes)
+            };
+            (state, turn_notes, Some(doc))
         }
-        None => (fold::fold_dir(parsed), None),
+        None => (fold::fold_dir(parsed), Vec::new(), None),
     };
     let line = |n: u32| lines.get(&n).copied();
     let drafted_by = state.owner.drafted_by.clone();
 
     let (round, claim, stance) = match pick {
-        Pick::Approved { round } => return approved(entry, &state, line(round), drafted_by),
+        Pick::Approved { round } => {
+            return approved(
+                entry,
+                &state,
+                &turn_notes,
+                &index,
+                line(round),
+                drafted_by,
+                opts,
+            );
+        }
         Pick::Mine { claim, round } => (round, Some(claim), Stance::Mine),
         Pick::Peek { round } => (round, None, Stance::Peek { tty: !opts.peek }),
         Pick::ReadOnly { claim, round } => {
@@ -758,6 +838,7 @@ fn block(entry: &Entry, pick: Pick, opts: &Opts, now: u64, inputs: &Inputs) -> B
         .filter(|i| fold::listed(i, claim, &pending, read_only))
         .map(|i| as_sent(i, &lines, upto))
         .collect();
+    let answers = answers(&state, &turn_notes, since(&index, round), upto);
     let you = match (&doc, read_only) {
         (Some(doc), false) => you_lines(&state, &index, &lines, doc),
         _ => Vec::new(),
@@ -771,8 +852,11 @@ fn block(entry: &Entry, pick: Pick, opts: &Opts, now: u64, inputs: &Inputs) -> B
         drafted_by: drafted_by.clone(),
         stance,
         items: shown.iter().map(item_line).collect(),
+        answers: answers.iter().map(Answer::line).collect(),
         you: you.clone(),
         all: opts.all,
+        next: !opts.peek,
+        wait: !opts.dir,
     };
     let json = json!({
         "status": "round",
@@ -783,29 +867,53 @@ fn block(entry: &Entry, pick: Pick, opts: &Opts, now: u64, inputs: &Inputs) -> B
         "handed_back": {"ts": view.handed_at, "by": view.handed_by.name},
         "drafted_by": drafted_by,
         "items": shown,
+        "answers": answers.iter().map(Answer::json).collect::<Vec<_>>(),
         "you": you,
     });
     Block {
         text: render::round(&view),
         json,
         changed: false,
+        handed: Some(Handed {
+            at: view.handed_at,
+            notes: view.items.len(),
+            answers: view.answers.len(),
+            doc: entry.doc.is_some(),
+        }),
     }
 }
 
 fn approved(
     entry: &Entry,
     state: &ReviewState,
+    turn_notes: &[TurnNote],
+    index: &TurnIndex,
     line: Option<&Line>,
     drafted_by: Option<String>,
+    opts: &Opts,
 ) -> Block {
     let Some(approve) = &state.approve else {
         return Block {
             text: render::nothing(&entry.name, Some(&entry.path)),
             json: json!({"status": "nothing", "doc": entry.name}),
             changed: false,
+            handed: None,
         };
     };
     let changed = !approve.current_matches;
+    // Replies written before the approve are all the agent will get
+    let before = approve.n.saturating_sub(1);
+    let answers = answers(state, turn_notes, since(index, approve.n), before);
+    let unanswered: Vec<&Item> = state
+        .items
+        .iter()
+        .filter(|i| agents(i) && i.verdict == Some(Verdict::Ask))
+        .filter(|i| {
+            !i.replies
+                .iter()
+                .any(|r| r.by.kind == ByKind::Human && r.n < approve.n)
+        })
+        .collect();
     let view = ApprovedView {
         name: entry.name.clone(),
         path: entry.path.clone(),
@@ -814,12 +922,121 @@ fn approved(
         drafted_by,
         rev: approve.rev.clone(),
         changed_to: changed.then(|| state.rev.clone()),
+        answers: answers.iter().map(Answer::line).collect(),
+        unanswered: unanswered.iter().map(|i| target_of(&i.at)).collect(),
+        next: !opts.peek,
     };
+    let unanswered: Vec<Value> = unanswered
+        .iter()
+        .map(|i| asked_json(i.n, Some(&i.at)))
+        .collect();
     Block {
         text: render::approved(&view),
-        json: json!({"status": "approved", "doc": entry.name, "approve": approve, "rev": state.rev}),
+        json: json!({"status": "approved", "doc": entry.name, "approve": approve, "rev": state.rev,
+                     "unanswered": unanswered}),
         changed,
+        handed: None,
     }
+}
+
+/// The last human line an earlier claim already took, so replies up to it reached the
+/// agent then.
+fn since(index: &TurnIndex, round: u32) -> u32 {
+    index
+        .rounds
+        .iter()
+        .filter(|r| r.kind == RoundKind::Submit && r.n < round)
+        .filter(|r| r.claim.is_some() && r.withdrawn.is_none())
+        .map(|r| r.upto)
+        .max()
+        .unwrap_or(0)
+}
+
+/// A note of the agent's that the reviewer can answer.
+fn agents(item: &Item) -> bool {
+    item.by.kind != ByKind::Human
+        && item.op == "comment"
+        && !matches!(item.status, ItemStatus::Retracted | ItemStatus::Withdrawn)
+}
+
+/// The reviewer's reply to an agent's note, ask or turn note.
+struct Answer<'a> {
+    to: u32,
+    ask: bool,
+    /// `None` for a turn note, which is on the whole doc.
+    at: Option<&'a AtState>,
+    reply: &'a ReplyState,
+}
+
+impl Answer<'_> {
+    fn line(&self) -> AnswerLine {
+        AnswerLine {
+            ask: self.ask,
+            target: self.at.map_or(Target::Doc, target_of),
+            verdict: self.reply.verdict,
+            body: self.reply.body.clone(),
+        }
+    }
+
+    fn json(&self) -> Value {
+        let mut out = asked_json(self.to, self.at);
+        out["kind"] = json!(if self.ask { "answer" } else { "re" });
+        out["n"] = json!(self.reply.n);
+        if let Some(verdict) = self.reply.verdict {
+            out["verdict"] = json!(verdict);
+        }
+        if let Some(body) = &self.reply.body {
+            out["body"] = json!(body);
+        }
+        out
+    }
+}
+
+/// Each agent note's and turn note's latest reply from the reviewer written after line
+/// `since`, up to line `upto`.
+fn answers<'a>(
+    state: &'a ReviewState,
+    turn_notes: &'a [TurnNote],
+    since: u32,
+    upto: u32,
+) -> Vec<Answer<'a>> {
+    let latest = |replies: &'a [ReplyState]| {
+        replies
+            .iter()
+            .filter(|r| r.by.kind == ByKind::Human && r.n > since && r.n <= upto)
+            .max_by_key(|r| r.n)
+    };
+    let on_notes = state.items.iter().filter(|i| agents(i)).filter_map(|i| {
+        Some(Answer {
+            to: i.n,
+            ask: i.verdict == Some(Verdict::Ask),
+            at: Some(&i.at),
+            reply: latest(&i.replies)?,
+        })
+    });
+    let on_turns = turn_notes.iter().filter_map(|t| {
+        Some(Answer {
+            to: t.n,
+            ask: false,
+            at: None,
+            reply: latest(&t.replies)?,
+        })
+    });
+    on_notes.chain(on_turns).collect()
+}
+
+/// `{to, quote?}`: an agent's note, with its quote when it has one.
+fn asked_json(to: u32, at: Option<&AtState>) -> Value {
+    let mut out = json!({"to": to});
+    if let Some(AtState {
+        kind: AtKind::Anchor,
+        quote: Some(quote),
+        ..
+    }) = at
+    {
+        out["quote"] = json!(quote);
+    }
+    out
 }
 
 /// Submits a claim of `round` would take: unclaimed, not withdrawn, up to it.

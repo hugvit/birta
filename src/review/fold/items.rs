@@ -1,7 +1,7 @@
 //! Notes and what became of them: amends, retracts, replies, and whether the turn that
 //! took each one answered it.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::texts::{Texts, touches, untouched};
 use super::turns::{RoundRec, Turns};
@@ -57,13 +57,18 @@ pub(super) struct ReplyRec {
     pub kind: Option<ReplyKind>,
     pub verdict: Option<Verdict>,
     pub body: Option<String>,
+    pub retracted: bool,
 }
 
 #[derive(Default)]
 pub(super) struct Notes {
     pub notes: Vec<Note>,
+    /// The agent's turn notes, which take replies like its notes do.
+    pub turn_notes: Vec<Note>,
     /// Lines of human replies, which go back with the next hand-back.
     pub human_replies: Vec<u32>,
+    /// Each reply's line to the note or turn note it answers.
+    reply_to: HashMap<u32, u32>,
 }
 
 impl Notes {
@@ -79,6 +84,14 @@ impl Notes {
             .binary_search_by_key(&n, |note| note.n)
             .ok()
             .map(|i| &mut self.notes[i])
+    }
+
+    /// The note or turn note at line `n`.
+    fn target_mut(&mut self, n: u32) -> Option<&mut Note> {
+        if let Ok(i) = self.turn_notes.binary_search_by_key(&n, |note| note.n) {
+            return Some(&mut self.turn_notes[i]);
+        }
+        self.get_mut(n)
     }
 
     /// Takes in `line`; `index` has seen only the lines before it.
@@ -109,24 +122,57 @@ impl Notes {
                     replies: Vec::new(),
                 });
             }
+            Op::TurnNote { body, .. } if line.by.kind == ByKind::Agent => {
+                self.turn_notes.push(Note {
+                    n: line.n,
+                    by: line.by.clone(),
+                    cid: None,
+                    ts,
+                    at: At::Doc,
+                    verdict: None,
+                    body: Some(body.clone()),
+                    to: None,
+                    kind: None,
+                    amended: Vec::new(),
+                    retracted: false,
+                    superseded: false,
+                    replies: Vec::new(),
+                });
+            }
             Op::Amend {
                 to,
                 body,
                 verdict,
                 drop_verdict,
-            } if line.by.kind == ByKind::Human => match self.draft_mut(*to, index) {
-                Some(note) => {
+            } if line.by.kind == ByKind::Human => {
+                if let Some(reply) = self.draft_reply_mut(*to, &line.by, index) {
                     if body.is_some() {
-                        note.body.clone_from(body);
+                        reply.body.clone_from(body);
                     }
                     if verdict.is_some() || *drop_verdict {
-                        note.verdict = *verdict;
+                        reply.verdict = *verdict;
                     }
-                    note.amended.push(line.n);
+                    return;
                 }
-                None => warnings.push(unchangeable(line.n, "amend", *to)),
-            },
+                match self.draft_mut(*to, index) {
+                    Some(note) => {
+                        if body.is_some() {
+                            note.body.clone_from(body);
+                        }
+                        if verdict.is_some() || *drop_verdict {
+                            note.verdict = *verdict;
+                        }
+                        note.amended.push(line.n);
+                    }
+                    None => warnings.push(unchangeable(line.n, "amend", *to)),
+                }
+            }
             Op::Retract { to } if line.by.kind == ByKind::Human => {
+                if let Some(reply) = self.draft_reply_mut(*to, &line.by, index) {
+                    reply.retracted = true;
+                    self.human_replies.retain(|&n| n != *to);
+                    return;
+                }
                 match self.draft_mut(*to, index) {
                     Some(note) => note.retracted = true,
                     None => warnings.push(unchangeable(line.n, "retract", *to)),
@@ -140,7 +186,7 @@ impl Notes {
                 ..
             } => {
                 let human = line.by.kind == ByKind::Human;
-                let Some(note) = self.get_mut(*to) else {
+                let Some(note) = self.target_mut(*to) else {
                     warnings.push(format!(
                         "line {}: reply to {to} ignored: no such note",
                         line.n
@@ -157,7 +203,9 @@ impl Notes {
                     kind: *kind,
                     verdict: *verdict,
                     body: body.clone(),
+                    retracted: false,
                 });
+                self.reply_to.insert(line.n, *to);
                 if human {
                     self.human_replies.push(line.n);
                 }
@@ -168,13 +216,31 @@ impl Notes {
 
     /// Human note `to`, while nothing has handed it back yet.
     fn draft_mut(&mut self, to: u32, index: &TurnIndex) -> Option<&mut Note> {
-        let sent = index
-            .rounds
-            .iter()
-            .any(|r| r.withdrawn.is_none() && r.n > to && r.upto >= to);
+        let sent = sent(to, index);
         self.get_mut(to)
             .filter(|note| note.human() && !note.retracted && !sent)
     }
+
+    /// Reply `to`, when `by` wrote it and nothing has handed it back yet.
+    fn draft_reply_mut(&mut self, to: u32, by: &By, index: &TurnIndex) -> Option<&mut ReplyRec> {
+        let note = *self.reply_to.get(&to)?;
+        if sent(to, index) {
+            return None;
+        }
+        self.target_mut(note)?
+            .replies
+            .iter_mut()
+            .find(|r| r.n == to)
+            .filter(|r| r.by.kind == ByKind::Human && r.by.name == by.name && !r.retracted)
+    }
+}
+
+/// Whether a standing hand-back covers line `n`.
+fn sent(n: u32, index: &TurnIndex) -> bool {
+    index
+        .rounds
+        .iter()
+        .any(|r| r.withdrawn.is_none() && r.n > n && r.upto >= n)
 }
 
 fn unchangeable(n: u32, op: &str, to: u32) -> String {
@@ -304,7 +370,10 @@ pub(super) fn status(
     out: &Outcome,
 ) -> ItemStatus {
     if !note.human() {
-        let answered = note.replies.iter().any(|r| r.by.kind == ByKind::Human);
+        let answered = note
+            .replies
+            .iter()
+            .any(|r| r.by.kind == ByKind::Human && !r.retracted);
         return match (note.blank(), answered) {
             (true, true) => ItemStatus::Answered,
             (true, false) => ItemStatus::Open,

@@ -106,10 +106,14 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       var path = BR.pure.nextFile(dir, CURRENT_PATH, step);
       if (path) go(path);
     },
-    /** n past this page's last stop, or p before its first: the next file with news, at its first or last stop. */
+    /**
+     * n past this page's last stop, or p before its first: the next file with news, at its first
+     * or last stop. False when there is none.
+     */
     cross: function (step) {
       var path = BR.pure.nextFile(dir, CURRENT_PATH, step);
       if (path) go(path, step > 0 ? 'first' : 'last');
+      return !!path;
     },
     open: function (href) { location.href = href; }
   };

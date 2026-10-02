@@ -216,7 +216,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   function render() {
     queued = false;
-    var marks = current ? BR.pure.laneMarks(current, { now: BR.chrome.now() }) : [];
+    var now = BR.chrome.now();
+    // Approved, the doc reads clean: only the dots stay
+    var marks = current && !BR.pure.clean(current, now) ? BR.pure.laneMarks(current, { now: now }) : [];
     // A glyph shares its block's lane with the bar, so it moves to the slot beside it
     var barred = {};
     marks.forEach(function (m) { if (m.mark === 'bar') barred[m.sp] = m; });

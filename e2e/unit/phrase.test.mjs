@@ -103,31 +103,31 @@ const FIXTURE_CHROME = {
   picked: { phrase: "Claude picked up 14:13", button: B("With Claude", false, true), pill: null, menu: [COPY, MINE] },
   replied: {
     phrase: "Claude replied 14:13 · 1 done · 1 answered · 1 not handled",
-    button: B("Approve · 1 unseen", false),
+    button: B("Approve · 2 unseen", false),
     pill: null,
     menu: [COPY, MINE],
   },
   unseen: {
     phrase: "Claude replied 14:13 · 1 done · 1 answered · 2 unasked · 1 not handled",
-    button: B("Approve · 3 unseen", false),
+    button: B("Approve · 4 unseen", false),
     pill: null,
     menu: [COPY, MINE],
   },
   rewrite: {
     phrase: "Claude replied 14:13 · 1 done · 1 answered · 3 unasked",
-    button: B("Approve · 5 unseen", false),
+    button: B("Approve · 6 unseen", false),
     pill: null,
     menu: [COPY, MINE],
   },
   lost: {
     phrase: "Claude replied 14:13 · 1 done · 1 answered · 1 not handled",
-    button: B("Approve · 2 unseen", false),
+    button: B("Approve · 3 unseen", false),
     pill: null,
     menu: [COPY, MINE],
   },
   // The approve's hold has passed and nothing claimed it, so it can still be taken back
   approved: {
-    phrase: "approved 14:13 · 1 later",
+    phrase: "approved 14:13 · c to reopen",
     button: B("Approved", false, true),
     pill: null,
     menu: ["withdraw", COPY, MINE],
@@ -277,7 +277,7 @@ const CRAFTED = [
       s.approve.ts = at(16, 30);
       s.phrase.replied.ts = at(11, 45);
     }),
-    { phrase: "approved 16:30 · 1 later" },
+    { phrase: "approved 16:30 · c to reopen" },
   ],
 
   // The button names whoever holds the turn: the live claimer, else the drafter, else the agent
@@ -383,13 +383,13 @@ const CRAFTED = [
 
   // Approve
   [
-    "an approval whose text changed says so, and hands back again",
+    "an approval whose text changed says so, and can be approved again",
     bent("approved", (s) => {
       s.approve.changed_since = true;
       s.approve.current_matches = false;
       s.approve.later = 0;
     }),
-    { phrase: "approved 14:13 · changed since", button: B("Hand back · 0", false, true) },
+    { phrase: "approved 14:13 · changed since · c to reopen", button: B("Approve") },
   ],
   [
     "an approval whose text changed hands back the notes written since",
@@ -400,12 +400,14 @@ const CRAFTED = [
     }),
     { button: B("Hand back · 2") },
   ],
-  ["an approval counts what waits for later", bent("approved", (s) => (s.approve.later = 2)), { phrase: "approved 14:13 · 2 later" }],
+  // What waits for later goes to the tooltip; the clean view's phrase stays bare
+  ["an approval leaves what waits for later out of the phrase", bent("approved", (s) => (s.approve.later = 2)), { phrase: "approved 14:13 · c to reopen" }],
   [
     "unanswered questions show on the approve button",
     bent("replied", (s) => {
       s.counts.unseen = 0;
       s.counts.open_asks = 1;
+      s.items.find((i) => i.n === 6).replies[0].seen = true;
     }),
     { button: B("Approve · 1 unanswered", false) },
   ],
@@ -415,11 +417,15 @@ const CRAFTED = [
       s.counts.unseen = 2;
       s.counts.open_asks = 1;
     }),
-    { button: B("Approve · 2 unseen", false) },
+    // Two changes and the reply
+    { button: B("Approve · 3 unseen", false) },
   ],
   [
     "with nothing unseen or unanswered the button approves",
-    bent("replied", (s) => (s.counts.unseen = 0)),
+    bent("replied", (s) => {
+      s.counts.unseen = 0;
+      s.items.find((i) => i.n === 6).replies[0].seen = true;
+    }),
     { button: B("Approve") },
   ],
 
@@ -481,7 +487,7 @@ const CRAFTED = [
   [
     "an approval ends the silence too",
     state("approved"),
-    { phrase: "approved 14:13 · 1 later", menu: ["withdraw", COPY, MINE] },
+    { phrase: "approved 14:13 · c to reopen", menu: ["withdraw", COPY, MINE] },
     (s) => s.phrase.picked_up.silence.since_ts + 20 * MIN,
   ],
   [

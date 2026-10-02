@@ -9,6 +9,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var HINT = 'c note · q ask · x cut';
   var CLAMPED = 'selection clamped to this paragraph';
   var CREATED = 'review file created · z to undo';
+  var END = 'no more · j/k to move';
+  var REOPEN = 'approved · c to reopen';
+  // After approve these only say how to start again
+  var REOPENS = { yes: 1, no: 1, later: 1, your_call: 1, ask: 1, next_item: 1, prev_item: 1 };
 
   var stops = [];
   var focus = null;
@@ -18,8 +22,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   // This page's own acts, newest last; z takes back the top once its ack names its line
   var undos = [];
   var scrollQueued = false;
-  // Where n and p last landed, as `[rank, line, order]`, so a server push can't skip a stop
+  // Where n and p last landed, as `[line, rank, order]`, so a server push can't skip a stop
   var cursor = null;
+  // The round the cursor walked; a new one starts the walk from the top
+  var cursorRound = null;
 
   // Each stop's element, or the summary of a closed details for those it hides, until the doc changes
   var placed = null;
@@ -66,12 +72,18 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return placedStops().filter(function (el) { return standIns.has(el) || el.getClientRects().length; });
   }
 
-  function attention(state) {
+  function walkOf(state) {
     if (state !== walkFor) {
       walkFor = state;
-      walkStops = BR.pure.attention(state);
+      walkStops = BR.pure.walk(state);
     }
     return walkStops;
+  }
+
+  /** The latest round as a key: a new hand-back or claim changes it. */
+  function roundOf(state) {
+    var r = (state.rounds || [])[(state.rounds || []).length - 1];
+    return r ? r.submit + ':' + (r.claim || '') : '';
   }
 
   function headerBottom() {
@@ -150,7 +162,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   function see(el) {
     var state = BR.currentState();
     var sp = el && el.getAttribute && el.getAttribute('data-sourcepos');
-    if (!state || !sp || state.log_writable === false) return false;
+    // The clean view shows no change to have seen
+    if (!state || !sp || state.log_writable === false || BR.chrome.clean()) return false;
     var ids = (state.changes || []).filter(function (c) {
       return !c.seen && !c.settled && c.attr !== 'human' && c.range && c.range.sp === sp;
     }).map(function (c) { return c.id; });
@@ -158,32 +171,39 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return ids.length > 0;
   }
 
-  function keyOf(stop) { return [stop.rank, stop.line, stop.order]; }
+  function keyOf(stop) { return [stop.line, stop.rank, stop.order]; }
 
   function before(a, b) {
     for (var i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] < b[i];
     return false;
   }
 
-  /** Focuses a walk stop and marks it seen; blanks and not-handled rows wait for an answer or y. */
-  function land(stop) {
+  /**
+   * Focuses a walk stop, marks it seen when it isn't, and pills where it is in the walk;
+   * blanks and not-handled rows wait for an answer or y.
+   */
+  function land(stop, state) {
+    var all = walkOf(state);
     cursor = keyOf(stop);
+    cursorRound = roundOf(state);
     var el = stop.sp ? blockOf(stop.sp) : null;
     setFocus(el);
     if (el) reveal(el);
-    if (stop.kind === 'change' || stop.kind === 'reply') BR.op({ op: 'seen', ids: [stop.id] });
+    if (stop.unseen && (stop.kind === 'change' || stop.kind === 'reply')) BR.op({ op: 'seen', ids: [stop.id] });
     BR.flow.focusStop(stop);
+    showPill((all.indexOf(stop) + 1) + ' of ' + all.length + ' · n next · p back');
   }
 
   function walk(step) {
     var state = BR.currentState();
     if (!state || state.log_writable === false) return;
-    var all = attention(state);
+    if (cursorRound !== roundOf(state)) cursor = null;
+    var all = walkOf(state);
     var next = step > 0
       ? all.filter(function (x) { return !cursor || before(cursor, keyOf(x)); })[0]
       : all.filter(function (x) { return cursor && before(keyOf(x), cursor); }).pop();
-    if (next) land(next);
-    else BR.dir.cross(step);
+    if (next) land(next, state);
+    else if (!BR.dir.cross(step)) showPill(END);
   }
 
   function onClick(e) {
@@ -210,6 +230,16 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       at.tl = q.tl;
     }
     return at;
+  }
+
+  /** A block anchor in words, for a composer's label: a heading as its section, else its text. */
+  function named(at) {
+    var el = at.sp ? blockOf(at.sp) : null;
+    var text = el ? el.textContent.replace(/\s+/g, ' ').trim() : '';
+    if (at.k === 'block' && el && /^h[1-6]$/.test(el.localName)) {
+      return new Array(Number(el.localName[1]) + 1).join('#') + ' ' + text + ' (section)';
+    }
+    return '"' + (at.k === 'quote' ? at.q : text).slice(0, 40) + '"';
   }
 
   /** What a verdict points at: the selection, else the focus, else the whole doc. */
@@ -429,6 +459,17 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         move(action === 'focus_next' ? 1 : -1);
         return true;
       }
+      if (BR.chrome.clean()) {
+        if (REOPENS[action]) {
+          showPill(REOPEN);
+          return true;
+        }
+        if (action === 'note') {
+          var on = target();
+          BR.flow.open('note', on, null, 'new round · ' + (on.k === 'doc' ? 'whole doc' : named(on)));
+          return true;
+        }
+      }
       if (action === 'next_item' || action === 'prev_item') {
         walk(action === 'next_item' ? 1 : -1);
         return true;
@@ -468,20 +509,26 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     },
     /** Shows `text` in the pill, or hides it for ''. */
     pill: showPill,
-    /** The approve guard: goes to the first unseen change; false when there is none. */
-    toUnseen: function () {
+    /**
+     * The approve guard's jump: to the first unseen change or reply in doc order, else the first
+     * open question. False when there is neither.
+     */
+    guard: function () {
       var state = BR.currentState();
-      var first = state && attention(state).filter(function (x) { return x.kind === 'change'; })[0];
-      if (first) land(first);
+      if (!state) return false;
+      var all = walkOf(state);
+      var first = all.filter(function (x) { return x.unseen && (x.kind === 'change' || x.kind === 'reply'); })[0] ||
+        all.filter(function (x) { return x.kind === 'blank' && x.unseen; })[0];
+      if (first) land(first, state);
       return !!first;
     },
     /** Lands on this page's first or last walk stop, after n or p crossed files. */
     landAt: function (which) {
       var state = BR.currentState();
       if (!state) return;
-      var all = attention(state);
+      var all = walkOf(state);
       var stop = which === 'last' ? all[all.length - 1] : all[0];
-      if (stop) land(stop);
+      if (stop) land(stop, state);
     },
     /** Puts an act of this page's on the z stack: `{cid, undo(n) -> op fields, item?, created?}`. */
     remember: remember,

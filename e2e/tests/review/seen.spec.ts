@@ -25,6 +25,8 @@ const WIDE = { width: 1280, height: 900 };
 const SETTLE_MS = 400;
 /** How long a first x on a many-hunk change waits for the second. */
 const CONFIRM_MS = 3_000;
+/** How long after the approve guard's jump a ⌘⏎ is still ignored. */
+const DWELL_MS = 1_000;
 
 type Start = (
   files: Record<string, string>,
@@ -170,6 +172,15 @@ async function focusOn(page: Page, sp: string) {
   await expect.poll(() => focused(page)).toBe(sp);
 }
 
+/** Presses n until the walk lands on `sp`, failing after `max` stops. */
+async function nTo(page: Page, sp: string, max = 12) {
+  for (let i = 0; i < max && (await focused(page)) !== sp; i++) {
+    await page.keyboard.press("n");
+    await page.waitForTimeout(50);
+  }
+  await expect.poll(() => focused(page)).toBe(sp);
+}
+
 /** Clicks the first text of the block `sp`, as a reader clicking into it would. */
 async function clickIn(page: Page, sp: string) {
   const box = await page.evaluate((sp) => {
@@ -189,57 +200,54 @@ async function clickIn(page: Page, sp: string) {
 // --- Seen ------------------------------------------------------------------------------------
 
 test.describe("seen", () => {
-  test("n walks the unseen changes, then the replies, then not-handled rows, sending seen at each", async ({ page, birta }) => {
+  test("n walks every stop in doc order, sending seen at each change and reply", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "unseen");
-    const walk = [
-      { ids: ["9.0"], focus: "5:1-6:68" },
-      { ids: ["10.0"], focus: "11:1-11:44" },
-      { ids: ["11.0"] },
-      { ids: ["#13"] },
-    ];
-    for (const [i, step] of walk.entries()) {
-      await page.keyboard.press("n");
-      await expect.poll(() => seenIds(mock), { message: `step ${i + 1}` }).toEqual(walk.slice(0, i + 1).map((s) => s.ids));
-      if (step.focus) expect(await focused(page), `step ${i + 1}`).toBe(step.focus);
-    }
-    // A not-handled row is the last stop; stepping there acknowledges nothing, y does
+    await page.keyboard.press("n");
+    await expect.poll(() => seenIds(mock)).toEqual([["#13"]]);
+    expect(await focused(page)).toBeNull();
+    await page.keyboard.press("n");
+    await expect.poll(() => seenIds(mock)).toEqual([["#13"], ["9.0"]]);
+    expect(await focused(page)).toBe("5:1-6:68");
+    // A not-handled row: stepping there acknowledges nothing, y does
     await page.keyboard.press("n");
     await expect.poll(() => focused(page)).toBe("10:1-10:16");
     await page.waitForTimeout(SETTLE_MS);
-    expect(seenIds(mock)).toHaveLength(walk.length);
+    expect(seenIds(mock)).toHaveLength(2);
     await page.keyboard.press("y");
     await expect.poll(() => seenIds(mock).at(-1)).toEqual(["nh:5"]);
+    await page.keyboard.press("n");
+    await expect.poll(() => seenIds(mock).at(-1)).toEqual(["10.0"]);
+    expect(await focused(page)).toBe("11:1-11:44");
+    await page.keyboard.press("n");
+    await expect.poll(() => seenIds(mock).at(-1)).toEqual(["11.0"]);
     // n has nowhere further to go in one file
     await page.keyboard.press("n");
     await page.waitForTimeout(SETTLE_MS);
-    expect(seenIds(mock)).toHaveLength(walk.length + 1);
+    expect(seenIds(mock)).toHaveLength(5);
     expect(mock.ops().filter((o) => o.op !== "seen")).toEqual([]);
   });
 
   test("p walks back to the change before", async ({ page, birta }) => {
     await openFixture(page, birta, "unseen");
-    await page.keyboard.press("n");
-    await expect.poll(() => focused(page)).toBe("5:1-6:68");
-    await page.keyboard.press("n");
-    await expect.poll(() => focused(page)).toBe("11:1-11:44");
+    await nTo(page, "11:1-11:44");
+    await page.keyboard.press("p");
+    await expect.poll(() => focused(page)).toBe("10:1-10:16");
     await page.keyboard.press("p");
     await expect.poll(() => focused(page)).toBe("5:1-6:68");
   });
 
   test("n keeps walking when a step leaves the keys in a receipt, past every kind of change", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow");
-    // A receipt, an outside write, a reply that is a receipt, an unasked change, another outside write, a reply
-    const want = [["13.0"], ["26.0"], ["15.0"], ["19.0"], ["27.0"], ["#18"]];
-    for (let i = 0; i < want.length; i++) {
-      await page.keyboard.press("n");
-      await expect.poll(() => seenIds(mock), { message: `step ${i + 1}` }).toEqual(want.slice(0, i + 1));
-    }
-    // The open blank comes next: stepping there sends nothing, and it takes y as its answer
-    await page.keyboard.press("n");
-    await page.waitForTimeout(SETTLE_MS);
-    expect(seenIds(mock)).toEqual(want);
+    // The doc slot's reply, its rows, then the blanks: only the reply is seen on the way
+    await nTo(page, "3:1-3:6");
+    expect(seenIds(mock)).toEqual([["#18"]]);
+    // The open blank takes y as its answer
     await page.keyboard.press("y");
     await expect.poll(() => opsNamed(mock, "reply")).toEqual([expect.objectContaining({ op: "reply", to: 21, verdict: "yes" })]);
+    // A receipt, an outside write, a not-handled row, a reply that is a receipt, an unasked change, another outside write
+    const want = [["#18"], ["13.0"], ["26.0"], ["15.0"], ["19.0"], ["27.0"]];
+    for (let i = 0; i < 6; i++) await page.keyboard.press("n");
+    await expect.poll(() => seenIds(mock)).toEqual(want);
     expect(mock.ops().filter((o) => o.op === "comment")).toEqual([]);
   });
 
@@ -331,8 +339,7 @@ test.describe("seen", () => {
       s.counts.unseen = 0;
       s.counts.attention = 1;
     });
-    await page.keyboard.press("n");
-    await expect.poll(() => focused(page)).toBe("3:1-3:6");
+    await nTo(page, "3:1-3:6");
     await page.waitForTimeout(SETTLE_MS);
     expect(m2.ops()).toEqual([]);
   });
@@ -363,47 +370,31 @@ test.describe("seen", () => {
 // --- The approve guard -----------------------------------------------------------------------
 
 test.describe("approve guard", () => {
-  test("the first ⌘⏎ with an unseen change goes to it instead of approving; once seen, ⌘⏎ approves", async ({ page, birta }) => {
+  test("the first ⌘⏎ with something unseen goes to it instead of approving; a later one approves", async ({ page, birta }) => {
     const { mock, state } = await openFixture(page, birta, "replied");
-    await expect.poll(() => turnOf(page)).toEqual({ text: "Approve · 1 unseen", kbd: false });
+    await expect.poll(() => turnOf(page)).toEqual({ text: "Approve · 2 unseen", kbd: false });
     await page.keyboard.press("ControlOrMeta+Enter");
-    await expect.poll(() => focused(page)).toBe("5:1-6:68");
-    await expect.poll(() => seenIds(mock)).toEqual([["9.0"]]);
+    // The doc-level reply comes first in doc order
+    await expect.poll(() => seenIds(mock)).toEqual([["#11"]]);
+    expect(await focused(page)).toBeNull();
     expect(opsNamed(mock, "approve")).toEqual([]);
 
-    swap(mock, state, echoSeen(state, "9.0"));
+    const seen = echoSeen(state, "9.0");
+    seen.items.find((i: State) => i.n === 6).replies[0].seen = true;
+    swap(mock, state, seen);
     await expect.poll(() => turnOf(page)).toEqual({ text: "Approve", kbd: true });
+    await page.waitForTimeout(DWELL_MS);
     await page.keyboard.press("ControlOrMeta+Enter");
     await expect.poll(() => opsNamed(mock, "approve")).toHaveLength(1);
     expect(opFields(opsNamed(mock, "approve")[0])).toEqual(fixtureOp("approve"));
   });
 
-  test("a click on Approve · 1 unseen goes to the change too", async ({ page, birta }) => {
+  test("a click on Approve · N unseen goes there too", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "replied");
-    await expect.poll(() => turnOf(page)).toEqual({ text: "Approve · 1 unseen", kbd: false });
+    await expect.poll(() => turnOf(page)).toEqual({ text: "Approve · 2 unseen", kbd: false });
     await page.locator(".file-header birta-turn button").click();
-    await expect.poll(() => focused(page)).toBe("5:1-6:68");
-    await expect.poll(() => seenIds(mock)).toEqual([["9.0"]]);
+    await expect.poll(() => seenIds(mock)).toEqual([["#11"]]);
     expect(opsNamed(mock, "approve")).toEqual([]);
-  });
-
-  test("unseen changes go first, one per ⌘⏎; an unanswered question then doesn't block", async ({ page, birta }) => {
-    const { mock, state } = await openFixture(page, birta, "unseen", (s) => {
-      s.counts.open_asks = 1;
-      s.counts.attention += 1;
-    });
-    await expect.poll(() => turnOf(page)).toEqual({ text: "Approve · 3 unseen", kbd: false });
-    const labels = ["Approve · 2 unseen", "Approve · 1 unseen", "Approve · 1 unanswered"];
-    for (const [i, id] of ["9.0", "10.0", "11.0"].entries()) {
-      await page.keyboard.press("ControlOrMeta+Enter");
-      await expect.poll(() => seenIds(mock).at(-1), { message: `press ${i + 1}` }).toEqual([id]);
-      expect(opsNamed(mock, "approve")).toEqual([]);
-      swap(mock, state, echoSeen(state, id));
-      await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe(labels[i]);
-    }
-    await page.keyboard.press("ControlOrMeta+Enter");
-    await expect.poll(() => opsNamed(mock, "approve")).toHaveLength(1);
-    expect(seenOps(mock)).toHaveLength(3);
   });
 
   test("a hand-back is not guarded: with notes waiting and changes unseen, ⌘⏎ hands back", async ({ page, birta }) => {
@@ -525,8 +516,7 @@ test.describe("receipt keys", () => {
 
   test("n onto a change with a receipt makes x its undo; j onto the block keeps x the block's no", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow");
-    await page.keyboard.press("n");
-    await expect.poll(() => focused(page)).toBe("5:1-6:68");
+    await nTo(page, "5:1-6:68");
     await page.keyboard.press("x");
     await expect.poll(() => opsNamed(mock, "undo_change")).toEqual([expect.objectContaining({ change: "13.0" })]);
     expect(mock.ops().filter((o) => o.op === "comment")).toEqual([]);
@@ -601,9 +591,7 @@ test.describe("a receipt for every change", () => {
 
   test("n onto an unasked change makes x its undo", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "unseen");
-    await page.keyboard.press("n");
-    await page.keyboard.press("n");
-    await expect.poll(() => focused(page)).toBe("11:1-11:44");
+    await nTo(page, "11:1-11:44");
     await page.keyboard.press("x");
     await expect.poll(() => opsNamed(mock, "undo_change")).toEqual([expect.objectContaining({ change: "10.0" })]);
     expect(opsNamed(mock, "comment")).toEqual([]);
@@ -751,7 +739,7 @@ test.describe("beacon", () => {
     const { mock } = await openFixture(page, birta, "unseen", (s) => (s.counts.drafts = 1), { acks: "manual" });
     await noteOnDoc(page, "overall fine");
     await page.keyboard.press("n");
-    await expect.poll(() => seenIds(mock)).toEqual([["9.0"]]);
+    await expect.poll(() => seenIds(mock)).toEqual([["#13"]]);
     await clickIn(page, "1:1-1:16");
     // The hand-back waits for the note's ack, which never comes here, so it is never sent at all
     await page.keyboard.press("ControlOrMeta+Enter");
@@ -766,7 +754,7 @@ test.describe("beacon", () => {
     expect(body.token).toBe(await page.evaluate(() => (window as unknown as { BOOT: State }).BOOT.review.token));
     expect(body.tab).toBe(mock.frames.find((f) => f.msg.type === "hello")!.msg.tab);
     expect(body.path).toBe("pr.md");
-    expect(body.seen).toContain("9.0");
+    expect(body.seen).toContain("#13");
     const note = opsNamed(mock, "comment")[0];
     expect(body.ops).toContainEqual(expect.objectContaining({ type: "op", cid: note.cid, op: "comment", body: "overall fine" }));
     for (const b of all) {
@@ -776,6 +764,7 @@ test.describe("beacon", () => {
 
   test("an unacked approve never rides the beacon", async ({ page, birta }) => {
     const seen = echoSeen(fixtureState("replied"), "9.0");
+    seen.items.find((i: State) => i.n === 6).replies[0].seen = true;
     const { mock } = await open(page, birta, fixtureDoc("replied"), seen, { acks: "manual" });
     await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve");
     await page.keyboard.press("ControlOrMeta+Enter");
@@ -794,21 +783,21 @@ test.describe("beacon", () => {
   test("pagehide sends the beacon too", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "unseen", undefined, { acks: "manual" });
     await page.keyboard.press("n");
-    await expect.poll(() => seenIds(mock)).toEqual([["9.0"]]);
+    await expect.poll(() => seenIds(mock)).toEqual([["#13"]]);
     await page.evaluate(() => window.dispatchEvent(new Event("pagehide")));
-    await expect.poll(async () => (await beacons(page)).flatMap((b) => b.body.seen)).toContain("9.0");
+    await expect.poll(async () => (await beacons(page)).flatMap((b) => b.body.seen)).toContain("#13");
   });
 
   test("what the server has acked stays out of the beacon", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "unseen");
     await noteOnDoc(page, "already kept");
     await page.keyboard.press("n");
-    await expect.poll(() => seenIds(mock)).toEqual([["9.0"]]);
+    await expect.poll(() => seenIds(mock)).toEqual([["#13"]]);
     await page.waitForTimeout(SETTLE_MS);
     await hide(page);
     await page.waitForTimeout(SETTLE_MS);
     for (const b of await beacons(page)) {
-      expect(b.body.seen ?? []).not.toContain("9.0");
+      expect(b.body.seen ?? []).not.toContain("#13");
       expect(b.body.ops.map((o: State) => o.body)).not.toContain("already kept");
     }
   });
@@ -832,7 +821,7 @@ test.describe("beacon", () => {
   test("one hide sends one beacon, even after the socket reconnects", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "unseen", undefined, { acks: "manual" });
     await page.keyboard.press("n");
-    await expect.poll(() => seenIds(mock)).toEqual([["9.0"]]);
+    await expect.poll(() => seenIds(mock)).toEqual([["#13"]]);
     await mock.drop();
     await expect.poll(() => new Set(mock.frames.map((f) => f.socket)).size, { timeout: 10_000 }).toBe(2);
     await hide(page);
@@ -858,11 +847,11 @@ test.describe("beacon", () => {
     const flushed: string[] = [];
     page.on("request", (r) => r.url().endsWith("/review/flush") && flushed.push(r.postData() ?? ""));
     await page.keyboard.press("n");
-    await expect.poll(() => seenIds(mock)).toEqual([["9.0"]]);
+    await expect.poll(() => seenIds(mock)).toEqual([["#13"]]);
     await page.reload();
     await booted(page);
     const replayed = () => mock.frames.filter((f) => f.socket > 0 && f.msg.op === "seen").flatMap((f) => f.msg.ids);
-    await expect.poll(() => replayed().includes("9.0") || flushed.some((b) => b.includes('"9.0"'))).toBe(true);
+    await expect.poll(() => replayed().includes("#13") || flushed.some((b) => b.includes('"#13"'))).toBe(true);
   });
 });
 
@@ -1036,17 +1025,22 @@ test.describe("real server", () => {
     await expect.poll(() => washed(page)).toEqual([unasked]);
   });
 
-  test("on a real server ⌘⏎ steps through both unseen changes, then approves", async ({ page, birta }) => {
+  test("on a real server ⌘⏎ goes to the first unseen change, and a later one approves with the other unseen", async ({
+    page,
+    birta,
+  }) => {
     const s = seeded("\n", [FIX, UNASKED]);
     const { served } = await openSeeded(page, birta, s, ["7.0", "7.1"]);
     await expect.poll(() => turnOf(page)).toEqual({ text: "Approve · 2 unseen", kbd: false });
     await page.keyboard.press("ControlOrMeta+Enter");
     await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve · 1 unseen");
+    // Within the dwell a second press is a reflex: it neither steps on nor approves
     await page.keyboard.press("ControlOrMeta+Enter");
-    await expect.poll(() => turnOf(page)).toEqual({ text: "Approve", kbd: true });
+    await page.waitForTimeout(SETTLE_MS);
     const seen = reviewLog(served.root)!.filter((l) => l.op === "seen").flatMap((l) => l.ids);
-    expect(seen).toEqual(["7.0", "7.1"]);
+    expect(seen).toEqual(["7.0"]);
     expect(reviewLog(served.root)!.some((l) => l.op === "approve")).toBe(false);
+    await page.waitForTimeout(DWELL_MS);
     await page.keyboard.press("ControlOrMeta+Enter");
     await expect.poll(() => reviewLog(served.root)!.some((l) => l.op === "approve")).toBe(true);
   });
@@ -1065,12 +1059,14 @@ test.describe("killers: the walk and seen", () => {
   // K4
   test("n after the server's echo goes on to the next change, not past it", async ({ page, birta }) => {
     const { mock, state } = await openFixture(page, birta, "unseen");
-    await page.keyboard.press("n");
-    await expect.poll(() => seenIds(mock)).toEqual([["9.0"]]);
+    await nTo(page, "5:1-6:68");
+    await expect.poll(() => seenIds(mock)).toEqual([["#13"], ["9.0"]]);
     swap(mock, state, echoSeen(state, "9.0"));
-    await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve · 2 unseen");
+    await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve · 3 unseen");
     await page.keyboard.press("n");
-    await expect.poll(() => seenIds(mock)).toEqual([["9.0"], ["10.0"]]);
+    await expect.poll(() => focused(page)).toBe("10:1-10:16");
+    await page.keyboard.press("n");
+    await expect.poll(() => seenIds(mock)).toEqual([["#13"], ["9.0"], ["10.0"]]);
     expect(await focused(page)).toBe("11:1-11:44");
   });
 
@@ -1129,13 +1125,14 @@ test.describe("killers: the walk and seen", () => {
   }
 
   // K25
-  test("p from a reply walks back into the changes", async ({ page, birta }) => {
+  test("p from a removal walks back into the change above it", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "unseen");
-    for (let i = 0; i < 4; i++) await page.keyboard.press("n");
-    await expect.poll(() => seenIds(mock).at(-1)).toEqual(["#13"]);
-    await page.keyboard.press("p");
+    for (let i = 0; i < 5; i++) await page.keyboard.press("n");
+    await expect.poll(() => seenIds(mock).at(-1)).toEqual(["11.0"]);
     // 11.0 removed a block, so it walks at the block above its tick
-    await expect.poll(() => focused(page)).toBe("14:1-14:13");
+    expect(await focused(page)).toBe("14:1-14:13");
+    await page.keyboard.press("p");
+    await expect.poll(() => focused(page)).toBe("11:1-11:44");
   });
 
   // K26
@@ -1158,7 +1155,7 @@ test.describe("killers: the walk and seen", () => {
 
 test.describe("killers: the approve guard", () => {
   // K5
-  test("a real open blank never blocks approve, and ⌘⏎ goes nowhere", async ({ page, birta }) => {
+  test("a real open blank never blocks approve: the first ⌘⏎ goes to it, a later one approves", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow", (s) => {
       for (const c of s.changes) c.seen = true;
       for (const i of s.items) for (const r of i.replies ?? []) r.seen = true;
@@ -1168,28 +1165,33 @@ test.describe("killers: the approve guard", () => {
     });
     await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve · 1 unanswered");
     await page.keyboard.press("ControlOrMeta+Enter");
+    await expect.poll(() => focused(page)).toBe("3:1-3:6");
+    await page.waitForTimeout(DWELL_MS);
+    expect(opsNamed(mock, "approve")).toEqual([]);
+    await page.keyboard.press("ControlOrMeta+Enter");
     await expect.poll(() => opsNamed(mock, "approve")).toHaveLength(1);
     expect(seenOps(mock)).toEqual([]);
-    expect(await focused(page)).toBeNull();
   });
 
   // K6
   test("⌘⏎ twice before the server echoes the seen still never approves", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "replied");
     await page.keyboard.press("ControlOrMeta+Enter");
-    await expect.poll(() => seenIds(mock)).toEqual([["9.0"]]);
+    await expect.poll(() => seenIds(mock)).toEqual([["#11"]]);
     await page.keyboard.press("ControlOrMeta+Enter");
     await page.waitForTimeout(SETTLE_MS);
     expect(opsNamed(mock, "approve")).toEqual([]);
-    expect(await focused(page)).toBe("5:1-6:68");
+    expect(seenIds(mock)).toEqual([["#11"]]);
+    expect(await focused(page)).toBeNull();
   });
 
   // K7
   test("the guard skips a change the state already marks seen", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "unseen", (s) => {
       s.changes.find((c: State) => c.id === "9.0").seen = true;
+      s.items.find((i: State) => i.n === 6).replies[0].seen = true;
       s.counts.unseen -= 1;
-      s.counts.attention -= 1;
+      s.counts.attention -= 2;
     });
     await page.keyboard.press("ControlOrMeta+Enter");
     await expect.poll(() => seenIds(mock)).toEqual([["10.0"]]);
@@ -1331,7 +1333,10 @@ function seededNotHandled(): { doc: string; log: string } {
 
 test.describe("killers: real server", () => {
   // K1: the count, the flag the walk reads and the tab's news agree once the server acks
-  test("y on a not-handled row: the server counts it seen, flags it, and n never walks it again", async ({ page, birta }) => {
+  test("y on a not-handled row: the server counts it seen and flags it; n still walks the round, and it stays seen", async ({
+    page,
+    birta,
+  }) => {
     const s = seededNotHandled();
     const served = await birta({ "pr.md": s.doc, "pr.md.birta.jsonl": s.log }, GATE_ON);
     const got = watchReceived(page);
@@ -1357,9 +1362,13 @@ test.describe("killers: real server", () => {
     await booted(page);
     await expect(page).not.toHaveTitle(/^● /);
     const before = reviewLog(served.root)!.length;
+    // Seen is not settled: until a hand-back the row is still a stop of this round
     await page.keyboard.press("n");
+    await expect.poll(() => focused(page)).toBe(await stopSp(page, "metrics dashboard"));
     await page.waitForTimeout(SETTLE_MS);
     expect(reviewLog(served.root)!.slice(before)).toEqual([]);
+    expect(lastState(got).items.find((i: State) => i.n === 4).seen).toBe(true);
+    await expect(page).not.toHaveTitle(/^● /);
   });
 
   // K21

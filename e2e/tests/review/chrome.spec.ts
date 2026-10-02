@@ -204,8 +204,9 @@ test.describe("phrase and button", () => {
     ["drafts", "1 of 3 decided", "Hand back · 3", "hint", false],
     ["dir", "read-only · notes only", "Hand back · 2", "hint", false],
     ["sent", "sent 14:13 · not picked up yet", "With Claude", null, true],
-    ["replied", "Claude replied 14:13 · 1 done · 1 answered · 1 not handled", "Approve · 1 unseen", null, false],
-    ["approved", "approved 14:13 · 1 later", "Approved", null, true],
+    // The button counts unseen replies with unseen changes
+    ["replied", "Claude replied 14:13 · 1 done · 1 answered · 1 not handled", "Approve · 2 unseen", null, false],
+    ["approved", "approved 14:13 · c to reopen", "Approved", null, true],
   ];
   for (const [name, phrase, label, kbd, disabled] of SHOWN) {
     test(`${name}.json reads "${phrase}" beside "${label}"`, async ({ page, birta }) => {
@@ -242,10 +243,10 @@ test.describe("phrase and button", () => {
       const seq = [
         ["Approve", withRev(fixtureState("fresh"), revOf(doc))],
         ["Hand back · 3", withRev(fixtureState("drafts"), revOf(doc))],
-        ["Approve · 1 unseen", withRev(fixtureState("replied"), revOf(doc))],
+        ["Approve · 2 unseen", withRev(fixtureState("replied"), revOf(doc))],
         ["With Claude", withRev(fixtureState("sent"), revOf(doc))],
         ["Approved", withRev(fixtureState("approved"), revOf(doc))],
-        ["Approve · 1 unseen", long],
+        ["Approve · 2 unseen", long],
       ] as [string, State][];
       const rights: number[] = [];
       for (const [label, next] of seq) {
@@ -256,7 +257,9 @@ test.describe("phrase and button", () => {
         expect(c.turn!.box.width, label).toBeGreaterThanOrEqual(112);
         expect(c.turn!.box.right, label).toBeLessThanOrEqual(copy);
         expect(c.phrase!.box.right, label).toBeLessThanOrEqual(c.turn!.box.left);
-        expect(c.phrase!.title, label).toBe(c.phrase!.text);
+        // The clean view leaves what waits for later to the tooltip
+        if (label === "Approved") expect(c.phrase!.title, label).toBe("approved 14:13 · 1 later · c to reopen");
+        else expect(c.phrase!.title, label).toBe(c.phrase!.text);
         rights.push(c.turn!.box.right);
       }
       for (const r of rights) expect(Math.abs(r - rights[0])).toBeLessThanOrEqual(0.5);
@@ -270,7 +273,7 @@ test.describe("phrase and button", () => {
     await page.waitForTimeout(SETTLE_MS);
     const c = await chrome(page);
     expect(c.phrase?.text).toBe("Claude replied 14:13 · 1 done · 1 answered · 2 unasked · 1 not handled");
-    expect(c.turn?.text).toBe("Approve · 3 unseen");
+    expect(c.turn?.text).toBe("Approve · 4 unseen");
   });
 });
 
@@ -551,7 +554,7 @@ test.describe("hold", () => {
     const log = reviewLog(served.root)!;
     const approve = log[log.length - 1];
     expect(approve).toMatchObject({ op: "approve", rev: revOf(STOPS_DOC) });
-    await expect.poll(() => phraseOf(page), { timeout: 6_000 }).toBe(`approved ${hhmm(approve.not_before)}`);
+    await expect.poll(() => phraseOf(page), { timeout: 6_000 }).toBe(`approved ${hhmm(approve.not_before)} · c to reopen`);
     expect(await pillOf(page)).toBeNull();
     expect(await turnOf(page)).toEqual({ text: "Approved", kbd: null, disabled: true });
   });
@@ -925,18 +928,14 @@ test.describe("killers: menu and turn", () => {
     await expect.poll(() => menuOf(page)).toEqual([COPY, MINE]);
   });
 
-  test("Approve with unseen changes sends no approve; with only unanswered questions it does", async ({ page, birta }) => {
-    const { mock, state } = await openFixture(page, birta, "replied");
-    await expect.poll(async () => (await turnOf(page))?.text).toBe("Approve · 1 unseen");
+  test("Approve with something unseen sends no approve at first; a press past the guard's dwell does", async ({ page, birta }) => {
+    const { mock } = await openFixture(page, birta, "replied");
+    await expect.poll(async () => (await turnOf(page))?.text).toBe("Approve · 2 unseen");
     await page.keyboard.press("ControlOrMeta+Enter");
     await page.locator(".file-header birta-turn button").click();
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops().filter((o) => o.op === "approve")).toEqual([]);
-    const asks = JSON.parse(JSON.stringify(state));
-    asks.counts.unseen = 0;
-    asks.counts.open_asks = 1;
-    swap(mock, state, asks);
-    await expect.poll(async () => (await turnOf(page))?.text).toBe("Approve · 1 unanswered");
+    await page.waitForTimeout(1_000);
     await page.locator(".file-header birta-turn button").click();
     await expect.poll(() => mock.ops().filter((o) => o.op === "approve").length).toBe(1);
   });
@@ -1031,10 +1030,13 @@ test.describe("killers: names and tab", () => {
 
   test("the phrase's title follows every push", async ({ page, birta }) => {
     const { mock, state } = await openFixture(page, birta, "fresh");
-    for (const name of ["drafts", "sent", "approved"]) {
+    for (const name of ["drafts", "sent"]) {
       swap(mock, state, withRev(fixtureState(name), state.rev));
       await expect.poll(async () => (await chrome(page)).phrase?.title).toBe(await phraseOf(page));
     }
+    // The clean view's phrase leaves what waits for later to the title
+    swap(mock, state, withRev(fixtureState("approved"), state.rev));
+    await expect.poll(async () => (await chrome(page)).phrase?.title).toBe("approved 14:13 · 1 later · c to reopen");
   });
 
   test("not-handled rows alone are news", async ({ page, birta }) => {

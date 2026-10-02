@@ -5,6 +5,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var MIN = 60000;
   var NAME_CHARS = 24;
   var NACK_MS = 4000;
+  // A ⌘⏎ this soon after the approve guard's jump is a reflex, not a second press
+  var DWELL_MS = 1000;
+  // Keys that only modify the next one never count as "another key"
+  var MODIFIERS = { Meta: 1, Control: 1, Shift: 1, Alt: 1, AltGraph: 1, CapsLock: 1, Fn: 1 };
   var COPY = 'copy hand-off line';
   var NACKS = {
     changed_since: 'changed since · try again',
@@ -40,10 +44,40 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       decided: c.decided || 0,
       items: c.items || 0,
       notHandled: c.not_handled || 0,
-      unseen: c.unseen || 0,
+      unseen: (c.unseen || 0) + unseenReplies(s),
       asks: c.open_asks || 0
     };
   }
+
+  // The agent's replies the reader hasn't seen; the approve guard stops for them as for changes
+  function unseenReplies(s) {
+    var n = 0;
+    (s.items || []).forEach(function (i) {
+      (i.replies || []).forEach(function (r) { if (r.by && r.by.type === 'agent' && !r.seen) n++; });
+    });
+    return n;
+  }
+
+  /** Whether `s` is approved and past its hold at `now`: the page then shows only dots. */
+  BR.pure.clean = function (s, now) {
+    return !!s && s.log_writable !== false && view(s, now).p.stage === 'approved';
+  };
+
+  /**
+   * What the approve guard's first press says, or null when nothing stops it: unseen changes
+   * and replies, else the agent's open questions. `opts.key` is the turn key as the button shows it.
+   */
+  BR.pure.guardPill = function (s, opts) {
+    var v = view(s, s.server_now);
+    var again = ' · ' + opts.key + ' again approves anyway';
+    if (v.unseen) return v.unseen + ' unseen · n walk' + again;
+    if (!v.asks) return null;
+    var ask = (s.items || []).filter(function (i) {
+      return i.by && i.by.type === 'agent' && i.verdict === 'ask' && i.status === 'open';
+    })[0];
+    var who = (ask && ask.by.name) || holder(s, v.p);
+    return (who ? cap(who) : 'The agent') + ' asked ' + plural(v.asks, 'question', 'questions') + ' · n go' + again;
+  };
 
   /** Whole minutes of silence once the fold's threshold has passed, else null. */
   function silence(p, now) {
@@ -74,12 +108,13 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   /** The header phrase for `s` at server time `opts.now` (design call 5, r-frontend §11). */
   BR.pure.formatPhrase = function (s, opts) {
     if (s.log_writable === false) return 'review unavailable · folder not writable';
-    var base = docPhrase(s, opts);
+    var base = docPhrase(s, opts, !!opts.full);
     var others = opts.dir ? BR.pure.otherFiles(opts.dir, opts.path).length : 0;
     return others ? base + ' · ' + plural(others, 'other file', 'other files') + ' ▾' : base;
   };
 
-  function docPhrase(s, opts) {
+  /** The phrase; `full` keeps the facts the clean view leaves to the tooltip. */
+  function docPhrase(s, opts, full) {
     if (s.writable === false) return 'read-only · notes only';
     var v = view(s, opts.now);
     var p = v.p;
@@ -110,7 +145,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       }
       case 'approved': {
         var a = s.approve;
-        return 'approved ' + hhmm(a.ts) + (a.changed_since ? ' · changed since' : '') + (a.later ? ' · ' + a.later + ' later' : '');
+        return 'approved ' + hhmm(a.ts) + (a.changed_since ? ' · changed since' : '') +
+          (full && a.later ? ' · ' + a.later + ' later' : '') + ' · c to reopen';
       }
       case 'drafts':
         return yours();
@@ -120,6 +156,14 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       }
     }
   }
+
+  /** The phrase's tooltip: the phrase with every fact it leaves out. */
+  BR.pure.phraseTitle = function (s, opts) {
+    var all = {};
+    for (var k in opts) all[k] = opts[k];
+    all.full = true;
+    return BR.pure.formatPhrase(s, all);
+  };
 
   function button(text, kbd, disabled) { return { text: text, kbd: !!kbd, disabled: !!disabled }; }
 
@@ -148,7 +192,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       var who = holder(s, p);
       return button('With ' + (who ? short(cap(who)) : 'the agent'), false, true);
     }
-    if (p.stage === 'approved') return s.approve.changed_since ? button('Hand back · 0', false, true) : button('Approved', false, true);
+    // Text that moved on since the approve can be approved again
+    if (p.stage === 'approved' && !s.approve.changed_since) return button('Approved', false, true);
     return approve();
   };
 
@@ -210,8 +255,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   // Its batch once acked; another doc's hold the page's own state never shows
   var batch = null;
   var withdrawing = null;
-  // The pill's own message: {text} from pointing, or {nack, until} for a refused op
+  // The pill's own message: {text, until?, arm?} from pointing, or {nack, until} for a refused op
   var message = null;
+  // The approve guard's jump, until a key other than ⌘⏎ or its pill going disarms it: {at}
+  var guard = null;
   var heldN = null;
   var rows = [];
   var cur = 0;
@@ -278,7 +325,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (on) {
       var text = BR.pure.formatPhrase(s, opts(t));
       if (phraseWords.data !== text) phraseWords.data = text;
-      if (phrase.getAttribute('title') !== text) phrase.setAttribute('title', text);
+      var title = BR.pure.phraseTitle(s, opts(t));
+      if (phrase.getAttribute('title') !== title) phrase.setAttribute('title', title);
     }
     if (b) {
       var label = b.kbd ? b.text + ' ' : b.text;
@@ -303,14 +351,55 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (b && !(hold && s.hold.kind === 'approve')) hold = 'handing back · ' + plural(b.count, 'note', 'notes') + ' · z to undo';
     // A new hold speaks over whatever the pill said before it
     var n = b ? 'batch ' + b.batch : hold ? s.hold.n : null;
-    if (n !== null && n !== heldN) message = null;
+    if (n !== null && n !== heldN) say(null);
     heldN = n;
-    // A refusal's deadline runs on the page's own clock
-    if (message && message.until && Date.now() >= message.until) message = null;
+    // A deadline runs on the page's own clock
+    if (message && message.until && Date.now() >= message.until) say(null);
     var text = hold ? (down ? 'connection lost · hand-back stands' : hold)
       : message ? (message.nack ? BR.pure.nackText(message.nack, s) : message.text) : '';
-    pill.textContent = text;
+    if (pill.textContent !== text) pill.textContent = text;
     popover(pill, !!text);
+    place();
+  }
+
+  /** Replaces the pill's message; an armed one going takes its arm with it. */
+  function say(next) {
+    var was = message;
+    message = next;
+    if (was && was.arm && was !== next && was.arm.off) was.arm.off();
+  }
+
+  /** Any key but the one an armed pill waits for disarms it; a bare modifier is not a key yet. */
+  function onAnyKey(e) {
+    // A held key's repeats are not new keys
+    if (!message || !message.arm || MODIFIERS[e.key] || e.repeat) return;
+    if (message.arm.keep && message.arm.keep(e)) return;
+    say(null);
+    render();
+  }
+
+  // A pill never covers an open composer: it moves above it, or below when there is no room
+  function place() {
+    pill.style.removeProperty('top');
+    pill.style.removeProperty('bottom');
+    var c = BR.flow.composerRect && BR.flow.composerRect();
+    if (!c || !pill.textContent) return;
+    var p = pill.getBoundingClientRect();
+    if (!p.height || p.bottom <= c.top || p.top >= c.bottom || p.right <= c.left || p.left >= c.right) return;
+    var top = c.top - p.height - 8;
+    pill.style.setProperty('bottom', 'auto');
+    pill.style.setProperty('top', (top >= 0 ? top : c.bottom + 8) + 'px');
+  }
+
+  var placing = false;
+
+  function placeSoon() {
+    if (placing) return;
+    placing = true;
+    requestAnimationFrame(function () {
+      placing = false;
+      place();
+    });
   }
 
   /** Re-renders when the next hold ends, the silence threshold passes or its minute ticks, or a nack pill expires. */
@@ -329,6 +418,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (!waits.length) return;
     timer = setTimeout(function () {
       render();
+      // A hold that ends turns an approve into the clean view
+      BR.flow.refresh();
       BR.lane.redraw();
     }, Math.max(0, Math.min.apply(null, waits)) + 5);
   }
@@ -504,9 +595,33 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var b = BR.pure.turnButton(s, turnOpts(now()));
     if (!b || b.disabled) return;
     if (/^Hand back/.test(b.text)) handBackWhenAcked();
-    // With unseen changes the guard steps through them instead
-    else if (/ unseen$/.test(b.text)) BR.pointing.toUnseen();
-    else if (b.text === 'Approve' || / unanswered$/.test(b.text)) BR.op({ op: 'approve' });
+    // Inside an approve's hold the approve is already on its way
+    else if (/^Approve/.test(b.text) && !(holding(s, now()) && s.hold.kind === 'approve')) approveGuarded(s);
+  }
+
+  /**
+   * Approves, unless something unseen or an open question is left: then the first press goes
+   * there and says so, and a press past the dwell, while that pill stands, approves anyway.
+   */
+  function approveGuarded(s) {
+    if (guard) {
+      if (Date.now() - guard.at < DWELL_MS) return;
+      say(null);
+      BR.op({ op: 'approve' });
+      return;
+    }
+    var text = BR.pure.guardPill(s, { key: turnKbd.textContent });
+    if (!text || !BR.pointing.guard()) {
+      BR.op({ op: 'approve' });
+      return;
+    }
+    var mine = guard = { at: Date.now(), unseen: view(s, now()).unseen };
+    say({ text: text, arm: { keep: turnKey, off: function () { if (guard === mine) guard = null; } } });
+    render();
+  }
+
+  function turnKey(e) {
+    return BR.pure.keyAction(e, typeof KEYBINDINGS === 'undefined' ? null : KEYBINDINGS) === 'turn';
   }
 
   function onFrame(msg) {
@@ -522,12 +637,14 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
           var d = msg.state.server_now - Date.now();
           skew = skew === null ? d : Math.max(skew, d);
         }
+        // New unseen text must be seen before approve anyway counts for it
+        if (guard && msg.path === CURRENT_PATH && msg.state && view(msg.state, now()).unseen > guard.unseen) say(null);
         break;
       case 'dir_state':
         dir = msg;
         break;
       case 'ack':
-        if (message && message.nack) message = null;
+        if (message && message.nack) say(null);
         if (handBackDue && !BR.pending.unacked()) {
           handBackDue = false;
           handBack();
@@ -638,6 +755,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
       birtaBus.on(onFrame);
       document.addEventListener('copy', onCopy, true);
+      // Capture, so a key a host or the composer keeps to itself still disarms
+      document.addEventListener('keydown', onAnyKey, true);
+      window.addEventListener('scroll', placeSoon, { passive: true });
+      window.addEventListener('resize', placeSoon);
+      document.addEventListener('input', placeSoon, true);
       render();
     },
     render: render,
@@ -649,16 +771,23 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     closeMenu: closeMenu,
     /** Esc's menu layer: true when it closed the menu. */
     escape: closeMenu,
-    /** Shows `text` in the pill, or clears it for ''. */
-    pill: function (text) {
-      message = text ? { text: text } : null;
+    /**
+     * Shows `text` in the pill, or clears it for ''. An armed pill passes `arm`: `{until?, keep(e),
+     * off()}`; it goes when `until` passes or on any key `keep` doesn't claim, and `off` runs then.
+     */
+    pill: function (text, arm) {
+      say(text ? { text: text, until: arm && arm.until, arm: arm || null } : null);
       render();
     },
     pillSays: function (text) { return !!message && message.text === text; },
     /** Shows a refused op's reason until the next acked op, a new hold, or 4 s. */
     nack: function (reason) {
-      message = { nack: reason, until: Date.now() + NACK_MS };
+      say({ nack: reason, until: Date.now() + NACK_MS });
       render();
-    }
+    },
+    /** Whether the page shows the clean view: approved, and past the approve's hold. */
+    clean: function () { return BR.pure.clean(BR.currentState(), now()); },
+    /** Moves the pill clear of a composer that just opened or moved. */
+    place: place
   };
 })();

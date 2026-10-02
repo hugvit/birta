@@ -714,7 +714,7 @@ const WALK: Record<string, string> = {
   "fresh.md": fixtureDoc("fresh"),
 };
 const WALK_STATES = () => [fixtureState("unseen"), fixtureState("replied"), fixtureState("fresh")];
-// unseen.json walks 9.0, 10.0, 11.0, #13, nh:5; replied.json walks 9.0, #11, nh:5; fresh.json walks nothing
+// In doc order unseen.json walks #13, 9.0, nh:5, 10.0, 11.0; replied.json #11, 9.0, nh:5; fresh.json nothing
 
 async function openWalk(page: Page, birta: Start, dir: State) {
   const served = await birta(WALK, GATE_ON, ["."]);
@@ -743,13 +743,14 @@ test.describe("n and p across files", () => {
     for (let i = 0; i < 5; i++) await page.keyboard.press("n");
     await page.waitForTimeout(SETTLE_MS);
     expect(viewing(page)).toBe("/view/unseen.md");
-    expect(seenOn(mock, 0)).toEqual([["9.0"], ["10.0"], ["11.0"], ["#13"]]);
+    expect(seenOn(mock, 0)).toEqual([["#13"], ["9.0"], ["10.0"], ["11.0"]]);
 
     await page.keyboard.press("n");
     await page.waitForURL(`${served.url}/view/replied.md`);
     await booted(page);
-    await expect.poll(() => focused(page)).toBe("5:1-6:68");
-    await expect.poll(() => seenOn(mock, 1)).toEqual([["9.0"]]);
+    // Its first stop is the doc-level reply
+    await expect.poll(() => seenOn(mock, 1)).toEqual([["#11"]]);
+    expect(await focused(page)).toBeNull();
     // The landing was used; a reload lands nowhere
     await page.reload();
     await booted(page);
@@ -769,7 +770,7 @@ test.describe("n and p across files", () => {
       if (key === "n") for (let i = 0; i < 6; i++) await page.keyboard.press("n");
       else {
         await page.keyboard.press("n");
-        await expect.poll(() => seenOn(mock, 0)).toEqual([["9.0"]]);
+        await expect.poll(() => seenOn(mock, 0)).toEqual([["#13"]]);
         await page.keyboard.press("p");
       }
       await page.waitForURL(`${served.url}/view/replied.md`);
@@ -818,7 +819,7 @@ test.describe("n and p across files", () => {
     ]);
     const { served, mock } = await openWalk(page, birta, dir);
     await page.keyboard.press("n");
-    await expect.poll(() => seenOn(mock, 0)).toEqual([["9.0"]]);
+    await expect.poll(() => seenOn(mock, 0)).toEqual([["#13"]]);
     await page.keyboard.press("p");
     await page.waitForURL(`${served.url}/view/replied.md`);
     await booted(page);
@@ -846,7 +847,7 @@ test.describe("n and p across files", () => {
     for (let i = 0; i < 7; i++) await page.keyboard.press("n");
     await page.waitForTimeout(SETTLE_MS);
     expect(viewing(page)).toBe("/view/unseen.md");
-    expect(seenOn(mock, 0)).toEqual([["9.0"], ["10.0"], ["11.0"], ["#13"]]);
+    expect(seenOn(mock, 0)).toEqual([["#13"], ["9.0"], ["10.0"], ["11.0"]]);
   });
 });
 
@@ -949,8 +950,8 @@ test.describe("a listing that comes before review starts", () => {
     for (let i = 0; i < 6; i++) await page.keyboard.press("n");
     await page.waitForURL(`${served.url}/view/replied.md`);
     await booted(page);
-    await expect.poll(() => focused(page)).toBe("5:1-6:68");
-    await expect.poll(() => seenOn(mock, 1)).toEqual([["9.0"]]);
+    await expect.poll(() => seenOn(mock, 1)).toEqual([["#11"]]);
+    expect(await focused(page)).toBeNull();
   });
 });
 

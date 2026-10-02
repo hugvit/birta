@@ -15,9 +15,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   };
 
   /**
-   * What `n` and `p` walk, in order: unseen changes, then unseen agent replies, open agent
-   * questions and not-handled rows, each in doc order with the doc slot first. Each stop is
-   * `{kind, id, sp}`, with `id` the one its seen op would carry.
+   * What is news to the reader, the count behind the tab's dot: unseen changes, then unseen agent
+   * replies, open agent questions and not-handled rows, each in doc order with the doc slot first.
+   * Each stop is `{kind, id, sp}`, with `id` the one its seen op would carry.
    */
   // Doc order is block order: the start line of a stop's sp, with the doc slot first
   function lineOf(sp) { return sp ? parseInt(sp, 10) : 0; }
@@ -52,7 +52,52 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return out;
   };
 
+  /** Whether a hand-back after line `n` has covered it. */
+  function covered(s, n) {
+    return (s.rounds || []).some(function (r) { return r.submit > n; });
+  }
+
+  /**
+   * What `n` and `p` walk: every stop until it is settled, that is seen and then covered by a
+   * hand-back, so a round stays walkable after one pass. One top-to-bottom order, the doc slot
+   * first; on one block a change, then a reply, a blank, a not-handled row, and last in the doc
+   * slot the lost-notes row. Each stop is `{kind, id, sp, unseen}`, `id` as its seen op names it.
+   */
+  BR.pure.walk = function (s) {
+    var out = [];
+    var lost = {};
+    (s.lost || []).forEach(function (n) { lost[n] = 1; });
+    var removed = {};
+    (s.deletions || []).forEach(function (d) { removed[d.change] = d; });
+    function add(kind, id, sp, rank, order, unseen) {
+      out.push({ kind: kind, id: id, sp: sp, unseen: unseen, rank: rank, line: lineOf(sp), order: order });
+    }
+    (s.changes || []).forEach(function (c) {
+      if (c.settled || c.attr === 'human') return;
+      var d = removed[c.id];
+      add('change', c.id, (c.range && c.range.sp) || (d && d.after_sp) || null, 0, c.op * 1e4 + c.idx, !c.seen);
+    });
+    (s.items || []).forEach(function (i) {
+      var sp = !lost[i.n] && i.at && i.at.kind !== 'doc' && i.at.loc ? i.at.loc.sp : null;
+      (i.replies || []).forEach(function (r) {
+        if (r.by && r.by.type === 'agent' && (!r.seen || !covered(s, r.n))) add('reply', r.id, sp, 1, r.n, !r.seen);
+      });
+      if (i.by && i.by.type === 'agent' && i.verdict === 'ask') {
+        var mine = (i.replies || []).filter(function (r) { return r.by && r.by.type === 'human'; });
+        var last = mine[mine.length - 1];
+        if (i.status === 'open' || (i.status === 'answered' && last && !covered(s, last.n))) {
+          add('blank', '#' + i.n, sp, 2, i.n, i.status === 'open');
+        }
+      }
+      if (i.status === 'not_handled' && (!i.seen || !covered(s, i.turn))) add('not_handled', 'nh:' + i.n, sp, 3, i.n, !i.seen);
+    });
+    if ((s.lost || []).length) add('lost', 'lost', null, 4, 0, false);
+    out.sort(function (a, b) { return a.line - b.line || a.rank - b.rank || a.order - b.order; });
+    return out;
+  };
+
   var VERDICT_OF = { yes: 'yes', no: 'no', later: 'later', your_call: 'your_call' };
+  var MOVES = { next_item: 1, prev_item: 1, focus_next: 1, focus_prev: 1 };
   // What a focused note keeps from the page: each would write a verdict or a note
   var NOTE_KEYS = { yes: 1, no: 1, later: 1, your_call: 1, note: 1, ask: 1 };
   // A seen note in one of these folds to its dot
@@ -423,7 +468,17 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       e.order = order;
       out.push(e);
     }
-    if (s) {
+    // Approved: every note on a block is its dot, and nothing else of the state is drawn
+    var clean = !!s && BR.pure.clean(s, BR.chrome.now());
+    if (clean) {
+      (s.lost || []).forEach(function (n) { lost[n] = 1; });
+      (s.items || []).forEach(function (i) {
+        if (i.cid) cids[i.cid] = 1;
+        var slot = slotOfItem(i);
+        if (lost[i.n] || i.status === 'retracted' || !slot.sp || !blockOf(slot.sp)) return;
+        dotList.push({ sp: slot.sp, role: i.by && i.by.type === 'agent' ? 'agent' : 'you' });
+      });
+    } else if (s) {
       (s.lost || []).forEach(function (n) { lost[n] = 1; });
       (s.items || []).forEach(function (i) {
         if (i.cid) cids[i.cid] = 1;
@@ -508,7 +563,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       var row = rewriteRow(s);
       if (row) add(row, { doc: true }, [G_REWRITE, 0, 0]);
     }
-    if (folderNotes > 0 && BOOT.review.dir) {
+    if (!clean && folderNotes > 0 && BOOT.review.dir) {
       add({ id: 'folder', kind: 'folder', text: plural(folderNotes, 'note on this folder', 'notes on this folder') },
         { doc: true }, [G_FOLDER, 0, 0]);
     }
@@ -692,9 +747,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   /**
    * Opens a composer on `at`. `kind` is `note` or `ask`; `own` is the draft verdict on that
-   * target, whose words the note then edits.
+   * target, whose words the note then edits; `label`, when given, heads it.
    */
-  function open(kind, at, own) {
+  function open(kind, at, own, label) {
     if (comp) keep(false);
     var key = composeKey(at, kind, own ? own.n : null);
     var restored = unsent.filter(function (u) { return u.key === key; })[0];
@@ -713,7 +768,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     comp = { h: h, kind: kind, at: at, key: key, own: own, anchor: anchor, sp: anchor ? sp : null,
       tie: at.sp && (at.k === 'block' || at.k === 'quote') ? tie(anchor) : null, rev: birtaBus.rev(),
       candidates: null, pick: 0, asked: null, rcid: null, rrev: null, timer: null, qtimer: null, sent: false, active: true };
-    var target = el('div', 'muted target');
+    var target = el('div', 'muted target', label || null);
     var area = document.createElement('textarea');
     area.setAttribute('dir', 'auto');
     if (kind === 'ask') {
@@ -746,6 +801,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     reconcile();
     area.focus({ preventScroll: true });
     area.setSelectionRange(area.value.length, area.value.length);
+    BR.chrome.place();
   }
 
   function composerInput() {
@@ -915,10 +971,15 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (undoing) return;
     var many = (c.op_hunks || 1) > 1;
     if (many && !(armed && armed.id === c.id && Date.now() < armed.until)) {
-      armed = { id: c.id, until: Date.now() + CONFIRM_MS };
-      BR.chrome.pill('x again to undo ' + c.op_hunks + ' changes');
+      var mine = armed = { id: c.id, until: Date.now() + CONFIRM_MS };
+      BR.chrome.pill('x again to undo ' + c.op_hunks + ' changes', {
+        until: mine.until,
+        keep: function (e) { return action(e) === 'no'; },
+        off: function () { if (armed === mine) armed = null; }
+      });
       return;
     }
+    if (armed) BR.chrome.pill('');
     armed = null;
     var f = { op: 'undo_change', change: c.id };
     if (many) f.confirm = true;
@@ -971,7 +1032,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   function blankKey(e, n, slot) {
     if (e.defaultPrevented || e.isComposing || e.keyCode === 229 || !writable()) return;
     if (slot.querySelector('textarea')) return;
-    var verdict = VERDICT_OF[action(e)];
+    var a = action(e);
+    // The walk passes through a closed blank
+    if (MOVES[a]) return;
+    var verdict = VERDICT_OF[a];
     if (verdict) {
       e.preventDefault();
       e.stopPropagation();
@@ -1131,6 +1195,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       });
       if (hit) reconcile();
       return hit;
+    },
+    /** Draws the flow again for the state it has, as when a hold ends with no new state. */
+    refresh: function () { reconcile(); },
+    /** The open composer's box, or null. */
+    composerRect: function () {
+      return comp && comp.h.host.isConnected ? comp.h.host.getBoundingClientRect() : null;
     },
     rewriteActive: function () { return !!(state && state.rewrite); },
     /**

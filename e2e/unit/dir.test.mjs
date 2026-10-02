@@ -171,7 +171,7 @@ test("drafts in other files make the button a hand-back even with none here", ()
   assert.deepEqual(btn(state("fresh"), others), B("Hand back · 3"));
   assert.deepEqual(btn(state("replied"), others), B("Hand back · 3"));
   // With no drafts anywhere, this doc's own turn speaks
-  assert.deepEqual(btn(state("replied"), dirState([listed("b.md", summary("sent"))])), B("Approve · 1 unseen", false));
+  assert.deepEqual(btn(state("replied"), dirState([listed("b.md", summary("sent"))])), B("Approve · 2 unseen", false));
   assert.deepEqual(btn(state("fresh"), dirState([listed("b.md", summary("sent"))])), B("Approve"));
 });
 

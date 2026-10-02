@@ -3,9 +3,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   BR.pure = BR.pure || {};
 
   var ACTIONS = ['focus_next', 'focus_prev', 'note', 'ask', 'yes', 'no', 'later', 'your_call', 'next_item',
-    'prev_item', 'next_file', 'prev_file', 'undo', 'hide_marks', 'open', 'turn'];
+    'prev_item', 'next_file', 'prev_file', 'undo', 'hide_marks', 'open', 'turn', 'revert_change'];
   // A held key repeats; these write to the review file or flip a toggle, so they act once
-  var ONCE = { yes: 1, no: 1, later: 1, your_call: 1, undo: 1, turn: 1, hide_marks: 1 };
+  var ONCE = { yes: 1, no: 1, later: 1, your_call: 1, undo: 1, turn: 1, hide_marks: 1, revert_change: 1 };
   // What a composing IME or a dead key reports instead of a character
   var NOT_KEYS = { Dead: 1, Process: 1, Unidentified: 1 };
 
@@ -32,6 +32,23 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     }
     return e.altKey === has(parts, 'Alt');
   }
+
+  /** Whether a keydown matches one binding, as review's actions match theirs. */
+  BR.pure.keyMatches = matches;
+
+  var NAMED = { yes: 'y', no: 'x', note: 'c', undo: 'z', focus_next: 'j', toggle_raw: 'u', revert_change: 'u', open: 'Enter' };
+
+  /** How a pill names `action`'s key under `bindings`: a letter as typed, Enter as ⏎. */
+  BR.pure.keyName = function (action, bindings) {
+    var b = (bindings && bindings[action]) || NAMED[action] || '';
+    if (b === 'Enter') return '⏎';
+    return /^[a-z]$/i.test(b) ? b.toLowerCase() : b;
+  };
+
+  /** The page's own name for `action`'s key. */
+  BR.keyName = function (action) {
+    return BR.pure.keyName(action, typeof KEYBINDINGS === 'undefined' ? null : KEYBINDINGS);
+  };
 
   /** The review action a keydown asks for under `bindings`, or null. Reads only the event. */
   BR.pure.keyAction = function (e, bindings) {
@@ -62,7 +79,17 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   /** Runs the review action a key asks for; true when it acted. */
   function run(e) {
-    var action = BR.pure.keyAction(e, typeof KEYBINDINGS === 'undefined' ? null : KEYBINDINGS);
+    var kb = typeof KEYBINDINGS === 'undefined' ? null : KEYBINDINGS;
+    var action = BR.pure.keyAction(e, kb);
+    // The revert shares its key with the source view: an open change row decides which it is
+    var row = action === 'revert_change' && reviewable() && BR.flow.openRow();
+    // A held revert acts once, and its repeats never flip the view either
+    if (e.repeat && kb && matches(e, kb.revert_change) && reviewable() && BR.flow.openRow()) return true;
+    if (!row && action === 'revert_change' && reviewable() && BR.flow.revertedRow()) {
+      BR.chrome.pill('already reverted · ' + BR.keyName('note') + ' note to ask for it back');
+      return true;
+    }
+    if (!row && kb && !e.isComposing && e.keyCode !== 229 && matches(e, kb.toggle_raw)) return BR.pointing.toggleRaw();
     if (!action || !reviewable()) return false;
     // The menu and what a key opens are never open together
     BR.chrome.closeMenu();

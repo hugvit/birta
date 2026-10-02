@@ -97,16 +97,21 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   };
 
   var VERDICT_OF = { yes: 'yes', no: 'no', later: 'later', your_call: 'your_call' };
-  var MOVES = { next_item: 1, prev_item: 1, focus_next: 1, focus_prev: 1 };
   // What a focused note keeps from the page: each would write a verdict or a note
   var NOTE_KEYS = { yes: 1, no: 1, later: 1, your_call: 1, note: 1, ask: 1 };
   // A seen note in one of these folds to its dot
   var FOLDS = { handled: 1, answered: 1, later: 1 };
   // Open blanks past this many show only their question until focused
   var OPEN_BLANKS = 5;
-  // How long a first x on a many-hunk change waits for the second
+  // How long a first x on an open change row waits for the second
   var CONFIRM_MS = 3000;
   var CANT_UNDO = "can't undo this one · c instead";
+  var BLANK_HINT = 'type an answer · y yes · x no · . your call · l later';
+  var TYPE_IT = '⏎ to type an answer';
+  var ANSWERED = { yes: 'yes', no: 'no', later: 'later', your_call: 'your call' };
+  // Keys a closed blank leaves to the page: moving, taking back, and switches that write nothing
+  var BLANK_PASSES = { focus_next: 1, focus_prev: 1, next_item: 1, prev_item: 1, next_file: 1, prev_file: 1, undo: 1,
+    hide_marks: 1, turn: 1, revert_change: 1 };
   var RESOLVE_MS = 120;
   var COMPOSE_MS = 300;
   var QUOTE_CHARS = 40;
@@ -140,7 +145,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var afterAck = {};
   // Words an op carries that a nack must hand back: {key, text, tie} for notes and edits, {blank, text} for answers
   var pending = {};
-  // A many-hunk undo waiting for its second x: {id, until}
+  // A no on an open change row waiting for its second x: {id, until}
   var armed = null;
   // The cid of an undo the server hasn't answered, so a second x can't send another
   var undoing = null;
@@ -282,8 +287,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     made.root.appendChild(box);
     var h = { id: id, host: host, box: box, sig: null, rule: null, entry: null };
     box.addEventListener('keydown', function (ev) {
-      if (h.blank && h.entry && h.entry.kind === 'blank') blankKey(ev, h.blank.n, h.blank.slot);
-      else if (h.entry && h.entry.change) receiptKey(ev, h.entry.change);
+      // A change row's keys reach the page, which asks openRow() whether the row is open
+      if (h.blank && h.entry && h.entry.kind === 'blank') blankKey(ev, h);
+      else if (h.entry && h.entry.change) return;
       else if (h.entry && h.entry.nh != null) notHandledKey(ev, h.entry.nh);
       else if (h.entry && h.entry.focusable) noteKey(ev, h);
     });
@@ -293,7 +299,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       if (h.blank && h.blank.quiet && !h.blank.slot.querySelector('textarea')) h.blank.hint.hidden = true;
     });
     box.addEventListener('click', function () {
-      if (h.entry && h.entry.kind === 'rewrite' && state && state.rewrite) markRewriteSeen();
+      if (h.blank && h.entry && h.entry.kind === 'blank') {
+        if (writable() && !h.blank.slot.querySelector('textarea')) openAnswer(h);
+      } else if (h.entry && h.entry.kind === 'rewrite' && state && state.rewrite) markRewriteSeen();
       else if (h.entry && h.entry.seen && writable()) BR.op({ op: 'seen', ids: [h.entry.seen] });
     });
     hosts.set(id, h);
@@ -324,7 +332,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     h.rule = e.rule || null;
     h.entry = e;
     var sig = JSON.stringify([e.kind, e.lead, e.text, e.tail, e.prefix, e.meta, e.keys, e.fold, e.quiet, e.lost,
-      e.kind === 'lost' && lostOpen]);
+      e.kind === 'lost' && lostOpen, e.answer && e.answer.n]);
     if (h.sig === sig) return;
     h.sig = sig;
     h.box.textContent = '';
@@ -361,11 +369,13 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     h.box.tabIndex = 0;
     h.box.appendChild(el('div', 'text')).appendChild(isolated(e.text));
     var slot = el('div', 'blank');
-    var hint = el('div', 'muted', 'y x . l or type');
+    var hint = el('div', 'muted', BLANK_HINT);
     hint.hidden = !!e.quiet;
     slot.appendChild(hint);
+    // Once answered, the answer shows under it and the empty slot goes
+    slot.hidden = !!e.answer;
     h.box.appendChild(slot);
-    h.blank = { n: e.blank, slot: slot, hint: hint, quiet: !!e.quiet };
+    h.blank = { n: e.blank, slot: slot, hint: hint, quiet: !!e.quiet, to: e.to };
   }
 
   function renderLost(h, e) {
@@ -493,10 +503,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
           return;
         }
         if (asking(i)) {
-          add({ id: 'b' + i.n, kind: 'blank', text: i.body || '', blank: i.n, open: i.status === 'open',
-            rule: ['dotted', 'agent'] }, slot, [G_BLANK, i.n, 0]);
           // The latest answer wins, so only it shows
           var answer = lastHumanReply(i);
+          add({ id: 'b' + i.n, kind: 'blank', text: i.body || '', blank: i.n, open: i.status === 'open',
+            answer: answer, to: who(i.by), rule: ['dotted', 'agent'] }, slot, [G_BLANK, i.n, 0]);
           if (answer) {
             add({ id: 'r' + answer.n, kind: 'reply', lead: '↳ ' + who(answer.by) + ' · ', text: answer.body || answer.verdict || '',
               fold: true, rule: ['solid', 'you'] }, slot, [G_BLANK, i.n, 1]);
@@ -750,7 +760,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
    * target, whose words the note then edits; `label`, when given, heads it.
    */
   function open(kind, at, own, label) {
-    if (comp) keep(false);
+    if (comp) keep(false, true);
     var key = composeKey(at, kind, own ? own.n : null);
     var restored = unsent.filter(function (u) { return u.key === key; })[0];
     // The words a block change left behind go where the reader points next
@@ -843,7 +853,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       keep(e.metaKey || e.ctrlKey);
     } else if (e.key === 'Escape' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) {
       e.preventDefault();
-      keep(false);
+      keep(false, true);
     } else if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && comp.candidates && comp.candidates.length > 1) {
       e.preventDefault();
       var last = comp.candidates.length - 1;
@@ -862,14 +872,24 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     reconcile();
   }
 
-  /** Keeps what the composer holds as an op, or closes it when empty. */
-  function keep(handBack) {
+  /**
+   * Keeps what the composer holds as an op, or closes it when empty. An edit emptied and kept
+   * with ⏎ takes your words back; with Esc (`esc`) it leaves the note as it was.
+   */
+  function keep(handBack, esc) {
     var text = comp.area.value;
     var hadDraft = comp.sent || unsent.some(function (u) { return u.key === comp.key; });
+    var own = comp.own;
     clearTimeout(comp.timer);
-    if (!text.trim()) {
+    if (!text.trim() || (own && text === own.body)) {
       if (hadDraft) sendCompose('');
       unsent = unsent.filter(function (u) { return u.key !== comp.key; });
+      if (!esc && !text.trim() && own && own.body) {
+        // A verdict outlives its words; a plain note is only its words
+        BR.op(own.verdict ? { op: 'amend', to: own.n, body: '' } : { op: 'retract', to: own.n });
+      }
+      // An unchanged edit sends nothing, yet ⌘⏎ still hands back
+      if (handBack && text.trim()) BR.chrome.handBack();
       close();
       return;
     }
@@ -962,43 +982,68 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   // --- receipts, not-handled rows, notes and blanks with focus ---
 
-  /** x on a change: undo it, after a second x for a many-hunk write. */
-  function undo(c) {
+  /** The latest round's claim line, or null before any. */
+  function latestTurn() {
+    var claims = ((state && state.rounds) || []).map(function (r) { return r.claim; }).filter(function (n) { return n != null; });
+    return claims.length ? Math.max.apply(null, claims) : null;
+  }
+
+  /** The change of the row that holds the keyboard, whatever its state; null for none. */
+  function focusedChange() {
+    var a = document.activeElement;
+    var hit = null;
+    hosts.forEach(function (h) { if (h.host === a && h.entry && h.entry.change) hit = changeOf(h.entry.change.id) || h.entry.change; });
+    return hit;
+  }
+
+  /** A row shows keys only for a change of the latest round, not settled and not reverted. */
+  function rowOpen(c) {
+    var latest = latestTurn();
+    return !c.settled && c.undone_by == null && !(c.turn != null && latest != null && c.turn < latest);
+  }
+
+  /** u on a change: revert it, once, when birta can. */
+  function revert(c) {
     if (!canUndo(c)) {
       BR.chrome.pill(CANT_UNDO);
       return;
     }
     if (undoing) return;
-    var many = (c.op_hunks || 1) > 1;
-    if (many && !(armed && armed.id === c.id && Date.now() < armed.until)) {
-      var mine = armed = { id: c.id, until: Date.now() + CONFIRM_MS };
-      BR.chrome.pill('x again to undo ' + c.op_hunks + ' changes', {
-        until: mine.until,
-        keep: function (e) { return action(e) === 'no'; },
-        off: function () { if (armed === mine) armed = null; }
-      });
-      return;
-    }
-    if (armed) BR.chrome.pill('');
-    armed = null;
-    var f = { op: 'undo_change', change: c.id };
-    if (many) f.confirm = true;
-    undoing = BR.op(f);
+    undoing = BR.op({ op: 'undo_change', change: c.id });
   }
 
-  // Keys on a receipt act on its change; every other key goes on to act as on the page
-  function receiptKey(e, c) {
-    if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
-    var a = action(e);
-    if (a !== 'no' && a !== 'yes' && a !== 'note') return;
-    if (writable()) {
-      if (a !== 'no') armed = null;
-      if (a === 'no') undo(c);
-      else if (a === 'yes') BR.op({ op: 'seen', ids: [c.id] });
-      else open('note', { k: 'change', id: c.id }, null);
+  /** x on an open row is "no" to its text, so it takes a second x within the arm window. */
+  function rowNo(c) {
+    var sp = c.range && c.range.sp;
+    if (!sp) {
+      BR.chrome.pill('nothing to say no to · ' + BR.keyName('revert_change') + ' reverts');
+      return;
     }
-    e.preventDefault();
-    e.stopPropagation();
+    if (armed && armed.id === c.id && Date.now() < armed.until) {
+      armed = null;
+      var el = blockOf(sp);
+      BR.pointing.verdictOn('no', { k: 'block', sp: sp, scope: el && /^h[1-6]$/.test(el.localName) ? 'section' : 'block' });
+      return;
+    }
+    var mine = armed = { id: c.id, until: Date.now() + CONFIRM_MS };
+    var x = BR.keyName('no');
+    var revertible = canUndo(c) ? ' · ' + BR.keyName('revert_change') + " reverts Claude's change" : '';
+    // The pill lasts as long as the arm, and only x keeps it
+    BR.chrome.pill(x + ' = no to this text' + revertible + ' · ' + x + ' again for no', {
+      until: mine.until,
+      keep: function (e) { return action(e) === 'no'; },
+      off: function () { if (armed === mine) armed = null; }
+    });
+  }
+
+  /** A row key on change `c`: y keeps it, x says no, u reverts it, c notes it. */
+  function rowKey(a, c) {
+    if (a !== 'no') armed = null;
+    if (!writable()) return;
+    if (a === 'revert_change') revert(c);
+    else if (a === 'no') rowNo(c);
+    else if (a === 'yes') BR.op({ op: 'seen', ids: [c.id] });
+    else if (a === 'note') open('note', { k: 'change', id: c.id }, null);
   }
 
   // A not-handled row needs y to be acknowledged; stepping or clicking onto it never does
@@ -1011,6 +1056,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   function action(e) {
     return BR.pure.keyAction(e, typeof KEYBINDINGS === 'undefined' ? null : KEYBINDINGS);
+  }
+
+  /** Whether a keydown is any key the page binds, review's or the viewer's. */
+  function bound(e) {
+    var kb = typeof KEYBINDINGS === 'undefined' ? null : KEYBINDINGS;
+    return !!kb && Object.keys(kb).some(function (k) { return BR.pure.keyMatches(e, kb[k]); });
   }
 
   // Keys that write act on the note or not at all, never on the doc behind it; the rest act as on the page
@@ -1028,24 +1079,55 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     else if (a === 'yes' && entry.item && settled(entry.item)) BR.op({ op: 'seen', ids: ['#' + entry.item.n] });
   }
 
-  // A typed character starts the written answer; keys that type nothing act as on the page
-  function blankKey(e, n, slot) {
+  /**
+   * A closed blank: verdict keys answer, ⏎ and c open the field, moving and taking back act as on
+   * the page, and any other key says how to type. An open field has every key.
+   */
+  function blankKey(e, h) {
     if (e.defaultPrevented || e.isComposing || e.keyCode === 229 || !writable()) return;
-    if (slot.querySelector('textarea')) return;
+    if (h.blank.slot.querySelector('textarea')) return;
     var a = action(e);
-    // The walk passes through a closed blank
-    if (MOVES[a]) return;
-    var verdict = VERDICT_OF[a];
-    if (verdict) {
-      e.preventDefault();
-      e.stopPropagation();
-      BR.op({ op: 'reply', to: n, verdict: verdict });
-      return;
-    }
-    if (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey) return;
+    var plainEnter = e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey;
+    if (BLANK_PASSES[a]) return;
+    if (VERDICT_OF[a]) answerWith(h, VERDICT_OF[a]);
+    else if (plainEnter || a === 'note') openAnswer(h);
+    else if (a === 'ask' || (!bound(e) && e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey)) {
+      BR.chrome.pill(TYPE_IT.replace('⏎', BR.keyName('open')));
+    } else return;
     e.preventDefault();
     e.stopPropagation();
-    answer(slot, n, e.key);
+  }
+
+  /** The answer the blank `n` holds that no hand-back took yet, or null. */
+  function draftAnswer(n) {
+    var item = ((state && state.items) || []).filter(function (i) { return i.n === n; })[0];
+    return item && asking(item) && !answerSent(item) ? lastHumanReply(item) : null;
+  }
+
+  /** An op that puts answer `r` back as it was. */
+  function restore(r) {
+    var f = { op: 'amend', to: r.n, body: r.body || '' };
+    if (r.verdict) f.verdict = r.verdict;
+    else f.drop_verdict = true;
+    return f;
+  }
+
+  /** A verdict key on a blank: the answer, or a change to the one not yet handed back. */
+  function answerWith(h, verdict) {
+    var n = h.blank.n;
+    var r = draftAnswer(n);
+    if (!r) {
+      BR.pointing.remember({
+        cid: BR.op({ op: 'reply', to: n, verdict: verdict }),
+        undo: function (line) { return { op: 'retract', to: line }; }
+      });
+    } else if (r.verdict !== verdict || r.body) {
+      var f = { op: 'amend', to: r.n, verdict: verdict };
+      // The key's answer stands alone, so typed words go
+      if (r.body) f.body = '';
+      BR.pointing.remember({ cid: BR.op(f), item: r.n, undo: function () { return restore(r); } });
+    }
+    BR.chrome.pill('answered ' + ANSWERED[verdict] + ' · ' + BR.keyName('undo') + ' to undo');
   }
 
   /** A blank whose written answer is open holds typed words, which reading mode must keep. */
@@ -1053,27 +1135,65 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return !!(h.blank && h.blank.slot.querySelector('textarea'));
   }
 
-  /** Opens the blank's written answer holding `text`. */
-  function answer(slot, n, text) {
-    hosts.forEach(function (h) { if (h.blank && h.blank.slot === slot) h.host.removeAttribute('data-br-hidden'); });
+  /** Opens blank `h`'s field, holding its answer not yet handed back, else `text`. */
+  function openAnswer(h, text) {
+    var n = h.blank.n;
+    var slot = h.blank.slot;
+    var r = draftAnswer(n);
+    h.host.removeAttribute('data-br-hidden');
+    slot.hidden = false;
+    h.blank.hint.hidden = true;
+    var label = el('div', 'muted', 'answer to ' + (h.blank.to || 'the agent'));
     var area = document.createElement('textarea');
     area.setAttribute('dir', 'auto');
-    area.value = text;
-    slot.appendChild(area);
+    area.placeholder = BLANK_HINT;
+    area.value = text != null ? text : (r && r.body) || '';
+    slot.append(label, area);
     area.focus();
-    area.setSelectionRange(text.length, text.length);
+    area.setSelectionRange(area.value.length, area.value.length);
+    var closed = false;
+    function done(how) {
+      if (closed) return;
+      closed = true;
+      var words = area.value;
+      label.remove();
+      area.remove();
+      h.blank.hint.hidden = !!h.blank.quiet;
+      slot.hidden = !!draftAnswer(n);
+      if (how !== 'blur') h.box.focus({ preventScroll: true });
+      if (!writable()) return;
+      var cid = null;
+      if (!words.trim()) {
+        // Emptied, ⏎ takes the answer back; Esc and a blur leave it as it was
+        if (how === 'enter' && r && r.body) cid = BR.op({ op: 'retract', to: r.n });
+        return;
+      }
+      if (r) {
+        if (words === r.body) return;
+        var f = { op: 'amend', to: r.n, body: words };
+        if (r.verdict) f.drop_verdict = true;
+        cid = BR.op(f);
+        BR.pointing.remember({ cid: cid, item: r.n, undo: function () { return restore(r); } });
+      } else {
+        cid = BR.op({ op: 'reply', to: n, body: words });
+        BR.pointing.remember({ cid: cid, undo: function (line) { return { op: 'retract', to: line }; } });
+      }
+      pending[cid] = { blank: n, text: words };
+    }
     area.addEventListener('keydown', function (ev) {
       ev.stopPropagation();
       if (ev.defaultPrevented || ev.isComposing || ev.keyCode === 229) return;
-      var done = ev.key === 'Escape' || (ev.key === 'Enter' && !ev.shiftKey);
-      if (!done) return;
-      ev.preventDefault();
-      // Esc keeps written words, as it does in the composer
-      if (area.value.trim() && writable()) {
-        var cid = BR.op({ op: 'reply', to: n, body: area.value });
-        pending[cid] = { blank: n, text: area.value };
+      if (ev.key === 'Escape' && !ev.shiftKey && !ev.altKey && !ev.ctrlKey && !ev.metaKey) {
+        ev.preventDefault();
+        done('esc');
+      } else if (ev.key === 'Enter' && !ev.shiftKey) {
+        ev.preventDefault();
+        done('enter');
       }
-      area.remove();
+    });
+    // Leaving the field keeps its words, as Esc does; a redraw that removed it already lost them
+    area.addEventListener('blur', function () {
+      setTimeout(function () { if (area.isConnected && document.activeElement !== h.host) done('blur'); }, 0);
     });
   }
 
@@ -1145,7 +1265,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   function giveBack(words, reason) {
     if (words.blank != null) {
       var h = hosts.get('b' + words.blank);
-      if (h && h.blank && !h.blank.slot.querySelector('textarea')) answer(h.blank.slot, words.blank, words.text);
+      if (h && h.blank && !h.blank.slot.querySelector('textarea')) openAnswer(h, words.text);
       return;
     }
     // An anchor the server could not place is never sent as it was again
@@ -1167,7 +1287,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     /** The Esc layer: keeps or closes the composer. False when none is open. */
     escape: function () {
       if (!comp) return false;
-      keep(false);
+      keep(false, true);
       return true;
     },
     /** ⏎ on a block, or on the doc for null: keeps its half-typed note, else opens its dot. */
@@ -1217,7 +1337,45 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
           (stop.kind === 'blank' && e.kind === 'blank' && '#' + e.blank === stop.id)) hit = h;
       });
       if (hit) hit.box.focus({ preventScroll: true });
-      return !!hit;
+      return hit ? hit.host : null;
+    },
+    /** The change of the open row, which takes y, x, u and c; null when no row is open. */
+    openRow: function () {
+      // The clean view hides every row
+      if (BR.chrome.clean()) return null;
+      var c = focusedChange();
+      if (c) return rowOpen(c) ? c : null;
+      // Focus on a changed block opens its row too
+      var block = BR.pointing.focused();
+      var sp = block && block.getAttribute && block.getAttribute('data-sourcepos');
+      if (!sp) return null;
+      return ((state && state.changes) || []).filter(function (x) {
+        return x.attr !== 'human' && x.range && x.range.sp === sp && rowOpen(x);
+      })[0] || null;
+    },
+    /** Takes back a first x on a row: any other key does. */
+    disarm: function () { armed = null; },
+    /** The change of a reverted row that holds the keyboard, or null. */
+    revertedRow: function () {
+      var c = focusedChange();
+      return c && c.undone_by != null ? c : null;
+    },
+    rowKey: rowKey,
+    /** The blank hosts on the page, which j and k stop on like blocks. */
+    blanks: function () {
+      var out = [];
+      hosts.forEach(function (h) {
+        if (h.blank && h.host.isConnected && h.host.getClientRects().length) out.push(h.host);
+      });
+      return out;
+    },
+    /** Gives blank `host` the keyboard. */
+    hold: function (host) {
+      hosts.forEach(function (h) { if (h.host === host) h.box.focus({ preventScroll: true }); });
+    },
+    /** Lets a host the focus has moved past give up the keyboard; an open field keeps it. */
+    release: function (node) {
+      hosts.forEach(function (h) { if (h.host === node && !typing(h) && h !== (comp && comp.h)) h.box.blur(); });
     },
     markRewriteSeen: markRewriteSeen,
     /** Rules for the overlay: each host with its style and role. */

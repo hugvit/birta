@@ -197,10 +197,28 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return approve();
   };
 
+  /** Your answers to the agent that hand-back `n` carries: replies no earlier hand-back took. */
+  function answersIn(s, n) {
+    var before = (s.rounds || []).map(function (r) { return r.submit; }).filter(function (x) { return x < n; });
+    var count = 0;
+    (s.items || []).forEach(function (i) {
+      if (!i.by || i.by.type !== 'agent') return;
+      (i.replies || []).forEach(function (r) {
+        var taken = before.some(function (x) { return x > r.n; });
+        if (r.by && r.by.type === 'human' && r.n < n && !taken) count++;
+      });
+    });
+    return count;
+  }
+
   /** What the pill says during a hold, or null outside one. */
   BR.pure.holdPill = function (s, opts) {
     if (!holding(s, opts.now)) return null;
-    return s.hold.kind === 'approve' ? 'approving · z to undo' : 'handing back · ' + plural(s.hold.count, 'note', 'notes') + ' · z to undo';
+    if (s.hold.kind === 'approve') return 'approving · z to undo';
+    var answers = answersIn(s, s.hold.n);
+    var parts = s.hold.count || !answers ? [plural(s.hold.count, 'note', 'notes')] : [];
+    if (answers) parts.push(plural(answers, 'answer', 'answers'));
+    return 'handing back · ' + parts.join(' · ') + ' · z to undo';
   };
 
   /** The phrase menu's rows: `{id, text, op?, copy?}`, in order. */
@@ -763,6 +781,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       render();
     },
     render: render,
+    /** The turn button as it reads now, `{text, kbd, disabled}`, or null while it isn't shown. */
+    button: function () {
+      var s = BR.currentState();
+      return shown(s) ? BR.pure.turnButton(s, turnOpts(now())) : null;
+    },
     /** Server time, as this page knows it. */
     now: now,
     turn: act,

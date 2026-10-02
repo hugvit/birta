@@ -23,8 +23,6 @@ import {
 
 const WIDE = { width: 1280, height: 900 };
 const SETTLE_MS = 400;
-/** How long a first x on a many-hunk change waits for the second. */
-const CONFIRM_MS = 3_000;
 /** How long after the approve guard's jump a ⌘⏎ is still ignored. */
 const DWELL_MS = 1_000;
 
@@ -167,12 +165,30 @@ async function focusOn(page: Page, sp: string) {
   const all = await stops(page);
   const at = all.findIndex((s) => s.sp === sp);
   if (at < 0) throw new Error(`${sp} is not a stop`);
-  while ((await focused(page)) !== null) await page.keyboard.press("k");
-  for (let i = 0; i <= at; i++) await page.keyboard.press("j");
+  while ((await focused(page)) !== null) await page.keyboard.press("Escape");
+  // Blanks are stops too, so walk until the block has focus rather than count
+  for (let i = 0; i <= at + 8 && (await focused(page)) !== sp; i++) await page.keyboard.press("j");
   await expect.poll(() => focused(page)).toBe(sp);
 }
 
 /** Presses n until the walk lands on `sp`, failing after `max` stops. */
+/** The question of the blank that holds the keyboard, or null. */
+function blankAt(page: Page): Promise<string | null> {
+  return page.evaluate(() => {
+    const a = document.activeElement;
+    return a?.getAttribute("data-kind") === "blank" ? (a.shadowRoot?.querySelector(".text")?.textContent ?? "") : null;
+  });
+}
+
+/** Presses n until the blank asking `question` holds the keyboard: a blank is its own stop. */
+async function nToBlank(page: Page, question: string, max = 12) {
+  for (let i = 0; i < max && (await blankAt(page)) !== question; i++) {
+    await page.keyboard.press("n");
+    await page.waitForTimeout(50);
+  }
+  await expect.poll(() => blankAt(page)).toBe(question);
+}
+
 async function nTo(page: Page, sp: string, max = 12) {
   for (let i = 0; i < max && (await focused(page)) !== sp; i++) {
     await page.keyboard.press("n");
@@ -239,7 +255,7 @@ test.describe("seen", () => {
   test("n keeps walking when a step leaves the keys in a receipt, past every kind of change", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow");
     // The doc slot's reply, its rows, then the blanks: only the reply is seen on the way
-    await nTo(page, "3:1-3:6");
+    await nToBlank(page, "is 503 the only code?");
     expect(seenIds(mock)).toEqual([["#18"]]);
     // The open blank takes y as its answer
     await page.keyboard.press("y");
@@ -339,7 +355,8 @@ test.describe("seen", () => {
       s.counts.unseen = 0;
       s.counts.attention = 1;
     });
-    await nTo(page, "3:1-3:6");
+    // The blank is a stop of its own, and holds the keyboard
+    await nToBlank(page, "is 503 the only code?");
     await page.waitForTimeout(SETTLE_MS);
     expect(m2.ops()).toEqual([]);
   });
@@ -415,21 +432,21 @@ const CITED = "because you said";
 const DONE = "done ·";
 
 test.describe("receipt keys", () => {
-  test("x on a receipt sends undo_change for its change", async ({ page, birta }) => {
+  test("u on a receipt sends undo_change for its change", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow");
     await receipt(page, CITED).click();
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => opsNamed(mock, "undo_change")).toHaveLength(1);
     const op = opFields(opsNamed(mock, "undo_change")[0]);
     expect(op).toEqual({ ...fixtureOp("undo_change"), change: "13.0" });
     expect(mock.ops().filter((o) => o.op === "comment")).toEqual([]);
   });
 
-  test("x on the done reply under your note undoes the change it names", async ({ page, birta }) => {
+  test("u on the done reply under your note reverts the change it names", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow");
     await reply(page, "1 line → 1").click();
     expect(await hostText(page, "reply", "1 line → 1")).toMatch(/x undo/);
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => opsNamed(mock, "undo_change")).toHaveLength(1);
     expect(opFields(opsNamed(mock, "undo_change")[0])).toEqual({ ...fixtureOp("undo_change"), change: "15.0" });
   });
@@ -475,12 +492,12 @@ test.describe("receipt keys", () => {
     await expect.poll(() => hostText(page, "reply", "1 line → 1")).toMatch(/· y keep\s+c instead$/);
   });
 
-  test("x on a change that can't be undone sends nothing and says so", async ({ page, birta }) => {
+  test("u on a change that can't be undone sends nothing and says so", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow", (s) => {
       s.changes.find((c: State) => c.id === "13.0").reversible = { ok: false, reason: "later_overlap" };
     });
     await receipt(page, CITED).click();
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => pillOf(page)).toBe("can't undo this one · c instead");
     expect(opsNamed(mock, "undo_change")).toEqual([]);
     expect(opsNamed(mock, "comment")).toEqual([]);
@@ -491,7 +508,7 @@ test.describe("receipt keys", () => {
     await expect.poll(() => hostText(page, "receipt", CITED)).toMatch(/· y keep\s+c instead$/);
     expect(await hostText(page, "reply", "1 line → 1")).toMatch(/· y keep\s+c instead$/);
     await receipt(page, CITED).click();
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => pillOf(page)).toBe("can't undo this one · c instead");
     expect(opsNamed(mock, "undo_change")).toEqual([]);
   });
@@ -499,7 +516,7 @@ test.describe("receipt keys", () => {
   test("an undo refused because the doc moved on says try again", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow", undefined, { acks: "manual" });
     await receipt(page, CITED).click();
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => opsNamed(mock, "undo_change")).toHaveLength(1);
     mock.nack(opsNamed(mock, "undo_change")[0].cid, "changed_since");
     await expect.poll(() => pillOf(page)).toBe("changed since · try again");
@@ -508,22 +525,24 @@ test.describe("receipt keys", () => {
   test("an undo refused for a read-only review file says so", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow", undefined, { acks: "manual" });
     await receipt(page, CITED).click();
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => opsNamed(mock, "undo_change")).toHaveLength(1);
     mock.nack(opsNamed(mock, "undo_change")[0].cid, "read_only");
     await expect.poll(() => pillOf(page)).toBe("review file is read-only");
   });
 
-  test("n onto a change with a receipt makes x its undo; j onto the block keeps x the block's no", async ({ page, birta }) => {
+  test("n onto a change makes u its revert; j onto the block opens its row too, where x asks before no", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow");
     await nTo(page, "5:1-6:68");
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => opsNamed(mock, "undo_change")).toEqual([expect.objectContaining({ change: "13.0" })]);
     expect(mock.ops().filter((o) => o.op === "comment")).toEqual([]);
 
     await page.reload();
     await booted(page);
     await focusOn(page, "5:1-6:68");
+    await page.keyboard.press("x");
+    await expect.poll(() => pillOf(page)).toBe("x = no to this text · u reverts Claude's change · x again for no");
     await page.keyboard.press("x");
     await expect
       .poll(() => opsNamed(mock, "comment"))
@@ -560,7 +579,7 @@ test.describe("a receipt for every change", () => {
     expect(await slotOf(page, "receipt", "nobody asked")).toBe("14:1-14:21");
   });
 
-  test("x, y and c on a nobody-asked receipt undo, see and note its change", async ({ page, birta }) => {
+  test("u, y and c on a nobody-asked receipt revert, see and note its change", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow");
     const row = receipt(page, "nobody asked");
     await row.click();
@@ -570,7 +589,7 @@ test.describe("a receipt for every change", () => {
     await expect.poll(() => seenOps(mock).length).toBe(before + 1);
     expect(seenIds(mock).at(-1)).toEqual(["19.0"]);
     await row.click();
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => opsNamed(mock, "undo_change")).toEqual([expect.objectContaining({ change: "19.0" })]);
     await row.click();
     await page.keyboard.press("c");
@@ -585,14 +604,14 @@ test.describe("a receipt for every change", () => {
     expect(await slotOf(page, "receipt", "nobody asked · 2 lines → 0")).toBe("14:1-14:13");
     expect(await hostText(page, "receipt", "2 lines → 0")).toMatch(/y keep\s+x undo\s+c instead$/);
     await receipt(page, "2 lines → 0").click();
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => opsNamed(mock, "undo_change")).toEqual([expect.objectContaining({ change: "11.0" })]);
   });
 
-  test("n onto an unasked change makes x its undo", async ({ page, birta }) => {
+  test("n onto an unasked change makes u its revert", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "unseen");
     await nTo(page, "11:1-11:44");
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => opsNamed(mock, "undo_change")).toEqual([expect.objectContaining({ change: "10.0" })]);
     expect(opsNamed(mock, "comment")).toEqual([]);
   });
@@ -610,10 +629,10 @@ test.describe("a receipt for every change", () => {
     expect(plain[0]).toMatch(/changed outside birta · y keep\s+c instead$/);
   });
 
-  test("x on an outside write that can't be undone says so; y sees it", async ({ page, birta }) => {
+  test("u on an outside write that can't be undone says so; y sees it", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow");
     await fact(page, "(git)").click();
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => pillOf(page)).toBe("can't undo this one · c instead");
     expect(opsNamed(mock, "undo_change")).toEqual([]);
     await fact(page, "(git)").click();
@@ -624,13 +643,13 @@ test.describe("a receipt for every change", () => {
     expect(seenIds(mock).at(-1)).toEqual(["26.0"]);
   });
 
-  test("an outside write the fold can reverse offers x undo, and x sends it", async ({ page, birta }) => {
+  test("an outside write the fold can reverse offers x undo, and u sends it", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow", (s) => {
       s.changes.find((c: State) => c.id === "26.0").reversible = { ok: true, reason: "none" };
     });
     await expect.poll(() => hostText(page, "fact", "(git)")).toMatch(/y keep\s+x undo\s+c instead$/);
     await fact(page, "(git)").click();
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => opsNamed(mock, "undo_change")).toEqual([expect.objectContaining({ change: "26.0" })]);
   });
 });
@@ -639,54 +658,16 @@ test.describe("undo of a many-hunk write", () => {
   const twoHunks = (s: State) => {
     const c = s.changes.find((x: State) => x.id === "13.0");
     c.op_hunks = 2;
-    c.reversible = { ok: true, reason: "multi_hunk" };
+    c.reversible = { ok: true, reason: "none" };
   };
 
-  test("the first x asks again, and a second x within 3 s undoes the whole write", async ({ page, birta }) => {
-    const { mock } = await openFixture(page, birta, "flow", twoHunks);
-    expect(await hostText(page, "receipt", CITED)).toMatch(/x undo/);
-    await receipt(page, CITED).click();
-    await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe("x again to undo 2 changes");
-    await page.waitForTimeout(SETTLE_MS);
-    expect(opsNamed(mock, "undo_change")).toEqual([]);
-    await page.keyboard.press("x");
-    await expect.poll(() => opsNamed(mock, "undo_change")).toHaveLength(1);
-    expect(opFields(opsNamed(mock, "undo_change")[0])).toEqual({ ...fixtureOp("undo_change-confirm"), change: "13.0" });
-  });
-
-  test("a second x after 3 s asks again instead of undoing", async ({ page, birta }) => {
+  test("one u reverts a change of a many-hunk write, with no confirm and no question", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow", twoHunks);
     await receipt(page, CITED).click();
-    await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe("x again to undo 2 changes");
-    await page.waitForTimeout(CONFIRM_MS + 300);
-    await page.keyboard.press("x");
-    await page.waitForTimeout(SETTLE_MS);
-    expect(opsNamed(mock, "undo_change")).toEqual([]);
-    expect(await pillOf(page)).toBe("x again to undo 2 changes");
-    await page.keyboard.press("x");
-    await expect.poll(() => opsNamed(mock, "undo_change")).toEqual([expect.objectContaining({ change: "13.0", confirm: true })]);
-  });
-
-  test("the question counts every hunk of the write", async ({ page, birta }) => {
-    const { mock } = await openFixture(page, birta, "flow", (s) => {
-      twoHunks(s);
-      s.changes.find((x: State) => x.id === "13.0").op_hunks = 3;
-    });
-    await receipt(page, CITED).click();
-    await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe("x again to undo 3 changes");
-    expect(opsNamed(mock, "undo_change")).toEqual([]);
-  });
-
-  test("a one-hunk change never asks for confirm", async ({ page, birta }) => {
-    const { mock } = await openFixture(page, birta, "flow");
-    await receipt(page, CITED).click();
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => opsNamed(mock, "undo_change")).toHaveLength(1);
-    expect(opsNamed(mock, "undo_change")[0].confirm).toBeUndefined();
-    expect((await pillOf(page)) ?? "").not.toMatch(/x again/);
+    expect(opFields(opsNamed(mock, "undo_change")[0])).toEqual({ ...fixtureOp("undo_change"), change: "13.0" });
+    expect((await pillOf(page)) ?? "").not.toMatch(/again/);
   });
 });
 
@@ -724,7 +705,7 @@ function hide(page: Page) {
 
 /** Keeps a whole-doc note from the doc stop. */
 async function noteOnDoc(page: Page, body: string) {
-  while ((await focused(page)) !== null) await page.keyboard.press("k");
+  while ((await focused(page)) !== null) await page.keyboard.press("Escape");
   await page.keyboard.press("c");
   await page.keyboard.type(body);
   await page.keyboard.press("Enter");
@@ -834,7 +815,7 @@ test.describe("beacon", () => {
     const { mock } = await openFixture(page, birta, "flow", undefined, { acks: "manual" });
     await noteOnDoc(page, "carry me");
     await receipt(page, CITED).click();
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => opsNamed(mock, "undo_change")).toHaveLength(1);
     await hide(page);
     await expect.poll(async () => (await beacons(page)).length).toBeGreaterThan(0);
@@ -960,12 +941,12 @@ test.describe("real server", () => {
     ["LF", "\n"],
     ["CRLF", "\r\n"],
   ] as const) {
-    test(`x on the agent's fix puts the doc's bytes back, and a ${name} doc keeps its line ends`, async ({ page, birta }) => {
+    test(`u on the agent's fix puts the doc's bytes back, and a ${name} doc keeps its line ends`, async ({ page, birta }) => {
       const s = seeded(eol, [FIX]);
       const { served, bytes } = await openSeeded(page, birta, s, ["7.0"]);
       expect(bytes().equals(Buffer.from(s.doc))).toBe(true);
       await reply(page, DONE).click();
-      await page.keyboard.press("x");
+      await page.keyboard.press("u");
       await expect.poll(() => bytes().equals(Buffer.from(s.orig)), { timeout: 5_000 }).toBe(true);
       if (eol === "\r\n") expect(/(^|[^\r])\n/.test(bytes().toString("utf-8"))).toBe(false);
       await expect.poll(() => reviewLog(served.root)!.at(-1)).toMatchObject({ op: "edit", act: "undo", of: "7.0" });
@@ -977,14 +958,11 @@ test.describe("real server", () => {
     });
   }
 
-  test("two x's on one change of a two-hunk write put back only that change", async ({ page, birta }) => {
+  test("u on one change of a two-hunk write puts back only that change", async ({ page, birta }) => {
     const s = seeded("\r\n", [FIX, UNASKED]);
     const { served, bytes } = await openSeeded(page, birta, s, ["7.0", "7.1"]);
     await reply(page, DONE).click();
-    await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe("x again to undo 2 changes");
-    expect(bytes().equals(Buffer.from(s.doc))).toBe(true);
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     const unasked = seeded("\r\n", [UNASKED]).doc;
     await expect.poll(() => bytes().equals(Buffer.from(unasked)), { timeout: 5_000 }).toBe(true);
     await expect.poll(() => reviewLog(served.root)!.at(-1)).toMatchObject({ op: "edit", act: "undo", of: "7.0" });
@@ -1001,7 +979,7 @@ test.describe("real server", () => {
     expect(await pillOf(page)).not.toBe("review file is read-only");
     fs.chmodSync(logFile, 0o444);
     try {
-      await page.keyboard.press("x");
+      await page.keyboard.press("u");
       await expect.poll(() => pillOf(page)).toBe("review file is read-only");
       await page.waitForTimeout(SETTLE_MS);
       expect(bytes().equals(Buffer.from(s.doc))).toBe(true);
@@ -1165,7 +1143,7 @@ test.describe("killers: the approve guard", () => {
     });
     await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve · 1 unanswered");
     await page.keyboard.press("ControlOrMeta+Enter");
-    await expect.poll(() => focused(page)).toBe("3:1-3:6");
+    await expect.poll(() => blankAt(page)).toBe("is 503 the only code?");
     await page.waitForTimeout(DWELL_MS);
     expect(opsNamed(mock, "approve")).toEqual([]);
     await page.keyboard.press("ControlOrMeta+Enter");
@@ -1201,25 +1179,25 @@ test.describe("killers: the approve guard", () => {
 
 test.describe("killers: receipts and undo", () => {
   // K1b
-  test("an unasked change has a receipt, and x there undoes it", async ({ page, birta }) => {
+  test("an unasked change has a receipt, and u there reverts it", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow");
     const row = receipt(page, "nobody asked");
     await expect(row).toHaveCount(1);
     expect(await hostText(page, "receipt", "nobody asked")).toMatch(/y keep\s+x undo\s+c instead/);
     await row.click();
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => opsNamed(mock, "undo_change")).toHaveLength(1);
     expect(opFields(opsNamed(mock, "undo_change")[0])).toEqual({ ...fixtureOp("undo_change"), change: "19.0" });
   });
 
   // K1c, on 5.4's outside row, which keeps its kind
-  test("an outside write's row can't be undone: x says so, y marks it seen", async ({ page, birta }) => {
+  test("an outside write's row can't be undone: u says so, y marks it seen", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow");
     const row = page.locator('birta-flow[data-kind="fact"]', { hasText: "changed outside birta (git)" });
     await expect(row).toHaveCount(1);
     expect(await hostText(page, "fact", "changed outside birta (git)")).toMatch(/· y keep\s+c instead$/);
     await row.click();
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => pillOf(page)).toBe("can't undo this one · c instead");
     expect(opsNamed(mock, "undo_change")).toEqual([]);
     await page.keyboard.press("y");
@@ -1235,7 +1213,7 @@ test.describe("killers: receipts and undo", () => {
       .toMatch(/^Claude · because you said "cap it" · 1 line → 1 · y keep\s+x undo\s+c instead$/);
     expect(await slotOf(page, "receipt", 'because you said "cap it"')).toBe("11:1-11:44");
     await receipt(page, 'because you said "cap it"').click();
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => opsNamed(mock, "undo_change")).toEqual([expect.objectContaining({ change: "15.0" })]);
   });
 
@@ -1251,57 +1229,42 @@ test.describe("killers: receipts and undo", () => {
     expect(opsNamed(mock, "reply")).toEqual([]);
   });
 
-  // K8
-  test("a second x 2.5 s after the first still undoes", async ({ page, birta }) => {
-    const { mock } = await openFixture(page, birta, "flow", twoHunks);
+  // K9: each change reverts on its own u
+  test("u on one change and then another reverts each, once", async ({ page, birta }) => {
+    const { mock } = await openFixture(page, birta, "flow");
     await receipt(page, CITED).click();
-    await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe("x again to undo 2 changes");
-    await page.waitForTimeout(2_500);
-    await page.keyboard.press("x");
-    await expect.poll(() => opsNamed(mock, "undo_change")).toEqual([expect.objectContaining({ change: "13.0", confirm: true })]);
+    await page.keyboard.press("u");
+    await expect.poll(() => opsNamed(mock, "undo_change")).toHaveLength(1);
+    await reply(page, "1 line → 1").click();
+    await page.keyboard.press("u");
+    await expect.poll(() => opsNamed(mock, "undo_change").map((o) => o.change)).toEqual(["13.0", "15.0"]);
   });
 
-  // K9
-  test("a confirm armed on one change never carries to another", async ({ page, birta }) => {
-    const { mock } = await openFixture(page, birta, "flow", twoHunks);
+  // K10
+  test("holding u down reverts once and never flips the view, and ⌘X or ⌘U on a row is no revert", async ({ page, birta }) => {
+    const { mock } = await openFixture(page, birta, "flow");
     await receipt(page, CITED).click();
-    await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe("x again to undo 2 changes");
+    // Playwright marks every down after the first as a repeat
+    await page.keyboard.down("u");
+    await page.keyboard.down("u");
+    await page.keyboard.down("u");
+    await page.keyboard.up("u");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(opsNamed(mock, "undo_change")).toHaveLength(1);
+    expect(await page.locator("#source-view").isVisible()).toBe(false);
     await reply(page, "1 line → 1").click();
-    await page.keyboard.press("x");
-    await expect.poll(() => opsNamed(mock, "undo_change")).toHaveLength(1);
-    expect(opFields(opsNamed(mock, "undo_change")[0])).toEqual({ ...fixtureOp("undo_change"), change: "15.0" });
-    // Back on 13.0, the first x asks again
-    await receipt(page, CITED).click();
-    await page.keyboard.press("x");
+    await page.keyboard.press("ControlOrMeta+x");
+    await page.keyboard.press("ControlOrMeta+u");
     await page.waitForTimeout(SETTLE_MS);
     expect(opsNamed(mock, "undo_change")).toHaveLength(1);
   });
 
-  // K10
-  test("holding x down never confirms, and ⌘X on a receipt is not an undo", async ({ page, birta }) => {
-    const { mock } = await openFixture(page, birta, "flow", twoHunks);
-    await receipt(page, CITED).click();
-    // Playwright marks every down after the first as a repeat
-    await page.keyboard.down("x");
-    await page.keyboard.down("x");
-    await page.keyboard.down("x");
-    await page.keyboard.up("x");
-    await page.waitForTimeout(SETTLE_MS);
-    expect(opsNamed(mock, "undo_change")).toEqual([]);
-    await reply(page, "1 line → 1").click();
-    await page.keyboard.press("ControlOrMeta+x");
-    await page.waitForTimeout(SETTLE_MS);
-    expect(opsNamed(mock, "undo_change")).toEqual([]);
-  });
-
   // K11
-  test("x twice before the ack sends one undo", async ({ page, birta }) => {
+  test("u twice before the ack sends one undo", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow", undefined, { acks: "manual" });
     await receipt(page, CITED).click();
-    await page.keyboard.press("x");
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
+    await page.keyboard.press("u");
     await page.waitForTimeout(SETTLE_MS);
     expect(opsNamed(mock, "undo_change")).toHaveLength(1);
   });
@@ -1372,7 +1335,7 @@ test.describe("killers: real server", () => {
   });
 
   // K21
-  test("x still undoes the fix after an outside edit above it", async ({ page, birta }) => {
+  test("u still reverts the fix after an outside edit above it", async ({ page, birta }) => {
     const s = seeded("\n", [FIX]);
     const { served, got, bytes } = await openSeeded(page, birta, s, ["7.0"]);
     const preface = "> draft\n\n";
@@ -1380,12 +1343,12 @@ test.describe("killers: real server", () => {
     await expect.poll(() => lastState(got)?.changes.find((c: State) => c.id === "7.0")?.range.lines).toEqual([8, 8]);
     await expect(page.locator("#content blockquote")).toHaveCount(1);
     await reply(page, DONE).click();
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => bytes().toString("utf-8"), { timeout: 5_000 }).toBe(preface + s.orig);
   });
 
   // K22
-  test("an edit over the fix takes x undo away, and x then writes nothing", async ({ page, birta }) => {
+  test("an edit over the fix takes x undo away, and u then writes nothing", async ({ page, birta }) => {
     const s = seeded("\n", [FIX]);
     const { served, got, bytes } = await openSeeded(page, birta, s, ["7.0"]);
     const over = s.doc.replace(FIX.to, FIX.to + " Mostly.");
@@ -1393,7 +1356,7 @@ test.describe("killers: real server", () => {
     await expect.poll(() => lastState(got)?.changes.find((c: State) => c.id === "7.0")?.reversible.ok).toBe(false);
     await expect.poll(() => hostText(page, "reply", DONE)).toMatch(/· y keep\s+c instead$/);
     await reply(page, DONE).click();
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => pillOf(page)).toBe("can't undo this one · c instead");
     expect(bytes().toString("utf-8")).toBe(over);
     expect(reviewLog(served.root)!.filter((l) => l.op === "edit")).toEqual([]);
@@ -1421,7 +1384,7 @@ test.describe("killers: real server", () => {
     const outside = s.doc + "\nA line from elsewhere.\n";
     served.write("pr.md", outside);
     await page.waitForTimeout(SETTLE_MS * 2);
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => pillOf(page)).toBe("changed since · try again");
     expect(fs.readFileSync(path.join(served.root, "pr.md"), "utf-8")).toBe(outside);
   });

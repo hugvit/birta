@@ -13,9 +13,52 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var REOPEN = 'approved · c to reopen';
   // After approve these only say how to start again
   var REOPENS = { yes: 1, no: 1, later: 1, your_call: 1, ask: 1, next_item: 1, prev_item: 1 };
+  var RENDERED = 'rendered view';
+  // What a change row takes before the block under it does
+  var ROW_KEYS = { yes: 1, no: 1, note: 1, revert_change: 1 };
+  var WORD = { yes: 'yes', no: 'no', later: 'later', your_call: 'your call' };
+  var KIND = { p: 'paragraph', li: 'list item', tr: 'table row', td: 'table row', th: 'table row', pre: 'code block' };
+  var LABEL_WORDS = 6;
+
+  /**
+   * The doc stop's block, when the first stop is an H1 whose section holds every later stop:
+   * that heading and the doc are then one stop. Null otherwise.
+   */
+  BR.pure.wholeDocStop = function (stops) {
+    var first = stops && stops[0];
+    if (!first || first.kind !== 'heading' || first.level !== 1 || !first.section) return null;
+    for (var i = 1; i < stops.length; i++) if (stops[i].lines[0] > first.section[1]) return null;
+    return first.sp;
+  };
+
+  /**
+   * What a verdict key at the whole-doc stop says instead of deciding. `b` is the turn button;
+   * `keys` names the bound move and note keys (`j` and `c` by default).
+   */
+  BR.pure.wholeDocPill = function (action, b, mac, keys) {
+    var j = (keys && keys.focus_next) || 'j';
+    var c = (keys && keys.note) || 'c';
+    if (action === 'later') return 'later needs a block · ' + j;
+    if (action === 'your_call') return 'your call needs a block · ' + j;
+    if (action === 'no') return 'whole doc: ' + c + " to say what's wrong";
+    if (!b) return null;
+    var key = mac ? '⌘⏎' : 'Ctrl⏎';
+    if (/^Hand back/.test(b.text)) return key + ' hands back';
+    if (/^Approve/.test(b.text) && !b.disabled) return key + ' approves';
+    if (b.text === 'Approved') return 'approved · ' + c + ' to reopen';
+    return b.text.charAt(0).toLowerCase() + b.text.slice(1);
+  };
+
+  /** Up to six words of `text`, with … only when it was cut. */
+  BR.pure.fewWords = function (text) {
+    var words = String(text || '').trim().split(/\s+/).filter(Boolean);
+    return words.length > LABEL_WORDS ? words.slice(0, LABEL_WORDS).join(' ') + '…' : words.join(' ');
+  };
 
   var stops = [];
   var focus = null;
+  // A click landed outside the focused block since it took focus
+  var pointedAway = false;
   // What the focused block looked like, to find it again when a patch replaces its node
   var focusWas = null;
   var active = false;
@@ -69,7 +112,19 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   /** The focus stops in document order; a closed `<details>` stands in with its summary. */
   function targets() {
-    return placedStops().filter(function (el) { return standIns.has(el) || el.getClientRects().length; });
+    var out = placedStops().filter(function (el) { return standIns.has(el) || el.getClientRects().length; });
+    // A blank is a stop of its own, right where it sits
+    var blanks = BR.flow.blanks();
+    if (!blanks.length) return out;
+    return out.concat(blanks).sort(function (a, b) {
+      return a === b ? 0 : a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+    });
+  }
+
+  /** The whole-doc H1's element, or null when the doc has none. */
+  function wholeDoc() {
+    var sp = BR.pure.wholeDocStop(stops);
+    return sp ? blockOf(sp) : null;
   }
 
   function walkOf(state) {
@@ -107,7 +162,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   }
 
   function setFocus(el, all) {
+    // A row or blank left behind would keep the keys
+    if (document.activeElement !== el) BR.flow.release(document.activeElement);
     focus = el;
+    pointedAway = false;
     focusWas = el && { name: el.localName, text: el.textContent, at: (all || targets()).indexOf(el) };
     BR.lane.focus(el);
     paintDoc();
@@ -146,14 +204,16 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         i = step > 0 ? after : after - 1;
       }
       if (i < 0) {
-        setFocus(null);
+        // A whole-doc H1 is the doc stop, so the topmost stop is the end
+        if (!wholeDoc()) setFocus(null);
         return;
       }
       next = all[Math.min(i, all.length - 1)];
     }
     setFocus(next, all);
     reveal(next);
-    see(next);
+    if (BR.isHost(next)) BR.flow.hold(next);
+    else see(next);
   }
 
   // --- seen and the attention walk ---
@@ -190,7 +250,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     setFocus(el);
     if (el) reveal(el);
     if (stop.unseen && (stop.kind === 'change' || stop.kind === 'reply')) BR.op({ op: 'seen', ids: [stop.id] });
-    BR.flow.focusStop(stop);
+    var host = BR.flow.focusStop(stop);
+    // A blank is the stop itself, so j and k go on from it
+    if (stop.kind === 'blank' && host) {
+      setFocus(host);
+      reveal(host);
+    }
     showPill((all.indexOf(stop) + 1) + ' of ' + all.length + ' · n next · p back');
   }
 
@@ -209,6 +274,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   function onClick(e) {
     var t = e.target;
     if (!t || !t.closest || BR.isHost(t) || !content().contains(t)) return;
+    // A click elsewhere in the doc shuts the focused block's row
+    if (focus && !focus.contains(t)) pointedAway = true;
     // A drag that selects text is pointing, not looking
     var s = getSelection();
     if (s && !s.isCollapsed) return;
@@ -248,6 +315,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var q = range && BR.quote.fromRange(range);
     if (q) return quoteAnchor(q);
     var block = isSummary(focus) ? summaryStop(focus) : focus;
+    if (block && (block === wholeDoc() || BR.isHost(block))) block = null;
     if (block) {
       return {
         k: 'block',
@@ -341,20 +409,50 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     undos.push(entry);
   }
 
+  /** Words of `el` that are its own: a list item's nested list and review's hosts left out. */
+  function ownText(el) {
+    var out = '';
+    el.childNodes.forEach(function (n) {
+      if (n.nodeType === 3) out += n.data;
+      else if (n.nodeType === 1 && !BR.isHost(n) && !/^(ul|ol)$/.test(n.localName)) out += n.textContent;
+    });
+    return out;
+  }
+
+  /** What a verdict on `at` is on, as its pill names it. */
+  function scopeLabel(at) {
+    if (at.k === 'quote') return '"' + BR.pure.fewWords(at.q) + '"';
+    var el = at.sp ? blockOf(at.sp) : null;
+    if (!el) return 'this block';
+    var level = /^h([1-6])$/.exec(el.localName);
+    if (level) return new Array(Number(level[1]) + 1).join('#') + ' ' + el.textContent.trim() + ' (section)';
+    return '"' + BR.pure.fewWords(ownText(el)) + '" (' + (KIND[el.localName] || 'block') + ')';
+  }
+
   function verdict(name) {
-    var state = BR.currentState();
     var at = target();
     if (at.k === 'doc' && name === 'yes' && BR.flow.rewriteActive()) {
       BR.flow.markRewriteSeen();
       return;
     }
+    if (at.k === 'doc') {
+      // A whole-doc verdict asks the agent nothing it can act on
+      var keys = { focus_next: BR.keyName('focus_next'), note: BR.keyName('note') };
+      showPill(BR.pure.wholeDocPill(name, BR.chrome.button(), /Mac/.test(navigator.platform), keys) || '');
+      return;
+    }
+    verdictOn(name, at);
+  }
+
+  /** Writes verdict `name` on `at`, or changes or clears your draft one there, and pills what it did. */
+  function verdictOn(name, at) {
     var own = draftVerdictAt(at);
     if (!own) {
       remember({
         cid: BR.op({ op: 'comment', at: at, verdict: name }),
-        created: !state || !state.log || !state.log.lines,
         undo: function (n) { return { op: 'retract', to: n }; }
       });
+      showPill(WORD[name] + ' · ' + scopeLabel(at) + ' · ' + BR.keyName('undo') + ' to undo');
       return;
     }
     var was = own.verdict;
@@ -364,7 +462,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         item: own.n,
         undo: function () { return { op: 'amend', to: own.n, verdict: was }; }
       });
-    } else if (own.body) {
+      showPill(WORD[name] + ' · ' + scopeLabel(at) + ' · ' + BR.keyName('undo') + ' to undo');
+      return;
+    }
+    if (own.body) {
       // The same key clears the verdict; the words stay
       remember({
         cid: BR.op({ op: 'amend', to: own.n, drop_verdict: true }),
@@ -377,13 +478,69 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         undo: function () { return { op: 'comment', at: at, verdict: was }; }
       });
     }
+    showPill(WORD[name] + ' removed · ' + BR.keyName('undo') + ' to undo');
+  }
+
+  /** The newest of your drafts on `at`'s block, or on the doc for a doc target; null for none. */
+  function newestDraft(at) {
+    var state = BR.currentState();
+    if (!state) return null;
+    var mine = (state.items || []).filter(function (i) {
+      if (!i.by || i.by.type !== 'human' || i.status !== 'draft' || !i.at) return false;
+      if (at.k === 'doc') return i.at.kind === 'doc';
+      return i.at.kind !== 'doc' && !!i.at.loc && i.at.loc.sp === at.sp;
+    });
+    return mine.reduce(function (a, i) { return !a || i.n > a.n ? i : a; }, null);
+  }
+
+  /** Your draft quote note whose words hold the selection `q`, newest first; null for none. */
+  function draftHolding(q) {
+    var state = BR.currentState();
+    if (!state || !q.sp || q.off == null) return null;
+    var end = q.off + Array.from(q.quote).length;
+    var mine = (state.items || []).filter(function (i) {
+      var loc = i.at && i.at.loc;
+      return !!i.by && i.by.type === 'human' && i.status === 'draft' && !!i.at && i.at.scope === 'quote' &&
+        !!loc && loc.sp === q.sp && !!loc.off && q.off >= loc.off[0] && end <= loc.off[1];
+    });
+    return mine.reduce(function (a, i) { return !a || i.n > a.n ? i : a; }, null);
+  }
+
+  /** c: your draft under the selection, else a new quote note; else your newest draft on the focus. */
+  function note() {
+    var range = selectedRange();
+    var q = range && BR.quote.fromRange(range);
+    if (q) {
+      BR.flow.open('note', quoteAnchor(q), draftHolding(q));
+      return;
+    }
+    var at = target();
+    BR.flow.open('note', at, newestDraft(at));
+  }
+
+  /** Flips the source view, keeping the focused block and saying how back. */
+  function toggleRaw() {
+    if (typeof setViewMode !== 'function') return false;
+    var raw = viewMode !== 'raw';
+    var kept = focus;
+    setViewMode(raw ? 'raw' : 'preview');
+    showPill(raw ? 'source view · ' + BR.keyName('toggle_raw') + ' back' : RENDERED);
+    if (raw) return true;
+    BR.lane.redraw();
+    if (kept && kept.isConnected) {
+      setFocus(kept);
+      reveal(kept);
+    }
+    return true;
   }
 
   /** Whether the note on line `n` has left the drafts, so z can no longer touch it. */
   function sent(n) {
     var state = BR.currentState();
     var item = state && (state.items || []).filter(function (i) { return i.n === n; })[0];
-    return !!item && item.status !== 'draft' && item.status !== 'retracted';
+    // A reply is no item, but a hand-back after it took it all the same
+    var handed = !!state && (state.rounds || []).some(function (r) { return r.submit > n; });
+    return handed || (!!item && item.status !== 'draft' && item.status !== 'retracted');
   }
 
   function takeBack(entry) {
@@ -436,7 +593,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     scrollQueued = true;
     requestAnimationFrame(function () {
       scrollQueued = false;
-      if (!focus) return;
+      // The source view hides the doc; its focus comes back with it
+      if (!focus || (typeof viewMode !== 'undefined' && viewMode === 'raw')) return;
       var r = focus.getBoundingClientRect();
       if (r.bottom <= headerBottom() || r.top >= innerHeight || !focus.getClientRects().length) setFocus(null);
     });
@@ -455,10 +613,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     /** Runs a review action; false leaves the key to the page. */
     act: function (action) {
       if (ACTIVATES[action]) activate();
-      if (action === 'focus_next' || action === 'focus_prev') {
-        move(action === 'focus_next' ? 1 : -1);
-        return true;
-      }
+      if (action !== 'no') BR.flow.disarm();
+      // The clean view hides the rows, so its keys come before theirs
       if (BR.chrome.clean()) {
         if (REOPENS[action]) {
           showPill(REOPEN);
@@ -469,6 +625,18 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
           BR.flow.open('note', on, null, 'new round · ' + (on.k === 'doc' ? 'whole doc' : named(on)));
           return true;
         }
+      }
+      // An open change row takes its keys first, the whole-doc stop's included; a selection beats it
+      var row = ROW_KEYS[action] && (action === 'revert_change' || !selectedRange()) ? BR.flow.openRow() : null;
+      if (row) {
+        BR.flow.rowKey(action, row);
+        return true;
+      }
+      // Its own key with no row open: a revert needs a change to revert
+      if (action === 'revert_change') return true;
+      if (action === 'focus_next' || action === 'focus_prev') {
+        move(action === 'focus_next' ? 1 : -1);
+        return true;
       }
       if (action === 'next_item' || action === 'prev_item') {
         walk(action === 'next_item' ? 1 : -1);
@@ -494,9 +662,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         undo();
         return true;
       }
-      if (action === 'note' || action === 'ask') {
-        var at = target();
-        BR.flow.open(action, at, action === 'note' ? draftVerdictAt(at) : null);
+      if (action === 'note') {
+        note();
+        return true;
+      }
+      if (action === 'ask') {
+        BR.flow.open('ask', target(), null);
         return true;
       }
       if (action === 'open') {
@@ -509,6 +680,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     },
     /** Shows `text` in the pill, or hides it for ''. */
     pill: showPill,
+    /** The focused stop's element, or null on the doc or once a click went elsewhere. */
+    focused: function () { return pointedAway ? null : focus; },
+    /** Writes verdict `name` on request target `at`, as its key would on that block. */
+    verdictOn: verdictOn,
+    /** The shared key away from a change row: the source view and back, focus kept. */
+    toggleRaw: toggleRaw,
     /**
      * The approve guard's jump: to the first unseen change or reply in doc order, else the first
      * open question. False when there is neither.

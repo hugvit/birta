@@ -54,6 +54,7 @@ pub struct KeybindingsConfig {
     pub toggle_dark: String,
     pub focus_theme: String,
     pub toggle_raw: String,
+    pub revert_change: String,
     pub focus_next: String,
     pub focus_prev: String,
     pub note: String,
@@ -81,6 +82,7 @@ impl Default for KeybindingsConfig {
             toggle_dark: key("d"),
             focus_theme: key("t"),
             toggle_raw: key("u"),
+            revert_change: key("u"),
             focus_next: key("j"),
             focus_prev: key("k"),
             note: key("c"),
@@ -142,19 +144,26 @@ fn presses(binding: &str) -> Vec<String> {
         .collect()
 }
 
-fn clash(a: &str, b: &str) -> bool {
-    let b = presses(b);
-    presses(a).iter().any(|p| b.contains(p))
+/// Whether action `a` on key `ka` and action `b` on key `kb` answer to one press. The change
+/// revert and the raw view may share one: the page picks by whether a change row is open.
+fn clash(a: &str, ka: &str, b: &str, kb: &str) -> bool {
+    let pair = [a, b];
+    if pair.contains(&"revert_change") && pair.contains(&"toggle_raw") {
+        return false;
+    }
+    let kb = presses(kb);
+    presses(ka).iter().any(|p| kb.contains(p))
 }
 
 impl KeybindingsConfig {
-    fn slots(&self) -> [(&'static str, &String); 21] {
+    fn slots(&self) -> [(&'static str, &String); 22] {
         [
             ("toggle_reading", &self.toggle_reading),
             ("exit_reading", &self.exit_reading),
             ("toggle_dark", &self.toggle_dark),
             ("focus_theme", &self.focus_theme),
             ("toggle_raw", &self.toggle_raw),
+            ("revert_change", &self.revert_change),
             ("focus_next", &self.focus_next),
             ("focus_prev", &self.focus_prev),
             ("note", &self.note),
@@ -181,6 +190,7 @@ impl KeybindingsConfig {
             "toggle_dark" => &mut self.toggle_dark,
             "focus_theme" => &mut self.focus_theme,
             "toggle_raw" => &mut self.toggle_raw,
+            "revert_change" => &mut self.revert_change,
             "focus_next" => &mut self.focus_next,
             "focus_prev" => &mut self.focus_prev,
             "note" => &mut self.note,
@@ -206,7 +216,7 @@ impl KeybindingsConfig {
         let slots = self.slots();
         for (i, (a, key)) in slots.iter().enumerate() {
             for (b, other) in &slots[i + 1..] {
-                if clash(key, other) {
+                if clash(a, key, b, other) {
                     return Some((a, b, (*key).clone()));
                 }
             }
@@ -257,7 +267,7 @@ impl KeybindingsConfig {
         for (i, (a, key)) in binds.iter().enumerate() {
             if let Some((b, _)) = binds[i + 1..]
                 .iter()
-                .find(|(b, other)| b != a && clash(key, other))
+                .find(|(b, other)| b != a && clash(a, key, b, other))
             {
                 return Err(format!(
                     "keybindings: --bind {a} and --bind {b} are both on \"{key}\""
@@ -276,7 +286,7 @@ impl KeybindingsConfig {
             let losers: Vec<&'static str> = out
                 .slots()
                 .iter()
-                .filter(|(other, held)| !bound(other) && clash(key, held))
+                .filter(|(other, held)| !bound(other) && clash(action, key, other, held))
                 .map(|(other, _)| *other)
                 .collect();
             for loser in losers {
@@ -289,7 +299,7 @@ impl KeybindingsConfig {
                 let free = out
                     .slots()
                     .iter()
-                    .all(|(other, held)| *other == loser || !clash(&fallback, held));
+                    .all(|(other, held)| *other == loser || !clash(loser, &fallback, other, held));
                 let now = if free { fallback } else { String::new() };
                 let shown = if now.is_empty() {
                     "unbound".to_string()
@@ -619,6 +629,7 @@ toggle_dark = ""
     fn keybindings_review_defaults() {
         let json = keys_json(&KeybindingsConfig::default());
         let want = [
+            ("revert_change", "u"),
             ("focus_next", "j"),
             ("focus_prev", "k"),
             ("note", "c"),

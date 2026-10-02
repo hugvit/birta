@@ -243,7 +243,9 @@ fn said(verdict: Verdict) -> &'static str {
 }
 
 fn answer_line(a: &AnswerLine) -> String {
-    let reply = match (a.verdict, &a.body) {
+    // A key pressed over typed words empties them rather than dropping them
+    let body = a.body.as_ref().filter(|b| !b.trim().is_empty());
+    let reply = match (a.verdict, body) {
         (Some(v), Some(body)) => format!("{}: {}", said(v), clip(body)),
         (Some(v), None) => said(v).to_string(),
         (None, Some(body)) => clip(body),

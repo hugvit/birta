@@ -96,9 +96,21 @@ async function focusOn(page: Page, sp: string) {
   const all = await stops(page);
   const at = all.findIndex((s) => s.sp === sp);
   if (at < 0) throw new Error(`${sp} is not a stop`);
-  while ((await focused(page)) !== null) await page.keyboard.press("k");
-  for (let i = 0; i <= at; i++) await page.keyboard.press("j");
+  while ((await focused(page)) !== null) await page.keyboard.press("Escape");
+  // Blanks are stops too, so walk until the block has focus rather than count
+  for (let i = 0; i <= at + 8 && (await focused(page)) !== sp; i++) await page.keyboard.press("j");
   await expect.poll(() => focused(page)).toBe(sp);
+}
+
+/** Presses j from nothing until the blank asking `question` holds the keyboard. */
+async function focusBlank(page: Page, question: string) {
+  while ((await focused(page)) !== null) await page.keyboard.press("Escape");
+  const has = () => page.evaluate((q) => {
+    const a = document.activeElement;
+    return !!a && a.getAttribute("data-kind") === "blank" && (a.shadowRoot?.textContent ?? "").includes(q);
+  }, question);
+  for (let i = 0; i < 40 && !(await has()); i++) await page.keyboard.press("j");
+  await expect.poll(has).toBe(true);
 }
 
 /** Selects `word` in the first text node of the block `sp` that holds it. */
@@ -980,11 +992,11 @@ test.describe("blanks", () => {
     await expect.poll(async () => (await hostsAt(page, "3:1-3:6")).map((h) => h.kind)).toEqual(["blank"]);
     const [blank] = await hostsAt(page, "3:1-3:6");
     expect(blank.text).toContain("is 503 the only code?");
-    expect(blank.text).toContain("y x . l or type");
+    expect(blank.text).toContain("type an answer · y yes · x no · . your call · l later");
   });
 
-  test("opening the lost row redraws that row alone, and an answer being typed stays", async ({ page, birta }) => {
-    await open(page, birta, FLOW_DOC, { state: fixtureState("flow") });
+  test("opening the lost row redraws that row alone, and an answer being typed is saved as the field is left", async ({ page, birta }) => {
+    const { mock } = await open(page, birta, FLOW_DOC, { state: fixtureState("flow") });
     await page.locator('birta-flow[data-kind="blank"]', { hasText: "is 503 the only code?" }).click();
     await page.keyboard.type("half an answer");
     const answer = page.locator('birta-flow[data-kind="blank"] textarea');
@@ -1000,7 +1012,8 @@ test.describe("blanks", () => {
     expect(marked).toBeGreaterThan(1);
     await page.locator('birta-flow[data-kind="lost"] .more').click();
     await expect(page.getByText("cut this")).toBeVisible();
-    await expect(answer).toHaveValue("half an answer");
+    // Leaving the field keeps its words, as Esc does
+    await expect.poll(() => mock.ops().map((o) => [o.op, o.body])).toEqual([["reply", "half an answer"]]);
     const kept = await page.evaluate(
       () => Array.from(document.querySelectorAll("birta-flow")).filter((h) => h.shadowRoot!.querySelector('[data-probe="1"]')).length,
     );
@@ -1015,7 +1028,7 @@ test.describe("blanks", () => {
   ] as const) {
     test(`a focused blank takes ${key} as the answer ${verdict}`, async ({ page, birta }) => {
       const { mock } = await open(page, birta, FLOW_DOC, { state: fixtureState("flow") });
-      await page.locator('birta-flow[data-kind="blank"]', { hasText: "is 503 the only code?" }).click();
+      await focusBlank(page, "is 503 the only code?");
       await page.keyboard.press(key);
       await expect.poll(() => mock.ops().length).toBe(1);
       expect(mock.ops()[0]).toMatchObject({ op: "reply", to: BLANK, verdict });
@@ -1041,7 +1054,7 @@ test.describe("blanks", () => {
     state.lost = [];
     const { mock } = await open(page, birta, FLOW_DOC, { state });
     const blanks = async () =>
-      (await hosts(page)).filter((h) => h.kind === "blank").map((h) => ({ q: h.text.match(/question \d/)?.[0], hint: h.text.includes("y x . l or type") }));
+      (await hosts(page)).filter((h) => h.kind === "blank").map((h) => ({ q: h.text.match(/question \d/)?.[0], hint: h.text.includes("type an answer · y yes · x no · . your call · l later") }));
     await expect.poll(blanks).toEqual([
       { q: "question 1", hint: true },
       { q: "question 2", hint: true },
@@ -1051,7 +1064,7 @@ test.describe("blanks", () => {
       { q: "question 6", hint: false },
       { q: "question 7", hint: false },
     ]);
-    await page.locator('birta-flow[data-kind="blank"]', { hasText: "question 6" }).click();
+    await focusBlank(page, "question 6");
     await expect.poll(async () => (await blanks())[5].hint).toBe(true);
     await page.keyboard.press("y");
     await expect.poll(() => mock.ops().length).toBe(1);
@@ -1067,10 +1080,11 @@ test.describe("blanks", () => {
       ["blank", expect.stringContaining("keep this title?")],
       ["reply", expect.stringMatching(/↳ you · yes, keep it/)],
     ]);
-    await page.locator('birta-flow[data-kind="blank"]', { hasText: "keep this title?" }).click();
+    // A second answer amends the first, and a key's answer replaces typed words
+    await focusBlank(page, "keep this title?");
     await page.keyboard.press("x");
     await expect.poll(() => mock.ops().length).toBe(1);
-    expect(mock.ops()[0]).toMatchObject({ op: "reply", to: 22, verdict: "no" });
+    expect(opFields(mock.ops()[0])).toStrictEqual({ op: "amend", to: 25, verdict: "no", body: "" });
 
     // Handed back: a settled note, where only y (seen) acts. The mock resends its state on
     // any content the server repeats, so the hand-back goes into that same state
@@ -1117,15 +1131,15 @@ test.describe("blanks", () => {
     await booted(page);
     const para = await stopSp(page, "Detail words.");
     const blank = page.locator('birta-flow[data-kind="blank"]', { hasText: "only here?" });
-    await blank.click();
+    await focusBlank(page, "only here?");
     await page.keyboard.press("y");
     await expect.poll(() => reviewLog(served.root)!.at(-1)).toMatchObject({ op: "reply", to: 7, verdict: "yes" });
-    // Still a draft answer: still a blank, and another key answers again
+    const answer = reviewLog(served.root)!.length;
+    // Still a draft answer: still a blank, and another key amends it
     await expect.poll(async () => texts(await hostsAt(page, para)).join("\n")).toMatch(/↳ you · yes/);
     await expect(blank).toBeVisible();
-    await blank.click();
     await page.keyboard.press("x");
-    await expect.poll(() => reviewLog(served.root)!.at(-1)).toMatchObject({ op: "reply", to: 7, verdict: "no" });
+    await expect.poll(() => reviewLog(served.root)!.at(-1)).toMatchObject({ op: "amend", to: answer, verdict: "no" });
     // The latest answer is the one shown
     await expect.poll(async () => texts(await hostsAt(page, para)).join("\n")).toMatch(/↳ you · no/);
     expect(texts(await hostsAt(page, para)).join("\n")).not.toMatch(/↳ you · yes/);
@@ -1144,9 +1158,12 @@ test.describe("blanks", () => {
     await expect.poll(async () => (await marks(page)).filter((m) => m.mark === "dot").map((m) => m.sp)).toEqual([para]);
   });
 
-  test("any other letter starts a written answer, which ⏎ keeps", async ({ page, birta }) => {
+  test("another letter says how to type; ⏎ opens the field, and ⏎ there keeps the words", async ({ page, birta }) => {
     const { mock } = await open(page, birta, FLOW_DOC, { state: fixtureState("flow") });
-    await page.locator('birta-flow[data-kind="blank"]', { hasText: "is 503 the only code?" }).click();
+    await focusBlank(page, "is 503 the only code?");
+    await page.keyboard.press("o");
+    await expect(page.getByText("⏎ to type an answer")).toBeVisible();
+    await page.keyboard.press("Enter");
     await page.keyboard.type("only 503, yes");
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops()).toEqual([]);
@@ -1718,21 +1735,17 @@ test.describe("names, verdicts and z", () => {
     expect(mock.ops()).toHaveLength(1);
   });
 
-  test("a blank's answer is not on the z stack, and answering again sends the new answer", async ({ page, birta }) => {
+  test("a blank's answer is on the z stack, so z takes it back", async ({ page, birta }) => {
     const { mock } = await open(page, birta, FLOW_DOC, { state: fixtureState("flow") });
-    const blank = page.locator('birta-flow[data-kind="blank"]', { hasText: "is 503 the only code?" });
-    await blank.click();
+    await focusBlank(page, "is 503 the only code?");
     await page.keyboard.press("y");
     await expect.poll(() => mock.ops().length).toBe(1);
-    await blank.click();
-    await page.keyboard.press("x");
-    await expect.poll(() => mock.ops().length).toBe(2);
     await page.locator("#content h1").click();
     await page.keyboard.press("z");
-    await page.waitForTimeout(SETTLE_MS);
+    await expect.poll(() => mock.ops().length).toBe(2);
     expect(mock.ops().map((o) => [o.op, o.to, o.verdict])).toEqual([
       ["reply", 21, "yes"],
-      ["reply", 21, "no"],
+      ["retract", 101, undefined],
     ]);
   });
 
@@ -1947,7 +1960,7 @@ test.describe("a note kept after the doc moved under it", () => {
   /** Walks to the block holding `text` as the doc shows it now, whatever the boot data said. */
   async function focusText(page: Page, text: string) {
     const sp = await spNow(page, text);
-    while ((await focused(page)) !== null) await page.keyboard.press("k");
+    while ((await focused(page)) !== null) await page.keyboard.press("Escape");
     for (let i = 0; i < 20 && (await focused(page)) !== sp; i++) await page.keyboard.press("j");
     expect(await focused(page)).toBe(sp);
   }
@@ -2487,8 +2500,11 @@ test.describe("rewrite row, other turns", () => {
   });
 
   test("y with a block focused is that block's verdict, not the rewrite's seen", async ({ page, birta }) => {
-    const { mock } = await open(page, birta, fixtureDoc("rewrite"), { state: fixtureState("rewrite") });
-    const first = (await stops(page))[0].sp;
+    const state = fixtureState("rewrite");
+    const { mock } = await open(page, birta, fixtureDoc("rewrite"), { state });
+    // Not the whole-doc H1, whose y is the doc's, and no changed block, whose row takes y
+    const changed = new Set(state.changes.map((c: State) => c.range && c.range.sp));
+    const first = (await stops(page)).slice(1).find((s) => !changed.has(s.sp))!.sp;
     await focusOn(page, first);
     await page.keyboard.press("y");
     await expect.poll(() => mock.ops().length).toBe(1);

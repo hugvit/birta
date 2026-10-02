@@ -407,8 +407,7 @@
 }
 
 .blank {
-  display: inline-block;
-  min-width: 160px;
+  display: block;
   min-height: 24px;
   padding: 0 8px;
   border: 1px dashed var(--birta-fg-muted);
@@ -420,6 +419,7 @@
   border-color: var(--review-you);
 }
 
+.blank[hidden],
 .blank [hidden] {
   display: none;
 }

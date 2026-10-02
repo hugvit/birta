@@ -327,8 +327,11 @@ test.describe("approve guard", () => {
     await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve · 1 unanswered");
     await press(page);
     await expect.poll(() => pillOf(page)).toBe(`Claude asked 1 question · n go · ${key} again approves anyway`);
-    // #22 above it is answered, so the first open one is #21 under ## Why
-    expect(await focused(page)).toBe("3:1-3:6");
+    // #22 above it is answered, so the first open one is #21 under ## Why; a blank is its own stop
+    expect(await page.evaluate(() => {
+      const a = document.activeElement;
+      return a?.getAttribute("data-kind") === "blank" ? (a.shadowRoot?.querySelector(".text")?.textContent ?? "") : null;
+    })).toBe("is 503 the only code?");
     expect(await page.evaluate(() =>
       Array.from(document.querySelectorAll('birta-flow[data-kind="blank"]')).some((h) => !!h.shadowRoot?.querySelector("textarea")),
     )).toBe(false);
@@ -466,6 +469,8 @@ test.describe("approve guard", () => {
 
   test("a held verdict key acts once", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "fresh");
+    // Past the whole-doc H1, whose verdict keys only say what to do
+    await page.keyboard.press("j");
     await page.keyboard.press("j");
     await expect.poll(() => focused(page)).not.toBeNull();
     await page.keyboard.press("y");

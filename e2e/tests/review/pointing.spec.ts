@@ -64,8 +64,9 @@ async function focusOn(page: Page, sp: string) {
   const all = await stops(page);
   const at = all.findIndex((s) => s.sp === sp);
   if (at < 0) throw new Error(`${sp} is not a stop`);
-  while ((await focused(page)) !== null) await page.keyboard.press("k");
-  for (let i = 0; i <= at; i++) await page.keyboard.press("j");
+  while ((await focused(page)) !== null) await page.keyboard.press("Escape");
+  // Blanks are stops too, so walk until the block has focus rather than count
+  for (let i = 0; i <= at + 8 && (await focused(page)) !== sp; i++) await page.keyboard.press("j");
   await expect.poll(() => focused(page)).toBe(sp);
 }
 
@@ -108,7 +109,7 @@ const outbox = (page: Page) =>
   page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("birta-unacked:") && localStorage.getItem(k)));
 
 test.describe("focus", () => {
-  test("j walks every stop in order, nested items included, and k walks back to the doc", async ({
+  test("j walks every stop in order, nested items included, and k walks back to the whole-doc H1", async ({
     page,
     birta,
   }) => {
@@ -148,15 +149,15 @@ test.describe("focus", () => {
       await page.keyboard.press("k");
       await expect.poll(() => focused(page)).toBe(all[i].sp);
     }
-    await page.keyboard.press("k");
-    await expect.poll(() => focused(page)).toBeNull();
+    // The H1 spans the doc, so it is the doc stop and nothing lies above it
     await page.keyboard.press("k");
     await page.waitForTimeout(SETTLE_MS);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe(all[0].sp);
   });
 
   test("the doc stop washes the filename once review is active in the tab", async ({ page, birta, context }) => {
-    const { served } = await open(page, birta, STOPS_DOC);
+    // With no H1 spanning the doc, the file chip is the doc stop
+    const { served } = await open(page, birta, "Intro words.\n\n" + STOPS_DOC);
     const bg = await filenameEdge(page);
     // Nothing shows until a review key is pressed
     await page.waitForTimeout(SETTLE_MS);
@@ -340,7 +341,7 @@ test.describe("focus", () => {
     await expect.poll(() => liveSp(page, "More detail.")).not.toBeNull();
     const last = (await blockBox(page, (await liveSp(page, "More detail."))!))!;
     await expect.poll(async () => near1((await focusMark(page))!.bottom, last.bottom)).toBe(true);
-    while ((await focused(page)) !== null) await page.keyboard.press("k");
+    while ((await focused(page)) !== null) await page.keyboard.press("Escape");
     for (const _ of [0, 1, 2]) await page.keyboard.press("j");
     await expect.poll(() => focused(page)).toBe(await liveSp(page, "A new first paragraph."));
   });
@@ -441,7 +442,7 @@ test.describe("focus", () => {
 });
 
 test.describe("verdict keys", () => {
-  test("a verdict acts on the selection, then the focus, then the doc", async ({ page, birta }) => {
+  test("a verdict acts on the selection, then the focus, and on the doc only says what to do", async ({ page, birta }) => {
     const { mock } = await open(page, birta, STOPS_DOC);
     const para = await stopSp(page, "When the upload");
     await focusOn(page, para);
@@ -462,12 +463,14 @@ test.describe("verdict keys", () => {
     await expect.poll(() => mock.ops().length).toBe(2);
     await page.keyboard.press("Escape");
     await expect.poll(() => focused(page)).toBeNull();
+    // A whole-doc verdict tells the agent nothing it can act on
     await page.keyboard.press(".");
-    await expect.poll(() => mock.ops().length).toBe(3);
-    const [quote, block, doc] = mock.ops();
+    await expect(page.getByText("your call needs a block · j")).toBeVisible();
+    await page.waitForTimeout(SETTLE_MS);
+    expect(mock.ops()).toHaveLength(2);
+    const [quote, block] = mock.ops();
     expect(quote).toMatchObject({ op: "comment", verdict: "yes", at: { k: "quote", sp: para, q: "upload", off: 9 } });
     expect(block).toMatchObject({ op: "comment", verdict: "later", at: { k: "block", sp: para, scope: "block" } });
-    expect(doc).toMatchObject({ op: "comment", verdict: "your_call", at: { k: "doc" } });
     for (const op of mock.ops()) expect(op.body).toBeUndefined();
   });
 
@@ -528,6 +531,7 @@ test.describe("verdict keys", () => {
 
   test("z retracts the verdict it just sent", async ({ page, birta }) => {
     const { mock } = await open(page, birta, STOPS_DOC);
+    await focusOn(page, await stopSp(page, "Detail words."));
     await page.keyboard.press("x");
     await expect.poll(() => mock.ops().length).toBe(1);
     // The mock acks with n = 101
@@ -568,14 +572,16 @@ test.describe("verdict keys", () => {
     const mock = await mockReview(page, { acks: "manual" });
     await page.goto(`${served.url}/view/pr.md`);
     await booted(page);
+    await page.keyboard.press("j");
+    await page.keyboard.press("j");
     await page.keyboard.press("x");
     await page.keyboard.press("j");
     await page.keyboard.press("y");
     await expect.poll(() => mock.ops().length).toBe(2);
-    const [doc, block] = mock.ops();
-    expect(doc.cid).not.toBe(block.cid);
-    mock.ack(block.cid); // n 101
-    mock.ack(doc.cid); // n 102
+    const [first, second] = mock.ops();
+    expect(first.cid).not.toBe(second.cid);
+    mock.ack(second.cid); // n 101
+    mock.ack(first.cid); // n 102
     await expect.poll(() => outbox(page)).toEqual([]);
     await page.keyboard.press("z");
     await expect.poll(() => mock.ops().length).toBe(3);
@@ -595,6 +601,8 @@ test.describe("verdict keys", () => {
     const mock = await mockReview(page, { acks: "manual" });
     await page.goto(`${served.url}/view/pr.md`);
     await booted(page);
+    await page.keyboard.press("j");
+    await page.keyboard.press("j");
     await page.keyboard.press("x");
     await expect.poll(() => mock.ops().length).toBe(1);
     await page.keyboard.press("z");
@@ -733,13 +741,17 @@ test.describe("selection", () => {
     });
   }
 
-  test("a selection outside the doc is not a target, so the verdict falls to the doc", async ({ page, birta }) => {
+  test("a selection outside the doc is not a target, so the verdict falls to the doc, which decides nothing", async ({
+    page,
+    birta,
+  }) => {
     const { mock } = await open(page, birta, STOPS_DOC);
     await page.locator(".file-header-name").dblclick();
     expect(await page.evaluate(() => getSelection()!.toString())).not.toBe("");
-    await page.keyboard.press("y");
-    await expect.poll(() => mock.ops().length).toBe(1);
-    expect(mock.ops()[0].at).toEqual({ k: "doc" });
+    await page.keyboard.press("x");
+    await expect(page.getByText("whole doc: c to say what's wrong")).toBeVisible();
+    await page.waitForTimeout(SETTLE_MS);
+    expect(mock.ops()).toEqual([]);
   });
 });
 

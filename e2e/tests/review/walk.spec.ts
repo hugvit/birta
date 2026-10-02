@@ -319,43 +319,38 @@ test.describe("killers: the walk", () => {
 
 // --- Pill lifetime ---------------------------------------------------------------------------
 
-/** flow.json with 13.0 as one hunk of a two-hunk write, whose first x arms a second. */
-function twoHunks(s: State) {
-  const c = s.changes.find((x: State) => x.id === "13.0");
-  c.op_hunks = 2;
-  c.reversible = { ok: true, reason: "none" };
-}
+/** On an open change row the first x arms a second, which says no to its text. */
 const CITED = "because you said";
-const ARMED = "x again to undo 2 changes";
+const ARMED = "x = no to this text · u reverts Claude's change · x again for no";
 
 test.describe("pill lifetime", () => {
   test("an armed pill clears when its window ends", async ({ page, birta }) => {
-    const { mock } = await openFixture(page, birta, "flow", twoHunks);
+    const { mock } = await openFixture(page, birta, "flow");
     await receipt(page, CITED).click();
     await page.keyboard.press("x");
     await expect.poll(() => pillOf(page)).toBe(ARMED);
     await page.waitForTimeout(CONFIRM_MS + 400);
     expect(await pillOf(page)).toBeNull();
-    expect(opsNamed(mock, "undo_change")).toEqual([]);
+    expect(opsNamed(mock, "comment")).toEqual([]);
   });
 
   test("an armed pill clears on any other key, and that key disarms it", async ({ page, birta }) => {
-    const { mock } = await openFixture(page, birta, "flow", twoHunks);
+    const { mock } = await openFixture(page, birta, "flow");
     await receipt(page, CITED).click();
     await page.keyboard.press("x");
     await expect.poll(() => pillOf(page)).toBe(ARMED);
     await page.keyboard.press("j");
     await expect.poll(() => pillOf(page), { timeout: 500 }).toBeNull();
-    // Back on the receipt inside the old window, x arms again instead of undoing
+    // Back on the receipt inside the old window, x arms again instead of saying no
     await receipt(page, CITED).click();
     await page.keyboard.press("x");
     await expect.poll(() => pillOf(page)).toBe(ARMED);
     await page.waitForTimeout(SETTLE_MS);
-    expect(opsNamed(mock, "undo_change")).toEqual([]);
+    expect(opsNamed(mock, "comment")).toEqual([]);
   });
 
   test("only another key disarms: x straight to the receipt after j arms again", async ({ page, birta }) => {
-    const { mock } = await openFixture(page, birta, "flow", twoHunks);
+    const { mock } = await openFixture(page, birta, "flow");
     await receipt(page, CITED).click();
     await page.keyboard.press("x");
     await expect.poll(() => pillOf(page)).toBe(ARMED);
@@ -369,9 +364,10 @@ test.describe("pill lifetime", () => {
           box.dispatchEvent(new KeyboardEvent(type, { key: "x", code: "KeyX", bubbles: true, composed: true, cancelable: true }));
       }
     }, CITED);
-    await expect.poll(() => pillOf(page)).toBe(ARMED);
+    // j moved the focus off the row, so that x is the focus's own and never the armed no
     await page.waitForTimeout(SETTLE_MS);
-    expect(opsNamed(mock, "undo_change")).toEqual([]);
+    expect(opsNamed(mock, "comment")).toEqual([]);
+    expect(await pillOf(page)).not.toBe(ARMED);
   });
 
   test("a pill that comes while the composer is open shows clear of it", async ({ page, birta }) => {

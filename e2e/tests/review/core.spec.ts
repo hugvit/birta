@@ -368,7 +368,7 @@ test.describe("outbox, only notes and only this tab's", () => {
     expect(reviewLog(served.root)).toBeNull();
   });
 
-  test("an undo lost with its socket leaves x free to undo again, and is not sent twice", async ({ page, birta }) => {
+  test("an undo lost with its socket leaves u free to revert again, and is not sent twice", async ({ page, birta }) => {
     const served = await birta({ "pr.md": UNSEEN }, GATE_ON);
     await page.setViewportSize(WIDE);
     const mock = await mockReview(page, { state: fixtureState("unseen"), acks: "manual" });
@@ -376,13 +376,13 @@ test.describe("outbox, only notes and only this tab's", () => {
     await booted(page);
     const receipt = page.locator("birta-flow", { hasText: "nobody asked" }).filter({ hasText: "x undo" }).first();
     await receipt.click();
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => mock.ops().filter((o) => o.op === "undo_change").length).toBe(1);
     const first = mock.ops().find((o) => o.op === "undo_change")!.cid;
     await mock.drop();
     await expect.poll(() => mock.frames.filter((f) => f.msg.type === "hello").length, { timeout: 10_000 }).toBe(2);
     await receipt.click();
-    await page.keyboard.press("x");
+    await page.keyboard.press("u");
     await expect.poll(() => mock.ops().filter((o) => o.op === "undo_change").length).toBe(2);
     expect(mock.ops().filter((o) => o.cid === first)).toHaveLength(1);
   });

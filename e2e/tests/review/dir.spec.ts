@@ -496,7 +496,7 @@ test.describe("the menu, more", () => {
     expect(tags).toBe(false);
   });
 
-  test("Esc keeps a folder note on the folder, under its own half-typed key", async ({ page, birta }) => {
+  test("Esc saves a folder note on the folder, typed under its own half-typed key", async ({ page, birta }) => {
     const { mock } = await openFolder(page, birta);
     await page.keyboard.press("c");
     await composer(page).fill("doc words");

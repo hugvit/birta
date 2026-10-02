@@ -808,7 +808,10 @@ test.describe("pill", () => {
 
   test("the review-file-created pill is a popover in the top layer", async ({ page, birta }) => {
     const served = await openReal(page, birta, STOPS_DOC);
-    await page.keyboard.press("x");
+    // A verdict pills its scope instead, so the first note is what creates the file here
+    await page.keyboard.press("c");
+    await page.keyboard.type("first");
+    await page.keyboard.press("Enter");
     await expect.poll(() => reviewLog(served.root)?.length ?? 0).toBe(4);
     await expect.poll(() => pillOf(page)).toBe("review file created · z to undo");
   });
@@ -964,7 +967,9 @@ test.describe("killers: menu and turn", () => {
 test.describe("killers: pill and socket", () => {
   test("the hold pill replaces review-file-created, which doesn't come back after", async ({ page, birta }) => {
     const served = await openReal(page, birta, STOPS_DOC, { BIRTA_REVIEW_HOLD_MS: "1500" });
-    await page.keyboard.press("x");
+    await page.keyboard.press("c");
+    await page.keyboard.type("first");
+    await page.keyboard.press("Enter");
     await expect.poll(() => pillOf(page)).toBe("review file created · z to undo");
     await page.keyboard.press("ControlOrMeta+Enter");
     await expect.poll(() => pillOf(page)).toBe("handing back · 1 note · z to undo");
@@ -1112,10 +1117,14 @@ test.describe("rulings", () => {
     await expect.poll(() => mock.ops().length).toBe(1);
     mock.nack(mock.ops()[0].cid, "nothing_to_send");
     await expect.poll(() => pillOf(page)).toBe("nothing to hand back");
+    // A block, as a whole-doc y only says what to do
+    await page.keyboard.press("j");
+    await page.keyboard.press("j");
     await page.keyboard.press("y");
     await expect.poll(() => mock.ops().length).toBe(2);
     mock.ack(mock.ops()[1].cid);
-    await expect.poll(() => pillOf(page), { timeout: 1_500 }).toBeNull();
+    // The verdict's own pill speaks over the refusal
+    await expect.poll(() => pillOf(page), { timeout: 1_500 }).toBe("yes · ## Why (section) · z to undo");
   });
 
   test("a new hold replaces a refusal's pill", async ({ page, birta }) => {
@@ -1158,9 +1167,10 @@ test.describe("rulings", () => {
       await expect(page.locator("textarea")).toHaveCount(0);
       await openMenu(page);
       if (where === "on the page") await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+      // On the doc x only says what to do, which is still the key acting
       await page.keyboard.press("x");
-      await expect.poll(() => mock.ops().length).toBe(1);
-      expect(mock.ops()[0]).toMatchObject({ op: "comment", verdict: "no", at: { k: "doc" } });
+      await expect.poll(() => pillOf(page)).toBe("whole doc: c to say what's wrong");
+      expect(mock.ops()).toEqual([]);
       expect(await menuOf(page)).toBeNull();
     });
   }

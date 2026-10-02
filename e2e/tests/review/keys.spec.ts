@@ -158,12 +158,16 @@ test.describe("guard", () => {
   test("a held verdict key sends one verdict, but a held j keeps moving", async ({ page, birta }) => {
     const { mock } = await open(page, birta, STOPS_DOC);
     const all = await stops(page);
+    // A block, as a whole-doc verdict only says what to do
+    await page.keyboard.press("j");
+    await page.keyboard.press("j");
+    await expect.poll(() => focused(page)).toBe(all[1].sp);
     await dispatchKey(page, { key: "x", code: "KeyX" }, "body");
     for (let i = 0; i < 3; i++) await dispatchKey(page, { key: "x", code: "KeyX", repeat: true }, "body");
     await expect.poll(() => mock.ops().length).toBe(1);
     await dispatchKey(page, { key: "j", code: "KeyJ" }, "body");
     for (let i = 0; i < 2; i++) await dispatchKey(page, { key: "j", code: "KeyJ", repeat: true }, "body");
-    await expect.poll(() => focused(page)).toBe(all[2].sp);
+    await expect.poll(() => focused(page)).toBe(all[4].sp);
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops()).toHaveLength(1);
   });
@@ -189,6 +193,8 @@ test.describe("guard", () => {
     birta,
   }) => {
     const { mock } = await open(page, birta, STOPS_DOC);
+    await page.keyboard.press("j");
+    await page.keyboard.press("j");
     await dispatchKey(page, { key: "x", code: "KeyX" }, "#lane-frame > birta-over");
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops()).toEqual([]);
@@ -367,6 +373,8 @@ test.describe("guard, edges", () => {
 
   test("a held z takes back nothing more", async ({ page, birta }) => {
     const { mock } = await open(page, birta, STOPS_DOC);
+    await page.keyboard.press("j");
+    await page.keyboard.press("j");
     await page.keyboard.press("x");
     await expect.poll(() => mock.ops().length).toBe(1);
     await page.waitForTimeout(SETTLE_MS);
@@ -558,20 +566,26 @@ test.describe("files and activation", () => {
     await page.goto(`${served.url}/view/pr.md`);
     await booted(page);
     for (const key of ["j", "j", "k", "k", "m", "m"]) await page.keyboard.press(key);
-    await expect.poll(() => focused(page)).toBeNull();
+    // k stops at the H1 that spans the doc
+    await expect.poll(() => focused(page)).toBe((await stops(page))[0].sp);
     await page.waitForTimeout(SETTLE_MS);
     expect(sent.filter((f) => f.type === "op" || f.type === "compose")).toEqual([]);
     expect(reviewLog(served.root)).toBeNull();
     expect(draftFiles(served.root)).toEqual([]);
 
-    // A stray x on the doc is a kept verdict, and says how to take it back
+    // A stray x on the doc only says what to do; on a block it is a kept verdict that says how to take it back
+    await page.keyboard.press("x");
+    await expect(page.getByText("whole doc: c to say what's wrong")).toBeVisible();
+    await page.waitForTimeout(SETTLE_MS);
+    expect(reviewLog(served.root)).toBeNull();
+    await page.keyboard.press("j");
     await page.keyboard.press("x");
     await expect.poll(() => reviewLog(served.root)?.length ?? 0).toBe(4);
     const created = reviewLog(served.root)!;
     expect(created.map((l) => l.op ?? l.birta)).toEqual(["review/1", "snap", "owner", "comment"]);
-    expect(created[3]).toMatchObject({ op: "comment", at: "doc", verdict: "no" });
+    expect(created[3]).toMatchObject({ op: "comment", verdict: "no" });
     expect(created[3].by).toStrictEqual({ type: "human", via: "browser" });
-    await expect(page.getByText("review file created · z to undo")).toBeVisible();
+    await expect(page.getByText("no · ## Why (section) · z to undo")).toBeVisible();
 
     await page.keyboard.press("z");
     await expect.poll(() => reviewLog(served.root)?.length ?? 0).toBe(5);
@@ -584,10 +598,15 @@ test.describe("files and activation", () => {
     await page.setViewportSize(WIDE);
     await page.goto(`${served.url}/view/pr.md`);
     await booted(page);
+    await page.keyboard.press("j");
+    await page.keyboard.press("j");
     await page.keyboard.press("x");
     await expect.poll(() => reviewLog(served.root)?.length ?? 0).toBe(4);
     await page.reload();
     await booted(page);
+    await page.keyboard.press("j");
+    await page.keyboard.press("j");
+    await page.keyboard.press("j");
     await page.keyboard.press("y");
     await expect.poll(() => reviewLog(served.root)?.length ?? 0).toBe(5);
     await page.waitForTimeout(SETTLE_MS);
@@ -617,7 +636,12 @@ test.describe("files and activation", () => {
       state: fixtureState("flow"),
       args: ["pr.md", "--bind", "yes=g"],
     });
-    await page.locator('birta-flow[data-kind="blank"]', { hasText: "is 503 the only code?" }).click();
+    // Blanks are stops for j, like blocks
+    for (let i = 0; i < 6; i++) {
+      const at = await page.evaluate(() => document.activeElement?.shadowRoot?.textContent ?? "");
+      if (at.includes("is 503 the only code?")) break;
+      await page.keyboard.press("j");
+    }
     await page.keyboard.press("g");
     await expect.poll(() => mock.ops().length).toBe(1);
     expect(mock.ops()[0]).toMatchObject({ op: "reply", to: 21, verdict: "yes" });
@@ -636,6 +660,8 @@ test.describe("files and activation", () => {
 
   test("a review key rebound with --bind acts on its new key only", async ({ page, birta }) => {
     const { mock } = await open(page, birta, STOPS_DOC, { args: ["pr.md", "--bind", "yes=g"] });
+    await page.keyboard.press("j");
+    await page.keyboard.press("j");
     await page.keyboard.press("y");
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops()).toEqual([]);
@@ -645,6 +671,14 @@ test.describe("files and activation", () => {
 
   test("a --bind onto a taken key wins it, and the action it took from is unbound", async ({ page, birta }) => {
     const { mock } = await open(page, birta, STOPS_DOC, { args: ["pr.md", "--bind", "yes=j"] });
+    // j no longer moves, so the verdict goes on a selection, as a whole-doc one decides nothing
+    await page.evaluate(() => {
+      const p = Array.from(document.querySelectorAll("#content p")).find((e) => e.textContent!.includes("Detail words."))!;
+      const r = document.createRange();
+      r.selectNodeContents(p);
+      getSelection()!.removeAllRanges();
+      getSelection()!.addRange(r);
+    });
     await page.keyboard.press("j");
     await expect.poll(() => mock.ops().map((o) => [o.op, o.verdict])).toEqual([["comment", "yes"]]);
     expect(await focused(page)).toBeNull();
@@ -661,6 +695,8 @@ test.describe("files and activation", () => {
     await page.setViewportSize(WIDE);
     await page.goto(`${served.url}/view/pr.md`);
     await booted(page);
+    await page.keyboard.press("j");
+    await page.keyboard.press("j");
     await page.keyboard.press("z");
     await page.keyboard.press("x");
     await page.reload();

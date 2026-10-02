@@ -1161,6 +1161,18 @@ fn an_amended_answer_reads_as_amended() {
 }
 
 #[test]
+fn a_verdict_put_over_a_typed_answer_reads_as_the_verdict_alone() {
+    // The page empties the words when a key answers over them
+    let (s, _) = answered_with(|s, ask| {
+        let r = s.human_reply(ask, None, Some("yes, 15"));
+        s.amend(r, Some(""), Some("yes"));
+    });
+    let (ans, v) = ans_lines(&s);
+    assert_eq!(ans, ["ANS   your ask on \"detail two\" — yes"]);
+    assert_eq!(v["answers"][0]["verdict"], "yes", "{v}");
+}
+
+#[test]
 fn an_amend_after_the_hand_back_is_a_draft_and_changes_nothing_sent() {
     let mut s = Scenario::drafted_by(DOC, "claude");
     let ask = asked_in_round_one(&mut s);

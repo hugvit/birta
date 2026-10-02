@@ -575,3 +575,140 @@ fn a_review_key_bound_to_a_free_key_takes_it() {
     );
     assert!(warnings(&stderr).is_empty(), "{stderr}");
 }
+
+// --- revert_change: on u with the raw view, which only that pair may share ---
+
+#[test]
+fn the_change_revert_shares_u_with_the_raw_view_by_default() {
+    let (keys, stderr) = bound("", &[]);
+    assert_eq!(
+        (&keys["revert_change"], &keys["toggle_raw"]),
+        (&"u".into(), &"u".into()),
+        "{keys}"
+    );
+    assert!(warnings(&stderr).is_empty(), "{stderr}");
+}
+
+#[test]
+fn the_change_revert_may_share_a_key_with_the_raw_view_only() {
+    let (keys, stderr) = bound(
+        "[keybindings]\ntoggle_raw = \"s\"\nrevert_change = \"s\"\n",
+        &[],
+    );
+    assert_eq!(
+        (&keys["revert_change"], &keys["toggle_raw"]),
+        (&"s".into(), &"s".into()),
+        "{keys}"
+    );
+    assert!(warnings(&stderr).is_empty(), "{stderr}");
+    let stderr = refused("[keybindings]\nrevert_change = \"x\"\n", &[]);
+    assert!(names_both(&stderr, "revert_change", "no"), "{stderr}");
+    let stderr = refused("[keybindings]\nrevert_change = \"r\"\n", &[]);
+    assert!(
+        names_both(&stderr, "revert_change", "toggle_reading"),
+        "{stderr}"
+    );
+    // The raw view itself still collides with everything else
+    let stderr = refused("[keybindings]\ntoggle_raw = \"x\"\n", &[]);
+    assert!(names_both(&stderr, "toggle_raw", "no"), "{stderr}");
+}
+
+#[test]
+fn bind_flags_may_put_the_revert_and_the_raw_view_on_one_key() {
+    let (keys, stderr) = bound("", &["toggle_raw=s", "revert_change=s"]);
+    assert_eq!(
+        (&keys["revert_change"], &keys["toggle_raw"]),
+        (&"s".into(), &"s".into()),
+        "{keys}"
+    );
+    assert!(warnings(&stderr).is_empty(), "{stderr}");
+    let (keys, stderr) = bound("[keybindings]\ntoggle_raw = \"s\"\n", &["revert_change=s"]);
+    assert_eq!(
+        (&keys["revert_change"], &keys["toggle_raw"]),
+        (&"s".into(), &"s".into()),
+        "{keys}"
+    );
+    assert!(warnings(&stderr).is_empty(), "{stderr}");
+}
+
+#[test]
+fn moving_the_raw_view_leaves_the_revert_on_u() {
+    let (keys, stderr) = bound("", &["toggle_raw=s"]);
+    assert_eq!(
+        (&keys["revert_change"], &keys["toggle_raw"]),
+        (&"u".into(), &"s".into()),
+        "{keys}"
+    );
+    assert!(warnings(&stderr).is_empty(), "{stderr}");
+}
+
+#[test]
+fn a_bind_flag_that_takes_u_takes_it_from_the_revert_and_the_raw_view() {
+    let (keys, stderr) = bound("", &["no=u"]);
+    assert_eq!(keys["no"], "u", "{keys}");
+    assert_eq!(
+        (&keys["revert_change"], &keys["toggle_raw"]),
+        (&"".into(), &"".into()),
+        "{keys}"
+    );
+    assert_eq!(warnings(&stderr).len(), 2, "{stderr}");
+    assert!(names_both(&stderr, "no", "revert_change"), "{stderr}");
+    assert!(names_both(&stderr, "no", "toggle_raw"), "{stderr}");
+}
+
+#[test]
+fn a_bind_flag_moves_the_revert_onto_another_actions_key_and_takes_it() {
+    let (keys, stderr) = bound("", &["revert_change=x"]);
+    assert_eq!(
+        (&keys["revert_change"], &keys["no"], &keys["toggle_raw"]),
+        (&"x".into(), &"".into(), &"u".into()),
+        "{keys}"
+    );
+    assert!(names_both(&stderr, "revert_change", "no"), "{stderr}");
+}
+
+#[test]
+fn either_one_bound_onto_the_others_key_is_no_clash() {
+    for binds in [
+        &["toggle_raw=u"][..],
+        &["revert_change=u"],
+        &["revert_change=s", "toggle_raw=s"],
+    ] {
+        let (keys, stderr) = bound("", binds);
+        let want = binds[0].split('=').nth(1).unwrap();
+        assert_eq!(
+            (&keys["revert_change"], &keys["toggle_raw"]),
+            (&want.into(), &want.into()),
+            "{binds:?}: {keys}"
+        );
+        assert!(warnings(&stderr).is_empty(), "{binds:?}: {stderr}");
+    }
+    let (keys, stderr) = bound("[keybindings]\nrevert_change = \"s\"\n", &["toggle_raw=s"]);
+    assert_eq!(
+        (&keys["revert_change"], &keys["toggle_raw"]),
+        (&"s".into(), &"s".into()),
+        "{keys}"
+    );
+    assert!(warnings(&stderr).is_empty(), "{stderr}");
+}
+
+#[test]
+fn a_flag_that_takes_their_shared_key_sends_both_back_to_u() {
+    let (keys, stderr) = bound("[keybindings]\nrevert_change = \"s\"\n", &["yes=s"]);
+    assert_eq!(keys["revert_change"], "u", "{keys}");
+    let warned = warnings(&stderr);
+    assert!(
+        warned.len() == 1 && warned[0].contains("on \"u\""),
+        "{stderr}"
+    );
+    let (keys, stderr) = bound(
+        "[keybindings]\ntoggle_raw = \"s\"\nrevert_change = \"s\"\n",
+        &["yes=s"],
+    );
+    assert_eq!(
+        (&keys["revert_change"], &keys["toggle_raw"], &keys["yes"]),
+        (&"u".into(), &"u".into(), &"s".into()),
+        "{keys}"
+    );
+    assert_eq!(warnings(&stderr).len(), 2, "{stderr}");
+}

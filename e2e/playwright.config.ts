@@ -31,6 +31,13 @@ export default defineConfig({
       use: { browserName: "webkit" },
       testMatch: /(selection|patch|review\/|csp).*\.spec\.ts/,
     },
+    // The reviewer's whole journey, one long test; gate:e2e never runs it
+    {
+      name: "journey",
+      testDir: "./journey",
+      timeout: 600_000,
+      use: { browserName: "chromium" },
+    },
     ...(process.env.BIRTA_FF === "1"
       ? [{ name: "firefox", use: { browserName: "firefox" as const } }]
       : []),

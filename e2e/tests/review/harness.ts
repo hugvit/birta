@@ -189,12 +189,14 @@ export interface Served {
  * Runs `target/debug/birta` over a fresh copy of `files` on a port the OS picks. `args`
  * defaults to the first file. HOME and XDG_STATE_HOME are private, so no user config applies.
  * `links` maps a path under the root to its symlink target; `../x` files land beside the root.
+ * `home` files land under the private HOME, e.g. `.config/birta/config.toml`.
  */
 export async function startBirta(
   files: Record<string, string>,
   env: Record<string, string> = {},
   args?: string[],
   links: Record<string, string> = {},
+  home: Record<string, string> = {},
 ): Promise<Served> {
   ensureBuilt();
   // realpath: the watcher compares canonical paths and macOS tmpdir is a symlink
@@ -208,6 +210,10 @@ export async function startBirta(
   for (const [rel, target] of Object.entries(links)) {
     fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
     fs.symlinkSync(target, path.join(root, rel));
+  }
+  for (const [rel, text] of Object.entries(home)) {
+    fs.mkdirSync(path.dirname(path.join(base, "home", rel)), { recursive: true });
+    fs.writeFileSync(path.join(base, "home", rel), text);
   }
   const proc: ChildProcess = spawn(
     BIN,
@@ -789,6 +795,96 @@ export function highlighted(page: Page): Promise<string[]> {
   });
 }
 
+// --- The real server: frames, header text, the agent CLI ----------------------------------
+
+/** HH:MM of an epoch ms in UTC, as the phrase prints it under a spec's `timezoneId: "UTC"`. */
+export const hhmm = (ts: number) => new Date(ts).toISOString().slice(11, 16);
+
+export interface Received {
+  socket: number;
+  msg: State;
+}
+
+/** Every frame each page socket sends and receives, numbered by socket in open order. */
+export function record(page: Page): { sent: Received[]; got: Received[] } {
+  const out = { sent: [] as Received[], got: [] as Received[] };
+  let sockets = 0;
+  page.on("websocket", (ws) => {
+    const socket = sockets++;
+    const parse = (payload: string | Buffer) => {
+      try {
+        return JSON.parse(typeof payload === "string" ? payload : payload.toString());
+      } catch {
+        return null;
+      }
+    };
+    ws.on("framesent", (f) => {
+      const msg = parse(f.payload);
+      if (msg) out.sent.push({ socket, msg });
+    });
+    ws.on("framereceived", (f) => {
+      const msg = parse(f.payload);
+      if (msg) out.got.push({ socket, msg });
+    });
+  });
+  return out;
+}
+
+/** Text of the shadow-rooted host `sel` in the header, or null while it isn't shown. */
+export function hostText(page: Page, sel: string): Promise<string | null> {
+  return page.evaluate((sel) => {
+    const h = document.querySelector(sel);
+    if (!h || !h.getClientRects().length) return null;
+    const root = h.shadowRoot ?? h;
+    let out = "";
+    const walk = (x: Node) => {
+      if (x.nodeType === 3) out += x.textContent;
+      else if (x.nodeType === 1 && (x as Element).localName !== "style") x.childNodes.forEach(walk);
+    };
+    root.childNodes.forEach(walk);
+    return out.replace(/\s+/g, " ").trim();
+  }, sel);
+}
+export const phraseOf = (page: Page) => hostText(page, ".file-header birta-phrase");
+export const turnOf = (page: Page) => hostText(page, ".file-header birta-turn");
+
+/** The review file's lines named `op`, each with its line number as `n`. */
+export const linesNamed = (root: string, op: string, rel = "pr.md") =>
+  (reviewLog(root, rel) ?? []).map((l, i) => ({ ...l, n: i + 1 })).filter((l) => l.op === op);
+
+/** The served folder's private HOME and state dir, so the agent shares the server's world. */
+function agentEnv(root: string): Record<string, string> {
+  const base = path.dirname(root);
+  return {
+    PATH: process.env.PATH ?? "",
+    HOME: path.join(base, "home"),
+    XDG_STATE_HOME: path.join(base, "state"),
+    BIRTA_REVIEW: "1",
+  };
+}
+
+/** Runs the agent CLI in the served folder, as an agent there would. */
+export function agent(root: string, args: string[], input?: string) {
+  return spawnSync(BIN, args, { cwd: root, input, env: agentEnv(root), encoding: "utf-8", timeout: 30_000 });
+}
+
+export interface AgentRun {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+/** The agent CLI in the background, e.g. a `review --wait`; `done` settles when it exits. */
+export function agentWait(root: string, args: string[]): { proc: ChildProcess; done: Promise<AgentRun> } {
+  const proc = spawn(BIN, args, { cwd: root, env: agentEnv(root), stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
+  let stderr = "";
+  proc.stdout!.on("data", (c: Buffer) => (stdout += c.toString()));
+  proc.stderr!.on("data", (c: Buffer) => (stderr += c.toString()));
+  const done = new Promise<AgentRun>((resolve) => proc.on("close", (status) => resolve({ status, stdout, stderr })));
+  return { proc, done };
+}
+
 // --- Pixels -------------------------------------------------------------------------------
 
 export type Rgb = [number, number, number];
@@ -926,6 +1022,7 @@ type Start = (
   env?: Record<string, string>,
   args?: string[],
   links?: Record<string, string>,
+  home?: Record<string, string>,
 ) => Promise<Served>;
 
 /** Pages share the CDN cache; `birta` starts servers that stop when the test ends. */
@@ -936,8 +1033,8 @@ export const testClosed = base.extend<{ birta: Start }>({
   },
   birta: async ({}, use) => {
     const started: Served[] = [];
-    await use(async (files, env, args, links) => {
-      const s = await startBirta(files, env, args, links);
+    await use(async (files, env, args, links, home) => {
+      const s = await startBirta(files, env, args, links, home);
       started.push(s);
       return s;
     });

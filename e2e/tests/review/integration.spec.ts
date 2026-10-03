@@ -1,7 +1,22 @@
 import { Page } from "@playwright/test";
-import { spawnSync } from "child_process";
-import * as path from "path";
-import { test, expect, BIN, GATE_ON, State, booted, highlighted, misaligned, revOf, reviewLog } from "./harness";
+import {
+  test,
+  expect,
+  GATE_ON,
+  Received,
+  State,
+  agent,
+  booted,
+  highlighted,
+  hhmm,
+  linesNamed,
+  misaligned,
+  phraseOf,
+  record,
+  revOf,
+  reviewLog,
+  turnOf,
+} from "./harness";
 
 // The real server end to end: no socket mock anywhere in this file.
 
@@ -37,39 +52,6 @@ const DOC = [
 const PARA = "5:1-5:44";
 const CODE = "7:1-9:3";
 
-/** HH:MM of an epoch ms in UTC, as the phrase prints it under the spec's timezone. */
-const hhmm = (ts: number) => new Date(ts).toISOString().slice(11, 16);
-
-interface Received {
-  socket: number;
-  msg: State;
-}
-
-/** Every frame each page socket sends and receives, numbered by socket in open order. */
-function record(page: Page): { sent: Received[]; got: Received[] } {
-  const out = { sent: [] as Received[], got: [] as Received[] };
-  let sockets = 0;
-  page.on("websocket", (ws) => {
-    const socket = sockets++;
-    const parse = (payload: string | Buffer) => {
-      try {
-        return JSON.parse(typeof payload === "string" ? payload : payload.toString());
-      } catch {
-        return null;
-      }
-    };
-    ws.on("framesent", (f) => {
-      const msg = parse(f.payload);
-      if (msg) out.sent.push({ socket, msg });
-    });
-    ws.on("framereceived", (f) => {
-      const msg = parse(f.payload);
-      if (msg) out.got.push({ socket, msg });
-    });
-  });
-  return out;
-}
-
 async function openReal(page: Page, birta: Start, env: Record<string, string> = {}, args?: string[]) {
   const served = await birta({ "pr.md": DOC }, { ...GATE_ON, ...env }, args);
   const frames = record(page);
@@ -78,24 +60,6 @@ async function openReal(page: Page, birta: Start, env: Record<string, string> = 
   await booted(page);
   return { served, frames };
 }
-
-/** Text of the shadow-rooted host `sel` in the header, or null while it isn't shown. */
-function hostText(page: Page, sel: string): Promise<string | null> {
-  return page.evaluate((sel) => {
-    const h = document.querySelector(sel);
-    if (!h || !h.getClientRects().length) return null;
-    const root = h.shadowRoot ?? h;
-    let out = "";
-    const walk = (x: Node) => {
-      if (x.nodeType === 3) out += x.textContent;
-      else if (x.nodeType === 1 && (x as Element).localName !== "style") x.childNodes.forEach(walk);
-    };
-    root.childNodes.forEach(walk);
-    return out.replace(/\s+/g, " ").trim();
-  }, sel);
-}
-const phraseOf = (page: Page) => hostText(page, ".file-header birta-phrase");
-const turnOf = (page: Page) => hostText(page, ".file-header birta-turn");
 
 /** Selects the rendered `text` (its last match with `last`) in block `sp`; returns the range's top. */
 async function selectText(page: Page, sp: string, text: string, last = false): Promise<number> {
@@ -137,27 +101,6 @@ async function keep(page: Page, body: string) {
   await page.keyboard.type(body);
   await page.keyboard.press("Enter");
   await expect(composer(page)).toHaveCount(0);
-}
-
-/** The review file's lines named `op`, each with its line number as `n`. */
-const linesNamed = (root: string, op: string) =>
-  (reviewLog(root) ?? []).map((l, i) => ({ ...l, n: i + 1 })).filter((l) => l.op === op);
-
-/** Runs the agent CLI in the served folder, as an agent there would. */
-function agent(root: string, args: string[], input?: string) {
-  const base = path.dirname(root);
-  return spawnSync(BIN, args, {
-    cwd: root,
-    input,
-    env: {
-      PATH: process.env.PATH ?? "",
-      HOME: path.join(base, "home"),
-      XDG_STATE_HOME: path.join(base, "state"),
-      BIRTA_REVIEW: "1",
-    },
-    encoding: "utf-8",
-    timeout: 30_000,
-  });
 }
 
 // --- hello and the state ------------------------------------------------------------------

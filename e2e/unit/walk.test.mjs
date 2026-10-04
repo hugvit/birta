@@ -36,9 +36,11 @@ function bent(name, edit) {
 // Results come from the vm context, whose objects have their own prototypes
 const plain = (v) => (v == null ? v : JSON.parse(JSON.stringify(v)));
 
-/** The n/p walk as `kind id @sp` strings, `@doc` for the doc slot. */
+/** The n/p walk as `kind id @sp` strings, `@doc` for the doc slot and `@after sp` (or `top`) for a removal's gap. */
 function walk(BR, s) {
-  return plain(BR.pure.walk(s)).map((e) => `${e.kind} ${e.id} @${e.sp ?? "doc"}`);
+  return plain(BR.pure.walk(s)).map((e) =>
+    e.kind === "removal" ? `removal ${e.id} @after ${e.after_sp ?? "top"}${e.sp == null ? "" : ` (on ${e.sp})`}` : `${e.kind} ${e.id} @${e.sp ?? "doc"}`,
+  );
 }
 
 /** Marks every change, agent reply and not-handled row seen, as walking them all would. */
@@ -59,13 +61,13 @@ function handedBack(s, at = 40) {
 }
 
 // unseen.json, in doc order: the doc-level reply, then 9.0 on the paragraph, the not-handled
-// bullet, 10.0 on the next bullet, and the removal under the last heading
+// bullet, 10.0 on the next bullet, and the removal in its gap under the last heading
 const UNSEEN_WALK = [
   "reply #13 @doc",
   "change 9.0 @5:1-6:68",
   "not_handled nh:5 @10:1-10:16",
   "change 10.0 @11:1-11:44",
-  "change 11.0 @14:1-14:13",
+  "removal 11.0 @after 14:1-14:13",
 ];
 
 for (const [name, files] of [
@@ -133,9 +135,25 @@ test("on one block a change goes before a reply", () => {
   assert.deepEqual(walk(load(), s).slice(0, 2), ["change 9.0 @5:1-6:68", "reply #13 @5:1-6:68"]);
 });
 
-test("a removal at the very top walks in the doc slot, ahead of a doc-level reply", () => {
+test("a removal at the very top walks in its gap above the first block, after whole doc's reply", () => {
   const s = bent("unseen", (s) => (s.deletions.find((d) => d.change === "11.0").after_sp = null));
-  assert.deepEqual(walk(load(), s).slice(0, 3), ["change 11.0 @doc", "reply #13 @doc", "change 9.0 @5:1-6:68"]);
+  assert.deepEqual(walk(load(), s).slice(0, 3), ["reply #13 @doc", "removal 11.0 @after top", "change 9.0 @5:1-6:68"]);
+});
+
+test("a removal walks in its gap, after everything on the block above it", () => {
+  const s = bent("unseen", (s) => {
+    // A reply of Claude's on the heading the paragraph was cut from under
+    s.items.find((i) => i.n === 6).at = { kind: "anchor", status: "ok", scope: "block", loc: { sp: "14:1-14:13" } };
+  });
+  assert.deepEqual(walk(load(), s).slice(-2), ["reply #13 @14:1-14:13", "removal 11.0 @after 14:1-14:13"]);
+});
+
+test("two removals in one gap are two stops, in op order", () => {
+  const s = bent("unseen", (s) => {
+    s.changes.push({ ...JSON.parse(JSON.stringify(s.changes.find((c) => c.id === "11.0"))), id: "11.1", idx: 1 });
+    s.deletions.push({ ...JSON.parse(JSON.stringify(s.deletions.find((d) => d.change === "11.0"))), change: "11.1" });
+  });
+  assert.deepEqual(walk(load(), s).slice(-2), ["removal 11.0 @after 14:1-14:13", "removal 11.1 @after 14:1-14:13"]);
 });
 
 // --- Membership: the latest round stays, seen or not ---------------------------------------------
@@ -338,7 +356,7 @@ test("a seen change the fold leaves unsettled is still walked, whatever the roun
 test("doc order goes by a stop's first line, and a tie on it by kind", () => {
   // A note on the whole list starts at its first item
   const whole = bent("unseen", (s) => (s.items.find((i) => i.n === 5).at.loc.sp = "10:1-14:13"));
-  assert.deepEqual(walk(load(), whole).slice(2), ["not_handled nh:5 @10:1-14:13", "change 10.0 @11:1-11:44", "change 11.0 @14:1-14:13"]);
+  assert.deepEqual(walk(load(), whole).slice(2), ["not_handled nh:5 @10:1-14:13", "change 10.0 @11:1-11:44", "removal 11.0 @after 14:1-14:13"]);
   const tie = bent("unseen", (s) => {
     s.items.find((i) => i.n === 5).at.loc.sp = "10:1-14:13";
     s.changes.find((c) => c.id === "10.0").range.sp = "10:1-10:16";

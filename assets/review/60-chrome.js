@@ -275,7 +275,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   /**
    * Claude's news as `{key, kind}` per item, in walk order: the state's `news`, else the walk's
-   * stops of Claude's, where a removal still walks at the block above its gap.
+   * stops of Claude's, where a removal is a stop of its own in its gap.
    */
   function newsItems(s) {
     if (Array.isArray(s.news)) {

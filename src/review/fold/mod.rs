@@ -797,7 +797,8 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
         items,
         changes: built.changes,
         deletions: built.deletions,
-        rewrite: built.rewrite,
+        // Every change has its own row, however much of the doc a turn touched
+        rewrite: None,
         later,
         lost,
         approve,

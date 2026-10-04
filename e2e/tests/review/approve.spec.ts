@@ -360,7 +360,7 @@ test.describe("approve guard", () => {
           return a && a.localName === "birta-flow" ? (a.shadowRoot?.textContent ?? "") : null;
         }),
       )
-      .toMatch(/done · /);
+      .toMatch(/↳ Claude · done/);
   });
 
   test("the guard goes to the first unseen in the doc, not the next one after a walk", async ({ page, birta }) => {

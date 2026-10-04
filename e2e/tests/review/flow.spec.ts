@@ -34,6 +34,8 @@ import {
   watchSent,
   withRev,
   stripMessage,
+  SIZE_LABEL,
+  changeRows,
 } from "./harness";
 
 const WIDE = { width: 1280, height: 900 };
@@ -675,7 +677,8 @@ test.describe("placement", () => {
   test("a list item's bar, wash and focus end at its own lines, above the notes inside it", async ({ page, birta }) => {
     await open(page, birta, FLOW_DOC, { state: fixtureState("flow") });
     const item = "11:1-11:44";
-    await expect.poll(async () => (await hostsAt(page, item)).length).toBe(2);
+    // Your note; Claude's row under it opens with the item's focus
+    await expect.poll(async () => (await hostsAt(page, item)).length).toBe(1);
     const noteTop = Math.min(...(await hostsAt(page, item)).map((h) => h.box.top));
     // The note's no veils the item's words
     await expect.poll(async () => (await marks(page)).filter((m) => m.sp === item).map((m) => m.mark).sort()).toEqual([
@@ -688,6 +691,7 @@ test.describe("placement", () => {
       expect(m.bottom, `${m.mark} bottom`).toBeLessThanOrEqual(noteTop);
     expect(await misaligned(page)).toEqual([]);
     await focusOn(page, item);
+    await expect.poll(async () => (await hostsAt(page, item)).length).toBe(2);
     // The outline keeps a 2 px gap round the item's own lines, still above the notes
     const focus = (await marks(page)).find((m) => m.mark === "focus")!;
     expect(focus.bottom).toBeLessThanOrEqual(noteTop + 2);
@@ -823,9 +827,11 @@ test.describe("placement", () => {
     const blank = state.items.find((i: State) => i.status === "open");
     blank.at.loc = { sp: "11:1-11:44" };
     await open(page, birta, FLOW_DOC, { state });
+    // Claude's done row under the note opens with the item's focus
+    await focusOn(page, "11:1-11:44");
     await expect.poll(async () => (await hostsAt(page, "11:1-11:44")).length).toBe(3);
     const at = await hostsAt(page, "11:1-11:44");
-    expect(at.map((h) => h.kind)).toEqual(["note", "reply", "blank"]);
+    expect(at.map((h) => h.kind)).toEqual(["note", "receipt", "blank"]);
     expect(at[0].text).toContain("cap it");
     expect(at[2].text).toContain("is 503 the only code?");
   });
@@ -868,6 +874,8 @@ test.describe("replies and receipts", () => {
     await expect.poll(async () => (await hostsAt(page, "11:1-11:44")).length).toBe(2);
     const [note, reply] = await hostsAt(page, "11:1-11:44");
     expect(note.text).toContain("cap it");
+    // Claude's row under your note is a change row
+    expect(reply.kind).toBe("receipt");
     expect(reply.text).toMatch(/^↳ Claude · done\b/);
     expect(reply.text).toMatch(KEYS);
     expect(texts(await hosts(page)).filter((t) => t.includes('because you said "cap it"'))).toEqual([]);
@@ -879,7 +887,9 @@ test.describe("replies and receipts", () => {
     await expect.poll(async () => (await hostsAt(page, "5:1-6:68")).length).toBe(1);
     const [receipt] = await hostsAt(page, "5:1-6:68");
     expect(receipt.kind).toBe("receipt");
-    expect(receipt.text).toBe('Claude · because you said "say why it fails" · 6 words changed · y keep · u revert · c note');
+    expect((await changeRows(page)).filter((r) => r.sp === "5:1-6:68").map((r) => r.lead)).toEqual(['Claude · because you said "say why it fails"']);
+    expect(receipt.text).toMatch(/· y keep · u revert · c note$/);
+    expect(receipt.text).not.toMatch(SIZE_LABEL);
   });
 
   test("a note the agent's turn left alone says so, with the time the turn ended", async ({ page, birta }) => {
@@ -896,7 +906,7 @@ test.describe("replies and receipts", () => {
     for (const other of [state.phrase.sent.ts, state.phrase.picked_up.ts]) expect(await hhmm(page, other)).not.toBe(at);
     await expect
       .poll(async () => texts(await hostsAt(page, "10:1-10:16")).join("\n"))
-      .toContain(`↳ not handled in Claude's ${at} turn`);
+      .toContain(`↳ Claude · not handled in its ${at} turn`);
   });
 
   test("a note an earlier turn left alone names that turn without a time", async ({ page, birta }) => {
@@ -907,7 +917,7 @@ test.describe("replies and receipts", () => {
     await open(page, birta, FLOW_DOC, { state });
     await expect
       .poll(async () => texts(await hostsAt(page, "10:1-10:16")).join("\n"))
-      .toContain("↳ not handled in Claude's earlier turn");
+      .toContain("↳ Claude · not handled in its earlier turn");
     expect(texts(await hostsAt(page, "10:1-10:16")).join("\n")).not.toMatch(/\d\d:\d\d/);
   });
 
@@ -1314,28 +1324,38 @@ test.describe("z", () => {
   });
 });
 
-// --- the rewrite row -------------------------------------------------------------------------
+// --- a big turn: no rewrite row ---------------------------------------------------------------
 
-test.describe("rewrite row", () => {
+test.describe("a big turn", () => {
   const TURN_CHANGES = ["10.0", "10.1", "10.2", "10.3", "11.0", "11.1", "11.2", "9.0"];
 
-  test("a rewrite shows one row at the top, and y there marks the turn's changes seen", async ({ page, birta }) => {
-    const { mock } = await open(page, birta, fixtureDoc("rewrite"), { state: fixtureState("rewrite") });
-    await expect
-      .poll(async () => (await docSlot(page)).filter((h) => h.kind === "rewrite").map((h) => h.text))
-      .toEqual(["Claude rewrote most of it · y mark seen"]);
-    await page.keyboard.press("y");
-    await expect.poll(() => mock.ops().length).toBe(1);
-    expect(mock.ops()[0].op).toBe("seen");
-    expect([...mock.ops()[0].ids].sort()).toEqual(TURN_CHANGES);
+  test("a turn that touched most blocks draws no rewrite row, and a click in the doc slot marks none of its changes seen", async ({
+    page,
+    birta,
+  }) => {
+    // Even a state that still names a rewrite
+    const state = fixtureState("rewrite");
+    state.rewrite = { turn: 8, pct: 0.8, blocks_changed: 8, blocks_total: 10 };
+    const { mock } = await open(page, birta, fixtureDoc("rewrite"), { state });
+    await expect.poll(async () => (await docSlot(page)).length).toBeGreaterThan(0);
+    await page.waitForTimeout(SETTLE_MS);
+    expect((await docSlot(page)).filter((h) => h.kind === "rewrite")).toEqual([]);
+    expect(texts(await docSlot(page)).join("\n")).not.toContain("rewrote most of it");
+    for (const host of await page.locator("birta-flow").all()) if (await host.isVisible()) await host.click();
+    await page.waitForTimeout(SETTLE_MS);
+    const named = mock.ops().filter((o) => o.op === "seen").flatMap((o) => o.ids).filter((id: string) => TURN_CHANGES.includes(id));
+    expect(named).toEqual([]);
   });
 
-  test("a click on the rewrite row marks them seen too", async ({ page, birta }) => {
-    const { mock } = await open(page, birta, fixtureDoc("rewrite"), { state: fixtureState("rewrite") });
-    await page.locator('birta-flow[data-kind="rewrite"]').click();
-    await expect.poll(() => mock.ops().length).toBe(1);
-    expect(mock.ops()[0].op).toBe("seen");
-    expect([...mock.ops()[0].ids].sort()).toEqual(TURN_CHANGES);
+  test("each change of a big turn opens its own row at its block", async ({ page, birta }) => {
+    const state = fixtureState("rewrite");
+    state.rewrite = { turn: 8, pct: 0.8, blocks_changed: 8, blocks_total: 10 };
+    await open(page, birta, fixtureDoc("rewrite"), { state });
+    for (const c of state.changes.filter((c: State) => c.range && c.range.sp)) {
+      await focusOn(page, c.range.sp);
+      await expect.poll(async () => (await changeRows(page)).filter((r) => r.sp === c.range.sp).length, c.id).toBe(1);
+      expect((await changeRows(page)).filter((r) => r.sp === c.range.sp)[0].text, c.id).not.toMatch(SIZE_LABEL);
+    }
   });
 });
 
@@ -1387,6 +1407,7 @@ test.describe("note dots", () => {
 
   test("an open note shows no dot", async ({ page, birta }) => {
     await open(page, birta, FLOW_DOC, { state: fixtureState("flow") });
+    await focusOn(page, "11:1-11:44");
     await expect.poll(async () => (await hostsAt(page, "11:1-11:44")).length).toBe(2);
     expect(await dots(page)).toEqual([]);
   });
@@ -1645,12 +1666,14 @@ test.describe("names, verdicts and z", () => {
   test("replies, receipts and not-handled rows name the agent that took the turn", async ({ page, birta }) => {
     const state = JSON.parse(JSON.stringify(fixtureState("flow")).replaceAll('"claude"', '"codex"'));
     await open(page, birta, FLOW_DOC, { state });
+    // Claude's row under your note opens with its block
+    await focusOn(page, "11:1-11:44");
     await expect.poll(async () => texts(await hostsAt(page, "11:1-11:44")).join("\n")).toMatch(/↳ codex · done/i);
     // A receipt is a row, which opens on its block
     await focusOn(page, "5:1-6:68");
     await expect.poll(async () => texts(await hostsAt(page, "5:1-6:68")).join("\n")).toMatch(/because you said/);
     const all = texts(await hosts(page)).join("\n");
-    expect(all).toMatch(/not handled in codex's/i);
+    expect(all).toMatch(/↳ codex · not handled in its/i);
     expect(all).toMatch(/codex · because you said/i);
     expect(all).not.toMatch(/claude/i);
   });
@@ -2306,7 +2329,10 @@ test.describe("placement, harder cases", () => {
     await expect.poll(async () => texts(await docSlot(page)).join("\n")).toContain("placeless");
   });
 
-  test("the doc slot holds whole-doc notes with the turn note under the first, the lost row, then the rewrite row", async ({ page, birta }) => {
+  test("the doc slot holds whole-doc notes with the turn note under the first, then the lost row, and never a rewrite row", async ({
+    page,
+    birta,
+  }) => {
     const state = fixtureState("flow");
     state.rewrite = { turn: 12, pct: 0.6, blocks_changed: 5, blocks_total: 8 };
     await open(page, birta, FLOW_DOC, { state });
@@ -2316,7 +2342,6 @@ test.describe("placement, harder cases", () => {
       "turn_note",
       "note",
       "lost",
-      "rewrite",
     ]);
   });
 
@@ -2351,31 +2376,38 @@ test.describe("placement, harder cases", () => {
 });
 
 test.describe("copy, harder cases", () => {
-  test("the reply under a fixed note says what the fix changed", async ({ page, birta }) => {
+  test("Claude's row under a fixed note shows what the fix changed, not how big it was", async ({ page, birta }) => {
     const state = fixtureState("flow");
     await open(page, birta, FLOW_DOC, { state });
-    const reply = async () => texts(await hostsAt(page, "11:1-11:44")).find((t) => t.startsWith("↳")) ?? "";
-    await expect.poll(reply).toBe("↳ Claude · done · 7 words → 10");
+    const row = async () => (await changeRows(page)).find((r) => r.sp === "11:1-11:44") ?? null;
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await row()).toBeNull();
     await focusOn(page, "11:1-11:44");
-    await expect.poll(reply).toBe("↳ Claude · done · 7 words → 10 · y keep · u revert · c note");
+    await expect.poll(async () => (await row())?.lead).toBe("↳ Claude · done");
+    expect((await row())!.text).toMatch(/· y keep · u revert · c note$/);
+    expect((await row())!.text).not.toMatch(SIZE_LABEL);
+    expect((await row())!.ins.join(" ")).toContain("capped at 8");
   });
 
-  test("a fix says what kind of change it was, as the server words it", async ({ page, birta }) => {
+  test("a fix never shows the server's size label", async ({ page, birta }) => {
     const state = fixtureState("flow");
     state.changes.find((c: State) => c.id === "15.0").label = "3 words changed";
     await open(page, birta, FLOW_DOC, { state });
-    const reply = async () => texts(await hostsAt(page, "11:1-11:44")).find((t) => t.startsWith("↳")) ?? "";
-    await expect.poll(reply).toBe("↳ Claude · done · 3 words changed");
+    await focusOn(page, "11:1-11:44");
+    await expect.poll(async () => (await changeRows(page)).filter((r) => r.sp === "11:1-11:44").length).toBe(1);
+    expect(texts(await hostsAt(page, "11:1-11:44")).join("\n")).not.toContain("3 words changed");
   });
 
-  test("a change with no label counts lines, in the plural", async ({ page, birta }) => {
+  test("a change with no label counts no lines either", async ({ page, birta }) => {
     const state = fixtureState("flow");
     const c = state.changes.find((c: State) => c.id === "13.0");
     delete c.label;
     Object.assign(c.what, { old_lines: 9, new_lines: 4 });
     await open(page, birta, FLOW_DOC, { state });
     await focusOn(page, "5:1-6:68");
-    await expect.poll(async () => texts(await hostsAt(page, "5:1-6:68")).join("\n")).toMatch(/· 9 lines → 4 ·/);
+    await expect.poll(async () => (await changeRows(page)).filter((r) => r.sp === "5:1-6:68").length).toBe(1);
+    expect(texts(await hostsAt(page, "5:1-6:68")).join("\n")).not.toMatch(/lines? →|→ 4/);
+    expect((await changeRows(page)).filter((r) => r.sp === "5:1-6:68")[0].ins.join(" ")).toContain("S3 answers 503 under load");
   });
 
   test("one lost note reads in the singular, and ▸ opens it", async ({ page, birta }) => {
@@ -2399,24 +2431,25 @@ test.describe("copy, harder cases", () => {
     await expect(page.locator("birta-flow").getByText("and this")).toBeVisible();
   });
 
-  test("once its changes are seen the rewrite row stops offering y, and stays until the next round", async ({
-    page,
-    birta,
-  }) => {
+  test("a big turn has no rewrite row before its changes are seen, after, or in the next round", async ({ page, birta }) => {
     const first = fixtureState("rewrite");
+    first.rewrite = { turn: 8, pct: 0.8, blocks_changed: 8, blocks_total: 10 };
     const { mock } = await open(page, birta, fixtureDoc("rewrite"), { state: first });
-    const row = async () => (await docSlot(page)).filter((h) => h.kind === "rewrite").map((h) => h.text);
-    await expect.poll(row).toEqual(["Claude rewrote most of it · y mark seen"]);
-    // The fold drops `rewrite` once the turn's changes are seen
+    const row = async () => (await docSlot(page)).filter((h) => h.kind === "rewrite" || h.text.includes("rewrote")).map((h) => h.text);
+    await expect.poll(async () => (await docSlot(page)).length).toBeGreaterThan(0);
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await row()).toEqual([]);
     const seen = JSON.parse(JSON.stringify(first));
     for (const c of seen.changes) c.seen = true;
     seen.rewrite = null;
     mock.pushState(seen);
-    await expect.poll(row).toEqual(["Claude rewrote most of it"]);
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await row()).toEqual([]);
     const next = JSON.parse(JSON.stringify(seen));
     next.rounds.push({ ...next.rounds.at(-1), submit: 20, ts: next.rounds.at(-1).ts + 60_000, claim: undefined, claimed_by: undefined, yield: undefined });
     mock.pushState(next);
-    await expect.poll(row).toEqual([]);
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await row()).toEqual([]);
   });
 
   test("markup in bodies, names, quotes, previews and nack reasons stays text", async ({ page, birta }) => {
@@ -2487,7 +2520,7 @@ test.describe("copy, harder cases", () => {
   });
 });
 
-test.describe("rewrite row, other turns", () => {
+test.describe("a big turn among other turns", () => {
   function withOthers(): State {
     const state = fixtureState("rewrite");
     const base = state.changes[0];
@@ -2498,12 +2531,16 @@ test.describe("rewrite row, other turns", () => {
     return state;
   }
 
-  test("y on the rewrite row marks only that turn's changes seen", async ({ page, birta }) => {
-    const { mock } = await open(page, birta, fixtureDoc("rewrite"), { state: withOthers() });
-    await expect.poll(async () => (await docSlot(page)).some((h) => h.kind === "rewrite")).toBe(true);
+  test("y on whole doc marks no turn's changes seen: each is checked at its own row", async ({ page, birta }) => {
+    const state = withOthers();
+    state.rewrite = { turn: 8, pct: 0.8, blocks_changed: 8, blocks_total: 10 };
+    const { mock } = await open(page, birta, fixtureDoc("rewrite"), { state });
+    await expect.poll(() => focused(page)).toBe("doc");
+    await expect.poll(async () => (await docSlot(page)).length).toBeGreaterThan(0);
     await page.keyboard.press("y");
-    await expect.poll(() => mock.ops().length).toBe(1);
-    expect([...mock.ops()[0].ids].sort()).toEqual(["10.0", "10.1", "10.2", "10.3", "11.0", "11.1", "11.2", "9.0"]);
+    await page.waitForTimeout(SETTLE_MS);
+    const ids = state.changes.map((c: State) => c.id);
+    expect(mock.ops().filter((o) => o.op === "seen").flatMap((o) => o.ids).filter((id: string) => ids.includes(id))).toEqual([]);
   });
 
   test("y with a block focused is that block's verdict, not the rewrite's seen", async ({ page, birta }) => {

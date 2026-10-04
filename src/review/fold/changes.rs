@@ -18,17 +18,13 @@ use crate::review::doc::Doc;
 use crate::review::ops::{Act, By, ByKind, Hunk, Line, Op};
 use crate::review::state::{
     Asked, AskedKind, Attr, Change, ChangeRange, Deletion, DeletionKind, RangeStatus, Reversible,
-    ReversibleReason, Rewrite, What,
+    ReversibleReason, What,
 };
 
 /// Code points of removed text a change keeps for the page to show.
 const REMOVED_CHARS: usize = 2_000;
 /// A hunk of at most this many lines, changing at most this many words, counts words.
 const SMALL: usize = 3;
-/// A turn that touches more than this share of the doc's blocks rewrote it.
-const REWRITE_SHARE: f64 = 0.40;
-/// Fewer blocks touched than this is never a rewrite, whatever their share.
-const REWRITE_BLOCKS: u32 = 8;
 
 pub(super) struct Input<'x> {
     pub lines: &'x [Line],
@@ -51,7 +47,6 @@ pub(super) struct Input<'x> {
 pub(super) struct Built {
     pub changes: Vec<Change>,
     pub deletions: Vec<Deletion>,
-    pub rewrite: Option<Rewrite>,
 }
 
 /// A human edit's new lines, carried forward while no later write replaces them.
@@ -62,13 +57,6 @@ struct Yours {
     i: Vec<String>,
 }
 
-/// Blocks a turn touched, for telling a rewrite.
-#[derive(Default)]
-struct Touched {
-    stops: BTreeSet<usize>,
-    removed: u32,
-}
-
 pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
     let chain = texts.chain;
     let head = texts.head;
@@ -77,7 +65,6 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
     let mut yours: Vec<Yours> = Vec::new();
     let mut changes = Vec::new();
     let mut deletions = Vec::new();
-    let mut touched: HashMap<u32, Touched> = HashMap::new();
 
     for line in input.lines {
         let step = match &line.op {
@@ -209,28 +196,6 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
                 });
             }
 
-            if who.attr == Attr::Agent
-                && let Some(turn) = who.turn
-            {
-                let entry = touched.entry(turn).or_default();
-                if !gone && il > 0 {
-                    entry.stops.extend(stops_in(head, placed.lines));
-                }
-                if dl > il {
-                    let before = texts
-                        .with_doc(&step.from, |doc| {
-                            stops_in(doc, (h.a + 1, h.a + dl)).count() as u32
-                        })
-                        .unwrap_or(0);
-                    let after = if gone || il == 0 {
-                        0
-                    } else {
-                        stops_in(head, placed.lines).count() as u32
-                    };
-                    entry.removed += before.saturating_sub(after);
-                }
-            }
-
             let touches_html = if gone || il == 0 {
                 h.d.iter().chain(&h.i).any(|l| looks_like_html(l))
             } else {
@@ -304,39 +269,13 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
         }
     }
 
-    let total = head.blocks.stops.len() as u32;
-    let rewrite = touched
-        .iter()
-        .filter_map(|(&turn, t)| {
-            let changed = t.stops.len() as u32 + t.removed;
-            let all = total + t.removed;
-            let pct = f64::from(changed) / f64::from(all.max(1));
-            let mine = || changes.iter().filter(|c: &&Change| c.turn == Some(turn));
-            let unseen = mine().any(|c| !c.seen);
-            (pct > REWRITE_SHARE && changed >= REWRITE_BLOCKS && unseen).then_some(Rewrite {
-                turn,
-                pct,
-                blocks_changed: changed,
-                blocks_total: all,
-            })
-        })
-        .max_by_key(|r| r.turn);
-    if let Some(r) = &rewrite {
-        for c in &mut changes {
-            c.is_rewrite = c.turn == Some(r.turn);
-        }
-    }
     let order: HashMap<&str, usize> = changes
         .iter()
         .enumerate()
         .map(|(i, c)| (c.id.as_str(), i))
         .collect();
     deletions.sort_by_key(|d| order.get(d.change.as_str()).copied().unwrap_or(usize::MAX));
-    Built {
-        changes,
-        deletions,
-        rewrite,
-    }
+    Built { changes, deletions }
 }
 
 /// Who made a write, as the chain and the turns tell it.
@@ -948,16 +887,6 @@ fn stop_above(doc: &Doc, line: u32) -> Option<String> {
         .filter(|s| s.lines.1 < line)
         .max_by_key(|s| (s.lines.1, s.lines.0))
         .map(|s| s.sp.clone())
-}
-
-/// Indexes of the stops with a line in `span`.
-fn stops_in(doc: &Doc, (first, last): (u32, u32)) -> impl Iterator<Item = usize> + '_ {
-    doc.blocks
-        .stops
-        .iter()
-        .enumerate()
-        .filter(move |(_, s)| s.lines.0 <= last && first <= s.lines.1)
-        .map(|(i, _)| i)
 }
 
 /// How many words a small hunk changed, and the places in its new text where it only

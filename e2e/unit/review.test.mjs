@@ -125,7 +125,7 @@ const FIXTURE_MARKS = {
   ],
   // An asked and a later outside change share the paragraph: the newest unseen one's bar wins
   lost: [glyph("10:1-10:16", "no", "agent"), bar("5:1-6:68", "dotted", "agent"), wash("5:1-6:68")],
-  // A rewrite keeps its bars, so its places show, but no washes: its own row is the news
+  // A turn that touched most blocks is checked like any other: each unseen change is washed
   rewrite: [
     glyph("5:1-6:68", "no", "agent"),
     glyph("10:1-10:29", "no", "agent"),
@@ -136,6 +136,13 @@ const FIXTURE_MARKS = {
     bar("16:1-16:19", "dotted", "agent"),
     bar("8:1-8:20", "dotted", "agent"),
     bar("14:1-14:20", "dotted", "agent"),
+    wash("5:1-6:68"),
+    wash("10:1-10:29"),
+    wash("11:1-11:18"),
+    wash("12:1-13:0"),
+    wash("16:1-16:19"),
+    wash("8:1-8:20"),
+    wash("14:1-14:20"),
   ],
   // Cited and asked fixes are solid; the unasked change and both outside writes are dotted
   flow: [
@@ -304,21 +311,11 @@ test("laneMarks: a withdrawn item draws as a draft", () => {
   assertMarks(BR.pure.laneMarks(s), [glyph("5:1-6:54", "no", "agent"), glyph("10:1-10:16", "no", "you")], "withdrawn");
 });
 
-test("laneMarks: a rewrite keeps its bars and ticks, so every place shows, and drops the washes", () => {
+test("laneMarks: a state that still names a rewrite washes its unseen changes like any other", () => {
   const { BR } = load();
   const s = state("unseen");
-  s.rewrite = state("rewrite").rewrite;
-  assertMarks(
-    BR.pure.laneMarks(s),
-    [
-      glyph("5:1-6:68", "no", "agent"),
-      glyph("10:1-10:16", "no", "agent"),
-      bar("5:1-6:68", "solid", "agent"),
-      bar("11:1-11:44", "dotted", "agent"),
-      tick("14:1-14:13"),
-    ],
-    "rewrite",
-  );
+  s.rewrite = { turn: 8, pct: 0.8, blocks_changed: 8, blocks_total: 10 };
+  assertMarks(BR.pure.laneMarks(s), UNSEEN, "rewrite");
 });
 
 test("laneMarks: glyphs on one block come in note order", () => {
@@ -345,11 +342,11 @@ test("laneMarks: two removed blocks in one gap draw one tick with a count", () =
   assert.deepEqual(ticks, [{ mark: "tick", after: "14:1-14:13", count: 2 }]);
 });
 
-test("laneMarks: a settled change's removed block leaves no tick", () => {
+test("laneMarks: a settled change's removed block keeps its tick, though it is no stop", () => {
   const { BR } = load();
   const s = state("unseen");
   s.changes[2].settled = true;
-  assertMarks(BR.pure.laneMarks(s), replace(UNSEEN, "tick 14:1-14:13"), "settled removal");
+  assertMarks(BR.pure.laneMarks(s), UNSEEN, "settled removal");
 });
 
 test("laneMarks: held verdicts turn grey when the hold passes, by the clock it is given", () => {

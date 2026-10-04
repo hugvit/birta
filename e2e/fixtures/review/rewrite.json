@@ -245,7 +245,7 @@
         "touches_html": false
       },
       "label": "6 words changed",
-      "is_rewrite": true,
+      "is_rewrite": false,
       "old_text": "Retrying three times with backoff fixes most of these.\n",
       "new_text": "S3 answers 503 under load; retrying three times fixes most of these.\n",
       "check": null,
@@ -302,7 +302,7 @@
         "touches_html": false
       },
       "label": "3 words → 6",
-      "is_rewrite": true,
+      "is_rewrite": false,
       "old_text": "- retries on 503\n",
       "new_text": "- retries on 502, 503 and 504\n",
       "check": null,
@@ -356,7 +356,7 @@
         "touches_html": false
       },
       "label": "7 words → 2",
-      "is_rewrite": true,
+      "is_rewrite": false,
       "old_text": "- backoff of 1, 2 and 4 seconds\n",
       "new_text": "- jittered backoff\n",
       "check": null,
@@ -411,7 +411,7 @@
         "touches_html": false
       },
       "label": "2 words → 3",
-      "is_rewrite": true,
+      "is_rewrite": false,
       "old_text": "- metrics dashboard\n",
       "new_text": "- a retry counter\n",
       "check": null,
@@ -465,7 +465,7 @@
         "touches_html": false
       },
       "label": "2 words → 4",
-      "is_rewrite": true,
+      "is_rewrite": false,
       "old_text": "Nothing yet.\n",
       "new_text": "The S3 client bump.\n",
       "check": null,
@@ -520,7 +520,7 @@
         "touches_html": false
       },
       "label": "2 words → 3",
-      "is_rewrite": true,
+      "is_rewrite": false,
       "old_text": "## What changes\n",
       "new_text": "## What this changes\n",
       "check": null,
@@ -575,7 +575,7 @@
         "touches_html": false
       },
       "label": "2 words → 4",
-      "is_rewrite": true,
+      "is_rewrite": false,
       "old_text": "## Stacked on\n",
       "new_text": "## Stacked on top of\n",
       "check": null,
@@ -628,7 +628,7 @@
         "touches_html": false
       },
       "label": "paragraph added",
-      "is_rewrite": true,
+      "is_rewrite": false,
       "old_text": "",
       "new_text": "\nShips behind a flag.\n",
       "check": null,
@@ -649,12 +649,6 @@
       "after_sp": "5:1-6:68"
     }
   ],
-  "rewrite": {
-    "turn": 8,
-    "pct": 0.8,
-    "blocks_changed": 8,
-    "blocks_total": 10
-  },
   "later": [],
   "lost": [],
   "rounds": [

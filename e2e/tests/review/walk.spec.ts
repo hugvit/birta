@@ -11,6 +11,7 @@ import {
   focusTo,
   focusTop,
   focused,
+  focusMark,
   mockReview,
   revOf,
   say,
@@ -99,14 +100,24 @@ const opsNamed = (mock: Mock, name: string) => mock.ops().filter((o) => o.op ===
 const composer = (page: Page) => page.locator('birta-flow[data-kind="composer"]');
 const receipt = (page: Page, has: string) => page.locator('birta-flow[data-kind="receipt"]', { hasText: has });
 
+/** The removal 11.0 as `stopOf` names it: a stop of its own, in the gap after `## Stacked on`. */
+const REMOVAL = "removal 11.0 after 14:1-14:13";
+
+/** Where focus is: the block's sp, `doc`, or `removal <change> after <sp>` on a removal stop. */
+async function stopOf(page: Page): Promise<string | null> {
+  const m = await focusMark(page);
+  if (m?.target === "removal") return `removal ${m.change} after ${m.after}`;
+  return focused(page);
+}
+
 // unseen.json walks, in doc order: the doc-level reply, the paragraph's change, the not-handled
-// bullet, the next bullet's change, and the removal walked at the block above its tick
+// bullet, the next bullet's change, and the removal at its own stop in the gap below the last heading
 const UNSEEN_WALK: { id: string; focus: string | null; seen: boolean }[] = [
   { id: "#13", focus: "doc", seen: true },
   { id: "9.0", focus: "5:1-6:68", seen: true },
   { id: "nh:5", focus: "10:1-10:16", seen: false },
   { id: "10.0", focus: "11:1-11:44", seen: true },
-  { id: "11.0", focus: "14:1-14:13", seen: true },
+  { id: "11.0", focus: REMOVAL, seen: true },
 ];
 
 // --- One pass in doc order -------------------------------------------------------------------
@@ -120,7 +131,7 @@ test.describe("the n walk", () => {
       if (stop.seen) sent.push([stop.id]);
       await expect.poll(() => stripPlace(page), { message: `step ${i + 1}` }).toBe(at(i + 1, UNSEEN_WALK.length));
       await expect.poll(() => seenIds(mock), { message: `step ${i + 1}` }).toEqual(sent);
-      expect(await focused(page), `step ${i + 1}`).toBe(stop.focus);
+      expect(await stopOf(page), `step ${i + 1}`).toBe(stop.focus);
     }
     expect(mock.ops().filter((o) => o.op !== "seen")).toEqual([]);
   });
@@ -133,7 +144,7 @@ test.describe("the n walk", () => {
       if (stop.seen) swap(mock, state, echoSeen(state, [stop.id]));
       await page.waitForTimeout(100);
     }
-    expect(await focused(page)).toBe("14:1-14:13");
+    expect(await stopOf(page)).toBe(REMOVAL);
   });
 
   test("n past the last stop stays there and says so; it never wraps", async ({ page, birta }) => {
@@ -146,7 +157,7 @@ test.describe("the n walk", () => {
     await page.keyboard.press("n");
     await page.waitForTimeout(SETTLE_MS);
     expect(await stripMessage(page)).toBe(END);
-    expect(await focused(page)).toBe("14:1-14:13");
+    expect(await stopOf(page)).toBe(REMOVAL);
     expect(seenIds(mock)).toHaveLength(before);
   });
 
@@ -157,7 +168,7 @@ test.describe("the n walk", () => {
     await expect.poll(() => stripMessage(page)).toBe(END);
     await page.keyboard.press("Escape");
     await page.waitForTimeout(SETTLE_MS);
-    expect(await focused(page)).toBe("14:1-14:13");
+    expect(await stopOf(page)).toBe(REMOVAL);
     await focusTop(page);
     expect(await focused(page)).toBe("doc");
     await page.keyboard.press("n");
@@ -276,7 +287,7 @@ test.describe("a seen round", () => {
     for (const [i, stop] of UNSEEN_WALK.entries()) {
       await page.keyboard.press("n");
       await expect.poll(() => stripPlace(page), { message: `step ${i + 1}` }).toBe(at(i + 1, UNSEEN_WALK.length));
-      expect(await focused(page), `step ${i + 1}`).toBe(stop.focus);
+      expect(await stopOf(page), `step ${i + 1}`).toBe(stop.focus);
     }
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops()).toEqual([]);
@@ -342,7 +353,7 @@ test.describe("killers: the walk", () => {
     });
     await page.keyboard.press("End");
     for (let i = 0; i < UNSEEN_WALK.length; i++) await page.keyboard.press("n");
-    await expect.poll(() => focused(page)).toBe("14:1-14:13");
+    await expect.poll(() => stopOf(page)).toBe(REMOVAL);
     const next = JSON.parse(JSON.stringify(state));
     next.rounds.push({ submit: 20, ts: next.server_now, by: "", to: "*", items: [], claim: 21, claimed_by: "claude", yield: 30, released: false });
     for (const c of next.changes) if (c.id !== "11.0") c.settled = true;
@@ -599,7 +610,7 @@ test.describe("the walk's place", () => {
   test("End puts the place at the last stop: p goes back from it", async ({ page, birta }) => {
     await openFixture(page, birta, "unseen");
     await page.keyboard.press("End");
-    await expect.poll(() => focused(page)).toBe("14:1-14:13");
+    await expect.poll(() => stopOf(page)).toBe(REMOVAL);
     await page.keyboard.press("p");
     await expect.poll(() => focused(page)).toBe("11:1-11:44");
     await expect.poll(() => stripPlace(page)).toBe(at(4, 5));
@@ -639,10 +650,10 @@ test.describe("your drafts in the walk", () => {
       s.items.push(draft(30, METRICS));
       s.counts.drafts = 1;
     });
-    const want = ["doc", "5:1-6:68", "10:1-10:16", "11:1-11:44", METRICS, "14:1-14:13"];
+    const want = ["doc", "5:1-6:68", "10:1-10:16", "11:1-11:44", METRICS, REMOVAL];
     for (const [i, sp] of want.entries()) {
       await page.keyboard.press("n");
-      await expect.poll(() => focused(page), { message: `n ×${i + 1}` }).toBe(sp);
+      await expect.poll(() => stopOf(page), { message: `n ×${i + 1}` }).toBe(sp);
     }
     await expect.poll(() => stripPlace(page)).toBe(at(5, 5));
     await page.keyboard.press("p");

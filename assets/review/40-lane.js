@@ -41,12 +41,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
     var bySp = {};
     var order = [];
-    var settled = {};
+    var undone = {};
     // Your revert of a change you have seen is no news: by the op of the write that reverted it
     var seenRevert = {};
     (state.changes || []).forEach(function (c) { if (c.undone_by != null && c.seen) seenRevert[c.undone_by] = true; });
     (state.changes || []).forEach(function (c) {
-      if (c.settled) settled[c.id] = true;
+      if (c.undone_by != null) undone[c.id] = true;
       var sp = c.range && c.range.sp;
       if (!sp) return;
       if (!bySp[sp]) {
@@ -63,14 +63,14 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       var win = pick[pick.length - 1];
       out.push({ mark: 'bar', sp: sp, style: barStyle(win), role: win.attr === 'human' ? 'you' : 'agent',
         weight: live.length ? 3 : 1, fresh: unseen.some(function (c) { return c.attr !== 'human'; }) });
-      // A rewrite's own row is its news, so its blocks keep their bars and drop the wash
-      if (unseen.length && !state.rewrite) out.push({ mark: 'wash', sp: sp });
+      if (unseen.length) out.push({ mark: 'wash', sp: sp });
     });
 
     var ticks = {};
     var tickOrder = [];
+    // A settled removal keeps its tick; one you reverted put its text back
     (state.deletions || []).forEach(function (d) {
-      if (d.kind !== 'block' || settled[d.change]) return;
+      if (d.kind !== 'block' || undone[d.change]) return;
       var after = d.after_sp == null ? null : d.after_sp;
       var key = after === null ? '' : after;
       if (!ticks[key]) {
@@ -367,6 +367,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       // Whole doc: its line and rows, across the doc's width
       outline.appendChild(box({ 'data-mark': 'focus', 'data-target': 'doc' }, 'focus',
         C.left - 8 - F.left, doc.top - 2 - F.top, C.width + 16, doc.bottom - doc.top + 4));
+    } else if (focused && focused.isConnected && BR.flow.removalOf(focused)) {
+      // A removal stop: its gap, or its row while it is open there
+      var gone = BR.flow.removalOf(focused);
+      var gr = focused.getBoundingClientRect();
+      outline.appendChild(box({ 'data-mark': 'focus', 'data-target': 'removal', 'data-after': gone.after, 'data-change': gone.change }, 'focus',
+        C.left - 8 - F.left, gr.top - 2 - F.top, C.width + 16, gr.height + 4));
     } else if (focused && focused.isConnected && rendered(focused)) {
       var own = ownRect(focused);
       var fl = Math.max(focused.localName === 'li' ? focused.parentElement.getBoundingClientRect().left : own.left, C.left) - 8;

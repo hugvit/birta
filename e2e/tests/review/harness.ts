@@ -471,6 +471,8 @@ export interface Mark extends Box {
   count: number | null;
   /** What a focus mark stands on when it is not a stop, e.g. `summary`. */
   target: string | null;
+  /** The removal's change id, on a focus mark that stands on a removal stop. */
+  change: string | null;
 }
 
 /** Every `[data-mark]` element in the lane's shadow roots (forced open by the harness). */
@@ -493,6 +495,7 @@ export function marks(page: Page): Promise<Mark[]> {
           n: a("data-n") === null ? null : Number(a("data-n")),
           count: a("data-count") === null ? null : Number(a("data-count")),
           target: a("data-target"),
+          change: a("data-change"),
           left: r.left,
           top: r.top,
           right: r.right,
@@ -886,6 +889,80 @@ export function hostText(page: Page, sel: string): Promise<string | null> {
 }
 export const phraseOf = (page: Page) => hostText(page, ".file-header birta-phrase");
 export const turnOf = (page: Page) => hostText(page, ".file-header birta-turn");
+
+// --- Change rows --------------------------------------------------------------------------
+
+/** A shown change row, read by its parts: lead, substance (cut, added, `…`) and tail. */
+export interface ChangeRow {
+  kind: string;
+  /** The whole row as it reads, whitespace squashed. */
+  text: string;
+  lead: string | null;
+  substance: string | null;
+  tail: string | null;
+  /** Struck text, then underlined text, then each `…`, in order. */
+  del: string[];
+  ins: string[];
+  gaps: string[];
+  /** The text of each `code` element in the substance. */
+  code: string[];
+  /** The words of each `kbd` chip, in order. */
+  kbd: string[];
+  /** The block the row follows (or the item it closes), null in the doc slot. */
+  sp: string | null;
+}
+
+/** Every shown `birta-flow` whose kind is in `kinds`, as a change row, in document order. */
+export function changeRows(page: Page, kinds: string[] = ["receipt"]): Promise<ChangeRow[]> {
+  return page.evaluate((kinds) => {
+    const textOf = (n: Node | null | undefined): string | null => {
+      if (!n) return null;
+      let out = "";
+      const walk = (x: Node) => {
+        if (x.nodeType === 3) out += x.textContent;
+        else if (x.nodeType === 1) {
+          const el = x as Element;
+          if (el.localName === "style" || el.localName === "script") return;
+          (el.shadowRoot ?? el).childNodes.forEach(walk);
+        } else if (x.nodeType === 11) x.childNodes.forEach(walk);
+      };
+      walk(n);
+      return out.replace(/\s+/g, " ").trim();
+    };
+    const content = document.getElementById("content")!;
+    return Array.from(document.querySelectorAll("birta-flow[data-kind]"))
+      .filter((h) => kinds.includes(h.getAttribute("data-kind")!) && h.getClientRects().length > 0)
+      .map((h) => {
+        const root = h.shadowRoot ?? h;
+        const part = (sel: string) => root.querySelector(sel);
+        const substance = part('[data-part="substance"]');
+        const all = (sel: string) => (substance ? Array.from(substance.querySelectorAll(sel)).map((e) => textOf(e) ?? "") : []);
+        let sp: string | null = null;
+        if (h.parentElement!.localName === "li") sp = h.parentElement!.getAttribute("data-sourcepos");
+        else {
+          let prev = h.previousElementSibling;
+          while (prev && prev.localName === "birta-flow") prev = prev.previousElementSibling;
+          sp = prev && content.contains(prev) ? prev.getAttribute("data-sourcepos") : null;
+        }
+        return {
+          kind: h.getAttribute("data-kind")!,
+          text: textOf(root) ?? "",
+          lead: textOf(part('[data-part="lead"]')),
+          substance: textOf(substance),
+          tail: textOf(part('[data-part="tail"]')),
+          del: all("del"),
+          ins: all("ins"),
+          gaps: all('[data-part="gap"]'),
+          code: all("code"),
+          kbd: Array.from(root.querySelectorAll("kbd")).map((k) => k.textContent ?? ""),
+          sp,
+        };
+      });
+  }, kinds);
+}
+
+/** A size label of the kind rows no longer show, e.g. `7 words → 10` or `section removed · 3 blocks`. */
+export const SIZE_LABEL = /\d+ (words?|lines?|list items?|blocks?|paragraphs?) (→|changed)|→ \d+|(paragraph|list item|section|block|heading) (removed|added)|\((paragraph|list item|section[^)]*|heading|block)\)/;
 
 // --- The strip ----------------------------------------------------------------------------
 

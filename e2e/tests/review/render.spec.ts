@@ -31,6 +31,8 @@ import {
   stops,
   stripMessage,
   stripPlace,
+  SIZE_LABEL,
+  changeRows,
 } from "./harness";
 
 const WIDE = { width: 1280, height: 900 };
@@ -55,6 +57,8 @@ type Start = (
 
 const FLOW = fixtureDoc("flow");
 const UNSEEN = fixtureDoc("unseen");
+/** flow.json's 19.0, flagged as unasked with its why. */
+const UNASKED = "Claude · not asked for: while I was there";
 
 /** Serves `doc` as pr.md with review on and the socket mocked, and waits for review to boot. */
 async function open(
@@ -134,6 +138,11 @@ async function hostWith(page: Page, has: string): Promise<Host | null> {
   return (await hosts(page)).find((h) => h.text.includes(has)) ?? null;
 }
 
+/** The shown change rows whose lead is `lead`. */
+async function rowsLed(page: Page, lead: string) {
+  return (await changeRows(page)).filter((r) => r.lead === lead);
+}
+
 const openRow = (page: Page) => page.evaluate(() => (window as unknown as W).BR.flow.openRow()?.id ?? null);
 /** The row on show for the focus, muted or not. */
 const focusedRow = (page: Page) => page.evaluate(() => (window as unknown as W).BR.flow.focusedRow()?.id ?? null);
@@ -173,69 +182,81 @@ const dots = async (page: Page) => (await marks(page)).filter((m) => m.mark === 
 // --- Rows only on focus (C2, C9) --------------------------------------------------------------
 
 test.describe("rows on focus", () => {
-  test("a change's row shows only while its block has focus, and reads without a note", async ({ page, birta }) => {
+  test("a change's row shows only while its block has focus, and reads why it wasn't asked for", async ({ page, birta }) => {
     await open(page, birta, FLOW, fixtureState("flow"));
     await page.waitForTimeout(SETTLE_MS);
-    expect(await hostWith(page, "without a note")).toBeNull();
+    expect(await rowsLed(page, UNASKED)).toEqual([]);
     await focusOn(page, "14:1-14:21");
-    await expect.poll(() => hostWith(page, "without a note")).toMatchObject({
-      text: `Claude · without a note · 2 words → 3 · ${KEYS}`,
-      sp: "14:1-14:21",
-    });
+    await expect.poll(async () => (await rowsLed(page, UNASKED)).map((r) => [r.sp, r.kbd])).toEqual([["14:1-14:21", ["y", "u", "c"]]]);
+    const row = (await rowsLed(page, UNASKED))[0];
+    expect(row.text.endsWith(KEYS)).toBe(true);
+    expect(row.text).not.toMatch(SIZE_LABEL);
+    // `## Stacked on` → `## Stacked on nothing`: the added word is underlined
+    expect(row.ins.join(" ")).toContain("nothing");
     // Only the lead is muted on a row you can act on
-    expect((await styleOf(page, "2 words → 3", ["color"]))?.color).not.toBe(MUTED);
+    expect((await styleOf(page, "nothing", ["color"]))?.color).not.toBe(MUTED);
     await page.keyboard.press("j");
-    await expect.poll(() => hostWith(page, "without a note")).toBeNull();
+    await expect.poll(() => rowsLed(page, UNASKED)).toEqual([]);
   });
 
-  test("the row's keys and the rewrite row's name the keys as rebound", async ({ page, birta }) => {
+  test("the row's keys name the keys as rebound, and a state naming a rewrite draws no rewrite row", async ({ page, birta }) => {
     await open(page, birta, FLOW, bent("flow", (s) => (s.rewrite = { turn: 12, pct: 0.8, blocks_changed: 8, blocks_total: 10 })));
     await page.evaluate(() => {
       const kb = (window as unknown as { KEYBINDINGS: Record<string, string> }).KEYBINDINGS;
       Object.assign(kb, { yes: "g", revert_change: "v", note: "b" });
     });
     await focusOn(page, "14:1-14:21");
-    await expect.poll(async () => (await hostWith(page, "without a note"))?.text).toBe("Claude · without a note · 2 words → 3 · g keep · v revert · b note");
-    expect((await hostWith(page, "rewrote most of it"))?.text).toBe("Claude rewrote most of it · g mark seen");
+    await expect.poll(async () => (await rowsLed(page, UNASKED)).map((r) => r.kbd)).toEqual([["g", "v", "b"]]);
+    const row = (await rowsLed(page, UNASKED))[0];
+    expect(row.text.endsWith("g keep · v revert · b note")).toBe(true);
+    expect(row.text).not.toMatch(SIZE_LABEL);
+    expect(await hostWith(page, "rewrote most of it")).toBeNull();
+    expect(await page.locator('birta-flow[data-kind="rewrite"]').count()).toBe(0);
   });
 
   test("a change that cites your answer says what you answered", async ({ page, birta }) => {
     // #25 is your answer to Claude's question 22; `#25 covers` credits change 19.0
     await open(page, birta, FLOW, bent("flow", (s) => (s.changes.find((c: State) => c.id === "19.0").asked = { kind: "cited", notes: [], answers: [25] })));
     await focusOn(page, "14:1-14:21");
-    await expect
-      .poll(async () => (await hostWith(page, "because you"))?.text)
-      .toBe(`Claude · because you answered "yes, keep it" · 2 words → 3 · ${KEYS}`);
+    const lead = 'Claude · because you answered "yes, keep it"';
+    await expect.poll(async () => (await rowsLed(page, lead)).map((r) => [r.sp, r.kbd])).toEqual([["14:1-14:21", ["y", "u", "c"]]]);
+    expect((await rowsLed(page, lead))[0].text).not.toMatch(SIZE_LABEL);
   });
 
-  test("a cited change's row says what you said and how big the change is", async ({ page, birta }) => {
+  test("a cited change's row says what you said, and shows the words that changed", async ({ page, birta }) => {
     await open(page, birta, FLOW, fixtureState("flow"));
     await focusOn(page, "5:1-6:68");
-    await expect
-      .poll(() => hostWith(page, "because you said"))
-      .toMatchObject({ text: `Claude · because you said "say why it fails" · 6 words changed · ${KEYS}`, sp: "5:1-6:68" });
+    const lead = 'Claude · because you said "say why it fails"';
+    await expect.poll(async () => (await rowsLed(page, lead)).map((r) => [r.sp, r.kbd])).toEqual([["5:1-6:68", ["y", "u", "c"]]]);
+    const row = (await rowsLed(page, lead))[0];
+    expect(row.text.endsWith(KEYS)).toBe(true);
+    expect(row.text).not.toMatch(SIZE_LABEL);
+    expect(row.ins.join(" ")).toContain("S3 answers 503 under load");
+    expect(row.del.join(" ")).toContain("with backoff");
   });
 
-  test("a done reply under your note always shows, and takes its keys only while its change is open", async ({ page, birta }) => {
+  test("Claude's done row under your note opens with its block's focus, its substance and keys with it", async ({ page, birta }) => {
     await open(page, birta, FLOW, fixtureState("flow"));
-    await expect.poll(() => hostWith(page, "done · 7 words → 10")).toMatchObject({
-      text: "↳ Claude · done · 7 words → 10",
-      kbd: [],
-      sp: "11:1-11:44",
-    });
+    // Your note shows; Claude's row under it opens only on focus
+    await expect.poll(async () => (await hostWith(page, "cap it"))?.sp).toBe("11:1-11:44");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await rowsLed(page, "↳ Claude · done")).toEqual([]);
     await focusOn(page, "11:1-11:44");
-    await expect.poll(() => hostWith(page, "done · 7 words → 10")).toMatchObject({
-      text: `↳ Claude · done · 7 words → 10 · ${KEYS}`,
-      kbd: ["y", "u", "c"],
-    });
+    await expect.poll(async () => (await rowsLed(page, "↳ Claude · done")).map((r) => [r.sp, r.kbd])).toEqual([["11:1-11:44", ["y", "u", "c"]]]);
+    const row = (await rowsLed(page, "↳ Claude · done"))[0];
+    expect(row.text.endsWith(KEYS)).toBe(true);
+    expect(row.text).not.toMatch(SIZE_LABEL);
+    expect(row.ins.join(" ")).toContain("capped at 8");
   });
 
   test("a change that can't be reverted offers y keep and c note", async ({ page, birta }) => {
     await open(page, birta, FLOW, fixtureState("flow"));
     await focusOn(page, "8:1-8:15");
-    await expect
-      .poll(() => hostWith(page, "changed outside birta"))
-      .toMatchObject({ text: `changed outside birta (git) · 1 word changed · ${KEYS_NO_REVERT}`, kbd: ["y", "c"], sp: "8:1-8:15" });
+    await expect.poll(() => hostWith(page, "changed outside birta")).toMatchObject({ kbd: ["y", "c"], sp: "8:1-8:15" });
+    const text = (await hostWith(page, "changed outside birta"))!.text;
+    expect(text).toMatch(/^changed outside birta \(git\)/);
+    expect(text.endsWith(KEYS_NO_REVERT)).toBe(true);
+    expect(text).not.toMatch(SIZE_LABEL);
   });
 
   test("keys are kbd chips on the open row only, in one group that never wraps", async ({ page, birta }) => {
@@ -262,7 +283,7 @@ test.describe("rows on focus", () => {
     await expect.poll(() => openRow(page)).toBe("27.0");
     await page.keyboard.press("k");
     await expect.poll(() => openRow(page)).toBe("19.0");
-    await expect.poll(async () => (await hostWith(page, "without a note"))?.kbd).toEqual(["y", "u", "c"]);
+    await expect.poll(async () => (await hostWith(page, "not asked for"))?.kbd).toEqual(["y", "u", "c"]);
     // Esc keeps the focus and its row; whole doc holds no change
     await page.keyboard.press("Escape");
     await page.waitForTimeout(SETTLE_MS);
@@ -270,7 +291,7 @@ test.describe("rows on focus", () => {
     await focusTop(page);
     expect(await focused(page)).toBe("doc");
     await expect.poll(() => openRow(page)).toBeNull();
-    await expect.poll(() => hostWith(page, "without a note")).toBeNull();
+    await expect.poll(() => hostWith(page, "not asked for")).toBeNull();
   });
 
   test("n opens the row of the change it lands on, and only that row", async ({ page, birta }) => {
@@ -284,6 +305,7 @@ test.describe("rows on focus", () => {
     const rows = (await hosts(page)).filter((h) => h.text.includes("without a note"));
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ sp: id === "20.0" ? a : b, kbd: ["y", "u", "c"] });
+    expect(rows[0].text).not.toMatch(SIZE_LABEL);
   });
 
   test("n on a block with two changes goes on to the next stop, not to the block's second change", async ({ page, birta }) => {
@@ -293,8 +315,10 @@ test.describe("rows on focus", () => {
     });
     await open(page, birta, FLOW, state);
     await walkTo(page, "19.0");
-    const keyed = async () => (await hosts(page)).filter((h) => h.text.includes("without a note") && h.kbd.length).map((h) => h.text);
-    await expect.poll(keyed).toEqual([`Claude · without a note · 2 words → 3 · ${KEYS}`]);
+    // Both changes on the block are one row, with one set of keys
+    const keyed = async () => (await changeRows(page)).filter((r) => r.sp === "14:1-14:21" && r.kbd.length).map((r) => r.lead);
+    await expect.poll(keyed).toEqual([UNASKED]);
+    expect((await changeRows(page)).filter((r) => r.sp === "14:1-14:21")).toHaveLength(1);
     // One stop, one landing: the next n leaves the block for 27.0's
     await page.keyboard.press("n");
     await expect.poll(() => openRow(page)).toBe("27.0");
@@ -318,15 +342,17 @@ test.describe("rows on focus", () => {
     mock.pushState({ ...JSON.parse(JSON.stringify(state)), server_now: state.server_now + 1_000 });
     await page.waitForTimeout(SETTLE_MS);
     expect(await openRow(page)).toBe("19.0");
-    expect((await hostWith(page, "without a note"))?.kbd).toEqual(["y", "u", "c"]);
+    expect((await hostWith(page, "not asked for"))?.kbd).toEqual(["y", "u", "c"]);
   });
 
   test("an earlier round's settled change opens muted, with no keys, and is no open row for keys", async ({ page, birta }) => {
     const state = bent("flow", (s) => Object.assign(s.changes.find((c: State) => c.id === "19.0"), { seen: true, settled: true }));
     await open(page, birta, FLOW, state);
     await focusOn(page, "14:1-14:21");
-    await expect.poll(() => hostWith(page, "without a note")).toMatchObject({ text: "Claude · without a note · 2 words → 3", kbd: [] });
-    expect((await styleOf(page, "2 words → 3", ["color"]))?.color).toBe(MUTED);
+    await expect.poll(async () => (await rowsLed(page, UNASKED)).map((r) => r.kbd)).toEqual([[]]);
+    expect((await rowsLed(page, UNASKED))[0].text).not.toMatch(SIZE_LABEL);
+    // The whole row is muted, its substance too
+    expect((await styleOf(page, "nothing", ["color"]))?.color).toBe(MUTED);
     expect(await openRow(page)).toBeNull();
     expect(await focusedRow(page)).toBe("19.0");
   });
@@ -356,11 +382,12 @@ test.describe("click", () => {
     await open(page, birta, FLOW, fixtureState("flow"));
     await clickText(page, "14:1-14:21");
     await expect.poll(() => focused(page)).toBe("14:1-14:21");
-    await expect.poll(async () => (await hostWith(page, "without a note"))?.text).toBe(`Claude · without a note · 2 words → 3 · ${KEYS}`);
+    await expect.poll(async () => (await rowsLed(page, UNASKED)).map((r) => [r.sp, r.kbd])).toEqual([["14:1-14:21", ["y", "u", "c"]]]);
+    expect((await rowsLed(page, UNASKED))[0].text).not.toMatch(SIZE_LABEL);
     expect(await openRow(page)).toBe("19.0");
     await clickText(page, "16:1-16:19");
     await expect.poll(() => focused(page)).toBe("16:1-16:19");
-    await expect.poll(() => hostWith(page, "without a note")).toBeNull();
+    await expect.poll(() => rowsLed(page, UNASKED)).toEqual([]);
     await expect.poll(async () => (await hostWith(page, "changed outside birta"))?.sp).toBe("16:1-16:19");
   });
 
@@ -435,17 +462,19 @@ test.describe("reverted row", () => {
   }
 
   for (const kept of [false, true]) {
-    test(`a reverted change reads reverted and its size, muted, with no keys${kept ? ", where it still stands" : ""}`, async ({
+    test(`a reverted change reads reverted with no size, muted, with no keys${kept ? ", where it still stands" : ""}`, async ({
       page,
       birta,
     }) => {
       await open(page, birta, FLOW, reverted(kept));
       await focusOn(page, "5:1-6:68");
-      await expect.poll(() => hostWith(page, "reverted")).toMatchObject({ text: "reverted · 6 words changed", kbd: [], sp: "5:1-6:68" });
+      await expect.poll(() => hostWith(page, "reverted")).toMatchObject({ kbd: [], sp: "5:1-6:68" });
+      expect((await hostWith(page, "reverted"))!.text).toMatch(/^reverted\b/);
+      expect((await hostWith(page, "reverted"))!.text).not.toMatch(SIZE_LABEL);
       expect((await styleOf(page, "reverted", ["color"]))?.color).toBe(MUTED);
       expect(await hostWith(page, "because you said")).toBeNull();
       // Your own write that reverted it is no row of its own
-      expect((await hosts(page)).filter((h) => h.sp === "5:1-6:68").map((h) => h.text)).toEqual(["reverted · 6 words changed"]);
+      expect((await hosts(page)).filter((h) => h.sp === "5:1-6:68")).toHaveLength(1);
       expect(await openRow(page)).toBeNull();
       expect(await focusedRow(page)).toBe("13.0");
       // The glyph on its block keeps 4 px from the row's rule
@@ -462,11 +491,11 @@ test.describe("reverted row", () => {
   test("z of the revert brings the change's own row back, keys and all", async ({ page, birta }) => {
     const { mock } = await open(page, birta, FLOW, reverted(false));
     await focusOn(page, "5:1-6:68");
-    await expect.poll(async () => (await hostWith(page, "reverted"))?.text).toBe("reverted · 6 words changed");
+    await expect.poll(async () => (await hostWith(page, "reverted"))?.text).toMatch(/^reverted\b/);
     mock.pushState(fixtureState("flow"));
-    await expect
-      .poll(async () => (await hostWith(page, "because you said"))?.text)
-      .toBe(`Claude · because you said "say why it fails" · 6 words changed · ${KEYS}`);
+    const lead = 'Claude · because you said "say why it fails"';
+    await expect.poll(async () => (await rowsLed(page, lead)).map((r) => r.kbd)).toEqual([["y", "u", "c"]]);
+    expect((await rowsLed(page, lead))[0].text.endsWith(KEYS)).toBe(true);
     expect(await hostWith(page, "reverted")).toBeNull();
     expect(await openRow(page)).toBe("13.0");
   });
@@ -493,10 +522,13 @@ test.describe("reverted row on a real server", () => {
     const { served, c } = await onChange(page, birta);
     await page.keyboard.press("u");
     await expect.poll(() => reviewLog(served.root)!.filter((l) => l.op === "edit").length).toBe(1);
-    await expect.poll(() => hostWith(page, "reverted")).toMatchObject({ text: `reverted · ${c.label}`, kbd: [] });
+    await expect.poll(() => hostWith(page, "reverted")).toMatchObject({ kbd: [] });
+    expect((await hostWith(page, "reverted"))!.text).toMatch(/^reverted\b/);
+    expect((await hostWith(page, "reverted"))!.text).not.toMatch(SIZE_LABEL);
     expect((await hostWith(page, "reverted"))!.sp).toMatch(/^5:1-/);
     expect(await focused(page)).toMatch(/^5:1-/);
-    await expect.poll(() => stripMessage(page)).toBe(`reverted · ${c.label}`);
+    await expect.poll(() => stripMessage(page)).toMatch(/^reverted\b/);
+    expect(await stripMessage(page)).not.toContain(c.label);
   });
 
   test("the reverted change stays a walk stop until the round ends, and its wash clears once seen", async ({ page, birta }) => {
@@ -508,7 +540,8 @@ test.describe("reverted row on a real server", () => {
     await focusTop(page);
     await page.keyboard.press("n");
     await expect.poll(() => focused(page)).toMatch(/^5:1-/);
-    await expect.poll(() => hostWith(page, "reverted")).toMatchObject({ text: `reverted · ${c.label}` });
+    await expect.poll(async () => (await hostWith(page, "reverted"))?.text).toMatch(/^reverted\b/);
+    expect((await hostWith(page, "reverted"))!.text).not.toContain(c.label);
     await expect.poll(() => stripPlace(page)).toBe("1 of 1");
     await page.waitForTimeout(SETTLE_MS);
     expect((await marks(page)).filter((m) => m.mark === "wash" && m.width > 0)).toEqual([]);
@@ -522,7 +555,12 @@ test.describe("tombstones", () => {
   function bareSectionNo(): State {
     return bent("unseen", (s) => {
       Object.assign(s.changes.find((c: State) => c.id === "11.0"), { asked: { kind: "location", notes: [30] }, label: "section removed · 2 blocks" });
-      Object.assign(s.deletions.find((d: State) => d.change === "11.0"), { first_line: "## Stacked on", label: "section · 2 blocks" });
+      Object.assign(s.deletions.find((d: State) => d.change === "11.0"), {
+        first_line: "## Stacked on",
+        label: "section · 2 blocks",
+        head: "## Stacked on\n\nNothing yet.",
+        more: 0,
+      });
       s.items.push({
         n: 30,
         op: "comment",
@@ -541,19 +579,19 @@ test.describe("tombstones", () => {
     });
   }
 
-  test("a section a bare x asked to remove is one row at its tick: what went, with no done row and no empty quote", async ({
+  test("a section a bare x asked to remove is one row at its removal stop: your no, what went, with no done row and no empty quote", async ({
     page,
     birta,
   }) => {
     await open(page, birta, UNSEEN, bareSectionNo());
-    await expect
-      .poll(async () => (await hosts(page)).filter((h) => h.sp === "14:1-14:13").map((h) => h.text))
-      .toEqual(["Claude · removed: ## Stacked on (section · 2 blocks)"]);
+    // Rows open only on focus: the block above the gap opens none of the removal's
+    await page.waitForTimeout(SETTLE_MS);
+    expect((await changeRows(page)).filter((h) => h.sp === "14:1-14:13")).toEqual([]);
     expect((await hosts(page)).map((h) => h.text).filter((t) => /done · section|""/.test(t))).toEqual([]);
     await walkTo(page, "11.0");
     await expect
-      .poll(async () => (await hosts(page)).filter((h) => h.sp === "14:1-14:13").map((h) => h.text))
-      .toEqual([`Claude · removed: ## Stacked on (section · 2 blocks) · ${KEYS}`]);
+      .poll(async () => (await changeRows(page)).filter((h) => h.sp === "14:1-14:13").map((h) => [h.lead, h.substance, h.kbd]))
+      .toEqual([["Claude · because you said no to ## Stacked on", "removed: ## Stacked on Nothing yet.", ["y", "u", "c"]]]);
     expect((await hosts(page)).map((h) => h.text).filter((t) => /done · section|""/.test(t))).toEqual([]);
   });
 
@@ -577,39 +615,45 @@ test.describe("tombstones", () => {
       }),
     );
     await focusOn(page, "5:1-6:68");
-    await expect
-      .poll(async () => (await hostWith(page, "because you said"))?.text)
-      .toBe(`Claude · because you said no to "When the upload hits a 503…" · 6 words changed · ${KEYS}`);
+    const lead = 'Claude · because you said no to "When the upload hits a 503…"';
+    await expect.poll(async () => (await rowsLed(page, lead)).map((r) => r.kbd)).toEqual([["y", "u", "c"]]);
+    expect((await rowsLed(page, lead))[0].text).not.toMatch(SIZE_LABEL);
   });
 
-  test("a removal's row opens where n lands on its tick, and shows its first line struck", async ({ page, birta }) => {
+  test("a removal's row opens where n lands on its stop, and shows what went struck", async ({ page, birta }) => {
     await open(page, birta, UNSEEN, fixtureState("unseen"));
     await page.waitForTimeout(SETTLE_MS);
     expect(await hostWith(page, "removed:")).toBeNull();
     await walkTo(page, "11.0");
-    await expect.poll(() => hostWith(page, "removed:")).toMatchObject({
-      text: `Claude · removed: Nothing yet. (paragraph) · ${KEYS}`,
-      sp: "14:1-14:13",
-      kbd: ["y", "u", "c"],
-    });
+    await expect
+      .poll(async () => (await changeRows(page)).map((r) => [r.lead, r.substance, r.sp, r.kbd]))
+      .toEqual([["Claude · without a note", "removed: Nothing yet.", "14:1-14:13", ["y", "u", "c"]]]);
+    expect((await changeRows(page))[0].text.endsWith(KEYS)).toBe(true);
+    expect((await changeRows(page))[0].del).toEqual(["Nothing yet."]);
     const struck = await styleOf(page, "Nothing yet.", ["text-decoration-line", "color"]);
     expect(struck).toEqual({ "text-decoration-line": "line-through", color: MUTED });
   });
 
-  test("a section's tombstone keeps its heading marker and counts its blocks", async ({ page, birta }) => {
+  test("a section's removal keeps its heading marker, shows its first block and counts the rest", async ({ page, birta }) => {
     const state = bent("unseen", (s) => {
-      Object.assign(s.deletions.find((d: State) => d.change === "11.0"), { first_line: "## Stacked on", label: "section · 2 blocks" });
+      Object.assign(s.deletions.find((d: State) => d.change === "11.0"), {
+        first_line: "## Stacked on",
+        label: "section · 3 blocks",
+        head: "## Stacked on\n\nNothing yet.",
+        more: 1,
+      });
     });
     await open(page, birta, UNSEEN, state);
     await walkTo(page, "11.0");
-    await expect.poll(async () => (await hostWith(page, "removed:"))?.text).toBe(`Claude · removed: ## Stacked on (section · 2 blocks) · ${KEYS}`);
+    await expect.poll(async () => (await changeRows(page)).map((r) => r.substance)).toEqual(["removed: ## Stacked on Nothing yet. and 1 more block"]);
+    expect((await changeRows(page))[0].text.endsWith(KEYS)).toBe(true);
   });
 
-  test("a partial removal's tombstone has no parenthetical", async ({ page, birta }) => {
+  test("a one-block removal has no more line", async ({ page, birta }) => {
     const state = bent("unseen", (s) => delete s.deletions.find((d: State) => d.change === "11.0").label);
     await open(page, birta, UNSEEN, state);
     await walkTo(page, "11.0");
-    await expect.poll(async () => (await hostWith(page, "removed:"))?.text).toBe(`Claude · removed: Nothing yet. · ${KEYS}`);
+    await expect.poll(async () => (await changeRows(page)).map((r) => r.substance)).toEqual(["removed: Nothing yet."]);
   });
 
   test("j onto the block above a tick opens no tombstone", async ({ page, birta }) => {
@@ -619,13 +663,14 @@ test.describe("tombstones", () => {
     expect(await hostWith(page, "removed:")).toBeNull();
   });
 
-  test("a removal of many lines strikes only its first line", async ({ page, birta }) => {
+  test("a removal shows its head, not every line it removed", async ({ page, birta }) => {
     const state = bent("unseen", (s) => {
       s.deletions.find((d: State) => d.change === "11.0").removed = "Nothing yet.\nAnd a second line.\n";
     });
     await open(page, birta, UNSEEN, state);
     await walkTo(page, "11.0");
-    await expect.poll(async () => (await hostWith(page, "removed:"))?.text).toBe(`Claude · removed: Nothing yet. (paragraph) · ${KEYS}`);
+    await expect.poll(async () => (await changeRows(page)).map((r) => r.substance)).toEqual(["removed: Nothing yet."]);
+    expect((await changeRows(page))[0].text).not.toContain("second line");
   });
 
   test("an outside removal's tombstone offers no revert", async ({ page, birta }) => {
@@ -641,16 +686,25 @@ test.describe("tombstones", () => {
     await open(page, birta, UNSEEN, state);
     await walkTo(page, "11.0");
     await expect.poll(() => hostWith(page, "removed:")).toMatchObject({ kbd: ["y", "c"] });
-    expect((await hostWith(page, "removed:"))!.text).toMatch(/removed: Nothing yet\. \(paragraph\) · y keep · c note$/);
+    expect((await changeRows(page)).map((r) => r.substance)).toEqual(["removed: Nothing yet."]);
+    expect((await hostWith(page, "removed:"))!.text).toMatch(/removed: Nothing yet\. · y keep · c note$/);
   });
 
   test("a removal at the very top opens its row above the doc's first block", async ({ page, birta }) => {
     const state = bent("unseen", (s) => {
-      Object.assign(s.deletions.find((d: State) => d.change === "11.0"), { after_sp: null, first_line: "- gone item", label: "list item" });
+      Object.assign(s.deletions.find((d: State) => d.change === "11.0"), {
+        after_sp: null,
+        first_line: "- gone item",
+        label: "list item",
+        removed: "- gone item\n",
+        head: "- gone item",
+        more: 0,
+      });
     });
     await open(page, birta, UNSEEN, state);
     await walkTo(page, "11.0");
-    await expect.poll(async () => (await hostWith(page, "removed:"))?.text).toBe(`Claude · removed: - gone item (list item) · ${KEYS}`);
+    await expect.poll(async () => (await changeRows(page)).map((r) => [r.lead, r.substance])).toEqual([["Claude · without a note", "removed: • gone item"]]);
+    expect((await hostWith(page, "removed:"))!.text.endsWith(KEYS)).toBe(true);
     const above = await page.evaluate(() => {
       const content = document.getElementById("content")!;
       for (const h of document.querySelectorAll("birta-flow")) {
@@ -676,7 +730,7 @@ test.describe("dots", () => {
     await expect.poll(async () => (await dots(page)).length).toBe(1);
     await walkTo(page, "15.0");
     await expect
-      .poll(async () => (await hosts(page)).filter((h) => h.sp === "11:1-11:44" && h.text.includes("7 words → 10")))
+      .poll(async () => (await changeRows(page)).filter((r) => r.sp === "11:1-11:44" && r.ins.join(" ").includes("capped at 8")))
       .toEqual([expect.objectContaining({ kbd: ["y", "u", "c"] })]);
   });
 
@@ -863,7 +917,7 @@ test.describe("replies", () => {
       s.items.find((i: State) => i.n === 10).outcome = { done: true, no_change: false, changes: ["13.0", "19.0", "26.0"] };
     });
     await open(page, birta, FLOW, state);
-    await expect.poll(() => hostWith(page, "3 changes")).toMatchObject({ text: "↳ Claude · done · 3 changes · n to walk", kbd: [], sp: null });
+    await expect.poll(() => hostWith(page, "3 changes")).toMatchObject({ text: "↳ Claude · done · 3 changes · n walks them", kbd: [], sp: null });
     // The changes keep their own rows, at their blocks
     await focusOn(page, "5:1-6:68");
     await expect.poll(async () => (await hostWith(page, "because you said"))?.sp).toBe("5:1-6:68");
@@ -874,7 +928,7 @@ test.describe("replies", () => {
       s.items.find((i: State) => i.n === 10).outcome = { done: true, no_change: false, changes: ["13.0"] };
     });
     await open(page, birta, FLOW, state);
-    await expect.poll(async () => (await hostWith(page, "1 change"))?.text).toBe("↳ Claude · done · 1 change · n to walk");
+    await expect.poll(async () => (await hostWith(page, "1 change"))?.text).toBe("↳ Claude · done · 1 change · n walks them");
   });
 
   test("the turn note reads as a reply under the whole-doc note", async ({ page, birta }) => {
@@ -913,7 +967,11 @@ test.describe("replies", () => {
       });
     });
     await open(page, birta, UNSEEN, state);
-    await expect.poll(() => hostWith(page, "removed")).toMatchObject({ text: "Claude · removed: Nothing yet. (paragraph)", sp: "14:1-14:13" });
+    // Its one row is the removal itself, which opens at the removal's stop
+    await walkTo(page, "11.0");
+    await expect
+      .poll(async () => (await changeRows(page)).map((r) => [r.lead, r.substance, r.sp]))
+      .toEqual([['Claude · because you said no to "Nothing yet."', "removed: Nothing yet.", "14:1-14:13"]]);
   });
 
   test("a handled note whose words the agent rewrote sits at its change", async ({ page, birta }) => {
@@ -1204,12 +1262,15 @@ test.describe("cards", () => {
   test("every annotation is a card with a 13 px muted author lead", async ({ page, birta }) => {
     await open(page, birta, FLOW, fixtureState("flow"));
     await expect.poll(() => hostWith(page, "drop this bullet")).not.toBeNull();
+    // Claude's done row under `cap it` opens with its block
+    await focusOn(page, "11:1-11:44");
+    await expect.poll(() => rowsLed(page, "↳ Claude · done")).toHaveLength(1);
     for (const [has, lead] of [
       ["drop this bullet", "you · "],
       ["is 503 the only code?", "Claude · "],
       ["Yes: CI runs it on every push.", "↳ Claude · "],
       ["yes, keep it", "↳ you · "],
-      ["done · 7 words → 10", "↳ Claude · "],
+      ["↳ Claude · done", "↳ Claude · done"],
     ]) {
       const got = await page.evaluate(
         ({ has }) => {
@@ -1236,7 +1297,7 @@ test.describe("cards", () => {
         },
         { has },
       );
-      expect(got, has).toEqual({ text: lead, size: "13px", color: MUTED, fill: CARD, border: "none" });
+      expect({ ...got, text: got?.text?.startsWith(lead) ? lead : got?.text }, has).toEqual({ text: lead, size: "13px", color: MUTED, fill: CARD, border: "none" });
     }
   });
 
@@ -1265,7 +1326,8 @@ test.describe("cards", () => {
         }
         return out;
       });
-      expect(got.map((g) => [g.text, g.size])).toEqual([["Claude · ", "13px"]]);
+      // The lead's words follow its author, on the same 13 px lead
+      expect(got.map((g) => [g.text.startsWith("Claude · ") ? "Claude · " : g.text, g.size])).toEqual([["Claude · ", "13px"]]);
       const rgb = (c: string) => c.match(/\d+/g)!.slice(0, 3).map(Number) as Rgb;
       for (const g of got) expect(contrast(rgb(g.color), rgb(g.fill)), `${g.color} on ${g.fill}`).toBeGreaterThanOrEqual(4.5);
     });
@@ -1273,7 +1335,18 @@ test.describe("cards", () => {
 
   test("a selection copied across notes, rows and a tombstone holds only the doc's words", async ({ page, birta }) => {
     const state = bent("flow", (s) => {
-      s.deletions.push({ change: "19.0", kind: "block", at_line: 15, at_byte: 290, removed: "Gone.\n", after_sp: "14:1-14:21", first_line: "Gone.", label: "paragraph" });
+      s.deletions.push({
+        change: "19.0",
+        kind: "block",
+        at_line: 15,
+        at_byte: 290,
+        removed: "Gone.\n",
+        after_sp: "14:1-14:21",
+        first_line: "Gone.",
+        label: "paragraph",
+        head: "Gone.",
+        more: 0,
+      });
       Object.assign(s.changes.find((c: State) => c.id === "19.0"), { range: { status: "ok", lines: [15, 14], bytes: [290, 290] } });
     });
     await open(page, birta, FLOW, state);

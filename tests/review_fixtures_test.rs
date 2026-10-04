@@ -1060,8 +1060,9 @@ fn each_contract_fixture_shows_its_case() {
     assert_eq!(kinds, [DeletionKind::Words, DeletionKind::Block]);
     assert!(unseen.rewrite.is_none(), "{:?}", unseen.rewrite);
 
-    assert!(get("rewrite").rewrite.is_some());
-    assert!(get("rewrite").changes.iter().all(|c| c.is_rewrite));
+    // A turn that touched most blocks has no rewrite row: each change is its own news
+    assert!(get("rewrite").rewrite.is_none());
+    assert!(get("rewrite").changes.iter().all(|c| !c.is_rewrite));
 
     let approved = get("approved");
     let approve = approved.approve.as_ref().unwrap();
@@ -1083,10 +1084,6 @@ fn each_contract_fixture_shows_its_case() {
 
     assert!(get("sent").phrase.sent.as_ref().unwrap().can_withdraw);
     assert_eq!(get("hold").hold.as_ref().unwrap().kind, HoldKind::HandBack);
-    let rewrite = get("rewrite");
-    let r = rewrite.rewrite.as_ref().unwrap();
-    assert_eq!((r.blocks_changed, r.blocks_total), (8, 10));
-    assert_eq!(Some(r.turn), rewrite.rounds[0].claim);
     let rewrite = serde_json::to_value(get("rewrite")).unwrap();
     let news: BTreeSet<&str> = rewrite["news"]
         .as_array()

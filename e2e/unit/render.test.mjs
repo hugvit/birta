@@ -245,7 +245,7 @@ test("a settled change draws no wash, and a block's newest unsettled change deci
   );
 });
 
-test("a round with no changes of its own leaves every bar thin and every settled removal unticked", () => {
+test("a round with no changes of its own leaves every bar thin, and every settled removal keeps its tick", () => {
   const BR = load();
   const s = bent("unseen", (s) => {
     for (const c of s.changes) Object.assign(c, { seen: true, settled: true });
@@ -256,7 +256,7 @@ test("a round with no changes of its own leaves every bar thin and every settled
     { sp: "11:1-11:44", weight: 1, fresh: false },
   ]);
   const marks = plain(BR.pure.laneMarks(s, { now: 0 }));
-  assert.deepEqual(marks.filter((m) => m.mark === "tick" || m.mark === "wash"), []);
+  assert.deepEqual(marks.filter((m) => m.mark === "tick" || m.mark === "wash"), [{ mark: "tick", after: "14:1-14:13", count: 1 }]);
   assert.deepEqual(plain(BR.pure.attention(s)).filter((x) => x.kind === "change"), []);
 });
 
@@ -285,4 +285,345 @@ test("a removal of whole blocks draws a tick and no bar", () => {
     marks.filter((m) => m.mark === "tick").map((m) => m.after),
     ["14:1-14:13"],
   );
+});
+
+// --- A change row's substance: textDiff and inline -------------------------------------------
+
+// The journey's first write, as `changes[].old_text`/`new_text` carry it
+const WHY_OLD =
+  "Uploads to the storage service occasionally fail with transient errors —\nconnection resets, 502/503s from the load balancer, and the odd timeout during\ndeploys. Today, when that happens, we just fail: the error bubbles up to the\ncaller and the user has to start the upload over. Most of these failures would\nsucceed on a second attempt a few hundred milliseconds later.\n";
+const WHY_NEW =
+  "`UploadClient.put` makes a single attempt with no retry logic, so on transient\nerrors (connection resets, 502/503s, deploy timeouts) we just fail and the user\nrestarts the upload. Most would succeed moments later.\n";
+const MERGED_OLD =
+  "- Wrap `UploadClient.put` in a retry loop with exponential backoff and full jitter\n- Retry only on idempotent failure modes: network errors, 502, 503, 504, and 429\n";
+const MERGED_NEW = "- Retry on network errors, 429 and 502–504 with exponential backoff and jitter\n";
+
+const squash = (s) => s.replace(/\s+/g, " ").trim();
+const wordsOf = (s) => squash(s).split(" ").filter(Boolean);
+// A list item's marker, and a task box, are the row's to draw
+const unmarked = (s) => squash(s.replace(/^\s*[-*+]\s+(\[[ xX]\]\s+)?/gm, ""));
+
+/** Every part of `textDiff(old, new)`, block by block, as plain `{kind, text}`. */
+function diffParts(BR, before, after) {
+  const blocks = plain(BR.pure.textDiff(before, after));
+  assert.ok(Array.isArray(blocks) && blocks.length > 0, JSON.stringify(blocks));
+  for (const b of blocks) assert.ok(Array.isArray(b.parts), JSON.stringify(b));
+  const parts = blocks.flatMap((b) => b.parts);
+  for (const p of parts) {
+    assert.ok(["same", "cut", "add", "gap"].includes(p.kind), JSON.stringify(p));
+    assert.equal(typeof p.text, "string", JSON.stringify(p));
+  }
+  return parts;
+}
+
+const textsOf = (parts, ...kinds) => parts.filter((p) => kinds.includes(p.kind)).map((p) => p.text);
+
+/** Nothing is lost or made up: the old words are the same and cut parts, the new the same and added. */
+function assertCovers(parts, before, after) {
+  assert.deepEqual(wordsOf(textsOf(parts, "same", "cut").join(" ")), wordsOf(before));
+  assert.deepEqual(wordsOf(textsOf(parts, "same", "add").join(" ")), wordsOf(after));
+}
+
+test("textDiff on the Why paragraph: the new UploadClient.put sentence is one add among the cuts", () => {
+  const parts = diffParts(load(), WHY_OLD, WHY_NEW);
+  const put = parts.filter((p) => p.text.includes("UploadClient.put"));
+  assert.equal(put.length, 1, JSON.stringify(parts));
+  assert.equal(put[0].kind, "add");
+  assert.equal(
+    squash(put[0].text).replace(/`/g, ""),
+    "UploadClient.put makes a single attempt with no retry logic, so on transient errors (connection resets, 502/503s, deploy timeouts) we just fail and the user restarts the upload.",
+  );
+  // The trimmed sentences are struck whole, so the new one reads apart from them
+  for (const sentence of [
+    "Uploads to the storage service occasionally fail with transient errors — connection resets, 502/503s from the load balancer, and the odd timeout during deploys.",
+    "Today, when that happens, we just fail: the error bubbles up to the caller and the user has to start the upload over.",
+  ]) {
+    assert.ok(textsOf(parts, "cut").some((t) => squash(t).includes(sentence)), `struck whole: ${sentence}`);
+  }
+  assert.ok(!textsOf(parts, "cut").some((t) => t.includes("makes a single attempt")));
+  assert.ok(!textsOf(parts, "add").some((t) => t.includes("Uploads to the storage")));
+  // Every sentence changed, so nothing collapses
+  assert.deepEqual(textsOf(parts, "gap"), []);
+  assertCovers(parts, WHY_OLD, WHY_NEW);
+});
+
+test("textDiff on the merged bullets: the two old items cut, then the new one added", () => {
+  const parts = diffParts(load(), MERGED_OLD, MERGED_NEW);
+  assert.deepEqual(
+    parts.map((p) => [p.kind, unmarked(p.text)]),
+    [
+      ["cut", "Wrap `UploadClient.put` in a retry loop with exponential backoff and full jitter"],
+      ["cut", "Retry only on idempotent failure modes: network errors, 502, 503, 504, and 429"],
+      ["add", "Retry on network errors, 429 and 502–504 with exponential backoff and jitter"],
+    ],
+  );
+});
+
+test("textDiff marks just the words of a sentence that changed in a few", () => {
+  const before = "The retry loop waits 200 ms between attempts.\n";
+  const after = "The retry loop waits 500 ms between attempts.\n";
+  const parts = diffParts(load(), before, after);
+  assert.deepEqual(textsOf(parts, "cut").map(squash), ["200"]);
+  assert.deepEqual(textsOf(parts, "add").map(squash), ["500"]);
+  assert.deepEqual(textsOf(parts, "gap"), []);
+  assertCovers(parts, before, after);
+});
+
+test("textDiff collapses unchanged sentences to …", () => {
+  const before = "First stays put. Second goes away entirely now. Third stays as well.\n";
+  const after = "First stays put. Totally different words appear here instead. Third stays as well.\n";
+  const parts = diffParts(load(), before, after);
+  assert.ok(textsOf(parts, "cut").some((t) => squash(t).includes("Second goes away entirely now.")), JSON.stringify(parts));
+  assert.ok(textsOf(parts, "add").some((t) => squash(t).includes("Totally different words appear here instead.")));
+  for (const kept of ["First stays put", "Third stays as well"]) {
+    assert.ok(!parts.some((p) => p.text.includes(kept)), `${kept} collapses: ${JSON.stringify(parts)}`);
+  }
+  const gaps = parts.filter((p) => p.kind === "gap");
+  assert.ok(gaps.length > 0);
+  for (const g of gaps) assert.equal(g.text, "…");
+});
+
+test("textDiff goes item by item: an unchanged item collapses, a reworded one is cut and added", () => {
+  const before = "- alpha stays here\n- beta goes away entirely now\n- gamma stays too\n";
+  const after = "- alpha stays here\n- totally different words appear instead\n- gamma stays too\n";
+  const parts = diffParts(load(), before, after);
+  assert.deepEqual(textsOf(parts, "cut").map(unmarked), ["beta goes away entirely now"]);
+  assert.deepEqual(textsOf(parts, "add").map(unmarked), ["totally different words appear instead"]);
+  for (const kept of ["alpha stays here", "gamma stays too"]) {
+    assert.ok(!parts.some((p) => p.text.includes(kept)), `${kept} collapses: ${JSON.stringify(parts)}`);
+  }
+  assert.ok(parts.some((p) => p.kind === "gap" && p.text === "…"));
+});
+
+/**
+ * A DOM with just what building nodes needs. Writing HTML into it throws, so a row's text can
+ * only ever be text.
+ */
+function fakeDocument() {
+  const refuse = (what) => () => {
+    throw new Error(`${what} is not allowed: rows build their nodes`);
+  };
+  function text(data) {
+    return { nodeType: 3, data: String(data), get textContent() { return this.data; } };
+  }
+  function parent(node) {
+    node.childNodes = [];
+    node.appendChild = (n) => {
+      node.childNodes.push(n);
+      return n;
+    };
+    node.append = (...ns) => {
+      for (const n of ns) node.childNodes.push(typeof n === "string" ? text(n) : n);
+    };
+    Object.defineProperty(node, "textContent", {
+      get: () => node.childNodes.map((n) => n.textContent).join(""),
+      set: (v) => (node.childNodes = v === "" || v == null ? [] : [text(v)]),
+    });
+    for (const p of ["innerHTML", "outerHTML"]) Object.defineProperty(node, p, { get: refuse(p), set: refuse(p) });
+    node.insertAdjacentHTML = refuse("insertAdjacentHTML");
+    return node;
+  }
+  function element(tag) {
+    const attrs = {};
+    const classes = new Set();
+    return parent({
+      nodeType: 1,
+      localName: String(tag).toLowerCase(),
+      attrs,
+      className: "",
+      classList: { add: (...c) => c.forEach((x) => classes.add(x)), remove: (...c) => c.forEach((x) => classes.delete(x)), contains: (c) => classes.has(c), toggle: (c) => (classes.has(c) ? (classes.delete(c), false) : (classes.add(c), true)) },
+      dataset: {},
+      style: {},
+      setAttribute: (k, v) => (attrs[k] = String(v)),
+      getAttribute: (k) => (k in attrs ? attrs[k] : null),
+      removeAttribute: (k) => delete attrs[k],
+      hasAttribute: (k) => k in attrs,
+    });
+  }
+  return {
+    createElement: element,
+    createTextNode: text,
+    createDocumentFragment: () => parent({ nodeType: 11 }),
+    createRange: refuse("createRange"),
+  };
+}
+
+/** What `inline` built, as markup: code, em, strong and a (with its href) kept, wrappers dropped. */
+function markup(n) {
+  if (n == null) return "";
+  if (Array.isArray(n)) return n.map(markup).join("");
+  if (n.nodeType === 3) return n.data;
+  const inner = n.childNodes.map(markup).join("");
+  if (n.nodeType === 11 || !["code", "em", "strong", "a"].includes(n.localName)) return inner;
+  const href = n.localName === "a" ? (n.getAttribute("href") ?? n.href ?? null) : null;
+  return `<${n.localName}${href != null ? ` href="${href}"` : ""}>${inner}</${n.localName}>`;
+}
+
+/** Every element `inline` built, by name. */
+function tags(n, out = []) {
+  if (n == null) return out;
+  if (Array.isArray(n)) n.forEach((x) => tags(x, out));
+  else if (n.nodeType !== 3) {
+    if (n.nodeType === 1) out.push(n.localName);
+    n.childNodes.forEach((x) => tags(x, out));
+  }
+  return out;
+}
+
+/** `BR.pure.inline` over the fake DOM, given only once the review files have loaded without one. */
+function inliner() {
+  const ctx = vm.createContext({});
+  for (const f of ORDER) {
+    const file = path.join(ASSETS, f);
+    vm.runInContext(fs.readFileSync(file, "utf-8"), ctx, { filename: file });
+  }
+  ctx.document = fakeDocument();
+  assert.equal(typeof ctx.BR.pure.inline, "function");
+  return { BR: ctx.BR, inline: (md) => ctx.BR.pure.inline(md) };
+}
+
+test("inline renders code spans, emphasis and links as nodes", () => {
+  const { inline } = inliner();
+  assert.equal(
+    markup(inline("Wrap `UploadClient.put` in a *retry* loop with **full** jitter")),
+    "Wrap <code>UploadClient.put</code> in a <em>retry</em> loop with <strong>full</strong> jitter",
+  );
+  assert.equal(markup(inline("see [the docs](https://example.com/a?b=1) now")), 'see <a href="https://example.com/a?b=1">the docs</a> now');
+  // A code span's text is literal
+  assert.equal(markup(inline("`a*b*c` and `[x](y)`")), "<code>a*b*c</code> and <code>[x](y)</code>");
+});
+
+test("inline draws a list marker as • and keeps a heading's ##", () => {
+  const { inline } = inliner();
+  assert.equal(markup(inline("- Respect `Retry-After` when the server sends it")), "• Respect <code>Retry-After</code> when the server sends it");
+  assert.equal(markup(inline("## Stacked on")), "## Stacked on");
+});
+
+test("inline keeps raw HTML as text and never links a script URL", () => {
+  const { inline } = inliner();
+  const raw = 'a <script>alert(1)</script> & <b onclick="x()">bold</b>';
+  const nodes = inline(raw);
+  assert.equal(markup(nodes), raw);
+  assert.deepEqual(tags(nodes), []);
+  const js = markup(inline("[click](javascript:alert(1))"));
+  assert.ok(!/href="\s*javascript:/i.test(js), js);
+});
+
+// --- Adversary: textDiff and inline inputs the cases above let through -------------------------
+
+test("textDiff strikes a merge whole even when the new item is close to the first old one", () => {
+  // Pairing items by position would mark only `and 429` in the first item
+  const before = "- Retry on network errors with exponential backoff\n- Also retry on 429 responses\n";
+  const after = "- Retry on network errors and 429 with exponential backoff\n";
+  const parts = diffParts(load(), before, after);
+  assert.deepEqual(
+    parts.map((p) => [p.kind, unmarked(p.text)]),
+    [
+      ["cut", "Retry on network errors with exponential backoff"],
+      ["cut", "Also retry on 429 responses"],
+      ["add", "Retry on network errors and 429 with exponential backoff"],
+    ],
+  );
+});
+
+test("textDiff at the 1/3 line: 2 of 6 words marks just them, 3 of 6 strikes the sentence", () => {
+  const BR = load();
+  const before = "alpha beta gamma delta epsilon zeta.\n";
+  const two = diffParts(BR, before, "alpha BETA GAMMA delta epsilon zeta.\n");
+  assert.deepEqual(wordsOf(textsOf(two, "cut").join(" ")), ["beta", "gamma"], JSON.stringify(two));
+  assert.deepEqual(wordsOf(textsOf(two, "add").join(" ")), ["BETA", "GAMMA"], JSON.stringify(two));
+  assertCovers(two, before, "alpha BETA GAMMA delta epsilon zeta.\n");
+  const after = "alpha BETA GAMMA DELTA epsilon zeta.\n";
+  const three = diffParts(BR, before, after);
+  assert.deepEqual(wordsOf(textsOf(three, "cut").join(" ")), wordsOf(before), JSON.stringify(three));
+  assert.deepEqual(wordsOf(textsOf(three, "add").join(" ")), wordsOf(after), JSON.stringify(three));
+});
+
+test("textDiff ends a sentence at ? and !, so an unchanged question collapses", () => {
+  const before = "Is five enough? The cap rides out short deploys! Keep it.\n";
+  const after = "Is five enough? Totally different closing words appear instead here! Keep it.\n";
+  const parts = diffParts(load(), before, after);
+  for (const kept of ["Is five enough", "Keep it"]) {
+    assert.ok(!parts.some((p) => p.text.includes(kept)), `${kept} collapses: ${JSON.stringify(parts)}`);
+  }
+  assert.ok(textsOf(parts, "cut").some((t) => squash(t).includes("The cap rides out short deploys!")), JSON.stringify(parts));
+});
+
+test("textDiff never ends a sentence at e.g. or inside a decimal", () => {
+  const BR = load();
+  const eg = diffParts(BR, "Use a proxy, e.g. Envoy in front, for local runs.\n", "Use a proxy, e.g. nginx in front, for local runs.\n");
+  assert.deepEqual(textsOf(eg, "gap"), [], JSON.stringify(eg));
+  assert.deepEqual(wordsOf(textsOf(eg, "cut").join(" ")), ["Envoy"], JSON.stringify(eg));
+  assert.deepEqual(wordsOf(textsOf(eg, "add").join(" ")), ["nginx"], JSON.stringify(eg));
+  const dec = diffParts(BR, "The cap is 2.5 s between tries.\n", "The cap is 3.5 s between tries.\n");
+  assert.deepEqual(textsOf(dec, "gap"), [], JSON.stringify(dec));
+  assert.deepEqual(wordsOf(textsOf(dec, "cut").join(" ")), ["2.5"], JSON.stringify(dec));
+  assert.deepEqual(wordsOf(textsOf(dec, "add").join(" ")), ["3.5"], JSON.stringify(dec));
+});
+
+test("textDiff never splits a sentence inside a code span", () => {
+  const before = "Run `a. b` now. Keep this sentence here.\n";
+  const after = "Execute `a. b` immediately please. Keep this sentence here.\n";
+  const parts = diffParts(load(), before, after);
+  for (const p of parts.filter((p) => p.kind !== "gap")) {
+    assert.equal((p.text.match(/`/g) ?? []).length % 2, 0, `a part cuts a code span in two: ${JSON.stringify(parts)}`);
+  }
+  assert.ok(textsOf(parts, "cut").some((t) => squash(t).includes("Run `a. b` now.")), JSON.stringify(parts));
+  assert.ok(textsOf(parts, "add").some((t) => squash(t).includes("Execute `a. b` immediately please.")), JSON.stringify(parts));
+});
+
+test("textDiff keeps non-ASCII words whole", () => {
+  const before = "Die Größe ändert sich um 200 ms — naïve café 🚀 bleibt.\n";
+  const after = "Die Größe ändert sich um 500 ms — naïve café 🎉 bleibt.\n";
+  const parts = diffParts(load(), before, after);
+  assert.deepEqual(wordsOf(textsOf(parts, "cut").join(" ")), ["200", "🚀"], JSON.stringify(parts));
+  assert.deepEqual(wordsOf(textsOf(parts, "add").join(" ")), ["500", "🎉"], JSON.stringify(parts));
+  assertCovers(parts, before, after);
+});
+
+test("inline links no script, data or vbscript URL, whatever its case or leading space", () => {
+  const { inline } = inliner();
+  for (const md of ["[x](JavaScript:void0)", "[x]( javascript:void0)", "[x](JAVASCRIPT:void0)", "[x](vbscript:msgbox)", "[x](data:text/html,hi)"]) {
+    const out = markup(inline(md));
+    assert.ok(!/href="\s*(javascript|vbscript|data):/i.test(out), `${md} → ${out}`);
+  }
+});
+
+test("inline still links a relative URL", () => {
+  const { inline } = inliner();
+  assert.equal(markup(inline("[the plan](docs/plan.md)")), '<a href="docs/plan.md">the plan</a>');
+});
+
+// --- Repair: textDiff stays fast, and a list marker always renders ------------------------------
+
+test("textDiff of a 5,000-word rewrite returns well under 200 ms", () => {
+  const BR = load();
+  const sentence = (k, w) => Array.from({ length: 20 }, (_, i) => `${w}${k}x${i}`).join(" ") + ".";
+  const before = Array.from({ length: 250 }, (_, k) => sentence(k, "old")).join(" ") + "\n";
+  const after = Array.from({ length: 250 }, (_, k) => sentence(k, "new")).join(" ") + "\n";
+  // One unit of 5,000 words with no sentence end, as a table or a long line gives
+  const runOn = (w) => Array.from({ length: 5000 }, (_, i) => `${w}${i}`).join(" ") + "\n";
+  for (const [a, b] of [
+    [before, after],
+    [runOn("a"), runOn("b")],
+    [runOn("a"), runOn("a").replace("a7 ", "z7 ")],
+  ]) {
+    const t0 = performance.now();
+    const parts = diffParts(BR, a, b);
+    const ms = performance.now() - t0;
+    assert.ok(ms < 200, `${ms.toFixed(0)} ms`);
+    assertCovers(parts, a, b);
+  }
+});
+
+test("a list item whose first word changed still renders its marker as •", () => {
+  const BR = load();
+  const { inline } = inliner();
+  const parts = diffParts(BR, "- Retry 3 times on network errors\n", "- Repeat 3 times on network errors\n");
+  assert.deepEqual(textsOf(parts, "cut").map(squash), ["Retry"], JSON.stringify(parts));
+  assert.deepEqual(textsOf(parts, "add").map(squash), ["Repeat"], JSON.stringify(parts));
+  // Rendered as a row does: each part on its own, in order
+  const shown = parts.map((p) => markup(inline(p.text.replace(/\s+/g, " ").replace(/^ /, "")))).join(" ");
+  assert.match(shown, /^• /, shown);
+  assert.ok(!/(^|\s)-(\s|$)/.test(shown), shown);
 });

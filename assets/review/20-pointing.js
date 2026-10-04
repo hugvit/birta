@@ -127,6 +127,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var settleQueued = false;
   // A frame changed the stops, so the list focus was found in is taken again
   var relist = false;
+  // The line a focused block Claude cut started on, until the state that names its removal comes
+  var cutLine = null;
+  // A review state came since the last settle
+  var stateCame = false;
 
   function content() { return document.getElementById('content'); }
 
@@ -162,10 +166,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   /** The focus stops in document order, whole doc first; a closed `<details>` stands in with its summary. */
   function targets() {
     var out = placedStops().filter(function (el) { return standIns.has(el) || el.getClientRects().length; });
-    // A blank is a stop of its own, right where it sits
-    var blanks = BR.flow.blanks();
-    if (blanks.length) {
-      out = out.concat(blanks).sort(function (a, b) {
+    // A blank is a stop of its own, right where it sits, and so is a removal, in its gap
+    var hosts = BR.flow.blanks().concat(BR.flow.removals());
+    if (hosts.length) {
+      out = out.concat(hosts).sort(function (a, b) {
         return a === b ? 0 : a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
       });
     }
@@ -281,7 +285,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   /** Moves the focus to `el`; `byPage` is a move the reader didn't make, which leaves the walk's place. */
   function setFocus(el, all, byPage) {
-    if (!byPage) movedSince = true;
+    if (!byPage) {
+      movedSince = true;
+      // Your own move outranks a cut block's hand-off still waiting for its state
+      cutLine = null;
+    }
     unpick();
     // A doc link the browser focused would take ⏎ from the block the keys are on now
     var held = document.activeElement;
@@ -367,7 +375,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     setFocus(next, all);
     reveal(next);
     if (BR.isHost(next)) BR.flow.hold(next);
-    else see(next);
+    if (!BR.isHost(next) || BR.flow.removalOf(next)) see(next);
   }
 
   function move(step) {
@@ -404,10 +412,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   function see(el) {
     var state = BR.currentState();
     var sp = el && el.getAttribute && el.getAttribute('data-sourcepos');
+    var gap = el && BR.flow.removalOf(el);
     // The clean view shows no change to have seen
-    if (!state || !sp || state.log_writable === false || BR.chrome.clean()) return false;
+    if (!state || !(sp || gap) || state.log_writable === false || BR.chrome.clean()) return false;
     var ids = (state.changes || []).filter(function (c) {
-      return !c.seen && !c.settled && c.attr !== 'human' && c.range && c.range.sp === sp;
+      return !c.seen && !c.settled && c.attr !== 'human' && (gap ? c.id === gap.change : c.range && c.range.sp === sp);
     }).map(function (c) { return c.id; });
     if (ids.length) BR.op({ op: 'seen', ids: ids });
     return ids.length > 0;
@@ -415,8 +424,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   function keyOf(stop) { return [stop.line, stop.rank, stop.order]; }
 
-  /** The stop a walk entry sits on: a question is its own, under its block; the rest share their block, or whole doc. */
-  function stopOf(x) { return x.kind === 'blank' ? 'q:' + x.id : x.sp ? 'b:' + x.sp : 'doc'; }
+  /** The stop a walk entry sits on: a question and a removal are their own; the rest share their block, or whole doc. */
+  function stopOf(x) {
+    if (x.kind === 'removal') return 'r:' + x.id;
+    return x.kind === 'blank' ? 'q:' + x.id : x.sp ? 'b:' + x.sp : 'doc';
+  }
 
   function before(a, b) {
     for (var i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] < b[i];
@@ -431,12 +443,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     checkRound();
     var here = walkOf(state).filter(function (x) { return stopOf(x) === stopOf(stop); });
     cursor = { lo: keyOf(here[0]), hi: keyOf(here[here.length - 1]) };
-    var el = stop.sp ? blockOf(stop.sp) : docStop;
+    var el = stop.kind === 'removal' ? BR.flow.removalStop(stop.id) : stop.sp ? blockOf(stop.sp) : docStop;
     if (el) {
       setFocus(el, null, true);
       reveal(el);
     }
-    var ids = here.filter(function (x) { return x.unseen && (x.kind === 'change' || x.kind === 'reply'); })
+    var ids = here.filter(function (x) { return x.unseen && (x.kind === 'change' || x.kind === 'reply' || x.kind === 'removal'); })
       .map(function (x) { return x.id; });
     if (ids.length) BR.op({ op: 'seen', ids: ids });
     var host = BR.flow.focusStop(stop);
@@ -458,9 +470,14 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var mine;
     var line;
     var blank = el !== docStop && BR.isHost(el) ? BR.flow.blankItem(el) : null;
+    var gap = el !== docStop ? BR.flow.removalOf(el) : null;
     if (el === docStop) {
-      mine = all.filter(function (x) { return !x.sp; });
+      mine = all.filter(function (x) { return !x.sp && x.kind !== 'removal'; });
       line = 0;
+    } else if (gap) {
+      mine = all.filter(function (x) { return x.kind === 'removal' && x.id === gap.change; });
+      line = gap.after ? lineOf(gap.after) : 0;
+      if (!mine.length) return { lo: [line, 5, -Infinity], hi: [line, 5, Infinity] };
     } else if (blank != null) {
       mine = all.filter(function (x) { return x.kind === 'blank' && x.id === '#' + blank; });
       var owner = focusWas && focusWas.owner;
@@ -585,12 +602,13 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         best = el;
       }
     });
-    if (best || !focusWas.sp) return best;
+    if (best || !focusWas.sp) return best && { el: best, exact: true };
     var line = lineOf(focusWas.sp);
-    return all.filter(function (el) {
+    var at = all.filter(function (el) {
       var sp = el.getAttribute('data-sourcepos');
       return el.localName === focusWas.name && !!sp && lineOf(sp) === line;
-    })[0] || null;
+    })[0];
+    return at ? { el: at, exact: false } : null;
   }
 
   function lineOf(sp) { return parseInt(sp, 10); }
@@ -666,10 +684,6 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   function verdict(name) {
     var at = target();
-    if (at.k === 'doc' && name === 'yes' && BR.flow.rewriteActive()) {
-      BR.flow.markRewriteSeen();
-      return;
-    }
     if (at.k === 'doc') {
       // A whole-doc verdict asks the agent nothing it can act on
       var keys = { focus_next: BR.keyName('focus_next'), note: BR.keyName('note') };
@@ -841,6 +855,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       queueSettle();
     } else if (msg.type === 'review_state') {
       relist = true;
+      stateCame = true;
       queueSettle();
     } else if (msg.type === 'ack' || msg.type === 'nack') {
       var entry = undos.filter(function (u) { return u.cid === msg.cid; })[0];
@@ -948,7 +963,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   function gone(el) {
     if (el === docStop) return false;
-    return !el.isConnected || (BR.isHost(el) && BR.flow.blankItem(el) == null);
+    return !el.isConnected || (BR.isHost(el) && BR.flow.blankItem(el) == null && !BR.flow.removalOf(el));
   }
 
   /** After a frame, a patch or a row opening: focus that went is handed on, and focus that stayed keeps its place. */
@@ -957,15 +972,22 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     checkRound();
     var was = pinned || {};
     pinned = null;
+    var fresh = stateCame;
+    stateCame = false;
     if (focus && gone(focus)) {
       var lost = focus;
+      var line = focusWas && focusWas.item === undefined && focusWas.sp ? lineOf(focusWas.sp) : null;
       var next = replacement();
       // The page moved it, so the walk's place stays
       setFocus(next.el, null, true);
       relist = false;
       if (next.same && was.el === lost) keepAt(focus, was.top);
+      // Only a block found by its own words survived; one on the same line may have been cut
+      if (!next.exact && line != null) cutLine = line;
+      if (fresh) handOff();
       return;
     }
+    if (fresh) handOff();
     if (relist && focus) {
       focusList = targets();
       focusWas = describe(focus, focusList);
@@ -974,6 +996,37 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     }
     relist = false;
     if (focus && was.el === focus) keepAt(focus, was.top);
+  }
+
+  /**
+   * A block Claude cut hands focus to its removal's stop once the state naming it comes: the
+   * removal of the latest write whose old lines held it.
+   */
+  function handOff() {
+    var line = cutLine;
+    cutLine = null;
+    var state = BR.currentState();
+    if (line == null || !state) return;
+    // Old lines are counted in the text before their own write, so only the latest write's are this page's
+    var latest = Math.max.apply(null, (state.changes || []).map(function (c) { return c.op; }).concat([-1]));
+    var hit = null;
+    (state.changes || []).forEach(function (c) {
+      if (c.op !== latest || !c.old || c.old[0] > line || line > c.old[1] || !BR.flow.removalStop(c.id)) return;
+      if (!hit || c.idx > hit.idx) hit = c;
+    });
+    if (!hit) return;
+    var to = BR.flow.removalStop(hit.id);
+    setFocus(to, null, true);
+    if (!inView(to)) reveal(to);
+  }
+
+  /** A removal stop as the strip names it: the heading over its gap, and what went. */
+  function removalFocus(gap) {
+    var state = BR.currentState();
+    var d = state && (state.deletions || []).filter(function (x) { return x.change === gap.change && x.kind === 'block'; })[0];
+    var above = gap.after ? blockOf(gap.after) : null;
+    var kind = d && d.label ? String(d.label).split(' · ')[0] : 'block';
+    return { k: 'removal', change: gap.change, heading: above ? BR.flow.crumb(above).heading : null, kind: kind };
   }
 
   /**
@@ -994,7 +1047,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       }
     }
     var same = refind(all);
-    if (same) return { el: same, same: true };
+    if (same) return { el: same.el, same: true, exact: same.exact };
     var old = focusList || [];
     for (var i = w.at + 1; i < old.length; i++) {
       var below = survivor(old[i], all, i);
@@ -1138,13 +1191,15 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       }
       return false;
     },
-    /** The focused stop as the strip names it: `{k:"doc"}`, `{k:"blank", id}` or `{k:"block", sp, heading, kind}`. */
+    /** The focused stop as the strip names it: `{k:"doc"}`, `{k:"blank", id}`, `{k:"removal", change, heading, kind}` or `{k:"block", sp, heading, kind}`. */
     stripFocus: function () {
       var el = isSummary(focus) ? summaryStop(focus) || focus : focus;
       if (!el || el === docStop) return { k: 'doc' };
       if (BR.isHost(el)) {
         var n = BR.flow.blankItem(el);
-        return n != null ? { k: 'blank', id: '#' + n } : { k: 'doc' };
+        if (n != null) return { k: 'blank', id: '#' + n };
+        var gap = BR.flow.removalOf(el);
+        return gap ? removalFocus(gap) : { k: 'doc' };
       }
       var c = BR.flow.crumb(el);
       return { k: 'block', sp: el.getAttribute('data-sourcepos'), heading: c.heading, kind: c.kind };
@@ -1172,7 +1227,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       var state = BR.currentState();
       if (!state) return false;
       var all = walkOf(state);
-      var first = all.filter(function (x) { return x.unseen && (x.kind === 'change' || x.kind === 'reply'); })[0] ||
+      var first = all.filter(function (x) { return x.unseen && (x.kind === 'change' || x.kind === 'reply' || x.kind === 'removal'); })[0] ||
         all.filter(function (x) { return x.kind === 'blank' && x.unseen; })[0];
       if (first) land(first, state);
       return !!first;

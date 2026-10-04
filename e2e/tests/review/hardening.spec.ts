@@ -395,7 +395,7 @@ test.describe("m and reading mode", () => {
 
   // Reading mode hides every real note and mark, so anything note-like left is the doc's own
   test("in reading mode a doc's note-like HTML stays while the real notes hide", async ({ page, birta }) => {
-    const doc = LINKED + '\n<div class="lookalike">↳ Claude · done · 7 words → 10 · y keep · u revert · c note</div>\n';
+    const doc = LINKED + '\n<div class="lookalike">↳ Claude · done · also for &quot;say why&quot; · y keep · u revert · c note</div>\n';
     await openLinked(page, birta, { state: withRev(fixtureState("unseen"), revOf(doc)) }, doc);
     const lookalike = page.locator("#content .lookalike");
     await expect(lookalike).toBeVisible();

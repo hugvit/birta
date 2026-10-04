@@ -322,7 +322,7 @@ test("with no news list, a stop on the walk takes its place from the walk, and d
   const s = state("unseen");
   // The page hands the strip the state without `news` until the walk reads it
   delete s.news;
-  // unseen.json walks #13 on whole doc, 9.0, nh:5, 10.0, then 11.0 at the block above its tick
+  // unseen.json walks #13 on whole doc, 9.0, nh:5, 10.0, then the removal 11.0 in its gap
   assert.equal(strip(BR, s, DOC).where, "1 of 5 · whole doc · Claude replied");
   assert.equal(strip(BR, s, WHY).where, "2 of 5 · ## Why › paragraph · Claude's change");
   const nh = { k: "block", sp: "10:1-10:16", heading: "## What changes", kind: "list item" };
@@ -339,10 +339,22 @@ test("with no news list, a stop on the walk takes its place from the walk, and d
   assert.equal(strip(BR, drafted, mine).where, "## What changes › list item · your note");
 });
 
+test("with no news list, a removal is a walk stop of its own in its gap, apart from the block above", () => {
+  const BR = load();
+  const s = state("unseen");
+  delete s.news;
+  const removal = { k: "removal", change: "11.0", heading: "## Stacked on", kind: "paragraph" };
+  assert.equal(line(strip(BR, s, removal)), "5 of 5 · ## Stacked on › removed paragraph | y keep the cut · u put it back · c reply · n next");
+  // The heading above the gap holds nothing of Claude's
+  const heading = { k: "block", sp: "14:1-14:13", heading: "## Stacked on", kind: null };
+  assert.equal(strip(BR, s, heading).where, "## Stacked on");
+});
+
 // --- The walk: your drafts join it ---------------------------------------------------------------
 
-/** The n/p walk as `kind id @sp` strings, `@doc` for the doc slot. */
-const walk = (BR, s) => plain(BR.pure.walk(s)).map((e) => `${e.kind} ${e.id} @${e.sp ?? "doc"}`);
+/** The n/p walk as `kind id @sp` strings, `@doc` for the doc slot and `@after sp` for a removal's gap. */
+const walk = (BR, s) =>
+  plain(BR.pure.walk(s)).map((e) => (e.kind === "removal" ? `removal ${e.id} @after ${e.after_sp ?? "top"}` : `${e.kind} ${e.id} @${e.sp ?? "doc"}`));
 
 test("your own draft notes join the walk, in doc order", () => {
   const BR = load();
@@ -366,7 +378,7 @@ test("a sent note or a settled one is no draft, so it is not walked", () => {
     "change 9.0 @5:1-6:68",
     "not_handled nh:5 @10:1-10:16",
     "change 10.0 @11:1-11:44",
-    "change 11.0 @14:1-14:13",
+    "removal 11.0 @after 14:1-14:13",
   ]);
 });
 
@@ -378,7 +390,7 @@ test("a draft sits in doc order among Claude's news", () => {
     s.counts.drafts = 2;
   });
   const at = walk(BR, s).map((e) => e.split(" @")[1]);
-  assert.deepEqual(at, ["doc", "doc", "5:1-6:68", "10:1-10:16", "11:1-11:44", "11:1-11:44", "14:1-14:13"]);
+  assert.deepEqual(at, ["doc", "doc", "5:1-6:68", "10:1-10:16", "11:1-11:44", "11:1-11:44", "after 14:1-14:13"]);
 });
 
 // --- Adversary: N of M counts stops, not items ----------------------------------------------------

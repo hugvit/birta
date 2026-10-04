@@ -19,6 +19,7 @@ import {
   revOf,
   withRev,
   stripMessage,
+  focusMark,
 } from "./harness";
 
 // The phrase prints local times; UTC lets the spec name them from the epoch alone
@@ -756,7 +757,8 @@ test.describe("n and p stay in the file", () => {
     await expect.poll(() => stripMessage(page)).toBe("no more · p back");
     await page.waitForTimeout(1_000);
     expect(viewing(page)).toBe("/view/unseen.md");
-    expect(await focused(page)).toBe("14:1-14:13");
+    // The last stop is the removal in its gap under ## Stacked on
+    expect(await focusMark(page)).toMatchObject({ target: "removal", change: "11.0", after: "14:1-14:13" });
   });
 
   // Both neighbours have news, so a crossing either way would leave

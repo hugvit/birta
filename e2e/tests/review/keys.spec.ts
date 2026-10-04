@@ -22,6 +22,7 @@ import {
   stops,
   watchSent,
   stripMessage,
+  focusMark,
 } from "./harness";
 
 const WIDE = { width: 1280, height: 900 };
@@ -357,8 +358,10 @@ test.describe("guard, edges", () => {
       await expect(page.locator("#lane-frame")).toBeVisible();
       await expect(page.locator("#source-view")).toBeHidden();
     }
+    // End's stop is the last: the removal in its gap after the last block
     const all = await stops(page);
-    await expect.poll(() => focused(page)).toBe(all[all.length - 1].sp);
+    await expect.poll(async () => (await focusMark(page))?.change).toBe("11.0");
+    expect((await focusMark(page))?.after).toBe(all[all.length - 1].sp);
     expect(mock.ops().filter((o) => o.op !== "seen")).toEqual([]);
     await expect.poll(() => laneShown(page)).toBe(true);
     await page.keyboard.press("Alt+KeyU");

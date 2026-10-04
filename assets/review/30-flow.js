@@ -31,7 +31,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     (s.changes || []).forEach(function (c) {
       if (c.seen || c.settled || c.attr === 'human') return;
       var d = removed[c.id];
-      // A removal walks at the block above its tick, or in the doc slot at the very top
+      // Until the walk reads news, attention counts a removal at the block above its gap
       var sp = (c.range && c.range.sp) || (d && d.after_sp) || null;
       out.push({ kind: 'change', id: c.id, sp: sp, rank: 0, line: lineOf(sp), order: c.op * 1e4 + c.idx });
     });
@@ -61,7 +61,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
    * What `n` and `p` walk: every stop until it is settled, that is seen and then covered by a
    * hand-back, so a round stays walkable after one pass, and your unsent notes. One top-to-bottom
    * order, the doc slot first; on one block a change, your note, a reply, a blank, a not-handled
-   * row, and last in the doc slot the lost-notes row. Each stop is `{kind, id, sp, unseen}`, `id` as its seen op names it.
+   * row, and last in the doc slot the lost-notes row; a removal follows in its gap. Each stop is
+   * `{kind, id, sp, unseen}`, `id` as its seen op names it, and a removal's `after_sp` names its gap.
    */
   BR.pure.walk = function (s) {
     var out = [];
@@ -83,7 +84,14 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       }
       if (c.settled) return;
       var d = removed[c.id];
-      add('change', c.id, (c.range && c.range.sp) || (d && d.after_sp) || null, 0, c.op * 1e4 + c.idx, !c.seen);
+      if (d && d.kind === 'block' && !(c.range && c.range.sp)) {
+        // A removal is a stop of its own in its gap, after all of the block above it
+        var after = d.after_sp || null;
+        out.push({ kind: 'removal', id: c.id, sp: null, after_sp: after, unseen: !c.seen, rank: 5, line: after ? lineOf(after) : 0,
+          order: c.op * 1e4 + c.idx });
+        return;
+      }
+      add('change', c.id, (c.range && c.range.sp) || null, 0, c.op * 1e4 + c.idx, !c.seen);
     });
     (s.items || []).forEach(function (i) {
       var sp = !lost[i.n] && i.at && i.at.kind !== 'doc' && i.at.loc ? i.at.loc.sp : null;
@@ -103,6 +111,282 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     });
     if ((s.lost || []).length) add('lost', 'lost', null, 4, 0, false);
     out.sort(function (a, b) { return a.line - b.line || a.rank - b.rank || a.order - b.order; });
+    return out;
+  };
+
+  // --- a change's substance: what its words did ---
+
+  // A list item's marker and task box, which the item's words leave out
+  var ITEM = /^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?/;
+  var HEADING = /^\s{0,3}#{1,6}(?:\s|$)/;
+  // Words that end in a full stop without ending a sentence
+  var ABBREV = /^\(?(?:e\.g|i\.e|etc|vs|cf|approx|incl|resp|mr|mrs|ms|dr|st)\.$/i;
+  // Past these, a diff is cut and added whole: a unit's words, a region's pairings, the units' table
+  var WORD_CAP = 300;
+  var PAIR_CAP = 400;
+  var UNIT_CAP = 250000;
+  // Diffs already worked out, by their texts: a row redraws on every state
+  var diffs = new Map();
+  var DIFFS_KEPT = 200;
+
+  /** The words of `text`; a code span is one word, so nothing ever splits it. */
+  function wordsIn(text) { return String(text).match(/(?:`[^`]*`|[^\s`]|`)+/g) || []; }
+
+  /** A paragraph's sentences, each as its words: one ends at . ? or ! before a word that doesn't start in lower case. */
+  function sentences(words) {
+    var out = [];
+    var cur = [];
+    words.forEach(function (w, i) {
+      cur.push(w);
+      var next = words[i + 1];
+      var ends = /[.?!]["'”’)\]]*$/.test(w) && w.charAt(0) !== '`' && !ABBREV.test(w);
+      if (ends && (next === undefined || !/^[\p{Ll}]/u.test(next))) {
+        out.push(cur);
+        cur = [];
+      }
+    });
+    if (cur.length) out.push(cur);
+    return out;
+  }
+
+  /** The units a text is diffed in: each sentence of a paragraph, each list item, each heading. */
+  function unitsOf(text) {
+    var units = [];
+    var para = [];
+    var item = null;
+    function flush() {
+      if (item) units.push(item);
+      item = null;
+      if (para.length) sentences(wordsIn(para.join(' '))).forEach(function (ws) { units.push({ kind: 'sentence', prefix: '', words: ws }); });
+      para = [];
+    }
+    String(text || '').split('\n').forEach(function (line) {
+      if (!line.trim()) return flush();
+      var m = ITEM.exec(line);
+      if (m) {
+        flush();
+        item = { kind: 'item', prefix: m[0].trim() + ' ', words: wordsIn(line.slice(m[0].length)) };
+      } else if (HEADING.test(line)) {
+        flush();
+        units.push({ kind: 'heading', prefix: '', words: wordsIn(line) });
+      } else if (item) {
+        item.words = item.words.concat(wordsIn(line));
+      } else {
+        para.push(line);
+      }
+    });
+    flush();
+    units.forEach(function (u) { u.key = u.kind + '\u0000' + u.prefix + u.words.join(' '); });
+    return units;
+  }
+
+  /** The longest common subsequence of `a` and `b` by `same`, as index pairs in order. */
+  function common(a, b, same) {
+    var n = a.length;
+    var m = b.length;
+    var t = [];
+    for (var i = 0; i <= n; i++) t.push(new Array(m + 1).fill(0));
+    for (i = n - 1; i >= 0; i--) {
+      for (var j = m - 1; j >= 0; j--) t[i][j] = same(a[i], b[j]) ? t[i + 1][j + 1] + 1 : Math.max(t[i + 1][j], t[i][j + 1]);
+    }
+    var out = [];
+    i = 0;
+    j = 0;
+    while (i < n && j < m) {
+      if (same(a[i], b[j])) {
+        out.push([i, j]);
+        i++;
+        j++;
+      } else if (t[i + 1][j] >= t[i][j + 1]) i++;
+      else j++;
+    }
+    return out;
+  }
+
+  function eq(x, y) { return x === y; }
+
+  /**
+   * The words `a` kept in becoming `b`, as index pairs, when it changed by a few: at most a third
+   * of the longer one's words. Null otherwise.
+   */
+  function near(a, b) {
+    var total = Math.max(a.words.length, b.words.length);
+    // At least the length difference changed, so a long or lopsided pair is settled unread
+    if (!total || total > WORD_CAP || Math.abs(a.words.length - b.words.length) * 3 > total) return null;
+    var kept = common(a.words, b.words, eq);
+    return (total - kept.length) * 3 <= total ? kept : null;
+  }
+
+  function whole(u) { return u.prefix + u.words.join(' '); }
+
+  /** `a` changed into `b` word by word: the runs it kept, cut and added. */
+  function wordParts(a, b, kept) {
+    // The marker keeps its space, so it renders as a marker even on its own
+    var out = a.prefix ? [{ kind: 'same', text: a.prefix }] : [];
+    function push(kind, w) {
+      var last = out[out.length - 1];
+      if (last && last.kind === kind) last.text += (/\s$/.test(last.text) ? '' : ' ') + w;
+      else out.push({ kind: kind, text: w });
+    }
+    var i = 0;
+    var j = 0;
+    kept.concat([[a.words.length, b.words.length]]).forEach(function (p) {
+      for (; i < p[0]; i++) push('cut', a.words[i]);
+      for (; j < p[1]; j++) push('add', b.words[j]);
+      if (p[0] < a.words.length) push('same', a.words[p[0]]);
+      i = p[0] + 1;
+      j = p[1] + 1;
+    });
+    return out;
+  }
+
+  /**
+   * What a change did to the text, as rows show it: `[{block, parts: [{kind, text}]}]`, `kind`
+   * one of same, cut, add and gap (`…`, for unchanged sentences or items). Prose goes sentence by
+   * sentence and lists item by item; one with a third of its words changed or fewer marks just those
+   * words, and a merge or split strikes its old items whole. Texts are markdown, for `inline`.
+   */
+  BR.pure.textDiff = function (oldText, newText) {
+    var key = oldText + '\u0000' + newText;
+    if (diffs.has(key)) return diffs.get(key);
+    if (diffs.size >= DIFFS_KEPT) diffs.clear();
+    var out = diff(oldText, newText);
+    diffs.set(key, out);
+    return out;
+  };
+
+  function diff(oldText, newText) {
+    var a = unitsOf(oldText);
+    var b = unitsOf(newText);
+    var blocks = [];
+    function block(name, parts) {
+      var last = blocks[blocks.length - 1];
+      if (name === 'paragraph' && last && (last.block === 'paragraph' || last.block === 'gap')) {
+        last.block = 'paragraph';
+        last.parts = last.parts.concat(parts);
+      } else blocks.push({ block: name, parts: parts });
+    }
+    function gap() {
+      var last = blocks[blocks.length - 1];
+      var tail = last && last.parts[last.parts.length - 1];
+      if (tail && tail.kind === 'gap') return;
+      if (last && last.block === 'paragraph') last.parts.push({ kind: 'gap', text: '…' });
+      else blocks.push({ block: 'gap', parts: [{ kind: 'gap', text: '…' }] });
+    }
+    function nameOf(u) { return u.kind === 'sentence' ? 'paragraph' : u.kind; }
+    function one(kind, u) { block(nameOf(u), [{ kind: kind, text: whole(u) }]); }
+    function pair(x, y) {
+      var kept = x.kind === y.kind ? near(x, y) : null;
+      if (kept) block(nameOf(y), wordParts(x, y, kept));
+      else {
+        one('cut', x);
+        one('add', y);
+      }
+    }
+    function region(xs, ys) {
+      var prose = xs.concat(ys).every(function (u) { return u.kind === 'sentence'; });
+      if (prose && xs.length * ys.length > PAIR_CAP) {
+        xs.forEach(function (x) { one('cut', x); });
+        ys.forEach(function (y) { one('add', y); });
+        return;
+      }
+      if (!prose) {
+        // Items keep their places only one for one; a merge or a split is struck whole
+        if (xs.length === ys.length) xs.forEach(function (x, k) { pair(x, ys[k]); });
+        else {
+          xs.forEach(function (x) { one('cut', x); });
+          ys.forEach(function (y) { one('add', y); });
+        }
+        return;
+      }
+      // A sentence is read against the first new one close to it, in order; the rest are cut or added
+      var j = 0;
+      xs.forEach(function (x) {
+        var k = j;
+        var kept = null;
+        while (k < ys.length && !(kept = near(x, ys[k]))) k++;
+        if (k === ys.length) return one('cut', x);
+        for (; j < k; j++) one('add', ys[j]);
+        block('paragraph', wordParts(x, ys[k], kept));
+        j = k + 1;
+      });
+      for (; j < ys.length; j++) one('add', ys[j]);
+    }
+    var i = 0;
+    var j = 0;
+    var same = a.length * b.length > UNIT_CAP ? [] : common(a, b, function (x, y) { return x.key === y.key; });
+    same.concat([[a.length, b.length]]).forEach(function (p) {
+      region(a.slice(i, p[0]), b.slice(j, p[1]));
+      if (p[0] < a.length) gap();
+      i = p[0] + 1;
+      j = p[1] + 1;
+    });
+    return blocks;
+  }
+
+  // A link may lead only somewhere a page can go: the web, mail, or a path of this site
+  function safeUrl(url) {
+    var bare = url.replace(/[\u0000- \u007f]/g, '');
+    var scheme = /^([a-z][a-z0-9+.-]*):/i.exec(bare);
+    return !scheme || /^(https?|mailto)$/i.test(scheme[1]);
+  }
+
+  // Code spans, strong, emphasis and links, in the order they start
+  var INLINE = /`([^`]+)`|\*\*(\S(?:[^*]*?\S)?)\*\*|__(\S(?:[^_]*?\S)?)__(?![\p{L}\p{N}])|\*(\S(?:[^*]*?\S)?)\*|(^|[^\p{L}\p{N}_])_(\S(?:[^_]*?\S)?)_(?![\p{L}\p{N}])|\[([^\]]*)\]\(([^)]*)\)/u;
+
+  function spans(text, out) {
+    var rest = text;
+    while (rest) {
+      var m = INLINE.exec(rest);
+      if (!m) {
+        out.push(document.createTextNode(rest));
+        return;
+      }
+      var at = m.index + (m[5] !== undefined ? m[5].length : 0);
+      if (at > 0) out.push(document.createTextNode(rest.slice(0, at)));
+      var node;
+      if (m[1] !== undefined) {
+        node = document.createElement('code');
+        node.textContent = m[1];
+      } else if (m[2] !== undefined || m[3] !== undefined) {
+        node = document.createElement('strong');
+        appendAll(node, inlineOf(m[2] !== undefined ? m[2] : m[3]));
+      } else if (m[4] !== undefined || m[6] !== undefined) {
+        node = document.createElement('em');
+        appendAll(node, inlineOf(m[4] !== undefined ? m[4] : m[6]));
+      } else {
+        var url = m[8].trim();
+        var safe = safeUrl(url);
+        node = document.createElement(safe ? 'a' : 'span');
+        if (safe) node.setAttribute('href', url);
+        appendAll(node, inlineOf(m[7]));
+      }
+      out.push(node);
+      rest = rest.slice(m.index + m[0].length);
+    }
+  }
+
+  function inlineOf(text) {
+    var out = [];
+    spans(text, out);
+    return out;
+  }
+
+  function appendAll(node, kids) { kids.forEach(function (k) { node.appendChild(k); }); }
+
+  /**
+   * Markdown of one line as nodes, never as HTML: code spans, emphasis and links render, a list
+   * marker reads `•`, a heading keeps its `##`, and anything else, raw HTML too, is text.
+   */
+  BR.pure.inline = function (md) {
+    var text = String(md == null ? '' : md);
+    var out = [];
+    var m = /^\s*[-*+]\s+/.exec(text);
+    if (m) {
+      out.push(document.createTextNode('• '));
+      text = text.slice(m[0].length);
+    }
+    spans(text, out);
     return out;
   };
 
@@ -131,7 +415,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   // Group order under one anchor: notes with their replies, then what the page added, then facts
   var G_NOTE = 1, G_DRAFT = 2, G_UNSENT = 3, G_COMPOSER = 4, G_RECEIPT = 5, G_FACT = 6, G_BLANK = 7,
-    G_TURN = 8, G_LOST = 9, G_REWRITE = 10, G_FOLDER = 11;
+    G_TURN = 8, G_LOST = 9, G_FOLDER = 11, G_REMOVAL = 12;
 
   var hosts = new Map();
   var state = null;
@@ -153,20 +437,19 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var expanded = {};
   var dotList = [];
   var lostOpen = false;
-  // The rewrite row stays, without its key, from its turn until the next hand-back
-  var rewriteTurn = null;
   // Runs once the op with that cid is acked; dropped on a nack
   var afterAck = {};
   // Words an op carries that a nack must hand back: {key, text, tie} for notes and edits, {blank, text} for answers
   var pending = {};
   // A no on an open change row waiting for its second x: {id, until}
   var armed = null;
-  // The cid of an undo the server hasn't answered, so a second x can't send another, and its change
+  // The cid of an undo the server hasn't answered, so a second x can't send another
   var undoing = null;
-  var reverting = null;
   // The block the keys act on, and the change n landed on there: they decide which rows are open
   var focusSp = null;
   var landed = null;
+  // The removal whose stop has focus, by change id: its row opens there
+  var focusGap = null;
   // Rows open now, in doc order, and the one whose keys act
   var openIds = [];
   var keyedRow = null;
@@ -304,7 +587,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return ((state && state.deletions) || []).filter(function (d) { return d.change === c.id && d.kind === 'block'; })[0] || null;
   }
 
-  /** A removal of whole blocks: its row sits at its tick, and only n opens it. */
+  /** A removal of whole blocks: its row opens at its own stop, in its gap. */
   function tombstone(c) {
     return !(c.range && c.range.sp) && c.undone_by == null && !!deletionOf(c);
   }
@@ -333,11 +616,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   // --- whole doc ---
 
-  /** The flow hosts in the doc slot above `#content`, whole doc's line left out. */
-  function docRows() {
+  /** The flow hosts in the doc slot above `#content`, whole doc's line left out, and a removal's stop too unless `all`. */
+  function docRows(all) {
     var out = [];
     for (var el = content().previousElementSibling; el && el.localName === 'birta-flow'; el = el.previousElementSibling) {
-      if (el !== docLine) out.unshift(el);
+      if (el !== docLine && (all || !el.hasAttribute('data-removal'))) out.unshift(el);
     }
     return out;
   }
@@ -353,7 +636,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   function paintDoc() {
     if (!docLine || !content()) return;
     var rows = docRows();
-    var top = rows[0] || content();
+    var top = docRows(true)[0] || content();
     if (docLine.nextElementSibling !== top) top.parentNode.insertBefore(docLine, top);
     var shown = rows.filter(function (h) { return h.getClientRects().length > 0; });
     docLine.toggleAttribute('data-rows', shown.length > 0);
@@ -376,7 +659,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       // A change row's keys reach the page, which asks openRow() whether the row is open
       if (h.entry && h.entry.kind === 'lost') lostKey(ev);
       else if (h.blank && h.entry && h.entry.kind === 'blank') blankKey(ev, h);
-      else if (h.entry && h.entry.change) return;
+      else if (h.entry && (h.entry.change || h.entry.removal)) return;
       else if (h.entry && h.entry.nh != null) notHandledKey(ev, h.entry.nh);
       else if (h.entry && h.entry.focusable) noteKey(ev, h);
     });
@@ -388,8 +671,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     box.addEventListener('click', function () {
       if (h.blank && h.entry && h.entry.kind === 'blank') {
         if (writable() && !h.blank.slot.querySelector('textarea')) openAnswer(h);
-      } else if (h.entry && h.entry.kind === 'rewrite' && state && state.rewrite) markRewriteSeen();
-      else if (h.entry && h.entry.seen && writable()) BR.op({ op: 'seen', ids: [h.entry.seen] });
+      } else if (h.entry && h.entry.seen && writable()) BR.op({ op: 'seen', ids: [h.entry.seen] });
     });
     hosts.set(id, h);
     return h;
@@ -423,12 +705,20 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     h.host.setAttribute('data-kind', e.kind);
     h.rule = e.rule || null;
     h.entry = e;
+    if (e.removal) h.host.setAttribute('data-removal', e.removal.change);
+    else h.host.removeAttribute('data-removal');
     var sig = JSON.stringify([e.kind, e.lead, e.pre, e.text, e.struck, e.tail, e.prefix, e.meta, e.keys, e.fold, e.quiet,
-      e.muted, e.lost, e.kind === 'lost' && lostOpen, e.answer && e.answer.n]);
+      e.muted, e.lost, e.kind === 'lost' && lostOpen, e.answer && e.answer.n, e.said, e.substance, e.sections]);
     if (h.sig === sig) return;
     h.sig = sig;
     h.box.textContent = '';
+    h.box.className = e.kind === 'removal' ? 'flow gap' : 'flow';
     h.blank = null;
+    if (e.kind === 'removal') {
+      h.box.tabIndex = -1;
+      return;
+    }
+    if (e.said) return renderRow(h, e);
     if (e.kind === 'blank') return renderBlank(h, e);
     if (e.kind === 'lost') return renderLost(h, e);
     if (e.kind === 'folder') return renderFolder(h, e);
@@ -455,6 +745,86 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     }
     if (e.meta) h.box.appendChild(el('div', 'muted', e.meta));
     // Reached by n, p and a click, never by Tab, which walks the focused block's links
+    if (e.focusable) h.box.tabIndex = -1;
+    else h.box.removeAttribute('tabindex');
+  }
+
+  /** Words with quoted parts, which an override in them can't reorder past their quotes. */
+  function said(parent, parts) {
+    parts.forEach(function (p) {
+      if (typeof p === 'string') parent.append(p);
+      else parent.appendChild(isolated(p.q));
+    });
+  }
+
+  /** Markdown of one line, rendered, inside a new `tag`. */
+  function md(tag, cls, text) {
+    var node = el(tag, cls);
+    BR.pure.inline(String(text).replace(/\s+/g, ' ').replace(/^ /, '')).forEach(function (n) { node.appendChild(n); });
+    return node;
+  }
+
+  var PART_TAG = { same: 'span', cut: 'del', add: 'ins' };
+
+  /** What a change did: struck and underlined words, `…` for the unchanged, a line per block. */
+  function renderSubstance(out, sub) {
+    function lineBreak() { out.append(' ', el('br')); }
+    if (sub.list) {
+      return sub.list.forEach(function (one, k) {
+        if (k) lineBreak();
+        renderSubstance(out, one);
+      });
+    }
+    if (sub.added) return out.append('added');
+    if (sub.removed) {
+      out.append('removed: ');
+      sub.removed.forEach(function (l, k) {
+        if (k) lineBreak();
+        out.appendChild(md('del', null, l));
+      });
+      if (sub.more) {
+        lineBreak();
+        out.append('and ' + plural(sub.more, 'more block', 'more blocks'));
+      }
+      return;
+    }
+    (sub.blocks || []).forEach(function (b, k) {
+      if (k) lineBreak();
+      b.parts.forEach(function (p, j) {
+        if (j && !/\s$/.test(b.parts[j - 1].text)) out.append(' ');
+        if (p.kind === 'gap') {
+          var gap = el('span', 'muted', '…');
+          gap.setAttribute('data-part', 'gap');
+          out.appendChild(gap);
+        } else out.appendChild(md(PART_TAG[p.kind] || 'span', null, p.text));
+      });
+    });
+  }
+
+  /** A change row: who and why, then on its own line what it did, with the keys after it. */
+  function renderRow(h, e) {
+    var line = null;
+    (e.sections || [{ said: e.said, substance: e.substance }]).forEach(function (part) {
+      var top = el('div', 'text' + (e.muted ? ' muted' : ''));
+      var lead = el('span', 'lead');
+      lead.setAttribute('data-part', 'lead');
+      said(lead, part.said);
+      top.appendChild(lead);
+      h.box.appendChild(top);
+      line = el('div', 'text' + (e.muted ? ' muted' : ''));
+      var sub = el('span', 'substance');
+      sub.setAttribute('data-part', 'substance');
+      renderSubstance(sub, part.substance || {});
+      line.appendChild(sub);
+      h.box.appendChild(line);
+    });
+    if (e.tail) {
+      var tail = el('span', 'tail', e.tail);
+      tail.setAttribute('data-part', 'tail');
+      line.append(' · ', tail);
+    }
+    if (e.keys) keysRow(line, e.keys);
+    h.fold = null;
     if (e.focusable) h.box.tabIndex = -1;
     else h.box.removeAttribute('tabindex');
   }
@@ -523,16 +893,6 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return ((state && state.changes) || []).filter(function (c) { return c.id === id; })[0] || null;
   }
 
-  function linesOf(c) {
-    var w = (c && c.what) || {};
-    return plural(w.old_lines || 0, 'line', 'lines') + ' → ' + (w.new_lines || 0);
-  }
-
-  /** What kind of change it was and how big, as the server words it. */
-  function labelOf(c) {
-    return (c && c.label) || linesOf(c);
-  }
-
   function canUndo(c) {
     return !!c.reversible && c.reversible.ok && !(state && state.writable === false);
   }
@@ -574,57 +934,103 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return hit;
   }
 
-  /** The row for change `c`, as it opens under its block or at its tick. */
+  /** Note `i` as a lead names it: its words in quotes, or its bare verdict on what it was on. */
+  function saidOf(i) {
+    if (!i.body && i.verdict) return [(ANSWERED[i.verdict] || i.verdict) + ' to ', { q: verdictOn(i) }];
+    return ['"', { q: i.body || '' }, '"'];
+  }
+
+  /** Each note's words joined with and: `"a" and "b"`. */
+  function saids(notes) {
+    var out = [];
+    notes.forEach(function (i, k) {
+      if (k) out.push(' and ');
+      out = out.concat(saidOf(i));
+    });
+    return out;
+  }
+
+  /** Why Claude made change `c`, as its row's lead says it after `Claude · `. */
+  function whyOf(c, s) {
+    var asked = c.asked || {};
+    if (asked.kind === 'cited' || asked.kind === 'location') {
+      var notes = (asked.notes || []).map(function (n) {
+        return (s.items || []).filter(function (i) { return i.n === n; })[0];
+      }).filter(Boolean);
+      if (notes.length) return ['because you said '].concat(saids(notes));
+      var answer = answerCited(s, asked.answers || []);
+      if (answer) return ['because you answered "', { q: answer.body || ANSWERED[answer.verdict] || '' }, '"'];
+    }
+    if (c.unasked_why) return ['not asked for: ', { q: c.unasked_why }];
+    return ['without a note'];
+  }
+
+  /** What a change did, as its row shows it: a removal's head, `added`, or its words cut and added. */
+  function substanceOf(c) {
+    var d = deletionOf(c);
+    if (d && !(c.range && c.range.sp)) {
+      var head = d.head != null ? d.head : d.first_line != null ? d.first_line : String(d.removed || '').split('\n')[0];
+      return { removed: String(head).split('\n').filter(function (l) { return l.trim(); }), more: d.more || 0 };
+    }
+    var before = c.old_text != null ? c.old_text : '';
+    var after = c.new_text != null ? c.new_text : '';
+    if (!before.trim() && after.trim()) return { added: true };
+    return { blocks: BR.pure.textDiff(before, after) };
+  }
+
+  /** The row for change `c`: who and why, then what it did. */
   function rowOf(c, s) {
     var e = { id: 'c' + c.id, kind: 'receipt', muted: muted(c), rule: ['dotted', 'agent'] };
     if (c.undone_by != null) {
-      e.pre = 'reverted · ' + labelOf(c);
+      e.pre = 'reverted';
       return receiptOf(c, e);
     }
-    if (tombstone(c)) {
-      var d = deletionOf(c);
-      e.lead = who(c.by) + ' · ';
-      e.pre = 'removed: ';
-      e.struck = d.first_line || '';
-      e.tail = d.label ? ' (' + d.label + ')' : '';
+    var outside = 'changed outside birta' + (c.cause === 'git' ? ' (git)' : '');
+    // An outside removal still opens at its own stop, showing what went
+    if (c.attr === 'outside' && tombstone(c)) {
+      e.said = [outside];
+      e.substance = substanceOf(c);
       return receiptOf(c, e);
     }
     if (c.attr === 'outside') {
       e.kind = 'fact';
       e.id = 'f' + c.id;
-      e.pre = 'changed outside birta' + (c.cause === 'git' ? ' (git)' : '') + ' · ' + labelOf(c);
+      e.pre = outside;
       return receiptOf(c, e);
     }
-    e.lead = who(c.by) + ' · ';
-    if (c.asked && (c.asked.kind === 'cited' || c.asked.kind === 'location')) {
-      var note = (s.items || []).filter(function (i) { return c.asked.notes.indexOf(i.n) >= 0; })[0];
-      e.rule = ['solid', 'agent'];
-      var answer = note ? null : answerCited(s, c.asked.answers || []);
-      if (answer) {
-        e.pre = 'because you answered "';
-        e.text = answer.body || ANSWERED[answer.verdict] || '';
-        e.tail = '" · ' + labelOf(c);
-        return receiptOf(c, e);
-      }
-      if (note && !note.body && note.verdict) {
-        e.pre = 'because you said ' + (ANSWERED[note.verdict] || note.verdict) + ' to ';
-        e.text = verdictOn(note);
-        e.tail = ' · ' + labelOf(c);
-        return receiptOf(c, e);
-      }
-      e.pre = 'because you said "';
-      e.text = (note && note.body) || '';
-      e.tail = '" · ' + labelOf(c);
-    } else {
-      e.pre = 'without a note · ' + labelOf(c);
-    }
+    var asked = c.asked || {};
+    if (asked.kind === 'cited' || asked.kind === 'location') e.rule = ['solid', 'agent'];
+    e.said = [who(c.by) + ' · '].concat(whyOf(c, s));
+    e.substance = substanceOf(c);
     return receiptOf(c, e);
   }
 
-  /** Works out which rows are open: the change n landed on, else every row under the focused block. */
+  /** Claude's row under your note `i` for its change `c`: done, the other notes it answers, and what it did. */
+  function doneOf(i, c, s, name) {
+    var also = (s.items || []).filter(function (o) {
+      if (o.n === i.n || o.status === 'retracted') return false;
+      return (o.outcome && o.outcome.changes && o.outcome.changes.indexOf(c.id) >= 0) ||
+        ((c.asked && c.asked.notes) || []).indexOf(o.n) >= 0;
+    });
+    var e = { id: 'o' + i.n, kind: 'receipt', muted: muted(c), rule: ['solid', 'agent'] };
+    e.said = ['↳ ' + name + ' · done'].concat(also.length ? [' · also for '].concat(saids(also)) : []);
+    e.substance = substanceOf(c);
+    return receiptOf(c, e);
+  }
+
+  /** Whether removal `c` is a stop of its own: it's still Claude's news, which a settled one isn't. */
+  function removalStop(c) {
+    if (!tombstone(c) || c.attr === 'human') return false;
+    var news = state && state.news;
+    if (Array.isArray(news)) return news.some(function (n) { return n.id === c.id; });
+    return !c.settled;
+  }
+
+  /** Works out which rows are open: the focused removal's, the change n landed on, else every row under the focused block. */
   function openRows(s) {
     var ids = [];
-    if (landed && changeOf(landed)) ids = [landed];
+    if (focusGap && changeOf(focusGap)) ids = [focusGap];
+    else if (landed && changeOf(landed) && !tombstone(changeOf(landed))) ids = [landed];
     else if (focusSp) {
       (s.changes || []).forEach(function (c) {
         if (c.attr !== 'human' && !tombstone(c) && rowSp(c) === focusSp) ids.push(c.id);
@@ -761,29 +1167,56 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
           var changes = i.outcome.no_change ? [] : i.outcome.changes;
           var e = { id: 'o' + i.n, kind: 'reply', lead: '↳ ' + name + ' · ', rule: ['solid', 'agent'] };
           var first = changes.length ? changeOf(changes[0]) : null;
-          if (bare && first && tombstone(first)) {
-            // Nothing above it says what went, so its one row is the removal itself
-            e = rowOf(first, s);
-            e.id = 'o' + i.n;
-          } else if (whole && changes.length) {
-            e.pre = 'done · ' + plural(changes.length, 'change', 'changes') + ' · n to walk';
+          if (whole && changes.length) {
+            // Counted from the changes as they stand, so your revert shows at once
+            var back = changes.filter(function (id) { var c = changeOf(id); return c && c.check === 'reverted'; }).length;
+            e.pre = 'done · ' + plural(changes.length, 'change', 'changes') +
+              (back ? ', ' + back + ' reverted by you' : ' · ' + BR.keyName('next_item') + ' walks them');
+            add(e, slot, [group, i.n, 1e6]);
+          } else if (first) {
+            // A bare verdict's removal is its own stop's row; any other row opens with its block
+            var shown = slot.sp === focusSp || openIds.indexOf(first.id) >= 0;
+            // A removal's row is its stop's alone
+            if (!tombstone(first) && shown) add(doneOf(i, first, s, name), slot, [group, i.n, 1e6]);
           } else {
-            var change = changes.length ? changeOf(changes[0]) : null;
-            e.pre = 'done · ' + (change ? labelOf(change) : 'no change in text');
-            receiptOf(change, e);
+            e.pre = 'done · no change in text';
+            add(e, slot, [group, i.n, 1e6]);
           }
-          add(e, slot, [group, i.n, 1e6]);
         }
         if (i.status === 'not_handled') {
           var replied = s.phrase && s.phrase.replied;
           var when = replied && replied.turn === i.turn && replied.ts ? hhmm(replied.ts) : 'earlier';
-          add({ id: 'h' + i.n, kind: 'reply', text: '↳ not handled in ' + name + "'s " + when + ' turn',
+          add({ id: 'h' + i.n, kind: 'reply', lead: '↳ ' + name + ' · ', text: 'not handled in its ' + when + ' turn',
             nh: i.n, focusable: true, rule: ['solid', 'agent'] }, slot, [group, i.n, 1e6 + 1]);
         }
       });
+      // Claude's changes on one block are one row, which shows each of them
+      var rowAt = {};
       (s.changes || []).forEach(function (c) {
-        if (openIds.indexOf(c.id) < 0 || keyed[c.id] || c.attr === 'human') return;
-        add(rowOf(c, s), slotOfChange(c), [c.attr === 'outside' ? G_FACT : G_RECEIPT, c.op, c.idx]);
+        if (openIds.indexOf(c.id) < 0 || keyed[c.id] || c.attr === 'human' || tombstone(c)) return;
+        var e = rowOf(c, s);
+        var sp = rowSp(c);
+        var first = sp && rowAt[sp];
+        if (e.substance && first) {
+          // A reason of its own gets its own lead; the same one shows its changes under one
+          if (!first.sections) first.sections = [{ said: first.said, substance: first.substance }];
+          var last = first.sections[first.sections.length - 1];
+          if (JSON.stringify(last.said) === JSON.stringify(e.said)) {
+            last.substance = { list: (last.substance.list || [last.substance]).concat([e.substance]) };
+          } else first.sections.push({ said: e.said, substance: e.substance });
+          return;
+        }
+        if (e.substance && sp) rowAt[sp] = e;
+        add(e, slotOfChange(c), [c.attr === 'outside' ? G_FACT : G_RECEIPT, c.op, c.idx]);
+      });
+      // Each removal still news is a stop in its gap, whose row opens there with its focus
+      (s.changes || []).forEach(function (c) {
+        if (!removalStop(c)) return;
+        var d = deletionOf(c);
+        var e = focusGap === c.id ? rowOf(c, s) : { kind: 'removal', focusable: true };
+        e.id = 'x' + c.id;
+        e.removal = { change: c.id, after: d.after_sp || null };
+        add(e, d.after_sp ? { sp: d.after_sp } : { doc: true }, [G_REMOVAL, c.op, c.idx]);
       });
       var replied = s.phrase && s.phrase.replied;
       if (replied && replied.note) {
@@ -792,8 +1225,6 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       }
       var gone = (s.items || []).filter(function (i) { return lost[i.n]; });
       if (gone.length) add({ id: 'lost', kind: 'lost', lost: gone }, { doc: true }, [G_LOST, 0, 0]);
-      var row = rewriteRow(s);
-      if (row) add(row, { doc: true }, [G_REWRITE, 0, 0]);
     }
     if (!clean && folderNotes > 0 && BOOT.review.dir) {
       add({ id: 'folder', kind: 'folder', text: plural(folderNotes, 'note on this folder', 'notes on this folder') },
@@ -826,29 +1257,6 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (!x) return -1;
     if (!y) return 1;
     return x.compareDocumentPosition(y) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
-  }
-
-  function rewriteRow(s) {
-    if (s.rewrite) rewriteTurn = s.rewrite.turn;
-    if (rewriteTurn == null) return null;
-    var turn = rewriteTurn;
-    // A hand-back after the rewrite ends it
-    if ((s.rounds || []).some(function (r) { return r.submit > turn; })) {
-      rewriteTurn = null;
-      return null;
-    }
-    var mine = (s.changes || []).filter(function (c) { return c.turn === turn; });
-    if (!s.rewrite && mine.some(function (c) { return !c.seen; })) return null;
-    var name = mine.length && mine[0].by ? who(mine[0].by) : turnAgent(turn);
-    return { id: 'rewrite', kind: 'rewrite', text: name + ' rewrote most of it' + (s.rewrite ? ' · ' + BR.keyName('yes') + ' mark seen' : '') };
-  }
-
-  function markRewriteSeen() {
-    var turn = state.rewrite.turn;
-    BR.op({
-      op: 'seen',
-      ids: state.changes.filter(function (c) { return c.turn === turn; }).map(function (c) { return c.id; })
-    });
   }
 
   // --- placement ---
@@ -1322,7 +1730,6 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     }
     if (undoing) return;
     undoing = BR.op({ op: 'undo_change', change: c.id });
-    reverting = c;
   }
 
   /** x on an open row is "no" to its text, so it takes a second x while the first one's message stands. */
@@ -1567,7 +1974,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       case 'ack':
         if (msg.cid === undoing) {
           undoing = null;
-          BR.chrome.say('reverted · ' + labelOf(reverting));
+          BR.chrome.say('reverted');
         }
         delete pending[msg.cid];
         if (afterAck[msg.cid]) {
@@ -1675,7 +2082,6 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     composerRect: function () {
       return comp && comp.h.host.isConnected ? comp.h.host.getBoundingClientRect() : null;
     },
-    rewriteActive: function () { return !!(state && state.rewrite); },
     /**
      * Puts the keys where a walk stop takes them: a change's receipt, a not-handled row, or a
      * blank. False when the stop has no line of its own.
@@ -1684,6 +2090,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       if (stop.kind === 'change') {
         landed = stop.id;
         reconcile();
+      }
+      if (stop.kind === 'removal') {
+        var gap = hosts.get('x' + stop.id);
+        if (gap) gap.box.focus({ preventScroll: true });
+        return gap ? gap.host : null;
       }
       var hit = null;
       hosts.forEach(function (h) {
@@ -1723,6 +2134,25 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       });
       return out;
     },
+    /** The stop hosts of the removals still news, which j and k stop on in their gaps. */
+    removals: function () {
+      var out = [];
+      hosts.forEach(function (h) {
+        if (h.entry && h.entry.removal && h.host.isConnected && h.host.getClientRects().length) out.push(h.host);
+      });
+      return out;
+    },
+    /** The removal a stop host stands for, `{change, after}`, or null for any other node. */
+    removalOf: function (node) {
+      var r = null;
+      hosts.forEach(function (h) { if (h.host === node && h.entry && h.entry.removal) r = h.entry.removal; });
+      return r;
+    },
+    /** The stop host of removal change `id`, or null while it is no stop. */
+    removalStop: function (id) {
+      var h = hosts.get('x' + id);
+      return h && h.host.isConnected && h.entry && h.entry.removal ? h.host : null;
+    },
     /** The item a blank host asks, or null for any other node. */
     blankItem: function (node) {
       var n = null;
@@ -1740,14 +2170,15 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     /** Focus moved to `el`, or to the doc for null: the rows under it open, and any other closes. */
     focusBlock: function (el) {
       var sp = el && el.getAttribute ? el.getAttribute('data-sourcepos') : null;
-      if (sp === focusSp && !landed) return;
+      var gap = el && el.getAttribute ? el.getAttribute('data-removal') : null;
+      if (sp === focusSp && gap === focusGap && !landed) return;
       focusSp = sp;
+      focusGap = gap;
       landed = null;
       // Focus moved off an open composer, as a click elsewhere does: the redraw mustn't take it back
       if (comp && document.activeElement !== comp.h.host) comp.active = false;
       reconcile();
     },
-    markRewriteSeen: markRewriteSeen,
     /** What request `at` points at, in words, as a composer's label names it. */
     label: label,
     /** A block in words, as every label names it: `## X (section)`, else `"its first words"`, `(kind)` added when asked. */

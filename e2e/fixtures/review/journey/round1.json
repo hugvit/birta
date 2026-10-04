@@ -1,0 +1,807 @@
+{
+  "schema": "review-state/1",
+  "doc": "pr.md",
+  "rev": "4ab70bb1df309ea25bc646fec759302345e8b12b",
+  "server_now": 1790000600000,
+  "writable": true,
+  "log_writable": true,
+  "hand_off": "Take a look at my notes: `birta review round1.md`",
+  "log": {
+    "lines": 22,
+    "bad": 0,
+    "unknown_ops": 0,
+    "read_only": false,
+    "baseline_available": true
+  },
+  "owner": {
+    "drafted_by": "claude"
+  },
+  "phrase": {
+    "stage": "replied",
+    "sent": {
+      "n": 8,
+      "ts": 1790000008000,
+      "items": 4,
+      "can_withdraw": false
+    },
+    "picked_up": {
+      "n": 9,
+      "ts": 1790000009000,
+      "by": "claude",
+      "silence": {
+        "since_ts": 1790000009000,
+        "threshold_ms": 900000
+      }
+    },
+    "replied": {
+      "turn": 9,
+      "ts": 1790000022000,
+      "by": "claude",
+      "done": 3,
+      "answered": 1,
+      "didnt": 0,
+      "asked": 0,
+      "unasked": 2,
+      "not_handled": 0,
+      "note": "I trimmed the whole doc to roughly half, explained that we fail because put makes a single attempt with no retry logic, and dropped the Stacked on section."
+    }
+  },
+  "phrase_before_hold": null,
+  "hold": null,
+  "counts": {
+    "drafts": 0,
+    "sent_unclaimed": 0,
+    "unseen": 7,
+    "unasked": 2,
+    "not_handled": 0,
+    "open_asks": 0,
+    "later": 0,
+    "lost": 0,
+    "items": 5,
+    "decided": 0,
+    "attention": 8,
+    "to_check": 9
+  },
+  "items": [
+    {
+      "n": 4,
+      "op": "comment",
+      "by": {
+        "type": "human",
+        "via": "browser"
+      },
+      "cid": "c-4",
+      "ts": 1790000004000,
+      "at": {
+        "kind": "doc",
+        "loc": null
+      },
+      "body": "way too verbose",
+      "status": "handled",
+      "sent_in": 8,
+      "turn": 9,
+      "amended": [],
+      "replies": [],
+      "outcome": {
+        "done": true,
+        "no_change": false,
+        "changes": [
+          "10.0",
+          "10.1",
+          "10.3",
+          "10.6"
+        ]
+      }
+    },
+    {
+      "n": 5,
+      "op": "comment",
+      "by": {
+        "type": "human",
+        "via": "browser"
+      },
+      "cid": "c-5",
+      "ts": 1790000005000,
+      "at": {
+        "kind": "anchor",
+        "status": "moved",
+        "scope": "quote",
+        "quote": "we just fail",
+        "shown": "we just fail",
+        "lines": [
+          6,
+          6
+        ],
+        "range": [
+          190,
+          202
+        ],
+        "block": [
+          5,
+          7
+        ],
+        "section": "Why",
+        "rev": "a6e7d8d2b9e5985ca7cede4885ba5e32519323e0",
+        "loc": {
+          "sp": "5:1-7:54",
+          "off": [
+            131,
+            143
+          ],
+          "tl": 211
+        }
+      },
+      "body": "say why",
+      "status": "handled",
+      "sent_in": 8,
+      "turn": 9,
+      "amended": [],
+      "replies": [],
+      "outcome": {
+        "done": true,
+        "no_change": false,
+        "changes": [
+          "10.0"
+        ]
+      }
+    },
+    {
+      "n": 6,
+      "op": "comment",
+      "by": {
+        "type": "human",
+        "via": "browser"
+      },
+      "cid": "c-6",
+      "ts": 1790000006000,
+      "at": {
+        "kind": "anchor",
+        "status": "orphaned",
+        "scope": "section",
+        "quote": "## Stacked on",
+        "section": "Stacked on",
+        "rev": "a6e7d8d2b9e5985ca7cede4885ba5e32519323e0",
+        "change": "10.5",
+        "loc": null
+      },
+      "verdict": "no",
+      "status": "handled",
+      "sent_in": 8,
+      "turn": 9,
+      "amended": [],
+      "replies": [],
+      "outcome": {
+        "done": true,
+        "no_change": false,
+        "changes": [
+          "10.5"
+        ]
+      }
+    },
+    {
+      "n": 7,
+      "op": "comment",
+      "by": {
+        "type": "human",
+        "via": "browser"
+      },
+      "cid": "c-7",
+      "ts": 1790000007000,
+      "at": {
+        "kind": "anchor",
+        "status": "moved",
+        "scope": "block",
+        "quote": "- [ ] Ran the integration suite",
+        "lines": [
+          17,
+          17
+        ],
+        "range": [
+          504,
+          535
+        ],
+        "block": [
+          17,
+          17
+        ],
+        "section": "Testing",
+        "rev": "a6e7d8d2b9e5985ca7cede4885ba5e32519323e0",
+        "loc": {
+          "sp": "17:1-17:31"
+        }
+      },
+      "verdict": "ask",
+      "body": "is 5 retries enough?",
+      "status": "handled",
+      "sent_in": 8,
+      "turn": 9,
+      "amended": [],
+      "replies": [
+        {
+          "n": 20,
+          "id": "#20",
+          "by": {
+            "type": "agent",
+            "name": "claude",
+            "via": "cli"
+          },
+          "kind": "answer",
+          "body": "The default is 4 attempts (3 retries), not 5; with a 5 s cap that rides out typical blips and short deploys, and it's configurable. The integration suite hasn't been run yet, so that's still unverified.",
+          "ts": 1790000020000,
+          "seen": false
+        }
+      ]
+    }
+  ],
+  "changes": [
+    {
+      "id": "10.0",
+      "op": 10,
+      "idx": 0,
+      "turn": 9,
+      "attr": "agent",
+      "by": {
+        "type": "agent",
+        "name": "claude"
+      },
+      "old": [
+        5,
+        9
+      ],
+      "new": [
+        5,
+        7
+      ],
+      "range": {
+        "status": "ok",
+        "lines": [
+          5,
+          7
+        ],
+        "bytes": [
+          57,
+          270
+        ],
+        "sp": "5:1-7:54"
+      },
+      "asked": {
+        "kind": "location",
+        "notes": [
+          5
+        ]
+      },
+      "reverts_your_edit": false,
+      "breaks_stet": [],
+      "seen": false,
+      "settled": false,
+      "what": {
+        "old_lines": 5,
+        "new_lines": 3,
+        "touches_html": false
+      },
+      "label": "61 words → 32",
+      "removed": "Uploads to the storage service occasionally fail with transient errors —\nconnection resets, 502/503s from the load balancer, and the odd timeout during\ndeploys. Today, when that happens, we just fail: the error bubbles up to the\ncaller and the user has to start the upload over. Most of these failures would\nsucceed on a second attempt a few hundred milliseconds later.\n",
+      "is_rewrite": false,
+      "old_text": "Uploads to the storage service occasionally fail with transient errors —\nconnection resets, 502/503s from the load balancer, and the odd timeout during\ndeploys. Today, when that happens, we just fail: the error bubbles up to the\ncaller and the user has to start the upload over. Most of these failures would\nsucceed on a second attempt a few hundred milliseconds later.\n",
+      "new_text": "`UploadClient.put` makes a single attempt with no retry logic, so on transient\nerrors (connection resets, 502/503s, deploy timeouts) we just fail and the user\nrestarts the upload. Most would succeed moments later.\n",
+      "check": null,
+      "reversible": {
+        "ok": true,
+        "reason": "none"
+      },
+      "op_hunks": 7
+    },
+    {
+      "id": "10.1",
+      "op": 10,
+      "idx": 1,
+      "turn": 9,
+      "attr": "agent",
+      "by": {
+        "type": "agent",
+        "name": "claude"
+      },
+      "old": [
+        13,
+        14
+      ],
+      "new": [
+        11,
+        11
+      ],
+      "range": {
+        "status": "ok",
+        "lines": [
+          11,
+          11
+        ],
+        "bytes": [
+          281,
+          361
+        ],
+        "sp": "11:1-11:80"
+      },
+      "asked": {
+        "kind": "cited",
+        "notes": [
+          4
+        ]
+      },
+      "reverts_your_edit": false,
+      "breaks_stet": [],
+      "seen": false,
+      "settled": false,
+      "what": {
+        "old_lines": 2,
+        "new_lines": 1,
+        "touches_html": false
+      },
+      "label": "2 list items → 1",
+      "removed": "- Wrap `UploadClient.put` in a retry loop with exponential backoff and full jitter\n- Retry only on idempotent failure modes: network errors, 502, 503, 504, and 429\n",
+      "is_rewrite": false,
+      "old_text": "- Wrap `UploadClient.put` in a retry loop with exponential backoff and full jitter\n- Retry only on idempotent failure modes: network errors, 502, 503, 504, and 429\n",
+      "new_text": "- Retry on network errors, 429 and 502–504 with exponential backoff and jitter\n",
+      "check": null,
+      "reversible": {
+        "ok": true,
+        "reason": "none"
+      },
+      "op_hunks": 7
+    },
+    {
+      "id": "10.2",
+      "op": 10,
+      "idx": 2,
+      "turn": 9,
+      "attr": "agent",
+      "by": {
+        "type": "agent",
+        "name": "claude"
+      },
+      "old": [
+        15,
+        15
+      ],
+      "new": [
+        12,
+        11
+      ],
+      "range": {
+        "status": "ok",
+        "lines": [
+          12,
+          11
+        ],
+        "bytes": [
+          362,
+          362
+        ]
+      },
+      "asked": {
+        "kind": "unasked",
+        "notes": []
+      },
+      "reverts_your_edit": false,
+      "breaks_stet": [],
+      "seen": false,
+      "settled": false,
+      "what": {
+        "old_lines": 1,
+        "new_lines": 0,
+        "touches_html": false
+      },
+      "label": "list item removed",
+      "removed": "- Respect `Retry-After` when the server sends it\n",
+      "is_rewrite": false,
+      "old_text": "- Respect `Retry-After` when the server sends it\n",
+      "new_text": "",
+      "check": null,
+      "unasked_why": "folded into the defaults bullet",
+      "reversible": {
+        "ok": true,
+        "reason": "none"
+      },
+      "op_hunks": 7
+    },
+    {
+      "id": "10.3",
+      "op": 10,
+      "idx": 3,
+      "turn": 9,
+      "attr": "agent",
+      "by": {
+        "type": "agent",
+        "name": "claude"
+      },
+      "old": [
+        16,
+        16
+      ],
+      "new": [
+        12,
+        12
+      ],
+      "range": {
+        "status": "ok",
+        "lines": [
+          12,
+          12
+        ],
+        "bytes": [
+          362,
+          427
+        ],
+        "sp": "12:1-13:0"
+      },
+      "asked": {
+        "kind": "cited",
+        "notes": [
+          4
+        ]
+      },
+      "reverts_your_edit": false,
+      "breaks_stet": [],
+      "seen": false,
+      "settled": false,
+      "what": {
+        "old_lines": 1,
+        "new_lines": 1,
+        "touches_html": false
+      },
+      "label": "7 words changed",
+      "is_rewrite": false,
+      "old_text": "- Defaults: 4 attempts, 200 ms base delay, 5 s max delay (all configurable)\n",
+      "new_text": "- Honor `Retry-After`; defaults: 4 attempts, 200 ms base, 5 s cap\n",
+      "check": null,
+      "reversible": {
+        "ok": true,
+        "reason": "none"
+      },
+      "op_hunks": 7
+    },
+    {
+      "id": "10.4",
+      "op": 10,
+      "idx": 4,
+      "turn": 9,
+      "attr": "agent",
+      "by": {
+        "type": "agent",
+        "name": "claude"
+      },
+      "old": [
+        17,
+        18
+      ],
+      "new": [
+        13,
+        12
+      ],
+      "range": {
+        "status": "ok",
+        "lines": [
+          13,
+          12
+        ],
+        "bytes": [
+          428,
+          428
+        ]
+      },
+      "asked": {
+        "kind": "unasked",
+        "notes": []
+      },
+      "reverts_your_edit": false,
+      "breaks_stet": [],
+      "seen": false,
+      "settled": false,
+      "what": {
+        "old_lines": 2,
+        "new_lines": 0,
+        "touches_html": false
+      },
+      "label": "list item removed",
+      "removed": "- Log each retry at `debug` with attempt number and delay\n\n",
+      "is_rewrite": false,
+      "old_text": "- Log each retry at `debug` with attempt number and delay\n\n",
+      "new_text": "",
+      "check": null,
+      "unasked_why": "too much detail for a PR description",
+      "reversible": {
+        "ok": true,
+        "reason": "none"
+      },
+      "op_hunks": 7
+    },
+    {
+      "id": "10.5",
+      "op": 10,
+      "idx": 5,
+      "turn": 9,
+      "attr": "agent",
+      "by": {
+        "type": "agent",
+        "name": "claude"
+      },
+      "old": [
+        19,
+        22
+      ],
+      "new": [
+        13,
+        12
+      ],
+      "range": {
+        "status": "ok",
+        "lines": [
+          13,
+          12
+        ],
+        "bytes": [
+          428,
+          428
+        ]
+      },
+      "asked": {
+        "kind": "location",
+        "notes": [
+          6
+        ]
+      },
+      "reverts_your_edit": false,
+      "breaks_stet": [],
+      "seen": false,
+      "settled": false,
+      "what": {
+        "old_lines": 4,
+        "new_lines": 0,
+        "touches_html": false
+      },
+      "label": "section removed · 3 blocks",
+      "removed": "## Stacked on\n\n- #482 — extract `UploadClient` from the sync worker\n- #479 — add a storage proxy for local runs\n",
+      "is_rewrite": false,
+      "old_text": "## Stacked on\n\n- #482 — extract `UploadClient` from the sync worker\n- #479 — add a storage proxy for local runs\n",
+      "new_text": "",
+      "check": null,
+      "reversible": {
+        "ok": true,
+        "reason": "none"
+      },
+      "op_hunks": 7
+    },
+    {
+      "id": "10.6",
+      "op": 10,
+      "idx": 6,
+      "turn": 9,
+      "attr": "agent",
+      "by": {
+        "type": "agent",
+        "name": "claude"
+      },
+      "old": [
+        26,
+        27
+      ],
+      "new": [
+        16,
+        16
+      ],
+      "range": {
+        "status": "ok",
+        "lines": [
+          16,
+          16
+        ],
+        "bytes": [
+          441,
+          503
+        ],
+        "sp": "16:1-16:62"
+      },
+      "asked": {
+        "kind": "cited",
+        "notes": [
+          4
+        ]
+      },
+      "reverts_your_edit": false,
+      "breaks_stet": [],
+      "seen": false,
+      "settled": false,
+      "what": {
+        "old_lines": 2,
+        "new_lines": 1,
+        "touches_html": false
+      },
+      "label": "2 list items → 1",
+      "removed": "- [x] Unit tests for backoff timing and jitter bounds\n- [x] Unit tests for retryable vs. non-retryable status codes\n",
+      "is_rewrite": false,
+      "old_text": "- [x] Unit tests for backoff timing and jitter bounds\n- [x] Unit tests for retryable vs. non-retryable status codes\n",
+      "new_text": "- [x] Unit tests for backoff timing and retryable status codes\n",
+      "check": null,
+      "reversible": {
+        "ok": true,
+        "reason": "none"
+      },
+      "op_hunks": 7
+    }
+  ],
+  "deletions": [
+    {
+      "change": "10.1",
+      "kind": "words",
+      "at_line": 11,
+      "at_byte": 355,
+      "removed": "full ",
+      "after_sp": "11:1-11:80"
+    },
+    {
+      "change": "10.1",
+      "kind": "words",
+      "at_line": 11,
+      "at_byte": 361,
+      "removed": "\n- Retry only on idempotent failure modes: network errors, 502, 503, 504, and 429",
+      "after_sp": "11:1-11:80"
+    },
+    {
+      "change": "10.2",
+      "kind": "block",
+      "at_line": 12,
+      "at_byte": 362,
+      "removed": "- Respect `Retry-After` when the server sends it\n",
+      "after_sp": "11:1-11:80",
+      "first_line": "- Respect `Retry-After` when the server sends it",
+      "label": "list item",
+      "head": "- Respect `Retry-After` when the server sends it",
+      "more": 0
+    },
+    {
+      "change": "10.3",
+      "kind": "words",
+      "at_line": 12,
+      "at_byte": 423,
+      "removed": " max delay",
+      "after_sp": "12:1-13:0"
+    },
+    {
+      "change": "10.4",
+      "kind": "block",
+      "at_line": 13,
+      "at_byte": 428,
+      "removed": "- Log each retry at `debug` with attempt number and delay\n\n",
+      "after_sp": "12:1-13:0",
+      "first_line": "- Log each retry at `debug` with attempt number and delay",
+      "label": "list item",
+      "head": "- Log each retry at `debug` with attempt number and delay",
+      "more": 0
+    },
+    {
+      "change": "10.5",
+      "kind": "block",
+      "at_line": 13,
+      "at_byte": 428,
+      "removed": "## Stacked on\n\n- #482 — extract `UploadClient` from the sync worker\n- #479 — add a storage proxy for local runs\n",
+      "after_sp": "12:1-13:0",
+      "first_line": "## Stacked on",
+      "label": "section · 3 blocks",
+      "head": "## Stacked on\n\n- #482 — extract `UploadClient` from the sync worker",
+      "more": 1
+    },
+    {
+      "change": "10.6",
+      "kind": "words",
+      "at_line": 16,
+      "at_byte": 481,
+      "removed": "jitter bounds\n- [x] Unit tests for ",
+      "after_sp": "16:1-16:62"
+    },
+    {
+      "change": "10.6",
+      "kind": "words",
+      "at_line": 16,
+      "at_byte": 490,
+      "removed": " vs. non-retryable",
+      "after_sp": "16:1-16:62"
+    }
+  ],
+  "later": [],
+  "lost": [],
+  "rounds": [
+    {
+      "submit": 8,
+      "ts": 1790000008000,
+      "by": "",
+      "to": "*",
+      "items": [
+        4,
+        5,
+        6,
+        7
+      ],
+      "claim": 9,
+      "claimed_by": "claude",
+      "yield": 22,
+      "released": false
+    }
+  ],
+  "warnings": [],
+  "news": [
+    {
+      "id": "#4",
+      "kind": "reply",
+      "sp": null,
+      "check": null
+    },
+    {
+      "id": "#21",
+      "kind": "turn_note",
+      "sp": null,
+      "check": null
+    },
+    {
+      "id": "10.0",
+      "kind": "change",
+      "sp": "5:1-7:54",
+      "check": null
+    },
+    {
+      "id": "#5",
+      "kind": "reply",
+      "sp": "5:1-7:54",
+      "check": null
+    },
+    {
+      "id": "10.1",
+      "kind": "change",
+      "sp": "11:1-11:80",
+      "check": null
+    },
+    {
+      "id": "10.2",
+      "kind": "removal",
+      "sp": null,
+      "after_sp": "11:1-11:80",
+      "check": null
+    },
+    {
+      "id": "10.3",
+      "kind": "change",
+      "sp": "12:1-13:0",
+      "check": null
+    },
+    {
+      "id": "10.4",
+      "kind": "removal",
+      "sp": null,
+      "after_sp": "12:1-13:0",
+      "check": null
+    },
+    {
+      "id": "10.5",
+      "kind": "removal",
+      "sp": null,
+      "after_sp": "12:1-13:0",
+      "check": null
+    },
+    {
+      "id": "#6",
+      "kind": "reply",
+      "sp": null,
+      "check": null
+    },
+    {
+      "id": "10.6",
+      "kind": "change",
+      "sp": "16:1-16:62",
+      "check": null
+    },
+    {
+      "id": "#20",
+      "kind": "answer",
+      "sp": "17:1-17:31",
+      "check": null
+    }
+  ]
+}

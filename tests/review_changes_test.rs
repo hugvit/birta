@@ -690,7 +690,7 @@ fn a_removed_excerpt_is_capped() {
     assert!(long.starts_with(&removed));
 }
 
-// --- rewrite (scenario 13's threshold) ---
+// --- a big turn (scenario 13): no rewrite row, each change checked on its own ---
 
 /// The ids of the news items of `kind`, in list order.
 fn news_of(state: &ReviewState, kind: &str) -> Vec<String> {
@@ -739,22 +739,18 @@ fn a_turn_touching_39_percent_of_a_grown_doc_is_no_rewrite() {
 }
 
 #[test]
-fn a_turn_touching_41_percent_of_a_grown_doc_is_a_rewrite() {
-    let (s, turn, _) = grown(30);
+fn a_turn_touching_41_percent_of_a_grown_doc_is_checked_change_by_change() {
+    let (s, _, _) = grown(30);
     let state = s.fold();
-    let r = state.rewrite.as_ref().expect("a rewrite");
-    assert_eq!(r.turn, turn);
-    assert_eq!((r.blocks_changed, r.blocks_total), (41, 100));
-    assert!((r.pct - 0.41).abs() < 1e-9, "{}", r.pct);
+    assert!(state.rewrite.is_none(), "{:?}", state.rewrite);
     assert_eq!(state.changes.len(), 32);
-    assert!(state.changes.iter().all(|c| c.is_rewrite));
-    // Each change is news of its own all the same
+    assert!(state.changes.iter().all(|c| !c.is_rewrite));
     let all: Vec<String> = state.changes.iter().map(|c| c.id.clone()).collect();
     assert_eq!(news_of(&state, "change"), all);
 }
 
 #[test]
-fn a_rewrite_is_over_once_its_changes_are_seen() {
+fn a_big_turn_is_checked_once_every_change_is_kept() {
     let (mut s, _, _) = grown(30);
     let all: Vec<String> = s.fold().changes.iter().map(|c| c.id.clone()).collect();
     assert_eq!(all.len(), 32);
@@ -1377,16 +1373,16 @@ fn an_outside_change_written_over_later_is_later_overlap() {
 }
 
 #[test]
-fn exactly_40_percent_is_no_rewrite_and_a_part_seen_rewrite_stands() {
+fn exactly_40_percent_is_no_rewrite_and_a_part_checked_turn_keeps_the_rest_to_check() {
     let (s, _, _) = grown(29);
     assert!(s.fold().rewrite.is_none(), "40/100");
 
-    let (mut s, turn, _) = grown(30);
+    let (mut s, _, _) = grown(30);
     let all: Vec<String> = s.fold().changes.iter().map(|c| c.id.clone()).collect();
     assert_eq!(all.len(), 32, "setup");
     s.seen(&all[..31].iter().map(String::as_str).collect::<Vec<_>>());
     let state = s.fold();
-    assert_eq!(state.rewrite.as_ref().map(|r| r.turn), Some(turn));
+    assert!(state.rewrite.is_none(), "{:?}", state.rewrite);
     assert_eq!(state.counts.unseen, 1);
     let v = serde_json::to_value(&state).unwrap();
     let left: Vec<&serde_json::Value> = v["news"]
@@ -1399,22 +1395,25 @@ fn exactly_40_percent_is_no_rewrite_and_a_part_seen_rewrite_stands() {
     assert_eq!(left[0]["id"], all[31]);
 }
 
-/// Seven of ten blocks is over the share but too few to call a rewrite.
+/// However many blocks a turn touches, its changes are rows of their own.
 #[test]
-fn a_rewrite_needs_eight_blocks_touched_as_well_as_the_share() {
+fn no_share_of_blocks_touched_makes_a_rewrite() {
     let doc: String = (1..=10).map(|i| format!("p{i} text\n\n")).collect();
-    for (edited, want) in [(7, false), (8, true)] {
+    for edited in [7, 8, 10] {
         let mut s = Scenario::new(&doc);
         let turn = claimed(&mut s);
         edit_paragraphs(&mut s, 1..=edited);
         s.yield_turn(CLAUDE, turn);
         let state = s.fold();
         assert_eq!(state.changes.len(), edited, "setup");
-        assert_eq!(
-            state.rewrite.is_some(),
-            want,
+        assert!(
+            state.rewrite.is_none(),
             "{edited} of 10: {:?}",
             state.rewrite
+        );
+        assert!(
+            state.changes.iter().all(|c| !c.is_rewrite),
+            "{edited} of 10"
         );
     }
 }
@@ -1443,7 +1442,7 @@ fn two_small_turns_do_not_add_up_to_a_rewrite() {
 }
 
 #[test]
-fn only_the_rewriting_turns_changes_are_marked() {
+fn no_turns_changes_are_marked_as_a_rewrite() {
     let mut s = Scenario::new(&paragraphs());
     let first = claimed(&mut s);
     let small = edit_paragraphs(&mut s, 1..=1);
@@ -1454,16 +1453,19 @@ fn only_the_rewriting_turns_changes_are_marked() {
     edit_paragraphs(&mut s, 2..=41);
     s.yield_turn(CLAUDE, second);
     let state = s.fold();
-    let r = state.rewrite.as_ref().expect("40 of 90 is a rewrite");
-    assert_eq!((r.turn, r.blocks_changed, r.blocks_total), (second, 40, 90));
+    assert!(state.rewrite.is_none(), "40 of 90: {:?}", state.rewrite);
     assert!(!change(&state, &id(small, 0)).is_rewrite);
+    assert!(
+        state.changes.iter().any(|c| c.turn == Some(second)),
+        "setup"
+    );
     for c in &state.changes {
-        assert_eq!(c.is_rewrite, c.turn == Some(second), "{}", c.id);
+        assert!(!c.is_rewrite, "{}", c.id);
     }
 }
 
 #[test]
-fn a_turn_that_cuts_most_of_the_doc_is_a_rewrite() {
+fn a_turn_that_cuts_most_of_the_doc_is_one_removal_to_check() {
     let mut s = Scenario::new(&paragraphs());
     let turn = claimed(&mut s);
     let kept: String = (1..=9)
@@ -1475,13 +1477,9 @@ fn a_turn_that_cuts_most_of_the_doc_is_a_rewrite() {
     s.external(&kept);
     s.yield_turn(CLAUDE, turn);
     let state = s.fold();
-    let r = state
-        .rewrite
-        .as_ref()
-        .expect("cutting 81 of 90 is a rewrite");
-    assert_eq!((r.turn, r.blocks_changed, r.blocks_total), (turn, 81, 90));
+    assert!(state.rewrite.is_none(), "81 of 90: {:?}", state.rewrite);
     assert_eq!(state.changes.len(), 1, "setup");
-    // A turn's one big removal is one item of news
+    assert!(!state.changes[0].is_rewrite);
     assert_eq!(news_of(&state, "removal"), [state.changes[0].id.clone()]);
 }
 

@@ -527,6 +527,31 @@
   unicode-bidi: isolate;
 }
 
+/* A change row's substance: cut words struck and muted, added words underlined */
+.flow del {
+  color: var(--birta-fg-muted);
+  text-decoration: line-through;
+}
+
+.flow ins {
+  text-decoration: underline;
+}
+
+.flow code {
+  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* A removal's stop is a thin place in its gap until focus opens its row there */
+:host(birta-flow[data-kind="removal"]) {
+  margin: 0 !important;
+}
+
+.flow.gap {
+  height: 4px;
+  padding: 0;
+  background-color: transparent;
+}
+
 .muted {
   color: var(--birta-fg-muted);
 }

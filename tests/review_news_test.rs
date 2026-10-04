@@ -6,11 +6,13 @@ use birta::review::doc::Doc;
 use birta::review::fold;
 use birta::review::state::ReviewState;
 use serde_json::{Value, json};
+use std::fs;
+use std::path::Path;
 
 mod support {
     pub mod scenario;
 }
-use support::scenario::{DOC, Scenario, agent};
+use support::scenario::{DOC, Scenario, T0, agent};
 
 const CLAUDE: &str = "claude";
 
@@ -127,7 +129,11 @@ struct Journey {
 }
 
 fn journey() -> Journey {
-    let mut s = Scenario::drafted_by(PR, CLAUDE);
+    journey_of(Scenario::drafted_by(PR, CLAUDE))
+}
+
+/// The journey's first round on `s`, a fresh scenario over the draft.
+fn journey_of(mut s: Scenario) -> Journey {
     let verbose = s.note("way too verbose");
     let say_why = s.comment(s.quote("we just fail"), None, Some("say why"));
     let stacked = s.comment(s.section("## Stacked on"), Some("no"), None);
@@ -229,8 +235,7 @@ fn the_journeys_changes_carry_their_checks_and_why_they_were_unasked() {
     let w = |idx| id(j.write, idx);
     for c in v["changes"].as_array().unwrap() {
         assert!(c.get("check").is_some_and(Value::is_null), "{c}");
-        // The rewrite row goes with its page row in 6.20; until then it stands
-        assert_eq!(c["is_rewrite"], true, "{c}");
+        assert_eq!(c["is_rewrite"], false, "{c}");
     }
     assert_eq!(
         change(&v, &w(2))["unasked_why"],
@@ -246,11 +251,29 @@ fn the_journeys_changes_carry_their_checks_and_why_they_were_unasked() {
     // The `no` on the section is answered by the section's own removal
     assert_eq!(change(&v, &w(5))["asked"]["notes"], json!([j.stacked]));
     assert_eq!(change(&v, &w(4))["asked"]["kind"], "unasked");
-    assert_eq!(
-        v["rewrite"]["turn"],
-        change(&v, &w(0))["turn"],
-        "{}",
-        v["rewrite"]
+    // Every change has its own row, however much of the doc the turn touched
+    assert!(v["rewrite"].is_null(), "{}", v["rewrite"]);
+}
+
+/// The journey's first reply as the page receives it, which the e2e row specs serve.
+/// Rewrite with `BIRTA_UPDATE_FIXTURES=1`.
+#[test]
+fn the_journeys_first_reply_matches_the_committed_json() {
+    let j = journey_of(Scenario::drafted_by(PR, CLAUDE).nameless());
+    let mut state = j.s.fold();
+    assert_eq!(state.rev, birta::rev::Rev::of(ROUND1.as_bytes()).as_str());
+    state.server_now = T0 + 600_000;
+    state.hand_off = "Take a look at my notes: `birta review round1.md`".to_string();
+    let want = serde_json::to_string_pretty(&state).unwrap() + "\n";
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("e2e/fixtures/review/journey/round1.json");
+    if std::env::var_os("BIRTA_UPDATE_FIXTURES").is_some_and(|v| v == "1") {
+        fs::write(&path, &want).unwrap();
+    }
+    assert!(
+        fs::read_to_string(&path).ok().as_deref() == Some(want.as_str()),
+        "out of date: {}; rerun with BIRTA_UPDATE_FIXTURES=1",
+        path.display()
     );
 }
 

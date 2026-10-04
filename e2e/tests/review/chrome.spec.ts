@@ -828,11 +828,12 @@ test.describe("tab", () => {
 
   test("news puts ● in the title and a dot on the favicon, and both go when it does", async ({ page, birta }) => {
     const { mock, state } = await openFixture(page, birta, "unseen");
-    expect(state.counts.attention).toBeGreaterThan(0);
+    // The tab reads what is left to check
+    expect(state.counts.to_check).toBeGreaterThan(0);
     await expect(page).toHaveTitle("● pr.md — birta");
     await expect.poll(() => icon(page)).toMatch(/^data:image\/png;base64,/);
     const quiet = withRev(fixtureState("fresh"), state.rev);
-    expect(quiet.counts.attention).toBe(0);
+    expect(quiet.counts.to_check).toBe(0);
     swap(mock, state, quiet);
     await expect(page).toHaveTitle("pr.md — birta");
     await expect.poll(() => icon(page)).toBe("/favicon.png");
@@ -1052,9 +1053,23 @@ test.describe("killers: names and tab", () => {
   });
 
   test("not-handled rows alone are news", async ({ page, birta }) => {
-    const { state } = await openFixture(page, birta, "approved");
+    // Claude's reply with everything checked but its not-handled row: one stop to check
+    const { state } = await openFixture(page, birta, "replied", (s) => {
+      for (const n of s.news) if (n.id !== "nh:5") n.check = n.kind === "change" ? "kept" : "ok";
+      s.changes.forEach((c: State) => Object.assign(c, { seen: true, check: "kept" }));
+      s.counts = { ...s.counts, unseen: 0, attention: 1, to_check: 1 };
+    });
     expect(state.counts).toMatchObject({ unseen: 0, attention: 1 });
     await expect(page).toHaveTitle("● pr.md — birta");
+  });
+
+  test("an approve as is settles all news: the fold counts nothing, and the tab has no ●", async ({ page, birta }) => {
+    const { state } = await openFixture(page, birta, "approved");
+    expect(state.counts).toMatchObject({ unseen: 0, attention: 0, to_check: 0 });
+    expect(state.news).toEqual([]);
+    await expect.poll(async () => (await chrome(page)).phrase).not.toBeNull();
+    await page.waitForTimeout(SETTLE_MS);
+    await expect(page).toHaveTitle("pr.md — birta");
   });
 
   test("news that ends before the dotted icon is drawn leaves the plain icon", async ({ page, birta }) => {

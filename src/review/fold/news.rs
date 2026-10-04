@@ -24,6 +24,8 @@ pub(super) struct Input<'x> {
     pub deletions: &'x [Deletion],
     /// Lines of hand-backs and approves that stand.
     pub rounds: &'x [u32],
+    /// Lines of approves that stand: each settles all news before it, checked or not.
+    pub approves: &'x [u32],
 }
 
 pub(super) struct Built {
@@ -123,6 +125,11 @@ fn rank(c: Check) -> u8 {
     }
 }
 
+/// Whether two spans of the current text's lines share a line.
+fn touches(a: Option<(u32, u32)>, b: Option<(u32, u32)>) -> bool {
+    matches!((a, b), (Some(a), Some(b)) if a.0 <= b.1 && b.0 <= a.1)
+}
+
 fn group(c: &Change) -> u64 {
     (u64::from(c.op) << 16) | u64::from(c.idx)
 }
@@ -173,18 +180,43 @@ pub(super) fn build(input: &Input) -> Built {
     let mut raws: Vec<Raw> = Vec::new();
     let mut places: HashMap<&str, Place> = HashMap::new();
     for c in input.changes {
-        if c.attr == Attr::Human
-            || (c.range.status == RangeStatus::Superseded && c.undone_by.is_none())
-        {
+        if c.attr == Attr::Human {
             continue;
         }
+        let overlapped = c.range.status == RangeStatus::Superseded && c.undone_by.is_none();
+        // A later write over it keeps it news until settled, on that write's block; Claude's own
+        // later hunk in the same turn stands for both
+        let over = if overlapped {
+            let writes: Vec<&Change> = input
+                .changes
+                .iter()
+                .filter(|x| x.op > c.op && touches(x.span, c.span))
+                .collect();
+            let own = |x: &&Change| {
+                x.attr == Attr::Agent
+                    && c.attr == Attr::Agent
+                    && x.turn.is_some()
+                    && x.turn == c.turn
+            };
+            if writes.iter().any(own) && writes.iter().all(own) {
+                continue;
+            }
+            let Some(stop) = c.span.and_then(|s| super::span_stop(input.doc, s)) else {
+                continue;
+            };
+            Some(stop.sp.clone())
+        } else {
+            None
+        };
         // A whole removal sits in its gap until you revert it; then it is back on its block
         let removal = removals
             .get(c.id.as_str())
             .filter(|_| c.range.sp.is_none() && c.undone_by.is_none());
-        let block = super::change_stop(input.changes, input.doc, c)
-            .map(|s| s.sp.clone())
-            .or_else(|| c.range.sp.clone().filter(|_| c.undone_by.is_none()));
+        let block = over.or_else(|| {
+            super::change_stop(input.changes, input.doc, c)
+                .map(|s| s.sp.clone())
+                .or_else(|| c.range.sp.clone().filter(|_| c.undone_by.is_none()))
+        });
         let (kind, place) = match removal {
             Some(d) => (
                 NewsKind::Removal,
@@ -375,7 +407,8 @@ pub(super) fn build(input: &Input) -> Built {
         });
     }
 
-    raws.retain(|r| !r.settled(input.rounds));
+    // An approve keeps every change you didn't revert, so it settles what you never checked too
+    raws.retain(|r| !r.settled(input.rounds) && !input.approves.iter().any(|&a| a > r.born));
     raws.sort_by_key(|r| r.order);
     let unchecked: HashSet<String> = raws
         .iter()

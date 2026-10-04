@@ -481,8 +481,9 @@ fn scenario_5_a_full_turn_sets_every_status_and_the_reply_facts() {
     assert_eq!(state.counts.not_handled, 0);
     assert_eq!(state.counts.open_asks, 0);
     assert_eq!(state.counts.drafts, 0);
-    // Two unseen agent replies; no changes, blanks or not-handled rows
-    assert_eq!(state.counts.attention, 2);
+    // Three stops hold Claude's news: the `done` on the first item, the answer on the
+    // second, and the `didnt` reply and turn note on the whole doc
+    assert_eq!(state.counts.attention, 3);
 }
 
 #[test]
@@ -920,7 +921,8 @@ fn scenario_14_a_blank_is_open_until_the_human_answers() {
     assert_eq!(b.verdict, Some(Verdict::Ask));
     assert_eq!(b.status, ItemStatus::Open);
     assert_eq!(state.counts.open_asks, 1);
-    assert_eq!(state.counts.attention, 1);
+    // The blank, and the `done` on the whole-doc note
+    assert_eq!(state.counts.attention, 2);
     assert_eq!(state.counts.drafts, 0);
     // An unanswered blank never makes the turn look unhandled
     assert_eq!(state.counts.not_handled, 0);
@@ -936,7 +938,8 @@ fn scenario_14_a_blank_is_open_until_the_human_answers() {
     assert_eq!(b.replies[0].by.kind, ByKind::Human);
     assert_eq!(b.replies[0].body.as_deref(), Some("alphabetical"));
     assert_eq!(state.counts.open_asks, 0);
-    assert_eq!(state.counts.attention, 0);
+    // Only the `done` is left to check
+    assert_eq!(state.counts.attention, 1);
     // The answer goes back with the next hand-back
     assert_eq!(state.counts.drafts, 1);
 }

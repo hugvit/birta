@@ -37,7 +37,7 @@ const YOU = hex("#0969da");
 const YOU_DARK = hex("#4493f8");
 const NEW = hex("#fff8c5");
 const WHITE: Rgb = [255, 255, 255];
-/** A bar for a change of this round, until it is seen. */
+/** A bar for a change of Claude's news, until it is checked. */
 const FRESH = hex("#bf8700");
 const FRESH_DARK = hex("#d29922");
 const DANGER = hex("#d1242f");
@@ -321,7 +321,7 @@ test.describe("lane overlay", () => {
     }
   });
 
-  test("an asked change is a solid bar and an unasked one is dotted, fresh until seen", async ({ page, birta }) => {
+  test("an asked change is a solid bar and an unasked one is dotted, fresh until checked", async ({ page, birta }) => {
     await open(page, birta, fixtureDoc("unseen"), { state: fixtureState("unseen") });
     await expect.poll(() => markKeys(page)).toEqual(UNSEEN_KEYS);
     const ms = await marks(page);
@@ -331,6 +331,8 @@ test.describe("lane overlay", () => {
     const dotted = only(ms, "bar", "11:1-11:44");
     expect(solid.role).toBe("agent");
     expect(dotted.role).toBe("agent");
+    // Neither is checked yet: both are new
+    expect([solid.check, dotted.check]).toEqual(["new", "new"]);
     // Below the glyph, where only the bar paints
     const solidPx = await column(page, x, glyph.bottom + 2, solid.bottom - 1);
     expect(solidPx.length).toBeGreaterThan(8);
@@ -919,6 +921,8 @@ test.describe("lane edges", () => {
       const ms = await marks(page);
       const bar = only(ms, "bar", sp);
       const glyph = only(ms, "glyph", sp);
+      // A seen change is a kept one: its bar is checked, muted
+      expect(bar.check).toBe("checked");
       // Two marks with daylight between them, never one merged shape
       const gap = Math.max(bar.left - glyph.right, glyph.left - bar.right);
       expect(gap, `bar ${JSON.stringify(bar)} glyph ${JSON.stringify(glyph)}`).toBeGreaterThanOrEqual(2);

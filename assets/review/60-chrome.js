@@ -57,7 +57,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     };
   }
 
-  // The agent's replies the reader hasn't seen; the approve guard stops for them as for changes
+  // The agent's replies the reader hasn't seen, which the Approve button counts with changes
   function unseenReplies(s) {
     var n = 0;
     (s.items || []).forEach(function (i) {
@@ -72,19 +72,14 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   };
 
   /**
-   * What the approve guard's first press says, or null when nothing stops it: unseen changes
-   * and replies, else the agent's open questions. `opts.key` is the turn key as the button shows it.
+   * What the approve guard's first press says, or null when nothing stops it: the fold's count of
+   * stops still holding something to check, questions included. `opts.key` is the turn key as the
+   * button shows it.
    */
   BR.pure.guardPill = function (s, opts) {
-    var v = view(s, s.server_now);
-    var again = ' · ' + opts.key + ' again approves anyway';
-    if (v.unseen) return v.unseen + ' unseen · n walk' + again;
-    if (!v.asks) return null;
-    var ask = (s.items || []).filter(function (i) {
-      return i.by && i.by.type === 'agent' && i.verdict === 'ask' && i.status === 'open';
-    })[0];
-    var who = (ask && ask.by.name) || holder(s, v.p);
-    return (who ? cap(who) : 'The agent') + ' asked ' + plural(v.asks, 'question', 'questions') + ' · n go' + again;
+    var n = (s.counts && s.counts.to_check) || 0;
+    if (!n) return null;
+    return n + ' to check · n next · ' + opts.key + ' again approves as is';
   };
 
   /** Whole minutes of silence once the fold's threshold has passed, else null. */
@@ -212,7 +207,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var v = view(s, opts.now);
     var p = v.p;
     function approve() {
-      // Unseen wins: the guard jumps there first
+      // Unseen wins over open questions in the label
       if (v.unseen) return button('Approve · ' + v.unseen + ' unseen');
       if (v.asks) return button('Approve · ' + v.asks + ' unanswered');
       return button('Approve', true);
@@ -266,23 +261,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   // A settled note folds to its dot; an agent question still taking answers never does
   var FOLDED = { handled: 1, answered: 1, later: 1 };
 
-  /** The stop a news item sits on, as a key: a removal or a question is a stop of its own, in its gap or under its block. */
-  function stopKey(kind, id, sp) {
-    if (kind === 'removal') return 'r:' + id;
-    if (kind === 'question' || kind === 'blank') return 'q:' + id;
-    return sp ? 'b:' + sp : 'doc';
-  }
-
-  /**
-   * Claude's news as `{key, kind}` per item, in walk order: the state's `news`, else the walk's
-   * stops of Claude's, where a removal is a stop of its own in its gap.
-   */
+  /** Claude's news as `{key, kind, check}` per item, in walk order, keyed by the stop the walk puts it on. */
   function newsItems(s) {
-    if (Array.isArray(s.news)) {
-      return s.news.map(function (n) { return { key: stopKey(n.kind, n.id, n.sp), kind: n.kind }; });
-    }
-    return BR.pure.walk(s).filter(function (w) { return w.kind !== 'draft' && w.kind !== 'lost'; }).map(function (w) {
-      return { key: stopKey(w.kind, w.id, w.sp), kind: w.kind === 'blank' ? 'question' : w.kind };
+    return BR.pure.walk(s).filter(function (w) { return BR.pure.isNews(w.kind); }).map(function (w) {
+      return { key: w.stop, kind: w.kind, check: w.check };
     });
   }
 
@@ -343,8 +325,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         return row(place + crumb, [key('yes') + ' keep the cut', key('revert_change') + ' put it back', key('note') + ' reply', next]);
       }
       if (first === 'change' && f.k !== 'doc') {
+        var mine = items.filter(function (i) { return i.key === here && i.kind === 'change'; });
+        // Kept once each change there is; a reverted one keeps the not-checked keys until restore lands
+        var kept = mine.every(function (i) { return i.check === 'kept' || i.check === 'restored'; });
         return row(place + crumb + " · Claude's change",
-          [key('yes') + ' keep', key('revert_change') + ' revert', key('note') + ' reply', next]);
+          [kept ? 'kept' : key('yes') + ' keep', key('revert_change') + ' revert', key('note') + ' reply', next]);
       }
       return row(place + crumb + ' · Claude replied', [key('yes') + ' ok', key('note') + ' reply', next]);
     }
@@ -454,7 +439,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var withdrawing = null;
   // The strip's message: {text, until?, arm?}, or {nack, until} for a refused op; an armed one waits for a key
   var message = null;
-  // The approve guard's jump, until a key other than ⌘⏎ or its message going disarms it: {at, ids, unseen}
+  // The approve guard's jump, until a key other than ⌘⏎ or its message going disarms it: {at, ids, left}
   var guard = null;
   var heldN = null;
   var rows = [];
@@ -538,7 +523,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       turnBtn.disabled = b.disabled;
     }
     renderStrip();
-    news(!!s && !!s.counts && s.counts.attention > 0);
+    news(!!s && !!s.counts && s.counts.to_check > 0);
     if (menuOpen()) fillMenu();
     schedule(s, t);
   }
@@ -582,9 +567,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     strip.hidden = !on;
     document.documentElement.toggleAttribute('data-review-strip', on);
     if (!on) return;
-    // n and p still step by the walk, so the strip counts the walk's stops, not `news`
-    var walked = s && s.news ? Object.assign({}, s, { news: undefined }) : s;
-    var r = BR.pure.stripText(walked, BR.pointing.stripFocus(), {
+    var r = BR.pure.stripText(s, BR.pointing.stripFocus(), {
       now: t,
       mode: mode,
       composer: BR.flow.composerLabel(),
@@ -902,8 +885,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   }
 
   /**
-   * Approves, unless something unseen or an open question is left: then the first press goes
-   * there and says so, and a press past the dwell, while that message stands, approves anyway.
+   * Approves, unless something is left to check: then the first press goes to its first stop and
+   * says so, and a press past the dwell, while that message stands, approves as is.
    */
   function approveGuarded(s) {
     if (guard) {
@@ -917,30 +900,30 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       BR.op({ op: 'approve' });
       return;
     }
-    // Counts that say unseen with no stop to land on still arm: approve is never silent
+    // A count with no stop to land on still arms: approve is never silent
     BR.pointing.guard();
-    var mine = guard = { at: Date.now(), ids: unseenIds(s), unseen: view(s, now()).unseen };
+    var mine = guard = { at: Date.now(), ids: uncheckedIds(s), left: s.counts.to_check };
     setMessage({ text: text, arm: { keep: turnKey, off: function () { if (guard === mine) guard = null; } } });
     render();
   }
 
-  /** The unseen changes and replies in `s`, by the id their seen op names. */
-  function unseenIds(s) {
+  /** Claude's news in `s` still to check, by the id its seen op names. */
+  function uncheckedIds(s) {
     var out = {};
-    BR.pure.attention(s).forEach(function (x) { if (x.kind === 'change' || x.kind === 'reply') out[x.id] = 1; });
+    BR.pure.attention(s).forEach(function (x) { out[x.id] = 1; });
     return out;
   }
 
   /**
-   * Whether `s` brings unseen text the arm never covered: an id outside its set, or a count
-   * above the lowest one since, which the jump's own seen echo lowers.
+   * Whether `s` brings news the arm never covered: an item outside its set, or a count above the
+   * lowest one since, which your own checks lower.
    */
-  function newUnseen(s) {
-    var ids = unseenIds(s);
+  function newNews(s) {
+    var ids = uncheckedIds(s);
     for (var id in ids) if (!guard.ids[id]) return true;
-    var n = view(s, now()).unseen;
-    if (n > guard.unseen) return true;
-    guard.unseen = n;
+    var n = (s.counts && s.counts.to_check) || 0;
+    if (n > guard.left) return true;
+    guard.left = n;
     return false;
   }
 
@@ -961,8 +944,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
           var d = msg.state.server_now - Date.now();
           skew = skew === null ? d : Math.max(skew, d);
         }
-        // New unseen text must be seen before approve anyway counts for it
-        if (guard && msg.path === CURRENT_PATH && msg.state && newUnseen(msg.state)) setMessage(null);
+        // News the arm never covered must be reached before approve as is counts for it
+        if (guard && msg.path === CURRENT_PATH && msg.state && newNews(msg.state)) setMessage(null);
         break;
       case 'dir_state':
         dir = msg;

@@ -312,6 +312,8 @@ test.describe("rows on focus", () => {
     const state = bent("flow", (s) => {
       const c = s.changes.find((c: State) => c.id === "19.0");
       s.changes.push({ ...JSON.parse(JSON.stringify(c)), id: "19.1", idx: 1, label: "1 word changed" });
+      const at = s.news.findIndex((n: State) => n.id === "19.0");
+      s.news.splice(at + 1, 0, { id: "19.1", kind: "change", sp: "14:1-14:21", check: null });
     });
     await open(page, birta, FLOW, state);
     await walkTo(page, "19.0");
@@ -346,7 +348,12 @@ test.describe("rows on focus", () => {
   });
 
   test("an earlier round's settled change opens muted, with no keys, and is no open row for keys", async ({ page, birta }) => {
-    const state = bent("flow", (s) => Object.assign(s.changes.find((c: State) => c.id === "19.0"), { seen: true, settled: true }));
+    // Kept, then settled by a hand-back: it has left Claude's news
+    const state = bent("flow", (s) => {
+      Object.assign(s.changes.find((c: State) => c.id === "19.0"), { seen: true, settled: true, check: "kept" });
+      s.news = s.news.filter((n: State) => n.id !== "19.0");
+      s.counts.to_check -= 1;
+    });
     await open(page, birta, FLOW, state);
     await focusOn(page, "14:1-14:21");
     await expect.poll(async () => (await rowsLed(page, UNASKED)).map((r) => r.kbd)).toEqual([[]]);
@@ -431,8 +438,11 @@ test.describe("reverted row", () => {
   function reverted(kept: boolean): State {
     return bent("flow", (s) => {
       const c = s.changes.find((c: State) => c.id === "13.0");
-      Object.assign(c, { undone_by: 40, settled: true, seen: true, reversible: { ok: false, reason: "later_overlap" } });
+      Object.assign(c, { undone_by: 40, settled: true, seen: true, check: "reverted", reversible: { ok: false, reason: "later_overlap" } });
       if (!kept) c.range = { ...c.range, status: "superseded", sp: null };
+      // Reverted is a check: the change stays news, on the block your revert put back, until a hand-back
+      s.news.find((n: State) => n.id === "13.0").check = "reverted";
+      s.counts.to_check -= 1;
       s.changes.push({
         ...JSON.parse(JSON.stringify(c)),
         id: "40.0",
@@ -442,6 +452,7 @@ test.describe("reverted row", () => {
         by: { type: "human", via: "browser" },
         asked: { kind: "human", notes: [] },
         undone_by: undefined,
+        check: null,
         settled: false,
         seen: false,
         range: { status: "ok", lines: [5, 6], bytes: [99, 167], sp: "5:1-6:68" },
@@ -462,17 +473,19 @@ test.describe("reverted row", () => {
   }
 
   for (const kept of [false, true]) {
-    test(`a reverted change reads reverted with no size, muted, with no keys${kept ? ", where it still stands" : ""}`, async ({
+    test(`a reverted change keeps its lead, ends reverted by you then Claude's version muted, with no size and no keys${kept ? ", where it still stands" : ""}`, async ({
       page,
       birta,
     }) => {
       await open(page, birta, FLOW, reverted(kept));
       await focusOn(page, "5:1-6:68");
-      await expect.poll(() => hostWith(page, "reverted")).toMatchObject({ kbd: [], sp: "5:1-6:68" });
-      expect((await hostWith(page, "reverted"))!.text).toMatch(/^reverted\b/);
-      expect((await hostWith(page, "reverted"))!.text).not.toMatch(SIZE_LABEL);
-      expect((await styleOf(page, "reverted", ["color"]))?.color).toBe(MUTED);
-      expect(await hostWith(page, "because you said")).toBeNull();
+      await expect.poll(() => hostWith(page, "reverted by you")).toMatchObject({ kbd: [], sp: "5:1-6:68" });
+      const row = (await changeRows(page)).find((r) => /^reverted by you\b/.test(r.tail ?? ""))!;
+      expect(row.lead).toBe('Claude · because you said "say why it fails"');
+      expect(row.tail).toMatch(/^reverted by you\b.*Claude's version:.*S3 answers 503 under load; retrying three times fixes most of these\./);
+      expect(row.text).not.toMatch(SIZE_LABEL);
+      // Claude's version, which the revert took out, is muted
+      expect((await styleOf(page, "S3 answers 503 under load", ["color"]))?.color).toBe(MUTED);
       // Your own write that reverted it is no row of its own
       expect((await hosts(page)).filter((h) => h.sp === "5:1-6:68")).toHaveLength(1);
       expect(await openRow(page)).toBeNull();
@@ -491,12 +504,12 @@ test.describe("reverted row", () => {
   test("z of the revert brings the change's own row back, keys and all", async ({ page, birta }) => {
     const { mock } = await open(page, birta, FLOW, reverted(false));
     await focusOn(page, "5:1-6:68");
-    await expect.poll(async () => (await hostWith(page, "reverted"))?.text).toMatch(/^reverted\b/);
+    await expect.poll(async () => (await hostWith(page, "reverted by you"))?.text).toMatch(/\breverted by you\b/);
     mock.pushState(fixtureState("flow"));
     const lead = 'Claude · because you said "say why it fails"';
     await expect.poll(async () => (await rowsLed(page, lead)).map((r) => r.kbd)).toEqual([["y", "u", "c"]]);
     expect((await rowsLed(page, lead))[0].text.endsWith(KEYS)).toBe(true);
-    expect(await hostWith(page, "reverted")).toBeNull();
+    expect(await hostWith(page, "reverted by you")).toBeNull();
     expect(await openRow(page)).toBe("13.0");
   });
 });
@@ -522,16 +535,17 @@ test.describe("reverted row on a real server", () => {
     const { served, c } = await onChange(page, birta);
     await page.keyboard.press("u");
     await expect.poll(() => reviewLog(served.root)!.filter((l) => l.op === "edit").length).toBe(1);
-    await expect.poll(() => hostWith(page, "reverted")).toMatchObject({ kbd: [] });
-    expect((await hostWith(page, "reverted"))!.text).toMatch(/^reverted\b/);
-    expect((await hostWith(page, "reverted"))!.text).not.toMatch(SIZE_LABEL);
-    expect((await hostWith(page, "reverted"))!.sp).toMatch(/^5:1-/);
+    await expect.poll(() => hostWith(page, "reverted by you")).toMatchObject({ kbd: [] });
+    const row = (await changeRows(page)).find((r) => /^reverted by you\b/.test(r.tail ?? ""))!;
+    expect(row.tail).toMatch(/Claude's version:.*we just fail, and the user starts again\./);
+    expect(row.text).not.toMatch(SIZE_LABEL);
+    expect(row.sp).toMatch(/^5:1-/);
     expect(await focused(page)).toMatch(/^5:1-/);
-    await expect.poll(() => stripMessage(page)).toMatch(/^reverted\b/);
-    expect(await stripMessage(page)).not.toContain(c.label);
+    // Interim until restore: the message is the bare word
+    await expect.poll(() => stripMessage(page)).toBe("reverted");
   });
 
-  test("the reverted change stays a walk stop until the round ends, and its wash clears once seen", async ({ page, birta }) => {
+  test("the reverted change stays a walk stop until the round ends, and its wash clears once reverted", async ({ page, birta }) => {
     const { served, c } = await onChange(page, birta);
     await page.keyboard.press("u");
     await expect.poll(() => reviewLog(served.root)!.filter((l) => l.op === "edit").length).toBe(1);
@@ -540,9 +554,10 @@ test.describe("reverted row on a real server", () => {
     await focusTop(page);
     await page.keyboard.press("n");
     await expect.poll(() => focused(page)).toMatch(/^5:1-/);
-    await expect.poll(async () => (await hostWith(page, "reverted"))?.text).toMatch(/^reverted\b/);
-    expect((await hostWith(page, "reverted"))!.text).not.toContain(c.label);
-    await expect.poll(() => stripPlace(page)).toBe("1 of 1");
+    await expect.poll(async () => (await hostWith(page, "reverted by you"))?.text).toMatch(/\breverted by you\b/);
+    expect((await hostWith(page, "reverted by you"))!.text).not.toContain(c.label);
+    // Whole doc holds Claude's done on your note, so the change is the second stop
+    await expect.poll(() => stripPlace(page)).toBe("2 of 2");
     await page.waitForTimeout(SETTLE_MS);
     expect((await marks(page)).filter((m) => m.mark === "wash" && m.width > 0)).toEqual([]);
   });
@@ -824,7 +839,7 @@ function twoRounds(edit: (s: State) => void = () => {}): State {
 }
 
 test.describe("rounds", () => {
-  test("this round's bars are 3 px, fresh until seen; an earlier round's are 1 px", async ({ page, birta }) => {
+  test("unchecked bars are 3 px and fresh; a kept one thins and mutes; an earlier round's are 1 px", async ({ page, birta }) => {
     const doc = fixtureDoc("fresh");
     const sp = (t: string) => spAt(doc, t);
     const state = laneState(doc, {
@@ -836,12 +851,14 @@ test.describe("rounds", () => {
     const bars = (await marks(page)).filter((m) => m.mark === "bar");
     const bar = (t: string) => bars.find((m) => m.sp === sp(t))!;
     expect(Math.round(bar("- retries on 503").width)).toBe(3);
-    expect(Math.round(bar("# Upload retries").width)).toBe(3);
+    expect([bar("- retries on 503").check, bar("# Upload retries").check, bar("- backoff").check]).toEqual(["new", "checked", "checked"]);
+    // Kept is checked: the bar thins, as a settled one is
+    expect(bar("# Upload retries").width).toBeLessThan(3);
     expect(Math.round(bar("- backoff").width)).toBe(1);
     const s = await shot(page, await frameBox(page));
     const mid = (m: Box) => s.at((m.left + m.right) / 2, (m.top + m.bottom) / 2);
     expect(near(mid(bar("- retries on 503")), NEW_BAR, 12), `${mid(bar("- retries on 503"))}`).toBe(true);
-    expect(near(mid(bar("# Upload retries")), AGENT, 12), `${mid(bar("# Upload retries"))}`).toBe(true);
+    expect(near(mid(bar("# Upload retries")), NEW_BAR, 40), `${mid(bar("# Upload retries"))}`).toBe(false);
   });
 
   test("in the dark theme a fresh bar is the dark accent, and a 1 px bar still reads on the canvas", async ({ page, birta }) => {
@@ -1348,6 +1365,8 @@ test.describe("cards", () => {
         more: 0,
       });
       Object.assign(s.changes.find((c: State) => c.id === "19.0"), { range: { status: "ok", lines: [15, 14], bytes: [290, 290] } });
+      // News names it as the removal it now is, in its gap
+      Object.assign(s.news.find((n: State) => n.id === "19.0"), { kind: "removal", sp: null, after_sp: "14:1-14:21" });
     });
     await open(page, birta, FLOW, state);
     await walkTo(page, "19.0");

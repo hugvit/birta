@@ -67,31 +67,46 @@ function swap(mock: Mock, state: State, next: State) {
   mock.pushState(state);
 }
 
+/** The stops still holding unchecked news, as the fold counts `to_check`. */
+function toCheck(s: State): number {
+  const stop = (n: State) => (n.kind === "removal" ? `r:${n.id}` : n.kind === "question" ? `q:${n.id}` : (n.sp ?? "doc"));
+  return new Set(s.news.filter((n: State) => n.check == null).map(stop)).size;
+}
+
+/** Checks news items `ids` in `s`, as the fold does after a seen naming them. */
+function check(s: State, ids: string[]) {
+  for (const id of ids) {
+    const n = s.news.find((x: State) => x.id === id);
+    if (n && n.check == null) n.check = n.kind === "change" || n.kind === "removal" ? "kept" : "ok";
+    const c = s.changes.find((x: State) => x.id === id);
+    if (c && !c.seen) {
+      c.seen = true;
+      c.check = "kept";
+      s.counts.unseen -= 1;
+    }
+  }
+  s.counts.to_check = toCheck(s);
+  s.counts.attention = s.counts.to_check;
+}
+
 /** What the server pushes once it has kept `seen` for `ids`. */
 function echoSeen(state: State, ids: string[]): State {
   const next = JSON.parse(JSON.stringify(state));
-  for (const id of ids) {
-    const c = next.changes.find((x: State) => x.id === id);
-    const r = next.items.flatMap((i: State) => i.replies ?? []).find((x: State) => x.id === id);
-    const hit = c ?? r;
-    if (hit && !hit.seen) {
-      hit.seen = true;
-      if (c) next.counts.unseen -= 1;
-      next.counts.attention -= 1;
-    }
-  }
+  check(next, ids);
   return next;
 }
 
-/** Marks every change, agent reply and not-handled row seen, as walking them all would. */
+/** Checks every news item, as y on every stop would. */
 function allSeen(s: State) {
-  for (const c of s.changes) c.seen = true;
-  for (const i of s.items) {
-    for (const r of i.replies ?? []) if (r.by.type === "agent") r.seen = true;
-    if (i.status === "not_handled") i.seen = true;
-  }
-  s.counts.attention -= s.counts.unseen;
-  s.counts.unseen = 0;
+  check(s, s.news.map((n: State) => n.id));
+}
+
+/** A hand-back after `s` settles what was checked: it leaves news, all but `keep`. */
+function settle(s: State, keep: string[] = []) {
+  s.news = s.news.filter((n: State) => keep.includes(n.id));
+  for (const c of s.changes) c.settled = !keep.includes(c.id);
+  s.counts.to_check = toCheck(s);
+  s.counts.attention = s.counts.to_check;
 }
 
 const seenIds = (mock: Mock) => mock.ops().filter((o) => o.op === "seen").map((o) => o.ids);
@@ -110,41 +125,49 @@ async function stopOf(page: Page): Promise<string | null> {
   return focused(page);
 }
 
-// unseen.json walks, in doc order: the doc-level reply, the paragraph's change, the not-handled
-// bullet, the next bullet's change, and the removal at its own stop in the gap below the last heading
-const UNSEEN_WALK: { id: string; focus: string | null; seen: boolean }[] = [
-  { id: "#13", focus: "doc", seen: true },
-  { id: "9.0", focus: "5:1-6:68", seen: true },
-  { id: "nh:5", focus: "10:1-10:16", seen: false },
-  { id: "10.0", focus: "11:1-11:44", seen: true },
-  { id: "11.0", focus: REMOVAL, seen: true },
+// unseen.json's news walks, in doc order: the doc-level reply and the turn note, the paragraph's
+// change and its done, the not-handled bullet, the next bullet's change, and the removal at its own
+// stop in the gap below the last heading. `ids` are every item on the stop, as y names them.
+const UNSEEN_WALK: { ids: string[]; focus: string | null }[] = [
+  { ids: ["#13", "#14"], focus: "doc" },
+  { ids: ["#4", "9.0"], focus: "5:1-6:68" },
+  { ids: ["nh:5"], focus: "10:1-10:16" },
+  { ids: ["10.0"], focus: "11:1-11:44" },
+  { ids: ["11.0"], focus: REMOVAL },
 ];
+
+/** Each seen op's ids, sorted, so the order a stop lists them in is free. */
+const seenSets = (mock: Mock) => seenIds(mock).map((ids) => [...ids].sort());
 
 // --- One pass in doc order -------------------------------------------------------------------
 
 test.describe("the n walk", () => {
   test("n walks every stop top to bottom, every kind interleaved, and the strip says where it is", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "unseen");
+    for (const [i, stop] of UNSEEN_WALK.entries()) {
+      await page.keyboard.press("n");
+      await expect.poll(() => stripPlace(page), { message: `step ${i + 1}` }).toBe(at(i + 1, UNSEEN_WALK.length));
+      expect(await stopOf(page), `step ${i + 1}`).toBe(stop.focus);
+    }
+    // Landing never checks: nothing at all is sent
+    await page.waitForTimeout(SETTLE_MS);
+    expect(mock.ops()).toEqual([]);
+  });
+
+  test("the count holds as each stop is checked with y: checked stops stay in the walk", async ({ page, birta }) => {
+    const { mock, state } = await openFixture(page, birta, "unseen");
     const sent: string[][] = [];
     for (const [i, stop] of UNSEEN_WALK.entries()) {
       await page.keyboard.press("n");
-      if (stop.seen) sent.push([stop.id]);
       await expect.poll(() => stripPlace(page), { message: `step ${i + 1}` }).toBe(at(i + 1, UNSEEN_WALK.length));
-      await expect.poll(() => seenIds(mock), { message: `step ${i + 1}` }).toEqual(sent);
-      expect(await stopOf(page), `step ${i + 1}`).toBe(stop.focus);
-    }
-    expect(mock.ops().filter((o) => o.op !== "seen")).toEqual([]);
-  });
-
-  test("the count holds as the server echoes each seen: seen stops stay in the walk", async ({ page, birta }) => {
-    const { mock, state } = await openFixture(page, birta, "unseen");
-    for (const [i, stop] of UNSEEN_WALK.entries()) {
-      await page.keyboard.press("n");
-      await expect.poll(() => stripPlace(page), { message: `step ${i + 1}` }).toBe(at(i + 1, UNSEEN_WALK.length));
-      if (stop.seen) swap(mock, state, echoSeen(state, [stop.id]));
+      await page.keyboard.press("y");
+      sent.push([...stop.ids].sort());
+      await expect.poll(() => seenSets(mock), { message: `step ${i + 1}` }).toEqual(sent);
+      swap(mock, state, echoSeen(state, stop.ids));
       await page.waitForTimeout(100);
     }
     expect(await stopOf(page)).toBe(REMOVAL);
+    await expect.poll(() => stripPlace(page)).toBe(at(5, 5));
   });
 
   test("n past the last stop stays there and says so; it never wraps", async ({ page, birta }) => {
@@ -215,17 +238,10 @@ test.describe("the n walk", () => {
   });
 
   test("a write that replaces the landed block keeps the walk's place on it: n goes on to the next stop", async ({ page, birta }) => {
-    // A reply on the paragraph too, so its one stop holds two items: change 9.0, then reply #14
-    const withReply = (s: State) => {
-      s.items.find((i: State) => i.n === 4).replies = [
-        { n: 14, id: "#14", by: { type: "agent", name: "claude" }, body: "said why", ts: s.server_now, seen: false },
-      ];
-    };
     const doc = fixtureDoc("unseen");
     // Same length, so every sp holds
     const doc2 = doc.replace("we just fail and the user", "we just fail, and the user").replace("start again.", "start over.");
     const first = fixtureState("unseen");
-    withReply(first);
     const second = withRev(JSON.parse(JSON.stringify(first)), revOf(doc2));
     const served = await birta({ "pr.md": doc }, GATE_ON);
     await page.setViewportSize(WIDE);
@@ -234,10 +250,10 @@ test.describe("the n walk", () => {
     await booted(page);
     await page.keyboard.press("n");
     await page.keyboard.press("n");
-    // 9.0 and #14 share the paragraph, one stop of five, landed on and seen together
+    // 9.0 and its done #4 share the paragraph, one stop of five, landed on together and never checked by it
     await expect.poll(() => stripPlace(page)).toBe(at(2, 5));
     expect(await focused(page)).toBe("5:1-6:68");
-    await expect.poll(() => seenIds(mock)).toEqual([["#13"], ["9.0", "#14"]]);
+    expect(seenIds(mock)).toEqual([]);
     served.write("pr.md", doc2);
     await expect.poll(() => page.evaluate(() => document.getElementById("content")!.textContent!.includes("start over."))).toBe(true);
     await expect.poll(() => focused(page)).toBe("5:1-6:68");
@@ -304,16 +320,16 @@ test.describe("a seen round", () => {
     }
   });
 
-  test("what a hand-back settled is not walked; what an earlier round left unseen is", async ({ page, birta }) => {
+  test("what a hand-back settled is not walked; what an earlier round left unchecked is", async ({ page, birta }) => {
     await openFixture(page, birta, "unseen", (s) => {
       allSeen(s);
       s.rounds.push({ submit: 40, ts: s.server_now, by: "", to: "*", items: [], released: false });
-      for (const c of s.changes) c.settled = true;
       const left = s.changes.find((c: State) => c.id === "10.0");
       left.seen = false;
-      left.settled = false;
+      left.check = null;
+      s.news.find((n: State) => n.id === "10.0").check = null;
       s.counts.unseen = 1;
-      s.counts.attention = 1;
+      settle(s, ["10.0"]);
     });
     await page.keyboard.press("n");
     await expect.poll(() => stripPlace(page)).toBe(at(1, 1));
@@ -329,16 +345,20 @@ test.describe("a seen round", () => {
     // The reader hands back, and the agent's next turn rewrites the paragraph again
     const next = JSON.parse(JSON.stringify(state));
     next.rounds.push({ submit: 20, ts: next.server_now, by: "", to: "*", items: [], claim: 21, claimed_by: "claude", yield: 30, released: false });
-    for (const c of next.changes) c.settled = true;
-    next.changes.push({ ...next.changes.find((c: State) => c.id === "9.0"), id: "25.0", op: 25, turn: 21, seen: false, settled: false });
+    settle(next);
+    next.changes.push({ ...next.changes.find((c: State) => c.id === "9.0"), id: "25.0", op: 25, turn: 21, seen: false, settled: false, check: null });
+    next.news = [{ id: "25.0", kind: "change", sp: "5:1-6:68", check: null }];
     next.counts.unseen = 1;
-    next.counts.attention = 1;
+    next.counts.to_check = next.counts.attention = 1;
     swap(mock, state, next);
     await page.waitForTimeout(SETTLE_MS);
     await page.keyboard.press("n");
     await expect.poll(() => stripPlace(page)).toBe(at(1, 1));
     expect(await focused(page)).toBe("5:1-6:68");
-    await expect.poll(() => seenIds(mock).at(-1)).toEqual(["25.0"]);
+    // Landing sends nothing; y there checks the new change
+    expect(seenIds(mock)).toEqual([]);
+    await page.keyboard.press("y");
+    await expect.poll(() => seenIds(mock)).toEqual([["25.0"]]);
   });
 });
 
@@ -348,18 +368,22 @@ test.describe("killers: the walk", () => {
       allSeen(s);
       const last = s.changes.find((c: State) => c.id === "11.0");
       last.seen = false;
+      last.check = null;
+      s.news.find((n: State) => n.id === "11.0").check = null;
       s.counts.unseen = 1;
-      s.counts.attention = 1;
+      s.counts.to_check = s.counts.attention = 1;
     });
     await page.keyboard.press("End");
     for (let i = 0; i < UNSEEN_WALK.length; i++) await page.keyboard.press("n");
     await expect.poll(() => stopOf(page)).toBe(REMOVAL);
     const next = JSON.parse(JSON.stringify(state));
     next.rounds.push({ submit: 20, ts: next.server_now, by: "", to: "*", items: [], claim: 21, claimed_by: "claude", yield: 30, released: false });
-    for (const c of next.changes) if (c.id !== "11.0") c.settled = true;
-    next.changes.push({ ...next.changes.find((c: State) => c.id === "9.0"), id: "25.0", op: 25, turn: 21, seen: false, settled: false });
+    settle(next, ["11.0"]);
+    next.changes.push({ ...next.changes.find((c: State) => c.id === "9.0"), id: "25.0", op: 25, turn: 21, seen: false, settled: false, check: null });
+    // The new change sits on the paragraph, above the removal in the list's doc order
+    next.news.unshift({ id: "25.0", kind: "change", sp: "5:1-6:68", check: null });
     next.counts.unseen = 2;
-    next.counts.attention = 2;
+    next.counts.to_check = next.counts.attention = 2;
     swap(mock, state, next);
     await page.waitForTimeout(SETTLE_MS);
     await page.keyboard.press("n");
@@ -367,7 +391,7 @@ test.describe("killers: the walk", () => {
     expect(await focused(page)).toBe("5:1-6:68");
   });
 
-  test("the lost-notes row is on whole doc's stop: n lands there once, and sends no seen for it", async ({ page, birta }) => {
+  test("the lost-notes row is on whole doc's stop: n lands there once, and sends no seen", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "lost");
     const focus: (string | null)[] = [];
     // One n per stop: an n that landed on an item of the stop it was on would leave focus put
@@ -378,15 +402,16 @@ test.describe("killers: the walk", () => {
     }
     // Whole doc (the doc-level reply and the lost row), the paragraph (both changes), the not-handled bullet
     expect(focus).toEqual(["doc", "5:1-6:68", "10:1-10:16"]);
-    // The lost row is no news of Claude's, so the count leaves it out: four items on three stops
+    // The lost row is no news of Claude's, so the count leaves it out: six items on three stops
     await page.keyboard.press("Home");
-    await expect.poll(() => stripPlace(page)).toMatch(/^1 of (3|4)$/);
+    await expect.poll(() => stripPlace(page)).toBe(at(1, 3));
     // The walk ends there, and n past it says so
     await page.keyboard.press("End");
     await page.keyboard.press("n");
     await expect.poll(() => stripMessage(page)).toBe(END);
     await page.waitForTimeout(SETTLE_MS);
-    expect(seenIds(mock)).toEqual([["#11"], ["9.0", "14.0"]]);
+    // Landing never checks
+    expect(seenIds(mock)).toEqual([]);
   });
 });
 
@@ -521,20 +546,21 @@ function draft(n: number, sp: string | null): State {
   return { ...base, n, cid: `c-${n}`, body: `draft ${n}`, status: "draft", at: sp ? { ...base.at, loc: { sp } } : base.at };
 }
 
-/** unseen.json picked up for a second turn, with 10.0 left unseen from the first: the walk is that one change. */
+/** unseen.json picked up for a second turn, with 10.0 left unchecked from the first: the walk is that one change. */
 function pickedUp(s: State) {
   allSeen(s);
   s.rounds.push({ submit: 20, ts: s.server_now, by: "", to: "*", items: [], claim: 21, claimed_by: "claude", released: false });
-  for (const c of s.changes) c.settled = c.id !== "10.0";
   const left = s.changes.find((c: State) => c.id === "10.0");
   left.seen = false;
+  left.check = null;
+  s.news.find((n: State) => n.id === "10.0").check = null;
+  settle(s, ["10.0"]);
   s.phrase = {
     stage: "picked_up",
     sent: { n: 20, ts: s.server_now, items: 0, can_withdraw: false },
     picked_up: { n: 21, ts: s.server_now, by: "claude" },
   };
   s.counts.unseen = 1;
-  s.counts.attention = 1;
 }
 
 /** Claude's reply to that turn: the round gets its yield, a new reply on whole doc and a new change on the paragraph. */
@@ -552,9 +578,15 @@ function repliedAgain(state: State): State {
     ts: next.server_now,
     seen: false,
   });
-  next.changes.push({ ...next.changes.find((c: State) => c.id === "9.0"), id: "25.0", op: 25, turn: 21, seen: false, settled: false });
+  next.changes.push({ ...next.changes.find((c: State) => c.id === "9.0"), id: "25.0", op: 25, turn: 21, seen: false, settled: false, check: null });
+  // News in walk order: the reply on whole doc, the new change on the paragraph, then 10.0
+  next.news = [
+    { id: "#26", kind: "reply", sp: null, check: null },
+    { id: "25.0", kind: "change", sp: "5:1-6:68", check: null },
+    ...next.news,
+  ];
   next.counts.unseen = 2;
-  next.counts.attention = 3;
+  next.counts.to_check = next.counts.attention = 3;
   return next;
 }
 
@@ -563,15 +595,15 @@ test.describe("the walk's place", () => {
     const { mock, state } = await openFixture(page, birta, "unseen", pickedUp);
     await page.keyboard.press("n");
     await expect.poll(() => focused(page)).toBe("11:1-11:44");
-    await expect.poll(() => seenIds(mock)).toEqual([["10.0"]]);
     // The reply keeps the same round (its claim is unchanged) and only adds the yield
     swap(mock, state, repliedAgain(state));
     await page.waitForTimeout(SETTLE_MS);
     expect(await focused(page), "a reply never moves the focus").toBe("11:1-11:44");
     await page.keyboard.press("n");
     await expect.poll(() => focused(page)).toBe("doc");
-    await expect.poll(() => seenIds(mock).at(-1)).toEqual(["#26"]);
     await expect.poll(() => stripPlace(page)).toBe(at(1, 3));
+    // Landing never checks
+    expect(seenIds(mock)).toEqual([]);
     await page.keyboard.press("n");
     await expect.poll(() => focused(page)).toBe("5:1-6:68");
   });
@@ -595,8 +627,9 @@ test.describe("the walk's place", () => {
     await page.keyboard.press("p");
     await expect.poll(() => focused(page)).toBe("5:1-6:68");
     await expect.poll(() => stripPlace(page)).toBe(at(2, 5));
-    // j on its way past the paragraph marks 9.0 seen too, until landing stops sending seen; then p's landing does
-    await expect.poll(() => seenIds(mock)).toEqual([["9.0"], ["9.0"]]);
+    // Neither j on its way past the paragraph nor p's landing checks it
+    await page.waitForTimeout(SETTLE_MS);
+    expect(seenIds(mock)).toEqual([]);
   });
 
   test("on a fresh tab, n after j goes on from the focus, not from the top", async ({ page, birta }) => {
@@ -660,8 +693,8 @@ test.describe("your drafts in the walk", () => {
     await expect.poll(() => focused(page)).toBe(METRICS);
     expect(await stripPlace(page)).toBeNull();
     await page.waitForTimeout(SETTLE_MS);
-    // Landing on your own note marks nothing seen
-    expect(seenIds(mock)).toEqual([["#13"], ["9.0"], ["10.0"], ["11.0"]]);
+    // Landing, on your own note or on Claude's news, marks nothing seen
+    expect(seenIds(mock)).toEqual([]);
   });
 });
 
@@ -672,13 +705,12 @@ test.describe("adversary: the walk's place", () => {
     const { mock, state } = await openFixture(page, birta, "unseen", pickedUp);
     await page.keyboard.press("n");
     await expect.poll(() => focused(page)).toBe("11:1-11:44");
-    await expect.poll(() => seenIds(mock)).toEqual([["10.0"]]);
     swap(mock, state, repliedAgain(state));
     await page.waitForTimeout(SETTLE_MS);
     await page.keyboard.press("p");
     await page.waitForTimeout(SETTLE_MS);
     expect(await focused(page), "p from before stop 1 moves nothing").toBe("11:1-11:44");
-    expect(seenIds(mock)).toEqual([["10.0"]]);
+    expect(seenIds(mock)).toEqual([]);
     await expect.poll(() => stripMessage(page)).toBe(END);
   });
 

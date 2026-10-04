@@ -260,7 +260,9 @@ test.describe("keys with focus in a review host", () => {
     await expect(page.locator('birta-flow[data-kind="composer"]')).toHaveCount(0);
     await page.keyboard.press("y");
     await expect.poll(() => mock.ops().length).toBe(1);
-    expect(mock.ops()[0]).toMatchObject({ op: "seen", ids: ["#6"] });
+    // y checks the whole stop: the done under the note and Claude's change on its bullet
+    expect(mock.ops()[0]).toMatchObject({ op: "seen" });
+    expect([...mock.ops()[0].ids].sort()).toEqual(["#6", "15.0"]);
     await note.click();
     await page.keyboard.press("j");
     await expect.poll(async () => [null, "doc"].includes(await focused(page))).toBe(false);
@@ -362,7 +364,8 @@ test.describe("guard, edges", () => {
     const all = await stops(page);
     await expect.poll(async () => (await focusMark(page))?.change).toBe("11.0");
     expect((await focusMark(page))?.after).toBe(all[all.length - 1].sp);
-    expect(mock.ops().filter((o) => o.op !== "seen")).toEqual([]);
+    // Landing on a stop checks nothing, so nothing at all is sent
+    expect(mock.ops()).toEqual([]);
     await expect.poll(() => laneShown(page)).toBe(true);
     await page.keyboard.press("Alt+KeyU");
     await expect(page.locator("#source-view")).toBeVisible();

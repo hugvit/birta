@@ -13,9 +13,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   /**
    * What the lane draws for a state, before any geometry:
    * `{mark:'glyph', sp, verdict, role, n}`, `{mark:'veil', sp, section}` over a block or section
-   * told no, `{mark:'bar', sp, style, role, weight, fresh}`, `{mark:'wash', sp}` and
-   * `{mark:'tick', after, count}`, where `after` is null above the first block. A bar is 3 px
-   * while its change is this round's, 1 px once settled, and fresh until seen.
+   * told no, `{mark:'bar', sp, style, role, weight, fresh, check}`, `{mark:'wash', sp}`,
+   * `{mark:'revert', sp}` where your revert put Claude's change back, and `{mark:'tick', after,
+   * count}`, where `after` is null above the first block. A bar is 3 px and new until its change
+   * is checked, then 1 px and muted.
    */
   BR.pure.laneMarks = function (state, opts) {
     // Inside a hand-back's hold nothing has left yet, so its verdicts keep your colour
@@ -42,13 +43,22 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var bySp = {};
     var order = [];
     var undone = {};
-    // Your revert of a change you have seen is no news: by the op of the write that reverted it
-    var seenRevert = {};
-    (state.changes || []).forEach(function (c) { if (c.undone_by != null && c.seen) seenRevert[c.undone_by] = true; });
+    // The writes that reverted a change of Claude's: each shows as a ↺ head, never your bar
+    var undoOps = {};
+    (state.changes || []).forEach(function (c) { if (c.undone_by != null) undoOps[c.undone_by] = true; });
+    var reverts = [];
     (state.changes || []).forEach(function (c) {
-      if (c.undone_by != null) undone[c.id] = true;
       var sp = c.range && c.range.sp;
+      // A reverted change's text is gone; its revert marks the block
+      if (c.undone_by != null) {
+        undone[c.id] = true;
+        return;
+      }
       if (!sp) return;
+      if (c.attr === 'human' && undoOps[c.op]) {
+        if (reverts.indexOf(sp) < 0) reverts.push(sp);
+        return;
+      }
       if (!bySp[sp]) {
         bySp[sp] = [];
         order.push(sp);
@@ -58,13 +68,17 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     order.forEach(function (sp) {
       var all = bySp[sp].slice().sort(newest);
       var live = all.filter(function (c) { return !c.settled; });
-      var unseen = live.filter(function (c) { return !c.seen && !(c.attr === 'human' && seenRevert[c.op]); });
+      // Claude's change stays new until you check it; yours until it is seen
+      var fresh = live.filter(function (c) { return c.attr !== 'human' && c.check == null; });
+      var unseen = live.filter(function (c) { return !c.seen && (c.attr === 'human' || c.check == null); });
       var pick = unseen.length ? unseen : live.length ? live : all;
       var win = pick[pick.length - 1];
+      var thick = live.some(function (c) { return c.attr === 'human' || c.check == null; });
       out.push({ mark: 'bar', sp: sp, style: barStyle(win), role: win.attr === 'human' ? 'you' : 'agent',
-        weight: live.length ? 3 : 1, fresh: unseen.some(function (c) { return c.attr !== 'human'; }) });
+        weight: thick ? 3 : 1, fresh: fresh.length > 0, check: fresh.length ? 'new' : 'checked' });
       if (unseen.length) out.push({ mark: 'wash', sp: sp });
     });
+    reverts.forEach(function (sp) { out.push({ mark: 'revert', sp: sp }); });
 
     var ticks = {};
     var tickOrder = [];
@@ -248,7 +262,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     function squeezed(m) { return narrow && glyphs[m.sp] && m.style === 'double'; }
     function barWidth(m) { return m.style === 'double' ? (squeezed(m) ? 2 : 6) : m.weight || 2; }
     function barX(sp, w) {
-      return narrow && glyphs[sp] ? laneX + 8 - w : laneX - w / 2;
+      if (narrow && glyphs[sp]) return laneX + 8 - w;
+      // A 1 px bar starts on a whole pixel, so it paints its colour rather than a blur across two
+      return w === 1 ? laneX - 1 : laneX - w / 2;
     }
     var stacked = {};
     var glyphBoxes = [];
@@ -275,7 +291,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       var r = ownRect(el);
       if (m.mark === 'bar') {
         var w = barWidth(m);
-        overOut.appendChild(box({ 'data-mark': 'bar', 'data-sp': m.sp, 'data-style': m.style, 'data-role': m.role, 'data-weight': m.weight },
+        overOut.appendChild(box({ 'data-mark': 'bar', 'data-sp': m.sp, 'data-style': m.style, 'data-role': m.role, 'data-weight': m.weight,
+          'data-check': m.check },
           'bar ' + m.style + ' ' + m.role + (squeezed(m) ? ' squeezed' : '') + (m.fresh ? ' fresh' : '') + (m.weight === 1 ? ' thin' : ''),
           barX(m.sp, w), r.top - F.top, w, r.height));
       } else if (m.mark === 'veil') {
@@ -300,6 +317,16 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         g.appendChild(svg(ICONS[m.verdict] || ICONS.no));
         overOut.appendChild(g);
         glyphBoxes.push({ left: gx, right: gx + size, top: gy, bottom: gy + size });
+      } else if (m.mark === 'revert') {
+        // Stacks under any glyph on its line, so the two never cover each other
+        var rk = stacked[m.sp] = (stacked[m.sp] || 0) + 1;
+        var rl = firstLine(el);
+        var rx = laneX - size / 2;
+        var ry = (rl.top + rl.bottom) / 2 - size / 2 + (rk - 1) * (size + 2) - F.top;
+        var head = box({ 'data-mark': 'revert', 'data-sp': m.sp, 'aria-label': 'reverted by you', role: 'img' }, 'revert', rx, ry, size, size);
+        head.textContent = '↺';
+        overOut.appendChild(head);
+        glyphBoxes.push({ left: rx, right: rx + size, top: ry, bottom: ry + size });
       }
     });
 

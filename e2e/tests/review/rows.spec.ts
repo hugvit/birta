@@ -383,15 +383,15 @@ test.describe("removal stops", () => {
     expect((await changeRows(page)).map((r) => r.lead)).toEqual(['Claude · because you said "way too verbose"']);
   });
 
-  test("the strip names a removal stop: N of M · ## What › removed list item, and its keys", async ({ page, birta }) => {
+  test("the strip names a removal stop: 4 of 9 · ## What › removed list item, and its keys", async ({ page, birta }) => {
     await open(page, birta, [bent()]);
     await focusTo(page, MERGED);
-    await expect.poll(async () => (await strip(page))?.where ?? "").toMatch(/^\d+ of \d+ · ## What › list item · Claude's change$/);
-    const [n, m] = (await strip(page))!.where!.match(/^(\d+) of (\d+)/)!.slice(1).map(Number);
+    // The news list's nine stops: whole doc, Why, then the merged bullet
+    await expect.poll(async () => (await strip(page))?.where ?? "").toBe("3 of 9 · ## What › list item · Claude's change");
     await page.keyboard.press("j");
     await expect.poll(() => at(page)).toBe(`removal ${RESPECT} after ${MERGED}`);
     // The walk's stop after the merged bullet, counted among the same stops
-    await expect.poll(async () => (await strip(page))?.where).toBe(`${n + 1} of ${m} · ## What › removed list item`);
+    await expect.poll(async () => (await strip(page))?.where).toBe("4 of 9 · ## What › removed list item");
     expect((await strip(page))!.keys).toBe("y keep the cut · u put it back · c reply · n next");
   });
 
@@ -410,8 +410,9 @@ test.describe("removal stops", () => {
 
   test("once settled a removal is no stop, and its tick stays", async ({ page, birta }) => {
     const state = bent((s) => {
-      Object.assign(changeOf(s, RESPECT), { seen: true, settled: true });
+      Object.assign(changeOf(s, RESPECT), { seen: true, settled: true, check: "kept" });
       s.news = s.news.filter((n: State) => n.id !== RESPECT);
+      s.counts.to_check -= 1;
     });
     await open(page, birta, [state]);
     await focusTo(page, MERGED);

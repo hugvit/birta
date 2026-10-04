@@ -111,6 +111,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var standIns = new Set();
   // The walk's stops for the state they came from
   var walkFor = null;
+  var walkFolder = 0;
   var walkStops = [];
   // When your last wheel, touch or scroll key came, and the last scroll counted as yours
   var userAt = -Infinity;
@@ -188,10 +189,16 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return el.getClientRects().length ? el.getBoundingClientRect() : null;
   }
 
+  /** The walk for `state`, in the order n and p step through it. */
   function walkOf(state) {
-    if (state !== walkFor) {
+    var folder = BR.flow.folderNotes();
+    // A listing can bring folder notes with no new state
+    if (state !== walkFor || folder !== walkFolder) {
       walkFor = state;
-      walkStops = BR.pure.walk(state);
+      walkFolder = folder;
+      walkStops = BR.pure.walk(state, { folder: folder }).slice().sort(function (a, b) {
+        return before(keyOf(a), keyOf(b)) ? -1 : before(keyOf(b), keyOf(a)) ? 1 : 0;
+      });
     }
     return walkStops;
   }
@@ -375,7 +382,6 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     setFocus(next, all);
     reveal(next);
     if (BR.isHost(next)) BR.flow.hold(next);
-    if (!BR.isHost(next) || BR.flow.removalOf(next)) see(next);
   }
 
   function move(step) {
@@ -406,54 +412,92 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     else go(next, all);
   }
 
-  // --- seen and the attention walk ---
-
-  /** Sends seen for the unseen changes on `el`; true when there were any. */
-  function see(el) {
-    var state = BR.currentState();
-    var sp = el && el.getAttribute && el.getAttribute('data-sourcepos');
-    var gap = el && BR.flow.removalOf(el);
-    // The clean view shows no change to have seen
-    if (!state || !(sp || gap) || state.log_writable === false || BR.chrome.clean()) return false;
-    var ids = (state.changes || []).filter(function (c) {
-      return !c.seen && !c.settled && c.attr !== 'human' && (gap ? c.id === gap.change : c.range && c.range.sp === sp);
-    }).map(function (c) { return c.id; });
-    if (ids.length) BR.op({ op: 'seen', ids: ids });
-    return ids.length > 0;
-  }
+  // --- the walk, and checking what Claude did ---
 
   function keyOf(stop) { return [stop.line, stop.rank, stop.order]; }
 
-  /** The stop a walk entry sits on: a question and a removal are their own; the rest share their block, or whole doc. */
-  function stopOf(x) {
-    if (x.kind === 'removal') return 'r:' + x.id;
-    return x.kind === 'blank' ? 'q:' + x.id : x.sp ? 'b:' + x.sp : 'doc';
+  /** The focused stop as the walk names it: `doc`, `b:<sp>`, `r:<removal id>` or `q:<id>`. */
+  function focusStopKey() {
+    var el = isSummary(focus) ? summaryStop(focus) || focus : focus;
+    if (!el || el === docStop) return 'doc';
+    if (BR.isHost(el)) {
+      var n = BR.flow.blankItem(el);
+      if (n != null) return 'q:#' + n;
+      var gap = BR.flow.removalOf(el);
+      return gap ? 'r:' + gap.change : 'doc';
+    }
+    return 'b:' + el.getAttribute('data-sourcepos');
   }
+
+  /** Claude's news on stop `key`, else the focused one; a question's left out: its field takes the keys. */
+  function newsHere(state, key) {
+    key = key || focusStopKey();
+    return walkOf(state).filter(function (x) { return BR.pure.isNews(x.kind) && x.kind !== 'question' && x.stop === key; });
+  }
+
+  /**
+   * y or u on the focused stop's news. y checks everything on it in one seen, and nothing goes to
+   * Claude; u reverts each change of Claude's there that it can. `key` names the stop when a row,
+   * not the stop, holds the keyboard. False leaves y to the page.
+   */
+  function checkStop(action, key) {
+    var state = BR.currentState();
+    if (!state || state.log_writable === false) return false;
+    var here = newsHere(state, key);
+    var changes = here.filter(function (x) { return x.kind === 'change' || x.kind === 'removal'; });
+    var ask = BR.keyName('note') + ' to ask Claude';
+    if (action === 'revert_change') {
+      if (!changes.length) say('nothing here to revert');
+      else if (changes.every(function (x) { return x.check === 'reverted'; })) say('already reverted · ' + ask);
+      else BR.flow.revertAll(changes.filter(function (x) { return x.check !== 'reverted'; }).map(function (x) { return x.id; }));
+      return true;
+    }
+    if (!here.length) return false;
+    var open = here.filter(function (x) { return x.check == null; });
+    if (!open.length) {
+      if (changes.some(function (x) { return x.check === 'reverted'; })) say('already reverted · ' + ask);
+      else if (changes.length) say('already kept · ' + BR.keyName('revert_change') + ' reverts it');
+      else say(okOf(here));
+      return true;
+    }
+    BR.op({ op: 'seen', ids: open.map(function (x) { return x.id; }) });
+    if (open.some(function (x) { return x.kind === 'change' || x.kind === 'removal'; })) {
+      // A keep can't be taken back yet, so z stops at it rather than reaching past it
+      remember({ marker: 'nothing to undo · a keep stays kept' });
+      say('kept');
+    } else say(okOf(here));
+    return true;
+  }
+
+  /** What y on Claude's replies says: whole doc's are its replies, an answer to your question is its answer. */
+  function okOf(here) {
+    if (here[0].stop === 'doc') return "ok · Claude's replies";
+    return here.every(function (x) { return x.kind === 'answer'; }) ? "ok · Claude's answer" : "ok · Claude's reply";
+  }
+
+  /** The stop a walk entry sits on: a question and a removal are their own; the rest share their block, or whole doc. */
+  function stopOf(x) { return x.stop; }
 
   function before(a, b) {
     for (var i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] < b[i];
     return false;
   }
 
-  /**
-   * Focuses the stop walk entry `stop` sits on, the whole stop at once, and marks its changes and
-   * replies seen; blanks and not-handled rows wait for an answer or y.
-   */
+  /** Focuses the stop walk entry `stop` sits on, the whole stop at once; landing checks nothing. */
   function land(stop, state) {
     checkRound();
     var here = walkOf(state).filter(function (x) { return stopOf(x) === stopOf(stop); });
     cursor = { lo: keyOf(here[0]), hi: keyOf(here[here.length - 1]) };
-    var el = stop.kind === 'removal' ? BR.flow.removalStop(stop.id) : stop.sp ? blockOf(stop.sp) : docStop;
+    var key = stopOf(stop);
+    var el = key.indexOf('r:') === 0 ? BR.flow.removalStop(key.slice(2)) : key.indexOf('b:') === 0 ? blockOf(key.slice(2))
+      : stop.sp ? blockOf(stop.sp) : docStop;
     if (el) {
       setFocus(el, null, true);
       reveal(el);
     }
-    var ids = here.filter(function (x) { return x.unseen && (x.kind === 'change' || x.kind === 'reply' || x.kind === 'removal'); })
-      .map(function (x) { return x.id; });
-    if (ids.length) BR.op({ op: 'seen', ids: ids });
     var host = BR.flow.focusStop(stop);
-    // A blank is the stop itself, so j and k go on from it
-    if (stop.kind === 'blank' && host) {
+    // A question is the stop itself, so j and k go on from it
+    if (stop.kind === 'question' && host) {
       setFocus(host, null, true);
       reveal(host);
     }
@@ -472,21 +516,21 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var blank = el !== docStop && BR.isHost(el) ? BR.flow.blankItem(el) : null;
     var gap = el !== docStop ? BR.flow.removalOf(el) : null;
     if (el === docStop) {
-      mine = all.filter(function (x) { return !x.sp && x.kind !== 'removal'; });
+      mine = all.filter(function (x) { return x.stop === 'doc'; });
       line = 0;
     } else if (gap) {
-      mine = all.filter(function (x) { return x.kind === 'removal' && x.id === gap.change; });
+      mine = all.filter(function (x) { return x.stop === 'r:' + gap.change; });
       line = gap.after ? lineOf(gap.after) : 0;
       if (!mine.length) return { lo: [line, 5, -Infinity], hi: [line, 5, Infinity] };
     } else if (blank != null) {
-      mine = all.filter(function (x) { return x.kind === 'blank' && x.id === '#' + blank; });
+      mine = all.filter(function (x) { return x.stop === 'q:#' + blank; });
       var owner = focusWas && focusWas.owner;
       var sp = owner && owner.getAttribute('data-sourcepos');
       line = sp ? lineOf(sp) : 0;
       if (!mine.length) return { lo: [line, 2, -Infinity], hi: [line, 2, Infinity] };
     } else {
       var at = el.getAttribute('data-sourcepos');
-      mine = all.filter(function (x) { return x.sp === at && x.kind !== 'blank'; });
+      mine = all.filter(function (x) { return x.stop === 'b:' + at; });
       line = at ? lineOf(at) : 0;
     }
     if (mine.length) return { lo: keyOf(mine[0]), hi: keyOf(mine[mine.length - 1]) };
@@ -536,9 +580,6 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     // A click on a block focuses it, as j would, so a mouse opens its rows; links and controls keep their own click
     var stop = engaged() && !t.closest('a, button, input, select, textarea, summary, label') ? stopAt(t) : null;
     if (stop && stop !== focus) setFocus(stop);
-    for (var el = t; el && el !== content(); el = el.parentElement) {
-      if (el.hasAttribute('data-sourcepos') && see(el)) return;
-    }
   }
 
   function selectedRange() {
@@ -842,6 +883,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     }
     var top = undos[undos.length - 1];
     if (!top) return;
+    if (top.marker) {
+      undos.pop();
+      say(top.marker);
+      return;
+    }
     // Before its ack the line isn't known: take it back once the ack names it
     if (top.n == null) top.queued = true;
     else takeBack(top);
@@ -1126,6 +1172,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
           return true;
         }
       }
+      // Claude's news on the stop takes y and u first, as one check of the whole stop
+      if ((action === 'yes' || action === 'revert_change') && !selectedRange() && checkStop(action)) return true;
       // An open change row takes its keys first, the whole-doc stop's included; a selection beats it
       var row = ROW_KEYS[action] && (action === 'revert_change' || !selectedRange()) ? BR.flow.openRow() : null;
       if (row) {
@@ -1219,19 +1267,17 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     verdictOn: verdictOn,
     /** Leaves reading mode, then the source view, so a key acts on the rendered doc. */
     leaveModes: leaveModes,
-    /**
-     * The approve guard's jump: to the first unseen change or reply in doc order, else the first
-     * open question. False when there is neither.
-     */
+    /** The approve guard's jump: to the first walk stop with something to check. False when there is none. */
     guard: function () {
       var state = BR.currentState();
       if (!state) return false;
       var all = walkOf(state);
-      var first = all.filter(function (x) { return x.unseen && (x.kind === 'change' || x.kind === 'reply' || x.kind === 'removal'); })[0] ||
-        all.filter(function (x) { return x.kind === 'blank' && x.unseen; })[0];
-      if (first) land(first, state);
+      var first = all.filter(function (x) { return BR.pure.isNews(x.kind) && x.check == null; })[0];
+      if (first) land(all.filter(function (x) { return stopOf(x) === stopOf(first); })[0], state);
       return !!first;
     },
+    /** y or u on the focused stop's news: true when it acted; y on a stop with none is left to the page. */
+    checkStop: checkStop,
     /** Lands on this page's first or last walk stop, else stays on whole doc, and says `says` when given. */
     landAt: function (which, says) {
       var state = BR.currentState();

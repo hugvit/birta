@@ -187,22 +187,30 @@ test("Claude's change, not checked", () => {
   );
 });
 
-// Interim until 6.21: a kept or reverted change shows the not-checked keys. The table's own
-// copy, `kept · u revert · c reply · n next` and `reverted · u restore · c reply · n next`, lands then.
-for (const check of ["kept", "reverted"]) {
-  test(`${check === "kept" ? "Kept" : "Reverted"}: the where reads the same, and the keys are the not-checked ones until 6.21`, () => {
-    const BR = load();
-    const s = replied((s) => {
-      s.changes.find((c) => c.id === "9.0").check = check;
-      s.news.find((n) => n.id === "9.0").check = check;
-      s.counts.to_check -= 1;
-    });
-    assert.equal(
-      line(strip(BR, s, WHY)),
-      "2 of 9 · ## Why › paragraph · Claude's change | y keep · u revert · c reply · n next",
-    );
+test("Kept: the where reads the same, and the keys say kept", () => {
+  const BR = load();
+  const s = replied((s) => {
+    s.changes.find((c) => c.id === "9.0").check = "kept";
+    s.news.find((n) => n.id === "9.0").check = "kept";
+    s.counts.to_check -= 1;
   });
-}
+  assert.equal(line(strip(BR, s, WHY)), "2 of 9 · ## Why › paragraph · Claude's change | kept · u revert · c reply · n next");
+});
+
+// Interim until 6.26: a reverted change shows the not-checked keys. The table's own copy,
+// `reverted · u restore · c reply · n next`, lands with restore.
+test("Reverted: the where reads the same, and the keys are the not-checked ones until 6.26", () => {
+  const BR = load();
+  const s = replied((s) => {
+    s.changes.find((c) => c.id === "9.0").check = "reverted";
+    s.news.find((n) => n.id === "9.0").check = "reverted";
+    s.counts.to_check -= 1;
+  });
+  assert.equal(
+    line(strip(BR, s, WHY)),
+    "2 of 9 · ## Why › paragraph · Claude's change | y keep · u revert · c reply · n next",
+  );
+});
 
 test("a removal", () => {
   const BR = load();
@@ -315,14 +323,12 @@ test("a selection's hint", () => {
   assert.equal(r.where, "## Why › paragraph");
 });
 
-// --- Interim until 6.21: with no `news` in the state, the walk gives the position -----------------
+// --- The news list gives the position, as the page hands the strip the whole state --------------
 
-test("with no news list, a stop on the walk takes its place from the walk, and drafts don't count", () => {
+test("a stop on the walk takes its place from the news list, and drafts don't count", () => {
   const BR = load();
   const s = state("unseen");
-  // The page hands the strip the state without `news` until the walk reads it
-  delete s.news;
-  // unseen.json walks #13 on whole doc, 9.0, nh:5, 10.0, then the removal 11.0 in its gap
+  // unseen.json's news: #13 and the turn note on whole doc, 9.0 and its done, nh:5, 10.0, then the removal 11.0 in its gap
   assert.equal(strip(BR, s, DOC).where, "1 of 5 · whole doc · Claude replied");
   assert.equal(strip(BR, s, WHY).where, "2 of 5 · ## Why › paragraph · Claude's change");
   const nh = { k: "block", sp: "10:1-10:16", heading: "## What changes", kind: "list item" };
@@ -339,15 +345,27 @@ test("with no news list, a stop on the walk takes its place from the walk, and d
   assert.equal(strip(BR, drafted, mine).where, "## What changes › list item · your note");
 });
 
-test("with no news list, a removal is a walk stop of its own in its gap, apart from the block above", () => {
+test("a removal is a stop of its own in its gap, apart from the block above", () => {
   const BR = load();
   const s = state("unseen");
-  delete s.news;
   const removal = { k: "removal", change: "11.0", heading: "## Stacked on", kind: "paragraph" };
   assert.equal(line(strip(BR, s, removal)), "5 of 5 · ## Stacked on › removed paragraph | y keep the cut · u put it back · c reply · n next");
   // The heading above the gap holds nothing of Claude's
   const heading = { k: "block", sp: "14:1-14:13", heading: "## Stacked on", kind: null };
   assert.equal(strip(BR, s, heading).where, "## Stacked on");
+});
+
+test("a reply to a note on a block Claude cut counts on its removal's stop, not on whole doc", () => {
+  const BR = load();
+  // The journey's reply once whole doc's reply and turn note have settled out of the list
+  const s = bent("journey/round1", (s) => {
+    s.news = s.news.filter((n) => n.id !== "#4" && n.id !== "#21");
+    s.counts.to_check = 8;
+  });
+  // Whole doc holds only your settled note now, no stop of Claude's news
+  assert.equal(strip(BR, s, DOC).where, "whole doc · settled note");
+  const stacked = { k: "removal", change: "10.5", heading: "## Stacked on", kind: "section" };
+  assert.match(strip(BR, s, stacked).where, /^6 of 8 · /);
 });
 
 // --- The walk: your drafts join it ---------------------------------------------------------------
@@ -375,7 +393,9 @@ test("a sent note or a settled one is no draft, so it is not walked", () => {
   // unseen.json's notes are handled or not handled; only Claude's news walks
   assert.deepEqual(walk(BR, state("unseen")), [
     "reply #13 @doc",
+    "turn_note #14 @doc",
     "change 9.0 @5:1-6:68",
+    "reply #4 @5:1-6:68",
     "not_handled nh:5 @10:1-10:16",
     "change 10.0 @11:1-11:44",
     "removal 11.0 @after 14:1-14:13",
@@ -390,7 +410,7 @@ test("a draft sits in doc order among Claude's news", () => {
     s.counts.drafts = 2;
   });
   const at = walk(BR, s).map((e) => e.split(" @")[1]);
-  assert.deepEqual(at, ["doc", "doc", "5:1-6:68", "10:1-10:16", "11:1-11:44", "11:1-11:44", "after 14:1-14:13"]);
+  assert.deepEqual(at, ["doc", "doc", "doc", "5:1-6:68", "5:1-6:68", "10:1-10:16", "11:1-11:44", "11:1-11:44", "after 14:1-14:13"]);
 });
 
 // --- Adversary: N of M counts stops, not items ----------------------------------------------------
@@ -450,11 +470,10 @@ test("adversary: two removals in one gap are two stops, not one", () => {
   assert.equal(strip(BR, s, second).where, "5 of 10 · ## What › removed list item");
 });
 
-test("adversary: interim, two changes on one paragraph and the lost row on whole doc count as stops", () => {
+test("adversary: two changes on one paragraph and the lost row on whole doc count as stops", () => {
   const BR = load();
   const s = state("lost");
-  delete s.news;
-  // #11 and the lost row on whole doc, 9.0 and 14.0 on the paragraph, nh:5 on the bullet: three stops of news
+  // #4, #11, the turn note and the lost row on whole doc, 9.0 and 14.0 on the paragraph, nh:5 on the bullet: three stops of news
   assert.match(strip(BR, s, DOC).where, /^1 of 3 · whole doc/);
   const para = { k: "block", sp: "5:1-6:68", heading: "## Why", kind: "paragraph" };
   assert.match(strip(BR, s, para).where, /^2 of 3 · ## Why › paragraph/);

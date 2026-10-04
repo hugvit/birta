@@ -58,7 +58,7 @@ pub(crate) fn dir_state_json(
     folder: Option<&Summary>,
     mut files: Vec<Listed>,
 ) -> serde_json::Value {
-    let fresh = |f: &Listed| f.news || f.summary.as_ref().is_some_and(|s| s.counts.attention > 0);
+    let fresh = |f: &Listed| f.news || f.summary.as_ref().is_some_and(|s| s.counts.to_check > 0);
     let (mut drafts, mut unseen_files, mut decided, mut items) = (0u64, 0u64, 0u64, 0u64);
     for summary in files
         .iter()
@@ -70,7 +70,7 @@ pub(crate) fn dir_state_json(
         items += u64::from(summary.counts.items);
     }
     unseen_files += files.iter().filter(|f| fresh(f)).count() as u64;
-    unseen_files += u64::from(folder.is_some_and(|s| s.counts.unseen > 0));
+    unseen_files += u64::from(folder.is_some_and(|s| s.counts.to_check > 0));
     files.sort_by(|a, b| {
         fresh(b)
             .cmp(&fresh(a))
@@ -455,13 +455,13 @@ mod tests {
     }
 
     #[test]
-    fn news_is_the_memory_flag_or_something_needing_attention() {
-        // Only unseen replies, and no unseen change
+    fn news_is_the_memory_flag_or_something_to_check() {
+        // Only replies to check, and no unseen change
         let mut replies = summary(Stage::Replied, 0, 0, 0, 0);
-        replies.counts.attention = 2;
-        // Left to check but walked past: `to_check` drives the listing only once the walk reads it
+        replies.counts.to_check = 2;
+        // Changes you replied to are unseen, yet checked
         let mut checked = summary(Stage::Replied, 0, 0, 0, 0);
-        checked.counts.to_check = 2;
+        checked.counts.unseen = 2;
         let state = dir_state_json(
             "",
             false,
@@ -621,6 +621,21 @@ mod tests {
             state["totals"],
             json!({"drafts": 5, "unseen_files": 1, "decided": 2, "items": 4})
         );
+    }
+
+    #[test]
+    fn the_folder_counts_as_news_while_it_has_something_to_check() {
+        let unseen_files = |folder: &Summary| {
+            dir_state_json("", false, Some(folder), Vec::new())["totals"]["unseen_files"].clone()
+        };
+        // Replies to check, and no unseen change
+        let mut replies = summary(Stage::Replied, 0, 0, 0, 0);
+        replies.counts.to_check = 1;
+        assert_eq!(unseen_files(&replies), 1);
+        // Unseen, yet checked
+        let mut checked = summary(Stage::Replied, 0, 0, 0, 0);
+        checked.counts.unseen = 2;
+        assert_eq!(unseen_files(&checked), 0);
     }
 
     #[test]

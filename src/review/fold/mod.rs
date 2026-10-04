@@ -401,20 +401,23 @@ pub fn change_stop<'d>(changes: &[Change], doc: &'d Doc, c: &Change) -> Option<&
         None if c.range.status == RangeStatus::Superseded => Vec::new(),
         None => c.span.into_iter().collect(),
     };
-    spans.into_iter().find_map(|(first, last)| {
-        (first..=last)
-            .filter(|&l| {
-                doc.lines
-                    .range(l)
-                    .is_some_and(|r| !doc.text[r].trim().is_empty())
-            })
-            .find_map(|l| {
-                doc.blocks
-                    .stops
-                    .iter()
-                    .rfind(|s| s.lines.0 <= l && l <= s.lines.1)
-            })
-    })
+    spans.into_iter().find_map(|span| span_stop(doc, span))
+}
+
+/// The innermost stop holding the first line with text in `span`, as the text is now.
+pub fn span_stop(doc: &Doc, (first, last): (u32, u32)) -> Option<&anchor::Stop> {
+    (first..=last)
+        .filter(|&l| {
+            doc.lines
+                .range(l)
+                .is_some_and(|r| !doc.text[r].trim().is_empty())
+        })
+        .find_map(|l| {
+            doc.blocks
+                .stops
+                .iter()
+                .rfind(|s| s.lines.0 <= l && l <= s.lines.1)
+        })
 }
 
 /// The line the human copies to point an agent at the notes on `doc`.
@@ -574,6 +577,12 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
         .filter(|r| !r.withdrawn)
         .map(|r| r.n)
         .collect();
+    let approves: Vec<u32> = turns
+        .rounds
+        .iter()
+        .filter(|r| !r.withdrawn && r.kind == RoundKind::Approve)
+        .map(|r| r.n)
+        .collect();
     let agents: HashSet<u32> = parsed
         .lines
         .iter()
@@ -671,22 +680,6 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
         .iter()
         .filter(|c| c.attr != Attr::Human && !c.seen && !c.settled)
         .count() as u32;
-    // What the page's walk can still clear by landing; it becomes `to_check` once the walk
-    // reads `news`
-    let attention = items
-        .iter()
-        .map(|i| {
-            let replies = i
-                .replies
-                .iter()
-                .filter(|r| r.by.kind == ByKind::Agent && !r.seen)
-                .count();
-            let open = agent_ask(i);
-            let unseen_nh = i.status == ItemStatus::NotHandled && !i.seen;
-            replies + usize::from(open) + usize::from(unseen_nh)
-        })
-        .sum::<usize>() as u32
-        + unseen;
     let news = news::build(&news::Input {
         doc,
         lines: &parsed.lines,
@@ -697,6 +690,7 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
         changes: &built.changes,
         deletions: &built.deletions,
         rounds: &standing,
+        approves: &approves,
     });
     for it in &mut items {
         if it.at.change.is_none() {
@@ -719,7 +713,8 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
         lost: lost.len() as u32,
         items: item_stops(doc).count() as u32,
         decided: decided(&notes, doc, &mut texts),
-        attention,
+        // The tab's dot and the folder's news: the stops still holding something to check
+        attention: news.to_check,
         to_check: news.to_check,
     };
 

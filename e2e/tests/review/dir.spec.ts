@@ -20,6 +20,7 @@ import {
   withRev,
   stripMessage,
   focusMark,
+  stripPlace,
 } from "./harness";
 
 // The phrase prints local times; UTC lets the spec name them from the epoch alone
@@ -721,7 +722,8 @@ const WALK: Record<string, string> = {
   "fresh.md": fixtureDoc("fresh"),
 };
 const WALK_STATES = () => [fixtureState("unseen"), fixtureState("replied"), fixtureState("fresh")];
-// In doc order unseen.json walks #13, 9.0, nh:5, 10.0, 11.0; replied.json #11, 9.0, nh:5; fresh.json nothing
+// unseen.json's news walks five stops: whole doc (#13, #14), the paragraph (9.0, #4), nh:5, 10.0, 11.0;
+// replied.json's three: whole doc (#11, #12), the paragraph (9.0, #4), nh:5; fresh.json nothing
 
 async function openWalk(page: Page, birta: Start, dir: State) {
   const served = await birta(WALK, GATE_ON, ["."]);
@@ -751,7 +753,9 @@ test.describe("n and p stay in the file", () => {
     for (let i = 0; i < 5; i++) await page.keyboard.press("n");
     await page.waitForTimeout(SETTLE_MS);
     expect(viewing(page)).toBe("/view/unseen.md");
-    expect(seenOn(mock, 0)).toEqual([["#13"], ["9.0"], ["10.0"], ["11.0"]]);
+    // Landing never checks
+    expect(seenOn(mock, 0)).toEqual([]);
+    expect(await focusMark(page)).toMatchObject({ target: "removal", change: "11.0" });
 
     await page.keyboard.press("n");
     await expect.poll(() => stripMessage(page)).toBe("no more · p back");
@@ -772,7 +776,8 @@ test.describe("n and p stay in the file", () => {
       if (key === "n") for (let i = 0; i < 6; i++) await page.keyboard.press("n");
       else {
         await page.keyboard.press("n");
-        await expect.poll(() => seenOn(mock, 0)).toEqual([["#13"]]);
+        await expect.poll(() => focused(page)).toBe("doc");
+        await expect.poll(() => stripPlace(page)).toBe("1 of 5");
         await page.keyboard.press("p");
       }
       await expect.poll(() => stripMessage(page)).toBe("no more · p back");
@@ -823,12 +828,14 @@ test.describe("n and p stay in the file", () => {
     ]);
     const { mock } = await openWalk(page, birta, dir);
     await page.keyboard.press("n");
-    await expect.poll(() => seenOn(mock, 0)).toEqual([["#13"]]);
+    await expect.poll(() => focused(page)).toBe("doc");
+    await expect.poll(() => stripPlace(page)).toBe("1 of 5");
     await page.keyboard.press("p");
     await expect.poll(() => stripMessage(page)).toBe("no more · p back");
     await page.waitForTimeout(1_000);
     expect(viewing(page)).toBe("/view/unseen.md");
     expect(await focused(page)).toBe("doc");
+    expect(seenOn(mock, 0)).toEqual([]);
   });
 
   test("Shift+J onto a file with nothing to walk lands on whole doc and stays", async ({ page, birta }) => {
@@ -849,7 +856,8 @@ test.describe("n and p stay in the file", () => {
     for (let i = 0; i < 7; i++) await page.keyboard.press("n");
     await page.waitForTimeout(SETTLE_MS);
     expect(viewing(page)).toBe("/view/unseen.md");
-    expect(seenOn(mock, 0)).toEqual([["#13"], ["9.0"], ["10.0"], ["11.0"]]);
+    expect(seenOn(mock, 0)).toEqual([]);
+    expect(await focusMark(page)).toMatchObject({ target: "removal", change: "11.0" });
   });
 });
 
@@ -952,8 +960,10 @@ test.describe("a listing that comes before review starts", () => {
     await page.keyboard.press("Shift+J");
     await page.waitForURL(`${served.url}/view/replied.md`);
     await booted(page);
-    await expect.poll(() => seenOn(mock, 1)).toEqual([["#11"]]);
+    // Its first stop is whole doc, holding Claude's reply and turn note; landing there checks nothing
+    await expect.poll(() => stripPlace(page)).toBe("1 of 3");
     expect(await focused(page)).toBe("doc");
+    expect(seenOn(mock, 1)).toEqual([]);
   });
 });
 

@@ -102,7 +102,7 @@ function opFields(frame: State): State {
 }
 
 const opsNamed = (mock: Mock, name: string) => mock.ops().filter((o) => o.op === name).map(opFields);
-/** Every op but seen, which moving onto a changed block sends. */
+/** Every op but seen, which y on Claude's news sends. */
 const writes = (mock: Mock) => mock.ops().filter((o) => o.op !== "seen").map(opFields);
 
 /** Goes to whole doc, the first stop. */
@@ -141,6 +141,13 @@ async function walkToBlank(page: Page, question: string) {
   await expect.poll(async () => (await blankFocus(page)) ?? "").toContain(question);
 }
 
+/** Keeps only the news items `ids`, and the fold's count of the stops still to check. */
+function keepNews(s: State, ids: string[]) {
+  s.news = s.news.filter((n: State) => ids.includes(n.id));
+  const stop = (n: State) => (n.kind === "removal" ? `r:${n.id}` : n.kind === "question" ? `q:${n.id}` : (n.sp ?? "doc"));
+  s.counts.to_check = new Set(s.news.filter((n: State) => n.check == null).map(stop)).size;
+}
+
 /** flow.json with only its two blanks: n has the open one as its one stop. */
 function blanksOnly(s: State) {
   s.changes = [];
@@ -148,6 +155,7 @@ function blanksOnly(s: State) {
   s.lost = [];
   s.items = s.items.filter((i: State) => i.n === 21 || i.n === 22);
   s.counts = { ...s.counts, unseen: 0, attention: 1, not_handled: 0, lost: 0 };
+  keepNews(s, ["#21", "#22"]);
 }
 
 const blank = (page: Page, has: string) => page.locator('birta-flow[data-kind="blank"]', { hasText: has });
@@ -168,6 +176,8 @@ function onlyChange(id: string, sp?: string) {
     s.lost = [];
     s.items = s.items.filter((i: State) => (s.changes[0].asked.notes ?? []).includes(i.n));
     s.counts = { ...s.counts, unseen: 1, attention: 1, open_asks: 0, not_handled: 0, lost: 0, drafts: 0 };
+    keepNews(s, [id]);
+    if (sp) s.news[0].sp = sp;
   };
 }
 
@@ -195,7 +205,7 @@ test.describe("u", () => {
     });
     await page.keyboard.press("n");
     await page.keyboard.press("u");
-    await expect.poll(() => stripMessage(page)).toBe("can't undo this one · c instead");
+    await expect.poll(() => stripMessage(page)).toBe("can't revert this one: a later change overlaps · c to ask Claude");
     await page.waitForTimeout(SETTLE_MS);
     expect(writes(mock)).toEqual([]);
     expect(await sourceShown(page)).toBe(false);
@@ -297,6 +307,7 @@ test.describe("rows that can't take a no or a revert", () => {
       s.items = [];
       s.lost = [];
       s.counts = { ...s.counts, unseen: 1, attention: 1, open_asks: 0, not_handled: 0, lost: 0, drafts: 0 };
+      keepNews(s, ["11.0"]);
     });
     await page.keyboard.press("n");
     await page.keyboard.press("x");
@@ -309,11 +320,15 @@ test.describe("rows that can't take a no or a revert", () => {
   test("u on a muted row from an earlier round shows no source and reverts nothing", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow", (s) => {
       onlyChange("13.0")(s);
-      // A later round the agent has answered: 13.0 is from the one before
+      // A later round the agent has answered: 13.0, kept in the one before, was settled by its hand-back
       s.rounds.push({ submit: 30, ts: s.server_now - 30_000, by: "", to: "*", items: [], claim: 31, claimed_by: "claude", yield: 35, released: false });
+      Object.assign(s.changes[0], { seen: true, settled: true, check: "kept" });
+      keepNews(s, []);
     });
-    await page.keyboard.press("n");
+    // Settled, it is no walk stop: j reaches its block
+    await focusOn(page, "5:1-6:68");
     await page.keyboard.press("u");
+    await expect.poll(() => stripMessage(page)).toBe("nothing here to revert");
     await page.waitForTimeout(SETTLE_MS);
     expect(await sourceShown(page)).toBe(false);
     expect(opsNamed(mock, "undo_change")).toEqual([]);
@@ -432,10 +447,11 @@ test.describe("the whole-doc stop", () => {
     await expect.poll(() => opsNamed(mock, "undo_change")).toEqual([{ op: "undo_change", change: "13.0" }]);
     await page.keyboard.press("x");
     await expect.poll(() => stripMessage(page)).toBe(ROW_X);
-    const seenBefore = opsNamed(mock, "seen").length;
+    // Landing sent no seen; y is the one check, and nothing reaches Claude as a verdict
+    expect(opsNamed(mock, "seen")).toEqual([]);
     await page.keyboard.press("y");
-    await expect.poll(() => opsNamed(mock, "seen").length).toBe(seenBefore + 1);
-    expect(opsNamed(mock, "seen").at(-1)).toEqual({ op: "seen", ids: ["13.0"] });
+    await expect.poll(() => opsNamed(mock, "seen")).toEqual([{ op: "seen", ids: ["13.0"] }]);
+    expect(opsNamed(mock, "comment")).toEqual([]);
     await page.keyboard.press("c");
     await expect(composer(page)).toBeFocused();
     await page.keyboard.type("why here?");
@@ -707,6 +723,8 @@ test.describe("blanks", () => {
         const asked = s.items.find((i: State) => i.n === 22);
         asked.status = "open";
         asked.replies = [];
+        s.news.find((n: State) => n.id === "#22").check = null;
+        s.counts.to_check = 2;
       });
       await walkToBlank(page, ANSWERED_Q);
       if (from === OPEN_Q) await walkToBlank(page, OPEN_Q);
@@ -962,6 +980,7 @@ function twoChanges(s: State) {
   s.lost = [];
   s.items = s.items.filter((i: State) => i.n === 10 || i.n === 6);
   s.counts = { ...s.counts, unseen: 2, attention: 2, open_asks: 0, not_handled: 0, lost: 0, drafts: 0 };
+  keepNews(s, ["13.0", "15.0", "#6"]);
 }
 
 /** Your draft quote note on "we just fail" in flow.json's paragraph. */
@@ -1018,7 +1037,7 @@ test.describe("killers: u and the row", () => {
     await page.keyboard.press("x");
     await expect.poll(() => stripMessage(page)).toBe('no · "When the upload hits a 503…" (paragraph) · z to undo');
     await page.keyboard.press("z");
-    // The mock acks every op in turn from line 101, the walk's seen first
+    // The mock acks every op in turn from line 101; landing sent none
     const line = 101 + mock.ops().findIndex((o) => o.op === "comment");
     await expect.poll(() => opsNamed(mock, "retract")).toEqual([{ op: "retract", to: line }]);
 
@@ -1037,10 +1056,14 @@ test.describe("killers: u and the row", () => {
       onlyChange("13.0")(s);
       s.changes[0].undone_by = 40;
       s.changes[0].reversible = { ok: false, reason: "later_overlap" };
+      // Reverted is a check: news keeps it until a hand-back, and it outranks the overlap
+      s.changes[0].check = "reverted";
+      s.news[0].check = "reverted";
+      s.counts.to_check = 0;
     });
     await page.keyboard.press("n");
     await page.keyboard.press("u");
-    await expect.poll(() => stripMessage(page)).toBe("already reverted · c note to ask for it back");
+    await expect.poll(() => stripMessage(page)).toBe("already reverted · c to ask Claude");
     await page.waitForTimeout(SETTLE_MS);
     expect(await sourceShown(page)).toBe(false);
     expect(writes(mock)).toEqual([]);
@@ -1161,6 +1184,8 @@ test.describe("killers: the whole-doc stop", () => {
       blanksOnly(s);
       s.items = s.items.filter((i: State) => i.n === 21);
       s.items[0].at = { kind: "doc", loc: null };
+      keepNews(s, ["#21"]);
+      s.news[0].sp = null;
     });
     await page.locator('birta-flow[data-kind="blank"]', { hasText: OPEN_Q }).waitFor();
     await expect.poll(() => focused(page)).toBe("doc");

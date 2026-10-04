@@ -93,8 +93,8 @@
     "lost": 0,
     "items": 3,
     "decided": 2,
-    "attention": 1,
-    "to_check": 3
+    "attention": 0,
+    "to_check": 0
   },
   "items": [
     {
@@ -362,24 +362,5 @@
     }
   ],
   "warnings": [],
-  "news": [
-    {
-      "id": "#12",
-      "kind": "turn_note",
-      "sp": null,
-      "check": null
-    },
-    {
-      "id": "#4",
-      "kind": "reply",
-      "sp": "5:1-6:68",
-      "check": null
-    },
-    {
-      "id": "nh:5",
-      "kind": "not_handled",
-      "sp": "10:1-10:16",
-      "check": null
-    }
-  ]
+  "news": []
 }

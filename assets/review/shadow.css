@@ -141,6 +141,13 @@
   border: 1.5px solid var(--verdict);
 }
 
+/* Your revert of Claude's change: its head stands where your bar would */
+.revert {
+  color: var(--review-you);
+  font: 600 13px/16px var(--birta-font, system-ui, sans-serif);
+  text-align: center;
+}
+
 /* Over the words a no asks to cut: they read at 70 %, never struck */
 .veil {
   background-color: var(--bgColor-default, var(--birta-bg));

@@ -151,7 +151,7 @@ function opFields(frame: State): State {
   return out;
 }
 
-/** Every op but seen, which landing on a changed block sends. */
+/** Every op but seen, which y on Claude's news sends. */
 const writes = (mock: Mock) => mock.ops().filter((o) => o.op !== "seen").map(opFields);
 
 /** Polls until the focus mark is on `whole doc`: `data-target="doc"`, with no block's sp. */
@@ -480,6 +480,9 @@ const ARRIVE: Record<string, string> = {
 function newsState(): State {
   const s = withRev(fixtureState("unseen"), revOf(NEWS_DOC));
   s.items = s.items.filter((i: State) => i.n !== 6);
+  // With no whole-doc note there is no whole-doc reply or turn note: the first walk stop is a block
+  s.news = s.news.filter((n: State) => n.sp != null || n.kind === "removal");
+  s.counts.to_check -= 1;
   return s;
 }
 

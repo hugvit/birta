@@ -14,104 +14,89 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return { quote: quote, rest: m[3] };
   };
 
-  /**
-   * What is news to the reader, the count behind the tab's dot: unseen changes, then unseen agent
-   * replies, open agent questions and not-handled rows, each in doc order with the doc slot first.
-   * Each stop is `{kind, id, sp}`, with `id` the one its seen op would carry.
-   */
   // Doc order is block order: the start line of a stop's sp, with the doc slot first
   function lineOf(sp) { return sp ? parseInt(sp, 10) : 0; }
 
-  BR.pure.attention = function (s) {
-    var out = [];
-    var lost = {};
-    (s.lost || []).forEach(function (n) { lost[n] = 1; });
-    var removed = {};
-    (s.deletions || []).forEach(function (d) { removed[d.change] = d; });
-    (s.changes || []).forEach(function (c) {
-      if (c.seen || c.settled || c.attr === 'human') return;
-      var d = removed[c.id];
-      // Until the walk reads news, attention counts a removal at the block above its gap
-      var sp = (c.range && c.range.sp) || (d && d.after_sp) || null;
-      out.push({ kind: 'change', id: c.id, sp: sp, rank: 0, line: lineOf(sp), order: c.op * 1e4 + c.idx });
-    });
-    (s.items || []).forEach(function (i) {
-      var sp = !lost[i.n] && i.at && i.at.kind !== 'doc' && i.at.loc ? i.at.loc.sp : null;
-      var line = lineOf(sp);
-      (i.replies || []).forEach(function (r) {
-        if (r.by && r.by.type === 'agent' && !r.seen) out.push({ kind: 'reply', id: r.id, sp: sp, rank: 1, line: line, order: r.n });
-      });
-      if (i.by && i.by.type === 'agent' && i.verdict === 'ask' && i.status === 'open') {
-        out.push({ kind: 'blank', id: '#' + i.n, sp: sp, rank: 2, line: line, order: i.n });
-      }
-      if (i.status === 'not_handled' && !i.seen) {
-        out.push({ kind: 'not_handled', id: 'nh:' + i.n, sp: sp, rank: 3, line: line, order: i.n });
-      }
-    });
-    out.sort(function (a, b) { return a.rank - b.rank || a.line - b.line || a.order - b.order; });
-    return out;
-  };
+  // What the walk holds of Claude's, as `news` names it; your drafts and the lost and folder rows are the page's own
+  var NEWS_KINDS = { change: 1, removal: 1, reply: 1, answer: 1, question: 1, not_handled: 1, turn_note: 1 };
 
-  /** Whether a hand-back after line `n` has covered it. */
-  function covered(s, n) {
-    return (s.rounds || []).some(function (r) { return r.submit > n; });
+  /** Whether a walk entry of `kind` is Claude's news, not your draft or one of the page's own rows. */
+  BR.pure.isNews = function (kind) { return !!NEWS_KINDS[kind]; };
+
+  /**
+   * The stop news item `n` sits on: `doc`, `b:<sp>`, `r:<removal id>` or `q:<id>`, with the line
+   * and rank the walk orders stops by. A reply to a note on a block Claude cut joins that cut's stop.
+   */
+  function newsStop(s, n, removals, notes) {
+    if (n.kind === 'removal') return { stop: 'r:' + n.id, after: n.after_sp || null, line: lineOf(n.after_sp), rank: 5 };
+    if (n.kind === 'question') return { stop: 'q:' + n.id, line: lineOf(n.sp), rank: 2 };
+    if (n.sp) return { stop: 'b:' + n.sp, line: lineOf(n.sp), rank: 0 };
+    var i = notes[n.id];
+    var d = i && i.at && i.at.change ? removals[i.at.change] : null;
+    if (d) return { stop: 'r:' + d.change, after: d.after_sp || null, line: lineOf(d.after_sp), rank: 5 };
+    return { stop: 'doc', line: 0, rank: 0 };
   }
 
   /**
-   * What `n` and `p` walk: every stop until it is settled, that is seen and then covered by a
-   * hand-back, so a round stays walkable after one pass, and your unsent notes. One top-to-bottom
-   * order, the doc slot first; on one block a change, your note, a reply, a blank, a not-handled
-   * row, and last in the doc slot the lost-notes row; a removal follows in its gap. Each stop is
-   * `{kind, id, sp, unseen}`, `id` as its seen op names it, and a removal's `after_sp` names its gap.
+   * What `n` and `p` walk: Claude's news as the state lists it, in its order, until a hand-back
+   * settles it, plus your unsent notes, the lost-notes row and, with `opts.folder` notes on the
+   * served folder, the folder-notes row. Your whole-doc notes open the doc slot and its rows close
+   * it, before Claude's turn note. Each entry is `{kind, id, sp, after_sp?, stop, check}`, `id` as
+   * its seen op names it and `stop` the stop it sits on.
    */
-  BR.pure.walk = function (s) {
-    var out = [];
+  BR.pure.walk = function (s, opts) {
+    var removals = {};
+    (s.news || []).forEach(function (n) {
+      if (n.kind === 'removal') removals[n.id] = { change: n.id, after_sp: n.after_sp || null };
+    });
     var lost = {};
     (s.lost || []).forEach(function (n) { lost[n] = 1; });
-    var removed = {};
-    (s.deletions || []).forEach(function (d) { removed[d.change] = d; });
-    function add(kind, id, sp, rank, order, unseen) {
-      out.push({ kind: kind, id: id, sp: sp, unseen: unseen, rank: rank, line: lineOf(sp), order: order });
-    }
-    var back = {};
-    (s.changes || []).forEach(function (c) { if (c.range && c.range.sp && back[c.op] == null) back[c.op] = c.range.sp; });
-    (s.changes || []).forEach(function (c) {
-      if (c.attr === 'human') return;
-      // Your revert settles a change, yet its row stays a stop, at the block it put back, until the round ends
-      if (c.undone_by != null && !covered(s, c.undone_by)) {
-        add('change', c.id, (c.range && c.range.sp) || back[c.undone_by] || null, 0, c.op * 1e4 + c.idx, false);
-        return;
-      }
-      if (c.settled) return;
-      var d = removed[c.id];
-      if (d && d.kind === 'block' && !(c.range && c.range.sp)) {
-        // A removal is a stop of its own in its gap, after all of the block above it
-        var after = d.after_sp || null;
-        out.push({ kind: 'removal', id: c.id, sp: null, after_sp: after, unseen: !c.seen, rank: 5, line: after ? lineOf(after) : 0,
-          order: c.op * 1e4 + c.idx });
-        return;
-      }
-      add('change', c.id, (c.range && c.range.sp) || null, 0, c.op * 1e4 + c.idx, !c.seen);
-    });
+    // The item a news id belongs to: a bare done or a not-handled row is its note, a reply its own line
+    var notes = {};
     (s.items || []).forEach(function (i) {
-      var sp = !lost[i.n] && i.at && i.at.kind !== 'doc' && i.at.loc ? i.at.loc.sp : null;
-      (i.replies || []).forEach(function (r) {
-        if (r.by && r.by.type === 'agent' && (!r.seen || !covered(s, r.n))) add('reply', r.id, sp, 1, r.n, !r.seen);
-      });
-      if (i.by && i.by.type === 'agent' && i.verdict === 'ask') {
-        var mine = (i.replies || []).filter(function (r) { return r.by && r.by.type === 'human'; });
-        var last = mine[mine.length - 1];
-        if (i.status === 'open' || (i.status === 'answered' && last && !covered(s, last.n))) {
-          add('blank', '#' + i.n, sp, 2, i.n, i.status === 'open');
-        }
-      }
-      if (i.status === 'not_handled' && (!i.seen || !covered(s, i.turn))) add('not_handled', 'nh:' + i.n, sp, 3, i.n, !i.seen);
-      // Your unsent notes are walked too, so n finds what you left before you hand it back
-      if (i.by && i.by.type === 'human' && i.status === 'draft') add('draft', '#' + i.n, sp, 0.5, i.n, false);
+      if (lost[i.n]) return;
+      notes['#' + i.n] = i;
+      notes['nh:' + i.n] = i;
+      (i.replies || []).forEach(function (r) { if (r.id) notes[r.id] = i; });
     });
-    if ((s.lost || []).length) add('lost', 'lost', null, 4, 0, false);
-    out.sort(function (a, b) { return a.line - b.line || a.rank - b.rank || a.order - b.order; });
+    var out = (s.news || []).map(function (n) {
+      var at = newsStop(s, n, removals, notes);
+      var e = { kind: n.kind, id: n.id, sp: n.sp == null ? null : n.sp, stop: at.stop, check: n.check == null ? null : n.check,
+        line: at.line, rank: at.rank };
+      if (n.kind === 'removal') e.after_sp = at.after;
+      return e;
+    });
+    // The page's own rows close the doc slot, before Claude's turn note
+    var own = [];
+    if ((s.lost || []).length) own.push({ kind: 'lost', id: 'lost', sp: null, stop: 'doc', check: null, line: 0, rank: 0 });
+    if (opts && opts.folder > 0) own.push({ kind: 'folder', id: 'folder', sp: null, stop: 'doc', check: null, line: 0, rank: 0 });
+    if (own.length) {
+      var turn = -1;
+      out.forEach(function (e, k) { if (e.stop === 'doc' && e.kind === 'turn_note' && turn < 0) turn = k; });
+      var end = 0;
+      out.forEach(function (e, k) { if (e.stop === 'doc') end = k + 1; });
+      var at = turn >= 0 ? turn : end;
+      out = out.slice(0, at).concat(own, out.slice(at));
+    }
+    // Your unsent notes join in doc order: whole doc's first, a block's with that block's stop
+    var mine = (s.items || []).filter(function (i) { return i.by && i.by.type === 'human' && i.status === 'draft'; }).map(function (i) {
+      var sp = !lost[i.n] && i.at && i.at.kind !== 'doc' && i.at.loc ? i.at.loc.sp : null;
+      return { kind: 'draft', id: '#' + i.n, sp: sp, stop: sp ? 'b:' + sp : 'doc', check: null, line: lineOf(sp), rank: sp ? 0 : -1, n: i.n };
+    }).sort(function (a, b) { return a.line - b.line || a.n - b.n; });
+    mine.forEach(function (d) {
+      var k = 0;
+      while (k < out.length && (out[k].line < d.line || (out[k].line === d.line && out[k].rank <= d.rank))) k++;
+      delete d.n;
+      out.splice(k, 0, d);
+    });
+    // n and p step by these: a stop's line, then where on it, then the list's own order
+    out.forEach(function (e, k) { e.order = k; });
     return out;
+  };
+
+  /** Claude's news still to check, in walk order, each on its stop: the tab's dot and the approve guard read it. */
+  BR.pure.attention = function (s) {
+    return BR.pure.walk(s).filter(function (e) { return NEWS_KINDS[e.kind] && e.check == null; });
   };
 
   // --- a change's substance: what its words did ---
@@ -398,6 +383,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   // Open blanks past this many show only their question until focused
   var OPEN_BLANKS = 5;
   var CANT_UNDO = "can't undo this one · c instead";
+  // A row's tail once you checked its change; a revert's says more
+  var TAILS = { kept: 'kept', restored: 'kept', replied: 'you replied' };
   var BLANK_HINT = 'type an answer · y yes · x no · . your call · l later';
   var TYPE_IT = '⏎ to type an answer';
   var ANSWERED = { yes: 'yes', no: 'no', later: 'later', your_call: 'your call' };
@@ -443,11 +430,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var pending = {};
   // A no on an open change row waiting for its second x: {id, until}
   var armed = null;
-  // The cid of an undo the server hasn't answered, so a second x can't send another
+  // The undos the server hasn't answered, `{cids, why}`, so a second u can't send more
   var undoing = null;
-  // The block the keys act on, and the change n landed on there: they decide which rows are open
+  // The block the keys act on: every row under it is open
   var focusSp = null;
-  var landed = null;
   // The removal whose stop has focus, by change id: its row opens there
   var focusGap = null;
   // Rows open now, in doc order, and the one whose keys act
@@ -595,6 +581,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   /** The block a change's row goes under: its own, the one your revert put back, or the one above its tick. */
   function rowSp(c) {
     if (c.range && c.range.sp) return c.range.sp;
+    // A change a later write overlapped is news on that write's block
+    if (c.undone_by == null && c.range && c.range.status === 'superseded') {
+      var n = ((state && state.news) || []).filter(function (x) { return x.id === c.id; })[0];
+      if (n && n.sp) return n.sp;
+    }
     if (c.undone_by != null) {
       var back = ((state && state.changes) || []).filter(function (x) { return x.op === c.undone_by && x.range && x.range.sp; })[0];
       if (back) return back.range.sp;
@@ -660,7 +651,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       if (h.entry && h.entry.kind === 'lost') lostKey(ev);
       else if (h.blank && h.entry && h.entry.kind === 'blank') blankKey(ev, h);
       else if (h.entry && (h.entry.change || h.entry.removal)) return;
-      else if (h.entry && h.entry.nh != null) notHandledKey(ev, h.entry.nh);
+      else if (h.entry && h.entry.nh != null) notHandledKey(ev, h);
       else if (h.entry && h.entry.focusable) noteKey(ev, h);
     });
     // A quiet blank shows its slot while it has focus
@@ -671,7 +662,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     box.addEventListener('click', function () {
       if (h.blank && h.entry && h.entry.kind === 'blank') {
         if (writable() && !h.blank.slot.querySelector('textarea')) openAnswer(h);
-      } else if (h.entry && h.entry.seen && writable()) BR.op({ op: 'seen', ids: [h.entry.seen] });
+      }
     });
     hosts.set(id, h);
     return h;
@@ -707,7 +698,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     h.entry = e;
     if (e.removal) h.host.setAttribute('data-removal', e.removal.change);
     else h.host.removeAttribute('data-removal');
-    var sig = JSON.stringify([e.kind, e.lead, e.pre, e.text, e.struck, e.tail, e.prefix, e.meta, e.keys, e.fold, e.quiet,
+    var sig = JSON.stringify([e.kind, e.lead, e.pre, e.text, e.struck, e.tail, e.version, e.prefix, e.meta, e.keys, e.fold, e.quiet,
       e.muted, e.lost, e.kind === 'lost' && lostOpen, e.answer && e.answer.n, e.said, e.substance, e.sections]);
     if (h.sig === sig) return;
     h.sig = sig;
@@ -821,6 +812,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (e.tail) {
       var tail = el('span', 'tail', e.tail);
       tail.setAttribute('data-part', 'tail');
+      if (e.version != null) tail.appendChild(md('span', 'muted', e.version));
       line.append(' · ', tail);
     }
     if (e.keys) keysRow(line, e.keys);
@@ -910,7 +902,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     e.change = c;
     if (c.id === keyedRow) e.keys = rowKeys(canUndo(c));
     e.focusable = true;
-    e.seen = c.seen ? null : c.id;
+    // Its check, once you made one, closes the row
+    var tail = c.undone_by == null && TAILS[c.check];
+    if (tail) {
+      e.tail = tail;
+      e.muted = e.muted || c.check !== 'replied';
+    }
     return e;
   }
 
@@ -982,7 +979,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   function rowOf(c, s) {
     var e = { id: 'c' + c.id, kind: 'receipt', muted: muted(c), rule: ['dotted', 'agent'] };
     if (c.undone_by != null) {
-      e.pre = 'reverted';
+      // Your revert put its words back, so the row keeps why, and Claude's own words after
+      e.said = c.attr === 'outside' ? ['changed outside birta' + (c.cause === 'git' ? ' (git)' : '')] : [who(c.by) + ' · '].concat(whyOf(c, s));
+      e.substance = {};
+      e.tail = 'reverted by you · ' + "Claude's version: ";
+      e.version = c.new_text || '';
       return receiptOf(c, e);
     }
     var outside = 'changed outside birta' + (c.cause === 'git' ? ' (git)' : '');
@@ -1026,11 +1027,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return !c.settled;
   }
 
-  /** Works out which rows are open: the focused removal's, the change n landed on, else every row under the focused block. */
+  /** Works out which rows are open: the focused removal's, else every row under the focused block. */
   function openRows(s) {
     var ids = [];
     if (focusGap && changeOf(focusGap)) ids = [focusGap];
-    else if (landed && changeOf(landed) && !tombstone(changeOf(landed))) ids = [landed];
     else if (focusSp) {
       (s.changes || []).forEach(function (c) {
         if (c.attr !== 'human' && !tombstone(c) && rowSp(c) === focusSp) ids.push(c.id);
@@ -1159,8 +1159,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         (i.replies || []).forEach(function (r, k) {
           var human = r.by && r.by.type === 'human';
           add({ id: 'r' + r.n, kind: 'reply', lead: '↳ ' + who(r.by) + ' · ', pre: r.kind === 'didnt' ? "didn't · " : null,
-            text: r.body || r.verdict || '', fold: true,
-            seen: !human && !r.seen ? r.id : null, rule: ['solid', human ? 'you' : 'agent'] }, slot, [group, i.n, 1 + k]);
+            text: r.body || r.verdict || '', fold: true, rule: ['solid', human ? 'you' : 'agent'] }, slot, [group, i.n, 1 + k]);
         });
         var name = turnAgent(i.turn);
         if (done) {
@@ -1724,12 +1723,32 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   /** u on a change: revert it, once, when birta can. */
   function revert(c) {
-    if (!canUndo(c)) {
-      BR.chrome.say(CANT_UNDO);
+    revertAll([c.id]);
+  }
+
+  /** Why birta can't revert `cs`: a later change over one, else the receipt's own refusal. */
+  function cantOf(cs) {
+    if (cs.some(function (c) { return c.reversible && c.reversible.reason === 'later_overlap'; })) {
+      return "can't revert this one: a later change overlaps · " + BR.keyName('note') + ' to ask Claude';
+    }
+    return CANT_UNDO;
+  }
+
+  /** u on a stop: reverts each of changes `ids` birta can, and names what it couldn't, once the reverts are back. */
+  function revertAll(ids) {
+    var cs = ids.map(changeOf).filter(Boolean);
+    var cant = cs.filter(function (c) { return !canUndo(c); });
+    var can = cs.filter(canUndo);
+    var why = cant.length ? cantOf(cant) : null;
+    if (!can.length) {
+      if (why) BR.chrome.say(why);
       return;
     }
     if (undoing) return;
-    undoing = BR.op({ op: 'undo_change', change: c.id });
+    undoing = { cids: can.map(function (c) { return BR.op({ op: 'undo_change', change: c.id }); }), why: why };
+    // A revert can't be taken back yet, so z stops at it rather than reaching past it
+    BR.pointing.remember({ marker: 'nothing to undo · a revert stays' });
+    if (why) BR.chrome.say(why);
   }
 
   /** x on an open row is "no" to its text, so it takes a second x while the first one's message stands. */
@@ -1763,8 +1782,22 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (!writable()) return;
     if (a === 'revert_change') revert(c);
     else if (a === 'no') rowNo(c);
-    else if (a === 'yes') BR.op({ op: 'seen', ids: [c.id] });
+    else if (a === 'yes' && !BR.pointing.checkStop('yes', 'b:' + rowSp(c))) {
+      BR.op({ op: 'seen', ids: [c.id] });
+      // As y on a stop: a keep can't be taken back yet, so z stops at it
+      BR.pointing.remember({ marker: 'nothing to undo · a keep stays kept' });
+      BR.chrome.say('kept');
+    }
     else if (a === 'note') open('note', { k: 'change', id: c.id }, null);
+  }
+
+  /** The walk stop a row's host sits on: its note's cut block's removal, its block, or whole doc. */
+  function stopOfHost(h) {
+    var i = h.entry && h.entry.item;
+    var c = i && i.at && i.at.change ? changeOf(i.at.change) : null;
+    if (c && tombstone(c)) return 'r:' + c.id;
+    var slot = h.entry && h.entry.slot;
+    return slot && slot.sp ? 'b:' + slot.sp : 'doc';
   }
 
   function lostKey(e) {
@@ -1774,10 +1807,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     toggleLost();
   }
 
-  // A not-handled row needs y to be acknowledged; stepping or clicking onto it never does
-  function notHandledKey(e, n) {
+  // A not-handled row is checked by y alone; stepping or clicking onto it never does
+  function notHandledKey(e, h) {
     if (e.defaultPrevented || e.isComposing || e.keyCode === 229 || action(e) !== 'yes') return;
-    if (writable()) BR.op({ op: 'seen', ids: ['nh:' + n] });
+    // y checks the row with the rest of its stop, as y on the stop does
+    if (writable() && !BR.pointing.checkStop('yes', stopOfHost(h))) BR.op({ op: 'seen', ids: ['nh:' + h.entry.nh] });
     e.preventDefault();
     e.stopPropagation();
   }
@@ -1804,7 +1838,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     e.stopPropagation();
     if (!writable()) return;
     if (unsentEnter) keepUnsent(entry.unsent);
-    else if (a === 'yes' && entry.item && settled(entry.item)) BR.op({ op: 'seen', ids: ['#' + entry.item.n] });
+    else if (a === 'yes' && entry.item && settled(entry.item) && !BR.pointing.checkStop('yes', stopOfHost(h))) BR.op({ op: 'seen', ids: ['#' + entry.item.n] });
   }
 
   /**
@@ -1972,9 +2006,13 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         reconcile();
         break;
       case 'ack':
-        if (msg.cid === undoing) {
-          undoing = null;
-          BR.chrome.say('reverted');
+        if (undoing && undoing.cids.indexOf(msg.cid) >= 0) {
+          undoing.cids.splice(undoing.cids.indexOf(msg.cid), 1);
+          if (!undoing.cids.length) {
+            // What it couldn't revert stays said
+            BR.chrome.say(undoing.why ? 'reverted · ' + undoing.why : 'reverted');
+            undoing = null;
+          }
         }
         delete pending[msg.cid];
         if (afterAck[msg.cid]) {
@@ -1984,7 +2022,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         }
         break;
       case 'nack':
-        if (msg.cid === undoing) undoing = null;
+        if (undoing && undoing.cids.indexOf(msg.cid) >= 0) undoing = null;
         delete afterAck[msg.cid];
         if (msg.reason) BR.chrome.nack(msg.reason);
         drafts = drafts.filter(function (d) { return d.cid !== msg.cid; });
@@ -2087,10 +2125,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
      * blank. False when the stop has no line of its own.
      */
     focusStop: function (stop) {
-      if (stop.kind === 'change') {
-        landed = stop.id;
-        reconcile();
-      }
+      if (stop.kind === 'reply' && stop.stop.indexOf('r:') === 0) stop = { kind: 'removal', id: stop.stop.slice(2) };
+      // Every row on the stop opens, so y never keeps a change you couldn't see
+      if (stop.kind === 'change') reconcile();
       if (stop.kind === 'removal') {
         var gap = hosts.get('x' + stop.id);
         if (gap) gap.box.focus({ preventScroll: true });
@@ -2102,7 +2139,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         if (hit || !e || !h.host.isConnected) return;
         if ((stop.kind === 'change' && e.change && e.change.id === stop.id) ||
           (stop.kind === 'not_handled' && 'nh:' + e.nh === stop.id) ||
-          (stop.kind === 'blank' && e.kind === 'blank' && '#' + e.blank === stop.id) ||
+          (stop.kind === 'question' && e.kind === 'blank' && '#' + e.blank === stop.id) ||
           (stop.kind === 'lost' && e.kind === 'lost')) hit = h;
       });
       if (hit) hit.box.focus({ preventScroll: true });
@@ -2126,6 +2163,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     /** Takes back a first x on a row: any other key does. */
     disarm: function () { armed = null; },
     rowKey: rowKey,
+    revertAll: revertAll,
+    /** Live notes on the served folder, which the walk visits on whole doc. */
+    folderNotes: function () { return BOOT.review && BOOT.review.dir ? folderNotes : 0; },
     /** The blank hosts on the page, which j and k stop on like blocks. */
     blanks: function () {
       var out = [];
@@ -2171,10 +2211,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     focusBlock: function (el) {
       var sp = el && el.getAttribute ? el.getAttribute('data-sourcepos') : null;
       var gap = el && el.getAttribute ? el.getAttribute('data-removal') : null;
-      if (sp === focusSp && gap === focusGap && !landed) return;
+      if (sp === focusSp && gap === focusGap) return;
       focusSp = sp;
       focusGap = gap;
-      landed = null;
       // Focus moved off an open composer, as a click elsewhere does: the redraw mustn't take it back
       if (comp && document.activeElement !== comp.h.host) comp.active = false;
       reconcile();

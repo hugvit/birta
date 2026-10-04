@@ -1202,9 +1202,6 @@ function handedBack(state: State, submit: number): State {
   return round;
 }
 
-/** A seen op for changes only, which a j walk past changed blocks sends. */
-const changeSeen = (o: State) => o.op === "seen" && o.ids.every((id: string) => /^\d+\.\d+$/.test(id));
-
 /** An op frame without the envelope the core adds. */
 function opFields(frame: State): State {
   const out = { ...frame };
@@ -1345,6 +1342,8 @@ test.describe("a big turn", () => {
     await page.waitForTimeout(SETTLE_MS);
     const named = mock.ops().filter((o) => o.op === "seen").flatMap((o) => o.ids).filter((id: string) => TURN_CHANGES.includes(id));
     expect(named).toEqual([]);
+    // A click is never a check: no seen goes at all
+    expect(mock.ops().filter((o) => o.op === "seen")).toEqual([]);
   });
 
   test("each change of a big turn opens its own row at its block", async ({ page, birta }) => {
@@ -1412,12 +1411,14 @@ test.describe("note dots", () => {
     expect(await dots(page)).toEqual([]);
   });
 
-  test("y on a focused handled note sends seen with the note's own id", async ({ page, birta }) => {
+  test("y on a focused handled note sends seen with its stop's ids, its own done among them", async ({ page, birta }) => {
     const { mock } = await open(page, birta, FLOW_DOC, { state: fixtureState("flow") });
     await page.locator('birta-flow[data-kind="note"]', { hasText: "cap it" }).click();
     await page.keyboard.press("y");
     await expect.poll(() => mock.ops().length).toBe(1);
-    expect(mock.ops()[0]).toMatchObject({ op: "seen", ids: ["#6"] });
+    // y checks the stop the note is on: its done, and Claude's change on its bullet
+    expect(mock.ops()[0]).toMatchObject({ op: "seen" });
+    expect([...mock.ops()[0].ids].sort()).toEqual(["#6", "15.0"]);
   });
 
   test("⏎ on a folded note's block opens it here and sends nothing", async ({ page, birta }) => {
@@ -1428,8 +1429,8 @@ test.describe("note dots", () => {
     await expect.poll(async () => texts(await hostsAt(page, "11:1-11:44")).join("\n")).toContain("cap it");
     await expect.poll(async () => (await dots(page)).length).toBe(0);
     await page.waitForTimeout(SETTLE_MS);
-    // The walk there steps past changed blocks, which marks them seen; a note's own seen still counts
-    expect(mock.ops().filter((o) => !changeSeen(o))).toEqual([]);
+    // Stepping past changed blocks checks nothing, and opening the note sends nothing either
+    expect(mock.ops()).toEqual([]);
   });
 
   test("a note folded by y stays folded after a reload, and a new reply opens it again", async ({ page, birta }) => {
@@ -1680,15 +1681,18 @@ test.describe("names, verdicts and z", () => {
 
   test("a verdict key on a block whose verdict was sent never edits the sent one", async ({ page, birta }) => {
     const { mock } = await open(page, birta, FLOW_DOC, { state: fixtureState("flow") });
-    // Item 7: no, sent, not handled
+    // Item 7: no, sent, not handled; its not-handled row is Claude's news on the block
     await focusOn(page, "10:1-10:16");
-    for (const key of ["y", "x"]) {
+    for (const key of ["y", "l"]) {
       await page.keyboard.press(key);
       await page.waitForTimeout(SETTLE_MS);
     }
     expect(mock.ops().filter((o) => o.to === 7)).toEqual([]);
-    // The walk there steps past changed blocks, which marks them seen
-    expect(mock.ops().filter((o) => !changeSeen(o))[0]).toMatchObject({ op: "comment", verdict: "yes", at: { k: "block", sp: "10:1-10:16" } });
+    // Stepping past changed blocks checks nothing: y checks the row, and l is a new verdict
+    expect(mock.ops().map(opFields)).toEqual([
+      { op: "seen", ids: ["nh:7"] },
+      { op: "comment", at: { k: "block", sp: "10:1-10:16", scope: "block" }, verdict: "later" },
+    ]);
   });
 
   test("c on a verdict that has words opens them in the composer, and ⏎ sends the edit", async ({ page, birta }) => {

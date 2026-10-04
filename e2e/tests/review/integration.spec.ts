@@ -7,6 +7,7 @@ import {
   State,
   agent,
   booted,
+  focused,
   highlighted,
   hhmm,
   linesNamed,
@@ -410,7 +411,7 @@ test.describe("beacon", () => {
 // --- seen ---------------------------------------------------------------------------------
 
 test.describe("seen", () => {
-  test("after a real agent round, marking its change seen reaches the log, the server's state and a reload", async ({
+  test("after a real agent round, y on its change marks it seen in the log, the server's state and a reload", async ({
     page,
     birta,
   }) => {
@@ -432,19 +433,25 @@ test.describe("seen", () => {
     expect(responded.status, responded.stdout + responded.stderr).toBe(0);
 
     await expect.poll(() => turnOf(page), { timeout: 5_000 }).toMatch(/^Approve · 1 unseen/);
-    const changeId = () => {
+    const agentChange = () => {
       const s = [...frames.got].reverse().find((f) => f.msg.type === "review_state" && f.msg.path === "pr.md")?.msg.state;
-      return (s?.changes ?? []).find((c: State) => c.attr === "agent")?.id as string | undefined;
+      return (s?.changes ?? []).find((c: State) => c.attr === "agent") as State | undefined;
     };
-    await expect.poll(changeId).toBeDefined();
-    // Nothing is marked seen until the reader walks to it
-    expect(linesNamed(served.root, "seen")).toEqual([]);
-    const id = changeId()!;
-    for (let i = 0; i < 5 && !linesNamed(served.root, "seen").some((l) => l.ids.includes(id)); i++) {
+    await expect.poll(() => agentChange()?.range?.sp).toBeDefined();
+    const id = agentChange()!.id as string;
+    const sp = agentChange()!.range.sp as string;
+    // Walking to it checks nothing: only y does
+    for (let i = 0; i < 5 && (await focused(page)) !== sp; i++) {
       await page.keyboard.press("n");
       await page.waitForTimeout(150);
     }
+    await expect.poll(() => focused(page)).toBe(sp);
+    await page.waitForTimeout(300);
+    expect(linesNamed(served.root, "seen")).toEqual([]);
+    await page.keyboard.press("y");
     await expect.poll(() => linesNamed(served.root, "seen").some((l) => l.ids.includes(id))).toBe(true);
+    // One y, one seen line
+    expect(linesNamed(served.root, "seen")).toHaveLength(1);
     const seenInState = (socket: number) =>
       frames.got.some(
         (f) =>

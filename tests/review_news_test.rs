@@ -226,6 +226,7 @@ fn the_journeys_reply_is_twelve_items_of_news_on_nine_stops() {
     // Nine stops: whole doc, Why, the merged bullet, the Respect cut, Honor, the Log
     // cut, the Stacked on cut (with its reply), the unit-test bullet, the suite item
     assert_eq!(to_check(&v), 9);
+    assert_eq!(v["counts"]["attention"], 9);
 }
 
 #[test]
@@ -345,6 +346,7 @@ fn the_journeys_nine_stops_are_checked_one_at_a_time() {
         }
         let v = wire(&j.s.fold());
         assert_eq!(to_check(&v), *left, "after step {k}: {:?}", listed(&v));
+        assert_eq!(v["counts"]["attention"], *left, "after step {k}");
     }
     let v = wire(&j.s.fold());
     assert_eq!(news(&v).len(), 12, "{:?}", listed(&v));
@@ -496,16 +498,35 @@ fn a_withdrawn_hand_back_settles_nothing() {
 
 #[test]
 fn an_approve_settles_what_was_checked() {
-    let (mut s, ext, reply) = reworded();
+    let (mut s, ext, _) = reworded();
     s.seen(&[&id(ext, 0)]);
     s.approve();
     let v = wire(&s.fold());
-    assert_eq!(
-        listed(&v),
-        [item(&hash(reply), "reply", Value::Null)],
-        "the unchecked reply stays"
+    // Approve keeps every change you didn't revert, so the unchecked reply settles too
+    assert_eq!(listed(&v), [], "{:?}", listed(&v));
+    assert_eq!(to_check(&v), 0);
+    assert_eq!(v["counts"]["attention"], 0);
+}
+
+/// An approve as is, with nothing checked, settles all of Claude's news, so the tab's dot
+/// and the folder's news clear; what comes after it is news again.
+#[test]
+fn an_approve_as_is_settles_all_news_checked_or_not() {
+    let (mut s, ..) = reworded();
+    let v = wire(&s.fold());
+    assert_eq!(to_check(&v), 2, "setup: {:?}", listed(&v));
+    s.approve();
+    let v = wire(&s.fold());
+    assert_eq!(listed(&v), [], "{:?}", listed(&v));
+    assert_eq!(to_check(&v), 0);
+    assert_eq!(v["counts"]["attention"], 0);
+    let later = s.replace_line("- first item", "- first item, after the approve");
+    let v = wire(&s.fold());
+    assert!(
+        listed(&v).iter().any(|(i, ..)| *i == id(later, 0)),
+        "{:?}",
+        listed(&v)
     );
-    assert_eq!(to_check(&v), 1);
 }
 
 // --- what checks an item ---
@@ -1062,4 +1083,102 @@ fn a_revert_edited_afterwards_keeps_its_change_on_the_block() {
         .find(|i| i["n"] == note)
         .unwrap();
     assert_eq!(it["at"]["change"], id(ext, 0), "{it}");
+}
+
+/// A later write over part of Claude's change leaves it news, on the block that write
+/// holds, so the reviewer sees it with the write over it until a hand-back settles it.
+#[test]
+fn a_change_a_later_write_overlaps_stays_news_on_its_block_until_settled() {
+    let mut s = Scenario::new(DOC);
+    let x = s.note("tighten it");
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    let text = s.text().replace(
+        "Intro paragraph here,\nwith a second line.",
+        "Intro, tightened,\nand its second line.",
+    );
+    let claude = s.external(&text);
+    s.done(CLAUDE, x, turn);
+    s.yield_turn(CLAUDE, turn);
+    let outside = s.replace_line("Intro, tightened,", "Intro, tightened by hand,");
+    let v = wire(&s.fold());
+    let mine = id(claude, 0);
+    assert_eq!(
+        change(&v, &mine)["range"]["sp"],
+        Value::Null,
+        "setup: overlapped"
+    );
+    let para = sp_of(s.text(), "Intro, tightened by hand,");
+    assert_eq!(entry(&v, &mine)["sp"], para);
+    assert_eq!(entry(&v, &mine)["kind"], "change");
+    assert!(check(&v, &mine).is_null());
+    assert_eq!(entry(&v, &id(outside, 0))["sp"], para);
+    // One stop holds both, and it is to check until the overlapped change is checked too
+    s.seen(&[id(outside, 0).as_str()]);
+    let v = wire(&s.fold());
+    assert!(check(&v, &mine).is_null());
+    // The doc's `done`, and the overlapped change
+    assert_eq!(to_check(&v), 2);
+    s.seen(&[mine.as_str(), &hash(x)]);
+    let v = wire(&s.fold());
+    assert_eq!(check(&v, &mine), "kept");
+    assert_eq!(to_check(&v), 0);
+    s.submit();
+    let v = wire(&s.fold());
+    assert!(
+        !listed(&v).iter().any(|(i, ..)| *i == mine),
+        "{:?}",
+        listed(&v)
+    );
+}
+
+/// Claude's own later hunk in the same turn stands for the one it overlaps: one change of
+/// news, not two. Your revert of it puts the earlier hunk's words back, which are then news.
+#[test]
+fn claudes_own_overlap_in_one_turn_is_one_change_of_news() {
+    let mut s = Scenario::new(DOC);
+    let x = s.note("tighten it");
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    let first = s.replace_line("- third item", "- third item, first try");
+    let second = s.replace_line("- third item, first try", "- third item, second try");
+    s.done(CLAUDE, x, turn);
+    s.yield_turn(CLAUDE, turn);
+    let v = wire(&s.fold());
+    let ids: Vec<String> = listed(&v).into_iter().map(|(i, ..)| i).collect();
+    assert!(!ids.contains(&id(first, 0)), "{ids:?}");
+    assert!(ids.contains(&id(second, 0)), "{ids:?}");
+    // The doc's `done`, and the one change
+    assert_eq!(to_check(&v), 2);
+    // u on it: the doc holds the first try now, which nobody checked
+    let back = s.replaced("- third item, second try", "- third item, first try");
+    s.undo(&id(second, 0), &back);
+    let v = wire(&s.fold());
+    assert_eq!(check(&v, &id(second, 0)), "reverted");
+    let block = sp_of(s.text(), "- third item, first try");
+    assert_eq!(entry(&v, &id(first, 0))["sp"], block);
+    assert!(check(&v, &id(first, 0)).is_null());
+}
+
+/// Claude's write in a later turn over a change it made earlier leaves that change news.
+#[test]
+fn a_later_turns_overlap_keeps_the_earlier_change_news() {
+    let mut s = Scenario::new(DOC);
+    let x = s.note("tighten it");
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    let first = s.replace_line("- third item", "- third item, first try");
+    s.done(CLAUDE, x, turn);
+    s.yield_turn(CLAUDE, turn);
+    let y = s.note("and the list");
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    let second = s.replace_line("- third item, first try", "- third item, second try");
+    s.done(CLAUDE, y, turn);
+    s.yield_turn(CLAUDE, turn);
+    let v = wire(&s.fold());
+    let block = sp_of(s.text(), "- third item, second try");
+    assert_eq!(entry(&v, &id(first, 0))["sp"], block);
+    assert!(check(&v, &id(first, 0)).is_null());
+    assert_eq!(entry(&v, &id(second, 0))["sp"], block);
 }

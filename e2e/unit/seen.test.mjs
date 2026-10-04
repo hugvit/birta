@@ -33,10 +33,12 @@ function bent(name, edit) {
 // Results come from the vm context, whose objects have their own prototypes
 const plain = (v) => (v == null ? v : JSON.parse(JSON.stringify(v)));
 
-/** The walk as `kind id @sp` strings, `@doc` for the doc slot. */
-function walk(BR, s) {
-  return plain(BR.pure.attention(s)).map((e) => `${e.kind} ${e.id} @${e.sp ?? "doc"}`);
+/** Claude's news still to check, as `kind id @stop` strings. */
+function attention(BR, s) {
+  return plain(BR.pure.attention(s)).map((e) => `${e.kind} ${e.id} @${e.stop}`);
 }
+
+const NAMES = ["unseen", "flow", "replied", "approved", "fresh", "drafts", "sent", "picked", "rewrite", "hold", "lost", "journey/round1"];
 
 for (const [name, files] of [
   ["in bundle order", ORDER],
@@ -47,81 +49,103 @@ for (const [name, files] of [
   });
 }
 
-// --- The walk n and p take -------------------------------------------------------------------
+// --- What is left to check -------------------------------------------------------------------
 
-test("unseen changes come first in doc order, then unseen replies, then not-handled rows", () => {
-  // The doc-level reply sits above every block and the not-handled row above the second
-  // change, so a walk in plain doc order would interleave them
-  assert.deepEqual(walk(load(), state("unseen")), [
-    "change 9.0 @5:1-6:68",
-    "change 10.0 @11:1-11:44",
-    // A removed block has no sp of its own: it is walked at the block above its tick
-    "change 11.0 @14:1-14:13",
+test("what is left to check is every unchecked news item, in walk order, each on its stop", () => {
+  assert.deepEqual(attention(load(), state("unseen")), [
     "reply #13 @doc",
-        "not_handled nh:5 @10:1-10:16",
+    "turn_note #14 @doc",
+    "change 9.0 @b:5:1-6:68",
+    "reply #4 @b:5:1-6:68",
+    "not_handled nh:5 @b:10:1-10:16",
+    "change 10.0 @b:11:1-11:44",
+    "removal 11.0 @r:11.0",
   ]);
 });
 
-test("every kind in one state: changes, replies, open blanks, then not-handled rows", () => {
-  assert.deepEqual(walk(load(), state("flow")), [
-    // Outside writes count as unseen too; changes go by their line, not their op
-    "change 13.0 @5:1-6:68",
-    "change 26.0 @8:1-8:15",
-    "change 15.0 @11:1-11:44",
-    "change 19.0 @14:1-14:21",
-    "change 27.0 @16:1-16:19",
-    "reply #18 @doc",
-    // Item 22 is answered, and your own reply to it is not news
-    "blank #21 @3:1-3:6",
-    // Notes that lost their place are walked in the doc slot, in line order
+test("every kind in one state: an answered question is checked, so it leaves; an open one stays", () => {
+  assert.deepEqual(attention(load(), state("flow")), [
     "not_handled nh:4 @doc",
     "not_handled nh:5 @doc",
-    "not_handled nh:7 @10:1-10:16",
+    "reply #18 @doc",
+    "turn_note #23 @doc",
+    "question #21 @q:#21",
+    "change 13.0 @b:5:1-6:68",
+    "change 26.0 @b:8:1-8:15",
+    "not_handled nh:7 @b:10:1-10:16",
+    "change 15.0 @b:11:1-11:44",
+    "reply #6 @b:11:1-11:44",
+    "reply #9 @b:12:1-13:0",
+    "change 19.0 @b:14:1-14:21",
+    "change 27.0 @b:16:1-16:19",
   ]);
 });
 
 test("the walk has as many stops as the fold counts for attention", () => {
-  const BR = load();
   for (const name of ["unseen", "flow", "replied", "approved", "fresh", "drafts", "sent", "picked", "rewrite", "hold", "lost"]) {
     const s = state(name);
-    assert.equal(plain(BR.pure.attention(s)).length, s.counts.attention, name);
+    // The tab's count is the fold's stops to check, which the walk reads from 6.21
+    assert.equal(s.counts.attention, s.counts.to_check, name);
   }
 });
 
-test("a change you have seen, your own edit, and a settled change leave the walk", () => {
+test("the stops left to check are the fold's to_check, per fixture", () => {
+  const BR = load();
+  for (const name of NAMES) {
+    const s = state(name);
+    assert.equal(new Set(plain(BR.pure.attention(s)).map((e) => e.stop)).size, s.counts.to_check, name);
+  }
+});
+
+test("a checked item leaves what is left to check, but stays walked", () => {
+  const BR = load();
   const s = bent("unseen", (s) => {
-    s.changes[0].seen = true;
-    s.changes[1].attr = "human";
-    s.changes[1].by = { type: "human", via: "browser" };
-    s.changes[2].settled = true;
+    s.news.find((n) => n.id === "9.0").check = "kept";
+    s.news.find((n) => n.id === "#13").check = "ok";
   });
-  assert.deepEqual(walk(load(), s), ["reply #13 @doc", "not_handled nh:5 @10:1-10:16"]);
+  const left = attention(BR, s);
+  assert.ok(!left.some((e) => e.includes(" 9.0 ") || e.includes(" #13 ")), left.join(", "));
+  // #4 is still unchecked on 9.0's paragraph, so the stop is still to check
+  assert.ok(left.includes("reply #4 @b:5:1-6:68"));
+  const walked = plain(BR.pure.walk(s)).map((e) => e.id);
+  assert.ok(walked.includes("9.0") && walked.includes("#13"));
 });
 
-test("a reply you have seen leaves the walk", () => {
-  const s = bent("unseen", (s) => (s.items.find((i) => i.n === 6).replies[0].seen = true));
-  assert.deepEqual(walk(load(), s).filter((e) => e.startsWith("reply")), []);
+test("every check counts as checked: kept, ok, reverted, restored, replied and answered", () => {
+  const BR = load();
+  for (const check of ["kept", "ok", "reverted", "restored", "replied", "answered"]) {
+    const s = bent("unseen", (s) => (s.news.find((n) => n.id === "10.0").check = check));
+    assert.ok(!attention(BR, s).some((e) => e.includes(" 10.0 ")), check);
+  }
 });
 
-test("a not-handled row you have acknowledged leaves the walk", () => {
-  const s = bent("flow", (s) => (s.items.find((i) => i.n === 7).seen = true));
-  assert.deepEqual(walk(load(), s).filter((e) => e.startsWith("not_handled")), ["not_handled nh:4 @doc", "not_handled nh:5 @doc"]);
+test("what is left to check follows news, not the seen flags on changes, replies or rows", () => {
+  const BR = load();
+  const s = bent("unseen", (s) => {
+    for (const c of s.changes) c.seen = true;
+    for (const i of s.items) {
+      i.seen = true;
+      for (const r of i.replies ?? []) r.seen = true;
+    }
+    s.counts.unseen = 0;
+  });
+  assert.equal(attention(BR, s).length, 7);
 });
 
-test("an open blank stays in the walk until it is answered, whatever was seen", () => {
+test("an open question stays to check until it is answered, whatever was seen", () => {
   const BR = load();
   const seen = bent("flow", (s) => (s.items.find((i) => i.n === 21).seen = true));
-  assert.ok(walk(BR, seen).includes("blank #21 @3:1-3:6"));
-  const answered = bent("flow", (s) => (s.items.find((i) => i.n === 21).status = "answered"));
-  assert.ok(!walk(BR, answered).some((e) => e.startsWith("blank")));
+  assert.ok(attention(BR, seen).includes("question #21 @q:#21"));
+  const answered = bent("flow", (s) => (s.news.find((n) => n.id === "#21").check = "answered"));
+  assert.ok(!attention(BR, answered).some((e) => e.startsWith("question")));
 });
 
-test("a state with nothing new has an empty walk", () => {
-  assert.deepEqual(walk(load(), state("fresh")), []);
-  assert.deepEqual(walk(load(), state("drafts")), []);
+test("a state with nothing new has nothing to check", () => {
+  assert.deepEqual(attention(load(), state("fresh")), []);
+  assert.deepEqual(attention(load(), state("drafts")), []);
 });
 
-test("the walk leaves the state as it found it", () => {
+test("what is left to check leaves the state as it found it", () => {
   const s = state("flow");
   const before = JSON.stringify(s);
   load().pure.attention(s);
@@ -142,29 +166,31 @@ test("an undo the server can't make reads as the receipt's own refusal", () => {
 
 // --- Killers ---------------------------------------------------------------------------------
 
-test("a not-handled row the fold marks seen leaves the walk, and the length still matches the count", () => {
+test("a not-handled row checked by y leaves what is left to check, and the stops still match the count", () => {
   const BR = load();
   const s = bent("unseen", (s) => {
-    s.items.find((i) => i.n === 5).seen = true;
-    s.counts.attention -= 1;
+    s.news.find((n) => n.id === "nh:5").check = "ok";
+    s.counts.to_check -= 1;
   });
-  assert.deepEqual(walk(BR, s).filter((e) => e.startsWith("not_handled")), []);
-  assert.equal(plain(BR.pure.attention(s)).length, s.counts.attention);
+  assert.deepEqual(attention(BR, s).filter((e) => e.startsWith("not_handled")), []);
+  assert.equal(new Set(plain(BR.pure.attention(s)).map((e) => e.stop)).size, s.counts.to_check);
 });
 
-test("a removal at the very top walks in the doc slot, ahead of the other changes", () => {
-  const s = bent("unseen", (s) => (s.deletions.find((d) => d.change === "11.0").after_sp = null));
-  assert.deepEqual(walk(load(), s).slice(0, 3), ["change 11.0 @doc", "change 9.0 @5:1-6:68", "change 10.0 @11:1-11:44"]);
+test("a removal is a stop of its own, even at the very top", () => {
+  const s = bent("unseen", (s) => {
+    s.deletions.find((d) => d.change === "11.0").after_sp = null;
+    s.news.find((n) => n.id === "11.0").after_sp = null;
+  });
+  assert.ok(attention(load(), s).includes("removal 11.0 @r:11.0"));
 });
 
-test("two changes on one block are two stops, in op order", () => {
+test("two changes on one block are two items on one stop", () => {
   assert.deepEqual(
-    walk(load(), state("lost")).filter((e) => e.startsWith("change")),
-    ["change 9.0 @5:1-6:68", "change 14.0 @5:1-6:68"],
+    attention(load(), state("lost")).filter((e) => e.startsWith("change")),
+    ["change 9.0 @b:5:1-6:68", "change 14.0 @b:5:1-6:68"],
   );
 });
 
-test("only an agent's open ask is a blank", () => {
-  const s = bent("flow", (s) => (s.items.find((i) => i.n === 21).by = { type: "human", via: "browser" }));
-  assert.ok(!walk(load(), s).some((e) => e.startsWith("blank")));
+test("a reply on a note whose block Claude cut is to check on that removal's stop", () => {
+  assert.ok(attention(load(), state("journey/round1")).includes("reply #6 @r:10.5"));
 });

@@ -215,15 +215,16 @@ const bars = (BR, s) =>
     .filter((m) => m.mark === "bar")
     .map((m) => ({ sp: m.sp, weight: m.weight, fresh: m.fresh }));
 
-test("an earlier round's settled change keeps a 1 px bar; this round's are 3 px, fresh until seen", () => {
+test("an earlier round's settled change keeps a 1 px bar; this round's are 3 px, fresh until checked", () => {
   const BR = load();
   assert.deepEqual(bars(BR, rounds()), [
     { sp: "5:1-6:68", weight: 1, fresh: false },
     { sp: "11:1-11:44", weight: 3, fresh: true },
   ]);
-  assert.deepEqual(bars(BR, rounds((s) => (s.changes[1].seen = true))), [
+  // Seen is kept: the bar thins and mutes
+  assert.deepEqual(bars(BR, rounds((s) => Object.assign(s.changes[1], { seen: true, check: "kept" }))), [
     { sp: "5:1-6:68", weight: 1, fresh: false },
-    { sp: "11:1-11:44", weight: 3, fresh: false },
+    { sp: "11:1-11:44", weight: 1, fresh: false },
   ]);
 });
 
@@ -248,7 +249,10 @@ test("a settled change draws no wash, and a block's newest unsettled change deci
 test("a round with no changes of its own leaves every bar thin, and every settled removal keeps its tick", () => {
   const BR = load();
   const s = bent("unseen", (s) => {
-    for (const c of s.changes) Object.assign(c, { seen: true, settled: true });
+    for (const c of s.changes) Object.assign(c, { seen: true, settled: true, check: "kept" });
+    // Settled news leaves the list
+    const ids = new Set(s.changes.map((c) => c.id));
+    s.news = s.news.filter((n) => !ids.has(n.id));
     s.rounds.push({ ...s.rounds[0], submit: 20, claim: 21, yield: 25, items: [] });
   });
   assert.deepEqual(bars(BR, s), [

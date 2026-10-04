@@ -88,12 +88,6 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (!action || !reviewable()) return false;
     // Source view and reading mode hide the doc the key acts on
     BR.pointing.leaveModes();
-    var row = action === 'revert_change' && BR.flow.openRow();
-    var shown = !row && action === 'revert_change' && BR.flow.focusedRow();
-    if (shown && shown.undone_by != null) {
-      BR.chrome.say('already reverted · ' + BR.keyName('note') + ' note to ask for it back');
-      return true;
-    }
     // The menu and what a key opens are never open together
     BR.chrome.closeMenu();
     return BR.pointing.act(action);

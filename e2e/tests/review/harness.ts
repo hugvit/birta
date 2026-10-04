@@ -149,6 +149,8 @@ export function laneState(doc: string, lane: Lane): State {
     asked: { kind: b.asked ?? "location", notes: [] },
     range: { ...change.range, sp: b.sp },
     seen: b.seen ?? false,
+    // A bar thins once its change is checked, which a seen change is
+    check: b.seen ? "kept" : null,
     ...(b.yourEdit ? { changes_your_edit: "3.0" } : {}),
   }));
   s.items = (lane.glyphs ?? []).map((g, i) => ({
@@ -162,6 +164,11 @@ export function laneState(doc: string, lane: Lane): State {
   }));
   s.deletions = (lane.ticks ?? []).map((t, i) => ({ ...deletion, change: `${60 + i}.0`, after_sp: t.after }));
   s.rewrite = null;
+  // Claude's news is its own bars' changes; your own edits are never news
+  s.news = s.changes
+    .filter((c: State) => c.attr !== "human")
+    .map((c: State) => ({ id: c.id, kind: "change", sp: c.range.sp, check: c.check }));
+  s.counts.to_check = new Set(s.news.filter((n: State) => n.check == null).map((n: State) => n.sp)).size;
   return s;
 }
 
@@ -473,6 +480,8 @@ export interface Mark extends Box {
   target: string | null;
   /** The removal's change id, on a focus mark that stands on a removal stop. */
   change: string | null;
+  /** A bar's `new` (unchecked) or `checked`. */
+  check: string | null;
 }
 
 /** Every `[data-mark]` element in the lane's shadow roots (forced open by the harness). */
@@ -496,6 +505,7 @@ export function marks(page: Page): Promise<Mark[]> {
           count: a("data-count") === null ? null : Number(a("data-count")),
           target: a("data-target"),
           change: a("data-change"),
+          check: a("data-check"),
           left: r.left,
           top: r.top,
           right: r.right,

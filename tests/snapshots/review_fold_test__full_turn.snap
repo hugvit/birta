@@ -63,7 +63,7 @@ expression: json
     "lost": 0,
     "items": 10,
     "decided": 4,
-    "attention": 2,
+    "attention": 3,
     "to_check": 3
   },
   "items": [

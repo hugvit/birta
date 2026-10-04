@@ -1141,24 +1141,24 @@ async function labelOf(page: Page): Promise<string | null> {
 }
 
 test.describe("composer", () => {
-  test("its label names the whole doc, a section, a selection and a block", async ({ page, birta }) => {
+  test("its label names kind and scope: the whole doc, a section, Claude's change, a list item and a selection", async ({ page, birta }) => {
     await open(page, birta, FLOW, fixtureState("flow"));
     await page.keyboard.press("c");
-    await expect.poll(() => labelOf(page)).toBe("on: whole doc");
+    await expect.poll(() => labelOf(page)).toBe("note on whole doc");
     await page.keyboard.press("Escape");
     await focusOn(page, "3:1-3:6");
     await page.keyboard.press("c");
-    await expect.poll(() => labelOf(page)).toBe("on: ## Why (section)");
+    await expect.poll(() => labelOf(page)).toBe("note on ## Why (section)");
     await page.keyboard.press("Escape");
-    // A block whose change row is open: c notes the change
+    // A block whose change row is open: c replies on the change
     await focusOn(page, "5:1-6:68");
     await page.keyboard.press("c");
-    await expect.poll(() => labelOf(page)).toBe('on: Claude\'s change to "Why"');
+    await expect.poll(() => labelOf(page)).toBe("reply to Claude's change on ## Why › paragraph");
     await page.keyboard.press("Escape");
-    // Six words or fewer: no ellipsis
+    // A list item is named by its markdown, whole when it is short
     await focusOn(page, "10:1-10:16");
     await page.keyboard.press("c");
-    await expect.poll(() => labelOf(page)).toBe('on: "retries on 503"');
+    await expect.poll(() => labelOf(page)).toBe("note on - retries on 503 (list item)");
     await page.keyboard.press("Escape");
     await page.evaluate(() => {
       const el = document.querySelector('#content [data-sourcepos="5:1-6:68"]')!;
@@ -1171,7 +1171,7 @@ test.describe("composer", () => {
       getSelection()!.addRange(r);
     });
     await page.keyboard.press("c");
-    await expect.poll(() => labelOf(page)).toBe('on: "we just fail"');
+    await expect.poll(() => labelOf(page)).toBe('note on "we just fail"');
   });
 
   test("a selection keeps a pale tint while its composer is open", async ({ page, birta }) => {
@@ -1211,17 +1211,18 @@ test.describe("composer", () => {
     await expect.poll(tinted).toEqual([]);
   });
 
-  test("its label names Claude's change by its section, your own note, and a label the caller gives", async ({ page, birta }) => {
+  test("its label names Claude's change by where it is, a paragraph by its first words, your own note, and a label the caller gives", async ({ page, birta }) => {
     await open(page, birta, FLOW, fixtureState("flow"));
     const openWith = (kind: string, at: object, own: object | null, label?: string) =>
       page.evaluate(({ kind, at, own, label }) => (window as unknown as W).BR.flow.open(kind, at, own, label), { kind, at, own, label });
     await openWith("note", { k: "change", id: "13.0" }, null);
-    await expect.poll(() => labelOf(page)).toBe('on: Claude\'s change to "Why"');
+    await expect.poll(() => labelOf(page)).toBe("reply to Claude's change on ## Why › paragraph");
+    // How many words a long paragraph keeps is open; its first words lead, unquoted, then … and its kind
     await openWith("note", { k: "block", sp: "5:1-6:68", scope: "block" }, null);
-    await expect.poll(() => labelOf(page)).toBe('on: "When the upload hits a 503…"');
-    // A change on a heading is named by that heading
+    await expect.poll(() => labelOf(page)).toMatch(/^note on When the upload( [^\s"]+)*… \(paragraph\)$/);
+    // A change on a heading is named by that heading, its own section
     await openWith("note", { k: "change", id: "19.0" }, null);
-    await expect.poll(() => labelOf(page)).toBe('on: Claude\'s change to "Stacked on nothing"');
+    await expect.poll(() => labelOf(page)).toBe("reply to Claude's change on ## Stacked on nothing");
     await openWith("note", { k: "block", sp: "10:1-10:16", scope: "block" }, { n: 7, body: "drop this bullet" });
     await expect.poll(() => labelOf(page)).toBe("editing your note");
     await openWith("note", { k: "doc" }, null, "new round · whole doc");
@@ -1234,13 +1235,13 @@ test.describe("composer", () => {
     const hint = `⏎ save · ⇧⏎ new line · ${mac ? "⌘⏎" : "Ctrl⏎"} save & hand back · esc save & close`;
     await page.keyboard.press("c");
     await expect(composer(page).getByText(hint, { exact: true })).toBeVisible();
-    await expect(composer(page).locator("textarea")).toHaveAttribute("placeholder", "note…");
+    await expect(composer(page).locator("textarea")).toHaveAttribute("placeholder", 'note… · start with "words" to point at them');
     await page.keyboard.press("Escape");
     await focusOn(page, "10:1-10:16");
     await page.keyboard.press("q");
     await expect(composer(page).getByText(hint, { exact: true })).toBeVisible();
     await expect(composer(page).locator("textarea")).toHaveAttribute("placeholder", "question for Claude…");
-    await expect.poll(() => labelOf(page)).toBe('on: "retries on 503"');
+    await expect.poll(() => labelOf(page)).toBe("question on - retries on 503 (list item)");
   });
 });
 
@@ -1259,17 +1260,22 @@ test.describe("copy", () => {
     await expect.poll(() => stripMessage(page)).toBe("note saved · z to undo");
   });
 
-  test("the phrase's three counts fit the header at 1280 px, and the tooltip holds the rest", async ({ page, birta }) => {
-    const state = bent("flow", (s) => Object.assign(s.counts, { unseen: 12, drafts: 10, decided: 10, items: 17 }));
+  test("the phrase holds one event and one count, fits the header at 1280 px, and leaves nothing to the tooltip", async ({
+    page,
+    birta,
+  }) => {
+    const state = bent("flow", (s) => Object.assign(s.counts, { unseen: 12, drafts: 10, decided: 10, items: 17, to_check: 12, attention: 12 }));
     await open(page, birta, FLOW, state);
     const p = page.locator(".file-header birta-phrase");
-    await expect(p).toHaveAttribute("title", /· 2 done · 1 answered · 2 for you · 1 without a note · 3 not handled$/);
+    await expect.poll(() => p.evaluate((h) => h.shadowRoot!.querySelector(".phrase")!.textContent)).toMatch(/^Claude replied \d\d:\d\d · 12 to check$/);
     const fits = await p.evaluate((h) => {
       const span = h.shadowRoot!.querySelector(".phrase") as HTMLElement;
-      return { text: span.textContent, fits: span.scrollWidth <= span.clientWidth };
+      return { text: span.textContent, fits: span.scrollWidth <= span.clientWidth, title: h.getAttribute("title") };
     });
     expect(fits.fits).toBe(true);
-    expect(fits.text).toMatch(/^Claude replied \d\d:\d\d · 13 unseen · your turn · 10 notes · 10 of 17 blocks decided$/);
+    // The reply's tallies, your notes and decided blocks are gone; the rows and the button carry them
+    expect(fits.title).toBe(fits.text);
+    expect(fits.title).not.toMatch(/unseen|decided|done|answered|for you|without a note|not handled|notes?\b/);
   });
 });
 

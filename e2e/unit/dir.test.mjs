@@ -115,12 +115,30 @@ test("in a folder the phrase names how many other files have activity", () => {
   const BR = load();
   const s = state("drafts");
   const phrase = (dir, p = "pr.md") => BR.pure.formatPhrase(s, { now: s.server_now, dir, path: p });
-  assert.equal(phrase(TWO_OTHERS), "your turn · 3 notes · 1 of 3 blocks decided · 2 other files ▾");
-  assert.equal(phrase(dirState([listed("pr.md"), listed("b.md")])), "your turn · 3 notes · 1 of 3 blocks decided · 1 other file ▾");
+  // The header never counts your notes; the button does
+  assert.equal(phrase(TWO_OTHERS), "drafted by Claude · your turn · 2 other files ▾");
+  assert.equal(phrase(dirState([listed("pr.md"), listed("b.md")])), "drafted by Claude · your turn · 1 other file ▾");
   // Only this doc, or nothing, listed: no suffix
-  assert.equal(phrase(dirState([listed("pr.md", summary("drafts"))])), "your turn · 3 notes · 1 of 3 blocks decided");
-  assert.equal(phrase(dirState([])), "your turn · 3 notes · 1 of 3 blocks decided");
-  assert.equal(phrase(null), "your turn · 3 notes · 1 of 3 blocks decided");
+  assert.equal(phrase(dirState([listed("pr.md", summary("drafts"))])), "drafted by Claude · your turn");
+  assert.equal(phrase(dirState([])), "drafted by Claude · your turn");
+  assert.equal(phrase(null), "drafted by Claude · your turn");
+});
+
+test("past its own hand-back, a file of the hand-back still sent is named instead of the other-file count", () => {
+  const BR = load();
+  const at = (s, dir) => BR.pure.formatPhrase(s, { now: s.server_now, dir, path: "pr.md", folder: true });
+  // The same ⌘⏎ batch as picked.json's hand-back
+  const sameBatch = (x) => (x.phrase.sent.ts = state("picked").phrase.sent.ts);
+  const stranded = dirState([listed("pr.md", summary("picked")), listed("checklist.md", summary("sent", sameBatch))]);
+  assert.equal(at(state("picked"), stranded), "Claude picked up 14:13 · checklist.md not picked up ▾");
+  // One menu item, however many other files there are
+  const more = dirState([listed("checklist.md", summary("sent", sameBatch)), listed("b.md", summary("drafts")), listed("sub/c.md", null, true)]);
+  assert.equal(at(state("picked"), more), "Claude picked up 14:13 · checklist.md not picked up ▾");
+  // Nothing of the hand-back left unclaimed: the count
+  const claimed = dirState([listed("checklist.md", summary("picked"))]);
+  assert.equal(at(state("picked"), claimed), "Claude picked up 14:13 · 1 other file ▾");
+  const drafts = dirState([listed("checklist.md", summary("drafts")), listed("b.md", summary("replied"))]);
+  assert.equal(at(state("picked"), drafts), "Claude picked up 14:13 · 2 other files ▾");
 });
 
 test("the folder's own review file is not one of the other files", () => {
@@ -134,7 +152,7 @@ test("the suffix follows every phrase but the one for a folder birta can't write
   const BR = load();
   const at = (s) => BR.pure.formatPhrase(s, { now: s.server_now, dir: TWO_OTHERS, path: "pr.md" });
   assert.equal(at(state("sent")), "sent 14:13 · not picked up yet · 2 other files ▾");
-  assert.equal(at(state("replied")), "Claude replied 14:13 · 2 unseen · 1 of 3 blocks decided · 1 done · 2 other files ▾");
+  assert.equal(at(state("replied")), "Claude replied 14:13 · 3 to check · 2 other files ▾");
   assert.equal(at(bent("drafts", (s) => (s.writable = false))), "read-only · notes only · 2 other files ▾");
   assert.equal(at(bent("drafts", (s) => (s.log_writable = false))), "review unavailable · folder not writable");
 });
@@ -143,7 +161,7 @@ test("inside a hold the phrase from before it keeps the suffix", () => {
   const BR = load();
   const s = state("hold");
   const inside = BR.pure.formatPhrase(s, { now: s.hold.not_before - 1, dir: TWO_OTHERS, path: "pr.md" });
-  assert.equal(inside, "your turn · 3 notes · 1 of 3 blocks decided · 2 other files ▾");
+  assert.equal(inside, "drafted by Claude · your turn · 2 other files ▾");
 });
 
 // --- The turn button -----------------------------------------------------------------------------
@@ -155,9 +173,9 @@ test("in a folder the button hands back every file's drafts", () => {
   // The totals count this doc's draft, so the listing holds it too
   const files = [listed("b.md", summary("drafts")), listed("pr.md", summary("drafts", (x) => (x.counts.drafts = 1)))];
   assert.deepEqual(btn(mine, dirState(files, { drafts: 4 })), B("Hand back · 4"));
-  // The carry-forward label: unseen files elsewhere drop the key hint
-  assert.deepEqual(btn(mine, dirState(files, { drafts: 4, unseen_files: 2 })), B("Hand back · 4 · 2 files unseen", false));
-  assert.deepEqual(btn(mine, dirState(files, { drafts: 4, unseen_files: 1 })), B("Hand back · 4 · 1 file unseen", false));
+  // Files with news elsewhere change neither the label nor the key hint: the button counts notes only
+  assert.deepEqual(btn(mine, dirState(files, { drafts: 4, unseen_files: 2 })), B("Hand back · 4"));
+  assert.deepEqual(btn(mine, dirState(files, { drafts: 4, unseen_files: 1 })), B("Hand back · 4"));
 });
 
 test("drafts in other files make the button a hand-back even with none here", () => {
@@ -168,7 +186,7 @@ test("drafts in other files make the button a hand-back even with none here", ()
   assert.deepEqual(btn(state("fresh"), others), B("Hand back · 3"));
   assert.deepEqual(btn(state("replied"), others), B("Hand back · 3"));
   // With no drafts anywhere, this doc's own turn speaks
-  assert.deepEqual(btn(state("replied"), dirState([listed("b.md", summary("sent"))])), B("Approve · 2 unseen", false));
+  assert.deepEqual(btn(state("replied"), dirState([listed("b.md", summary("sent"))])), B("Approve"));
   assert.deepEqual(btn(state("fresh"), dirState([listed("b.md", summary("sent"))])), B("Approve"));
 });
 
@@ -194,7 +212,7 @@ test("in a folder the menu adds the folder note and one row per other file, afte
   assert.equal(folder.id, "folder");
   assert.equal(b.id, "file");
   assert.equal(b.href, "/view/b.md");
-  assert.equal(b.note, "Claude replied 14:13 · 1 unseen · 1 of 3 blocks decided · 1 done");
+  assert.equal(b.note, "Claude replied 14:13 · 3 to check");
   assert.equal(c.href, "/view/sub/c.md");
   assert.equal(c.note, "changed");
   // Rows a page can't act on carry no op
@@ -261,11 +279,13 @@ test("a file row's note is its summary's phrase", () => {
   const BR = load();
   const note = (sum, news = false) =>
     BR.pure.fileNote(listed("b.md", sum, news), { now: state("drafts").server_now });
-  assert.equal(note(summary("drafts")), "your turn · 3 notes · 1 of 3 blocks decided");
+  // A file row has no button to count its notes, so drafts keep the count; blocks decided are gone
+  assert.equal(note(summary("drafts")), "your turn · 3 notes");
   assert.equal(note(summary("drafts", (x) => (x.counts.decided = 0))), "your turn · 3 notes");
   assert.equal(note(summary("sent")), "sent 14:13 · not picked up yet");
   assert.equal(note(summary("picked")), "Claude picked up 14:13");
-  assert.equal(note(summary("replied")), "Claude replied 14:13 · 1 unseen · 1 of 3 blocks decided · 1 done");
+  assert.equal(note(summary("replied")), "Claude replied 14:13 · 3 to check");
+  assert.equal(note(summary("replied", (x) => (x.counts.to_check = 0))), "Claude replied 14:13 · all checked");
   // The summary names no drafter
   assert.equal(note(summary("fresh")), "your turn");
   // The summary carries no approve time

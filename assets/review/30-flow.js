@@ -1319,12 +1319,16 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       groups.get(k).items.push({ h: h, order: order });
       want[h.id] = 1;
     }
+    var editingId = comp && comp.own && comp.own.body ? 'n' + comp.own.n : null;
     list.forEach(function (e) {
+      if (e.id === editingId) return;
       var h = hosts.get(e.id) || makeHost(e.id);
       render(h, e);
       join(place(e.slot), h, e.order);
     });
-    if (comp) join(place(composerSlot()), comp.h, [G_COMPOSER, 0, 0]);
+    // The editor of your note takes that note's place, and the note gives way to it
+    var editing = comp && comp.own && comp.own.body ? list.filter(function (e) { return e.item && e.item.n === comp.own.n; })[0] : null;
+    if (comp) join(editing ? place(editing.slot) : place(composerSlot()), comp.h, editing ? editing.order : [G_COMPOSER, 0, 0]);
     var apply = function () {
       hosts.forEach(function (h, id) {
         if (want[id]) return;
@@ -1350,7 +1354,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       if (h.fold) h.fold.more.hidden = h.fold.line.scrollHeight <= h.fold.line.clientHeight + 1;
     });
     paintDoc();
-    if (comp) refocus();
+    if (comp) {
+      refreshHint();
+      refocus();
+    }
     if (dotList.length) hintDots();
     if (BR.lane && BR.lane.redraw) BR.lane.redraw();
   }
@@ -1440,25 +1447,83 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return found;
   }
 
-  /** The composer's label line: what its note will be on. */
-  function targetLabel(at, own) {
+  /** The composer's label line: what kind of note it writes, and on what. */
+  function targetLabel(at, own, kind) {
     if (own && own.body) return 'editing your note';
-    return 'on: ' + label(at);
+    return label(at, kind);
   }
 
-  /** What a request points at, in words. */
-  function label(at) {
-    if (at.k === 'doc') return 'whole doc';
-    if (at.k === 'dir') return 'this folder';
-    if (at.k === 'quote') return '"' + clamp(at.q) + '"';
+  // A composer label names a block by this many of its first words
+  var COMPOSER_WORDS = 5;
+
+  /** A composer's words for `at`: its kind (note, question, reply) and its scope. */
+  function label(at, kind) {
+    var on = kind === 'ask' ? 'question on ' : 'note on ';
+    if (at.k === 'doc') return on + 'whole doc';
+    if (at.k === 'dir') return on + 'this folder';
+    if (at.k === 'quote') return on + '"' + clamp(at.q) + '"';
     var sp = spOfAt(at);
     var block = sp ? blockOf(sp) : null;
     if (at.k === 'change') {
-      var h = block && headingOver(block);
-      var name = h ? h.textContent.trim() : block ? BR.pure.fewWords(block.textContent) : '';
-      return name ? "Claude's change to \"" + name + '"' : "Claude's change";
+      if (!block) return "reply to Claude's change";
+      var c = crumb(block);
+      var where = c.heading ? (c.kind ? c.heading + ' › ' + c.kind : c.heading) : c.kind;
+      return "reply to Claude's change on " + where;
     }
-    return block ? blockLabel(block) : 'this block';
+    return on + (block ? composerBlock(block) : 'this block');
+  }
+
+  /** A block as a composer names it: a heading as its section, else its marker and first words, and its kind. */
+  function composerBlock(block) {
+    var level = /^h([1-6])$/.exec(block.localName);
+    if (level) return blockLabel(block);
+    var li = block.localName === 'li' ? block : block.localName === 'p' && block.parentElement && block.parentElement.localName === 'li' ? block.parentElement : null;
+    var marker = '';
+    if (li) {
+      var list = li.parentElement;
+      marker = list && list.localName === 'ol' ? (Array.prototype.indexOf.call(list.children, li) + (Number(list.getAttribute('start')) || 1)) + '. ' : '- ';
+      var box = li.querySelector(':scope > input[type="checkbox"], :scope > p > input[type="checkbox"]');
+      if (box) marker += box.checked ? '[x] ' : '[ ] ';
+    }
+    return marker + firstWords(li || block) + ' (' + (KIND[(li || block).localName] || 'block') + ')';
+  }
+
+  /**
+   * The first words of `el`'s own text: `COMPOSER_WORDS` of them, or fewer when a code span ends
+   * first, as its name says what the block is about; `…` marks a cut.
+   */
+  function firstWords(el) {
+    var segs = [];
+    (function walk(n, code) {
+      n.childNodes.forEach(function (c) {
+        if (c.nodeType === 3) segs.push({ text: c.data, code: code });
+        // A code block is words like any other; only an inline code span ends the label early
+        else if (c.nodeType === 1 && !BR.isHost(c) && !/^(ul|ol|input)$/.test(c.localName)) walk(c, code || (c.localName === 'code' && n.localName !== 'pre'));
+      });
+    })(el, false);
+    var words = [];
+    var cur = null;
+    segs.forEach(function (sg) {
+      Array.from(sg.text).forEach(function (ch) {
+        if (/\s/.test(ch)) {
+          if (cur) words.push(cur);
+          cur = null;
+          return;
+        }
+        if (!cur) cur = { text: '', code: false };
+        cur.text += ch;
+        cur.code = sg.code;
+      });
+    });
+    if (cur) words.push(cur);
+    var out = [];
+    for (var i = 0; i < words.length; i++) {
+      out.push(words[i].text);
+      var last = i === words.length - 1;
+      if (last) return out.join(' ');
+      if (out.length >= COMPOSER_WORDS || words[i].code) return out.join(' ') + '…';
+    }
+    return out.join(' ');
   }
 
   // A patch that replaced the composer's block moved it, which drops focus
@@ -1503,14 +1568,15 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var target = el('div', 'muted target');
     var area = document.createElement('textarea');
     area.setAttribute('dir', 'auto');
-    area.placeholder = kind === 'ask' ? 'question for Claude…' : 'note…';
+    area.placeholder = kind === 'ask' ? 'question for Claude…' : 'note… · start with "words" to point at them';
     if (kind === 'ask') area.rows = 1;
-    var mac = /Mac/.test(navigator.platform);
-    var hint = '⏎ save · ⇧⏎ new line · ' + (mac ? '⌘⏎' : 'Ctrl⏎') + ' save & hand back · esc save & close';
     var named = el('div', 'muted label');
-    named.appendChild(isolated(label || targetLabel(at, own)));
+    named.appendChild(isolated(label || targetLabel(at, own, kind)));
     comp.label = named;
-    h.box.append(named, target, area, el('div', 'muted hint', hint));
+    comp.baseLabel = named.textContent;
+    comp.focusEl = BR.pointing.focused();
+    comp.hint = el('div', 'muted hint', hintText());
+    h.box.append(named, target, area, comp.hint);
     tint(picked);
     comp.area = area;
     comp.target = target;
@@ -1535,6 +1601,31 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     reconcile();
     area.focus({ preventScroll: true });
     area.setSelectionRange(area.value.length, area.value.length);
+    // It opens where it can be read whole, between the header and the strip
+    BR.pointing.reveal(h.host);
+    BR.chrome.renderStrip();
+  }
+
+  /** The composer's keys; `⌘⏎` is named only while the turn button can be pressed. */
+  function hintText() {
+    return BR.pure.composerKeys(BR.chrome.buttonNow(), /Mac/.test(navigator.platform)).join(' · ');
+  }
+
+  function refreshHint() {
+    if (!comp) return;
+    var text = hintText();
+    if (comp.hint.textContent !== text) comp.hint.textContent = text;
+  }
+
+  /** Names the typed quote's words in the label once they are found, else what the composer opened on. */
+  function labelQuote() {
+    if (comp.own && comp.own.body) return;
+    var found = comp.candidates && comp.candidates.length;
+    var round = /^new round · /.test(comp.baseLabel) ? 'new round · ' : '';
+    var text = found ? round + (comp.kind === 'ask' ? 'question on ' : 'note on ') + '"' + clamp(comp.asked) + '"' : comp.baseLabel;
+    if (comp.label.textContent === text) return;
+    comp.label.textContent = '';
+    comp.label.appendChild(isolated(text));
     BR.chrome.renderStrip();
   }
 
@@ -1553,6 +1644,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     comp.rcid = null;
     comp.candidates = null;
     comp.target.textContent = '';
+    labelQuote();
     if (!quote) return;
     comp.qtimer = setTimeout(function () {
       if (!comp) return;
@@ -1568,10 +1660,24 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     comp.target.textContent = c.length ? c[comp.pick].preview : '→ no match · whole doc';
   }
 
+  /** Whether block `el` is the stop the composer was opened from, or sits inside it. */
+  function inFocus(el) {
+    var f = comp.focusEl;
+    return !!el && !!f && f.isConnected && (f === el || f.contains(el));
+  }
+
+  // Keys a field shares with the page's scrolling; in the field they only move the caret
+  var CARET = { Home: 1, End: 1, PageUp: 1, PageDown: 1 };
+
   function composerKey(e) {
     e.stopPropagation();
     // An IME owns ⏎ and Esc mid-word
     if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+    if (CARET[e.key] && !e.altKey && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault();
+      caret(e.key, e.shiftKey);
+      return;
+    }
     if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
       e.preventDefault();
       keep(e.metaKey || e.ctrlKey);
@@ -1583,6 +1689,21 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       var last = comp.candidates.length - 1;
       comp.pick = Math.max(0, Math.min(last, comp.pick + (e.key === 'ArrowDown' ? 1 : -1)));
       showPick();
+    }
+  }
+
+  /** Moves the caret as the key would in a field: Home and End by line, PageUp and PageDown to either end. */
+  function caret(key, extend) {
+    var area = comp.area;
+    var v = area.value;
+    var at = area.selectionDirection === 'backward' ? area.selectionStart : area.selectionEnd;
+    var to = key === 'PageUp' ? 0 : key === 'PageDown' ? v.length
+      : key === 'Home' ? v.lastIndexOf('\n', at - 1) + 1
+      : (v.indexOf('\n', at) < 0 ? v.length : v.indexOf('\n', at));
+    if (!extend) area.setSelectionRange(to, to);
+    else {
+      var from = area.selectionDirection === 'backward' ? area.selectionEnd : area.selectionStart;
+      area.setSelectionRange(Math.min(from, to), Math.max(from, to), to < from ? 'backward' : 'forward');
     }
   }
 
@@ -1602,6 +1723,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
    * with ⏎ takes your words back; with Esc (`esc`) it leaves the note as it was.
    */
   function keep(handBack, esc) {
+    // What the button does once the save is in, read as it stands now
+    var then = handBack ? BR.chrome.afterSave(!!comp.area.value.trim()) : null;
     var text = comp.area.value;
     var hadDraft = comp.sent || unsent.some(function (u) { return u.key === comp.key; });
     var own = comp.own;
@@ -1614,7 +1737,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         BR.op(own.verdict ? { op: 'amend', to: own.n, body: '' } : { op: 'retract', to: own.n });
       }
       // An unchanged edit sends nothing, yet ⌘⏎ still hands back
-      if (handBack && text.trim()) BR.chrome.handBack();
+      if (then && text.trim()) then();
       close();
       return;
     }
@@ -1649,7 +1772,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     pending[cid] = { key: comp.key, text: text, tie: comp.tie };
     if (hadDraft) sendCompose('');
     unsent = unsent.filter(function (u) { return u.key !== comp.key; });
-    if (handBack) afterAck[cid] = BR.chrome.handBack;
+    if (then) afterAck[cid] = then;
     close();
   }
 
@@ -1985,10 +2108,14 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         comp.candidates = (msg.candidates || []).map(function (c) {
           // Its sp names a block here only while the page still shows the rev it asked about
           var el = c.at && c.at.sp && comp.rrev === birtaBus.rev() ? blockOf(c.at.sp) : null;
-          return { at: c.at, preview: c.preview, tie: tie(el) };
+          return { at: c.at, preview: c.preview, tie: tie(el), here: inFocus(el) };
         });
+        // Matches in the focused block come first; the rest keep the server's order
+        comp.candidates = comp.candidates.filter(function (c) { return c.here; })
+          .concat(comp.candidates.filter(function (c) { return !c.here; }));
         comp.pick = 0;
         showPick();
+        labelQuote();
         break;
       case 'compose_restore':
         if (msg.path !== CURRENT_PATH) break;
@@ -2112,6 +2239,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     /** Draws the flow again for the state it has, as when a hold ends with no new state. */
     refresh: function () { reconcile(); },
     /** The open composer's label, as the strip names it, or null with none open. */
+    refreshHint: refreshHint,
     composerLabel: function () {
       return comp && comp.h.host.isConnected && comp.label ? comp.label.textContent.replace(/\s+/g, ' ').trim() : null;
     },

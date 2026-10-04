@@ -34,6 +34,8 @@ import {
   watchSent,
   withRev,
   stripMessage,
+  stripKeys,
+  stripWhere,
   SIZE_LABEL,
   changeRows,
 } from "./harness";
@@ -2557,5 +2559,709 @@ test.describe("a big turn among other turns", () => {
     await page.keyboard.press("y");
     await expect.poll(() => mock.ops().length).toBe(1);
     expect(mock.ops()[0]).toMatchObject({ op: "comment", verdict: "yes", at: { k: "block", sp: first } });
+  });
+});
+
+// --- The composer: in view, in place, scoped to the focus, and named ----------------------------
+
+/** The open composer's box, label, hint and placeholder, with the view it must sit in; null with none. */
+function composerView(page: Page) {
+  return page.evaluate(() => {
+    const host = document.querySelector('birta-flow[data-kind="composer"]');
+    if (!host) return null;
+    const root = host.shadowRoot ?? host;
+    const r = host.getBoundingClientRect();
+    const header = document.querySelector(".file-header")!.getBoundingClientRect().bottom;
+    const strip = document.querySelector("birta-strip");
+    const stripTop = strip && strip.getClientRects().length ? strip.getBoundingClientRect().top : innerHeight;
+    const text = (sel: string) => (root.querySelector(sel)?.textContent ?? "").replace(/\s+/g, " ").trim() || null;
+    return {
+      top: r.top,
+      bottom: r.bottom,
+      viewTop: Math.max(header, 0),
+      viewBottom: Math.min(stripTop, innerHeight),
+      label: text(".label"),
+      hint: text(".hint"),
+      placeholder: root.querySelector("textarea")?.getAttribute("placeholder") ?? null,
+    };
+  });
+}
+
+/** Where the composer sits against the view: `in view`, or what is cut. */
+async function composerPlace(page: Page): Promise<string> {
+  const c = await composerView(page);
+  if (!c) return "no composer";
+  if (c.bottom - c.top <= 0) return "no height";
+  if (c.top < c.viewTop - 1) return `top ${c.top} under the header ${c.viewTop}`;
+  if (c.bottom > c.viewBottom + 1) return `bottom ${c.bottom} under the strip ${c.viewBottom}`;
+  return "in view";
+}
+
+const labelNow = async (page: Page) => (await composerView(page))?.label ?? null;
+
+test.describe("the composer, in view", () => {
+  // A drafter, so the chrome and its strip show from the start
+  const LONG = longDoc();
+
+  test("at the end of a long doc, c opens it fully between the header and the strip", async ({ page, birta }) => {
+    await open(page, birta, LONG, { state: notesState(LONG, []) });
+    await page.keyboard.press("End");
+    await expect.poll(async () => (await focused(page)) === (await stopSp(page, "Filler paragraph 40."))).toBe(true);
+    await page.keyboard.press("c");
+    await expect(composer(page)).toBeFocused();
+    await expect.poll(() => composerPlace(page)).toBe("in view");
+  });
+
+  test("on a block whose bottom sits on the strip, c brings the composer up into view", async ({ page, birta }) => {
+    await open(page, birta, LONG, { state: notesState(LONG, []) });
+    const sp = await stopSp(page, "Filler paragraph 12.");
+    await focusOn(page, sp);
+    await page.waitForTimeout(SETTLE_MS);
+    // Put the block's bottom just above the strip, so the composer would open under it
+    for (let i = 0; i < 3; i++) {
+      await page.evaluate((sp) => {
+        const el = document.querySelector(`#content [data-sourcepos="${sp}"]`)!;
+        const strip = document.querySelector("birta-strip")!.getBoundingClientRect().top;
+        window.scrollTo({ top: scrollY + el.getBoundingClientRect().bottom - strip + 2, behavior: "instant" });
+      }, sp);
+      await page.waitForTimeout(200);
+    }
+    expect(await focused(page)).toBe(sp);
+    // Setup: the block is whole in the view, its bottom just above the strip
+    const at = await page.evaluate((sp) => {
+      const r = document.querySelector(`#content [data-sourcepos="${sp}"]`)!.getBoundingClientRect();
+      return {
+        top: r.top,
+        bottom: r.bottom,
+        header: document.querySelector(".file-header")!.getBoundingClientRect().bottom,
+        strip: document.querySelector("birta-strip")!.getBoundingClientRect().top,
+      };
+    }, sp);
+    expect(at.top).toBeGreaterThanOrEqual(at.header);
+    expect(at.bottom).toBeLessThanOrEqual(at.strip);
+    expect(at.strip - at.bottom).toBeLessThan(20);
+    await page.keyboard.press("c");
+    await expect(composer(page)).toBeFocused();
+    await expect.poll(() => composerPlace(page)).toBe("in view");
+  });
+
+  test("from the bottom of a long doc, Home then c opens the whole-doc composer under the header", async ({ page, birta }) => {
+    await open(page, birta, LONG, { state: notesState(LONG, []) });
+    await page.keyboard.press("End");
+    await page.waitForTimeout(SETTLE_MS);
+    await page.keyboard.press("Home");
+    await expect.poll(() => focused(page)).toBe("doc");
+    await page.keyboard.press("c");
+    await expect(composer(page)).toBeFocused();
+    await expect.poll(() => composerPlace(page)).toBe("in view");
+    expect(await labelNow(page)).toBe("note on whole doc");
+  });
+
+  test("on a block just under the header, the composer opens under it and in view", async ({ page, birta }) => {
+    await open(page, birta, LONG, { state: notesState(LONG, []) });
+    const sp = await stopSp(page, "Filler paragraph 20.");
+    await focusOn(page, sp);
+    await page.evaluate((sp) => {
+      const el = document.querySelector(`#content [data-sourcepos="${sp}"]`)!;
+      const header = document.querySelector(".file-header")!.getBoundingClientRect().bottom;
+      window.scrollBy(0, el.getBoundingClientRect().top - header - 2);
+    }, sp);
+    await page.waitForTimeout(SETTLE_MS);
+    await page.keyboard.press("c");
+    await expect(composer(page)).toBeFocused();
+    await expect.poll(() => composerPlace(page)).toBe("in view");
+    const block = await page.locator(`#content [data-sourcepos="${sp}"]`).evaluate((el) => el.getBoundingClientRect().bottom);
+    expect((await composerView(page))!.top).toBeGreaterThanOrEqual(block - 1);
+  });
+
+  test("keys in the field never scroll the page", async ({ page, birta }) => {
+    await open(page, birta, LONG, { state: notesState(LONG, []) });
+    await focusOn(page, await stopSp(page, "Filler paragraph 20."));
+    await page.keyboard.press("c");
+    await expect(composer(page)).toBeFocused();
+    await page.keyboard.type("two words");
+    await page.waitForTimeout(SETTLE_MS);
+    const y = () => page.evaluate(() => scrollY);
+    const at = await y();
+    for (const key of ["End", "Home", "PageDown", "PageUp", "Space", "ArrowDown", "ArrowUp"]) {
+      await page.keyboard.press(key);
+      await page.waitForTimeout(150);
+      expect(Math.abs((await y()) - at), `${key} scrolled the page`).toBeLessThanOrEqual(1);
+    }
+    await expect(composer(page)).toBeFocused();
+  });
+});
+
+test.describe("the composer, in place", () => {
+  test("c on your note opens the editor where the note was, and Esc puts the note back", async ({ page, birta }) => {
+    await open(page, birta, fixtureDoc("drafts"), { state: fixtureState("drafts") });
+    const sp = "10:1-10:16";
+    await focusOn(page, sp);
+    const noteOf = async () => (await hostsAt(page, sp)).find((h) => h.kind !== "composer" && h.text.includes("drop this bullet"));
+    await expect.poll(async () => !!(await noteOf())).toBe(true);
+    const docTop = async (top: number) => top + (await page.evaluate(() => scrollY));
+    const was = await docTop((await noteOf())!.box.top);
+    await page.keyboard.press("c");
+    await expect(composer(page)).toHaveValue("drop this bullet");
+    expect(await labelNow(page)).toBe("editing your note");
+    // The note gives way to its editor: one of them shows, in the same place
+    await expect.poll(async () => (await noteOf())?.box.height ?? 0).toBe(0);
+    expect(Math.abs((await docTop((await composerView(page))!.top)) - was), "the editor sits where the note was").toBeLessThanOrEqual(2);
+    await page.keyboard.press("Escape");
+    await expect(composer(page)).toHaveCount(0);
+    await expect.poll(async () => (await noteOf())?.box.height ?? 0).toBeGreaterThan(0);
+  });
+});
+
+test.describe("the composer, quotes by keyboard", () => {
+  test("its placeholder says to start with words in quotes", async ({ page, birta }) => {
+    await open(page, birta, STOPS_DOC);
+    await page.keyboard.press("c");
+    expect((await composerView(page))!.placeholder).toBe('note… · start with "words" to point at them');
+  });
+
+  test("matches in the focused block come first, ↑ and ↓ pick, and the label names the words", async ({ page, birta }) => {
+    const { mock } = await open(page, birta, STOPS_DOC);
+    const para = await stopSp(page, "When the upload");
+    const code = await stopSp(page, "retry(upload, 3);");
+    await focusOn(page, code);
+    await page.keyboard.press("c");
+    await page.keyboard.type('"upload" do it');
+    await expect.poll(() => mock.frames.filter((f) => f.msg.type === "resolve").length).toBeGreaterThan(0);
+    const ask = mock.frames.filter((f) => f.msg.type === "resolve").at(-1)!.msg;
+    const inPara = { k: "quote", q: "upload", pre: "", suf: "", sp: para, off: 9 };
+    const inCode = { k: "quote", q: "upload", pre: "", suf: "", sp: code, off: 6 };
+    // The server answers in doc order; the focused block's match must still come first
+    mock.push({
+      type: "resolved",
+      cid: ask.cid,
+      candidates: [
+        { at: inPara, preview: '→ "upload"' },
+        { at: inCode, preview: '→ "retry(upload, 3);"' },
+      ],
+    });
+    const flow = page.locator("birta-flow");
+    await expect(flow.getByText('→ "retry(upload, 3);"')).toBeVisible();
+    await expect.poll(() => labelNow(page)).toBe('note on "upload"');
+    await page.keyboard.press(PICK_NEXT);
+    await expect(flow.getByText('→ "upload"', { exact: true })).toBeVisible();
+    await page.keyboard.press(PICK_PREV);
+    await expect(flow.getByText('→ "retry(upload, 3);"')).toBeVisible();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => mock.ops().length).toBe(1);
+    expect(mock.ops()[0]).toMatchObject({ op: "comment", body: "do it" });
+    expect(mock.ops()[0].at).toStrictEqual(inCode);
+  });
+
+  test("with the focus on whole doc the server's order stands", async ({ page, birta }) => {
+    const { mock } = await open(page, birta, STOPS_DOC);
+    const para = await stopSp(page, "When the upload");
+    const code = await stopSp(page, "retry(upload, 3);");
+    await page.keyboard.press("c");
+    await page.keyboard.type('"upload" do it');
+    await expect.poll(() => mock.frames.filter((f) => f.msg.type === "resolve").length).toBeGreaterThan(0);
+    const ask = mock.frames.filter((f) => f.msg.type === "resolve").at(-1)!.msg;
+    const inPara = { k: "quote", q: "upload", pre: "", suf: "", sp: para, off: 9 };
+    const inCode = { k: "quote", q: "upload", pre: "", suf: "", sp: code, off: 6 };
+    mock.push({
+      type: "resolved",
+      cid: ask.cid,
+      candidates: [
+        { at: inPara, preview: '→ "upload"' },
+        { at: inCode, preview: '→ "retry(upload, 3);"' },
+      ],
+    });
+    await expect(page.locator("birta-flow").getByText('→ "upload"', { exact: true })).toBeVisible();
+    await expect.poll(() => labelNow(page)).toBe('note on "upload"');
+    await page.keyboard.press("Enter");
+    await expect.poll(() => mock.ops().length).toBe(1);
+    expect(mock.ops()[0].at).toStrictEqual(inPara);
+  });
+});
+
+const JOURNEY_DOC = fs.readFileSync(path.join(__dirname, "..", "..", "fixtures", "review", "journey", "pr-draft.md"), "utf-8");
+const ROUND1_DOC = fs.readFileSync(path.join(__dirname, "..", "..", "fixtures", "review", "journey", "round1.md"), "utf-8");
+const ROUND1_STATE = () =>
+  JSON.parse(fs.readFileSync(path.join(__dirname, "..", "..", "fixtures", "review", "journey", "round1.json"), "utf-8")) as State;
+
+/** Presses j from the top until focus is on the block holding `text`. */
+async function focusText(page: Page, text: string) {
+  await focusOn(page, await stopSp(page, text));
+}
+
+test.describe("the composer's labels name kind and scope", () => {
+  test("notes: whole doc, a section, a list item and quoted words", async ({ page, birta }) => {
+    await open(page, birta, JOURNEY_DOC);
+    await page.keyboard.press("c");
+    await expect.poll(() => labelNow(page)).toBe("note on whole doc");
+    await page.keyboard.press("Escape");
+    await focusText(page, "Stacked on");
+    await page.keyboard.press("c");
+    await expect.poll(() => labelNow(page)).toBe("note on ## Stacked on (section)");
+    await page.keyboard.press("Escape");
+    await focusText(page, "Ran the integration suite");
+    await page.keyboard.press("c");
+    await expect.poll(() => labelNow(page)).toBe("note on - [ ] Ran the integration suite (list item)");
+    await page.keyboard.press("Escape");
+    const why = await stopSp(page, "Uploads to the storage service");
+    await selectWord(page, why, "we just fail");
+    await page.keyboard.press("c");
+    await expect.poll(() => labelNow(page)).toBe('note on "we just fail"');
+  });
+
+  test("questions: a list item and quoted words", async ({ page, birta }) => {
+    await open(page, birta, JOURNEY_DOC);
+    const item = await stopSp(page, "Ran the integration suite");
+    await focusOn(page, item);
+    await page.keyboard.press("q");
+    await expect.poll(() => labelNow(page)).toBe("question on - [ ] Ran the integration suite (list item)");
+    await page.keyboard.press("Escape");
+    await selectWord(page, item, "Ran the integration suite");
+    await page.keyboard.press("q");
+    await expect.poll(() => labelNow(page)).toBe('question on "Ran the integration suite"');
+  });
+
+  test("a reply to Claude's change names its place", async ({ page, birta }) => {
+    await open(page, birta, ROUND1_DOC, { state: ROUND1_STATE() });
+    await focusText(page, "Retry on network errors");
+    await page.keyboard.press("c");
+    await expect.poll(() => labelNow(page)).toBe("reply to Claude's change on ## What › list item");
+  });
+
+  test("an answer to Claude's question names who asked", async ({ page, birta }) => {
+    await open(page, birta, FLOW_DOC, { state: fixtureState("flow") });
+    await focusBlank(page, "is 503 the only code?");
+    await page.keyboard.press("Enter");
+    const label = () =>
+      page.evaluate(() => {
+        const a = document.activeElement;
+        const area = a?.shadowRoot?.activeElement ?? null;
+        const before = area?.previousElementSibling;
+        return area && area.localName === "textarea" && before ? (before.textContent ?? "").trim() : null;
+      });
+    await expect.poll(label).toBe("answer to Claude");
+  });
+
+  test("after approving, c starts a new round on the focused stop", async ({ page, birta }) => {
+    await open(page, birta, fixtureDoc("approved"), { state: fixtureState("approved") });
+    await expect.poll(() => focused(page)).toBe("doc");
+    await page.keyboard.press("c");
+    await expect.poll(() => labelNow(page)).toBe("new round · note on whole doc");
+  });
+
+  test("the strip's where is the composer's label, and follows a typed quote", async ({ page, birta }) => {
+    // A state with a drafter, so the chrome and its strip show from the start
+    const { mock } = await open(page, birta, STOPS_DOC, { state: notesState(STOPS_DOC, []) });
+    const code = await stopSp(page, "retry(upload, 3);");
+    await page.keyboard.press("c");
+    await expect.poll(() => stripWhere(page)).toBe("note on whole doc");
+    await page.keyboard.type('"upload" x');
+    await expect.poll(() => mock.frames.filter((f) => f.msg.type === "resolve").length).toBeGreaterThan(0);
+    const ask = mock.frames.filter((f) => f.msg.type === "resolve").at(-1)!.msg;
+    mock.push({ type: "resolved", cid: ask.cid, candidates: [{ at: { k: "quote", q: "upload", pre: "", suf: "", sp: code, off: 6 }, preview: "→ x" }] });
+    await expect.poll(() => stripWhere(page)).toBe('note on "upload"');
+  });
+});
+
+test.describe("c picks, in order", () => {
+  /** flow.json with your unsent note on the Why paragraph, which also holds Claude's change. */
+  function withDraft(): State {
+    const s = fixtureState("flow");
+    const draft = notesState(FLOW_DOC, [{ sp: "5:1-6:68", body: "my unsent words", n: 60 }]).items[0];
+    s.items.push(draft);
+    s.counts.drafts += 1;
+    return s;
+  }
+
+  test("Claude's change on the stop, over the stop itself", async ({ page, birta }) => {
+    await open(page, birta, FLOW_DOC, { state: fixtureState("flow") });
+    await focusOn(page, "5:1-6:68");
+    await page.keyboard.press("c");
+    await expect.poll(() => labelNow(page)).toBe("reply to Claude's change on ## Why › paragraph");
+  });
+
+  test("your unsent note on the stop, over Claude's change", async ({ page, birta }) => {
+    await open(page, birta, FLOW_DOC, { state: withDraft() });
+    await focusOn(page, "5:1-6:68");
+    await page.keyboard.press("c");
+    await expect.poll(() => labelNow(page)).toBe("editing your note");
+    await expect(composer(page)).toHaveValue("my unsent words");
+  });
+
+  test("a selection, over your unsent note and Claude's change", async ({ page, birta }) => {
+    await open(page, birta, FLOW_DOC, { state: withDraft() });
+    await focusOn(page, "5:1-6:68");
+    await selectWord(page, "5:1-6:68", "we just fail");
+    await page.keyboard.press("c");
+    await expect.poll(() => labelNow(page)).toBe('note on "we just fail"');
+    await expect(composer(page)).toHaveValue("");
+  });
+
+  test("a second c on a stop edits the note the first one left", async ({ page, birta }) => {
+    const { mock } = await open(page, birta, STOPS_DOC);
+    const sp = await stopSp(page, "retries on 503");
+    await focusOn(page, sp);
+    await page.keyboard.press("c");
+    await expect.poll(() => labelNow(page)).toBe("note on - retries on 503 (list item)");
+    await page.keyboard.type("first words");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => mock.ops().length).toBe(1);
+    const state = notesState(STOPS_DOC, [{ sp, body: "first words", n: 101 }]);
+    state.items[0].cid = mock.ops()[0].cid;
+    mock.pushState(state);
+    await expect.poll(async () => texts(await hostsAt(page, sp)).join("\n")).toContain("first words");
+    await page.keyboard.press("c");
+    await expect.poll(() => labelNow(page)).toBe("editing your note");
+    await expect(composer(page)).toHaveValue("first words");
+  });
+});
+
+test.describe("the composer's hint follows the button", () => {
+  test("with the button disabled, the hint and the strip drop ⌘⏎, and ⌘⏎ only saves", async ({ page, birta }) => {
+    const { mock } = await open(page, birta, fixtureDoc("picked"), { state: fixtureState("picked") });
+    await expect.poll(() => page.locator(".file-header birta-turn button").isDisabled()).toBe(true);
+    await page.keyboard.press("c");
+    await expect(composer(page)).toBeFocused();
+    const without = "⏎ save · ⇧⏎ new line · esc save & close";
+    await expect.poll(async () => (await composerView(page))?.hint).toBe(without);
+    await expect.poll(() => stripKeys(page)).toBe(without);
+    await page.keyboard.type("for next time");
+    await page.keyboard.press("ControlOrMeta+Enter");
+    await expect.poll(() => mock.ops().length).toBe(1);
+    await page.waitForTimeout(SETTLE_MS);
+    expect(mock.ops().map((o) => o.op)).toEqual(["comment"]);
+  });
+
+  test("with the button enabled, the hint and the strip offer ⌘⏎", async ({ page, birta }) => {
+    await open(page, birta, fixtureDoc("fresh"), { state: fixtureState("fresh") });
+    await page.keyboard.press("c");
+    await expect(composer(page)).toBeFocused();
+    const mac = await page.evaluate(() => /Mac/.test(navigator.platform));
+    const withTurn = `⏎ save · ⇧⏎ new line · ${mac ? "⌘⏎" : "Ctrl⏎"} save & hand back · esc save & close`;
+    await expect.poll(async () => (await composerView(page))?.hint).toBe(withTurn);
+    await expect.poll(() => stripKeys(page)).toBe(withTurn);
+  });
+});
+
+test.describe("a section verdict", () => {
+  /** Whether a wash box covers the block holding `text`; a string says what is missing instead. */
+  async function washedOver(page: Page, text: string): Promise<true | string> {
+    const box = await page.evaluate((text) => {
+      let hit: Element | null = null;
+      document.querySelectorAll("#content [data-sourcepos]").forEach((el) => {
+        if ((el.textContent ?? "").includes(text)) hit = el;
+      });
+      if (!hit) return null;
+      const r = (hit as Element).getBoundingClientRect();
+      return { top: r.top, bottom: r.bottom };
+    }, text);
+    if (!box) return `no block holds ${text}`;
+    const washed = (await marks(page)).some((m) => m.mark === "wash" && m.height > 0 && m.top <= box.top + 1 && m.bottom >= box.bottom - 1);
+    return washed || `no wash over ${text}`;
+  }
+
+  test("washes every block of its section, and still does with the heading scrolled away", async ({ page, birta }) => {
+    await open(page, birta, longDoc(), { viewport: { width: 1280, height: 500 } });
+    const heading = await stopSp(page, "What changes");
+    await focusOn(page, heading);
+    await page.keyboard.press("x");
+    await expect.poll(() => stripMessage(page)).toMatch(/^no · ## What changes \(section\)/);
+    const section = ["retries on 503", "metrics dashboard", "retry(upload, 3);", "Detail words."];
+    // Setup: each text is a block of the doc, so a miss below can only be the wash
+    for (const text of section)
+      expect(await page.evaluate((t) => Array.from(document.querySelectorAll("#content [data-sourcepos]")).some((el) => (el.textContent ?? "").includes(t)), text), `a block holds ${text}`).toBe(true);
+    for (const text of section) await expect.poll(() => washedOver(page, text), { message: `the wash covers ${text}` }).toBe(true);
+    // Scroll the heading above the view, keeping the section's last block in it
+    await page.evaluate(() => {
+      const el = Array.from(document.querySelectorAll("#content p")).find((p) => p.textContent === "Detail words.")!;
+      window.scrollBy(0, el.getBoundingClientRect().top - innerHeight / 2);
+    });
+    await page.waitForTimeout(SETTLE_MS);
+    const headingTop = await page.locator(`#content [data-sourcepos="${heading}"]`).evaluate((el) => el.getBoundingClientRect().bottom);
+    expect(headingTop, "the heading is above the view").toBeLessThan(0);
+    await expect.poll(() => washedOver(page, "Detail words.")).toBe(true);
+  });
+});
+
+// --- adversary: the composer, quotes, c order and the section wash ----------------------------
+
+/** The `data-sourcepos` of the line of `doc` holding `text`, as a one-line block renders it. */
+function lineSp(doc: string, text: string): string {
+  const lines = doc.split("\n");
+  const i = lines.findIndex((l) => l.includes(text));
+  if (i < 0) throw new Error(`no line holds ${JSON.stringify(text)}`);
+  return `${i + 1}:1-${i + 1}:${Buffer.byteLength(lines[i], "utf-8")}`;
+}
+
+/** Visible hosts other than the composer whose text holds `text`. */
+async function shownWith(page: Page, text: string): Promise<number> {
+  return (await hosts(page)).filter((h) => h.kind !== "composer" && h.box.height > 0 && h.text.includes(text)).length;
+}
+
+/** The open composer's target line: the picked match's preview. */
+const pickShown = (page: Page) =>
+  page.evaluate(() => {
+    const host = document.querySelector('birta-flow[data-kind="composer"]');
+    const root = host?.shadowRoot ?? host;
+    return (root?.querySelector(".target")?.textContent ?? "").trim() || null;
+  });
+
+test.describe("adversary: composer labels by the lead's word rule", () => {
+  test("adversary: a paragraph longer than five words is named by its first five", async ({ page, birta }) => {
+    await open(page, birta, STOPS_DOC);
+    await focusOn(page, await stopSp(page, "When the upload"));
+    await page.keyboard.press("c");
+    await expect.poll(() => labelNow(page)).toBe("note on When the upload hits a… (paragraph)");
+  });
+
+  test("adversary: a list item's words end right after an inline code span, for notes and questions", async ({ page, birta }) => {
+    await open(page, birta, JOURNEY_DOC);
+    const item = await stopSp(page, "when the server sends it");
+    await focusOn(page, item);
+    await page.keyboard.press("c");
+    await expect.poll(() => labelNow(page)).toBe("note on - Respect Retry-After… (list item)");
+    await page.keyboard.press("Escape");
+    await page.keyboard.press("q");
+    await expect.poll(() => labelNow(page)).toBe("question on - Respect Retry-After… (list item)");
+  });
+});
+
+test.describe("adversary: the editor in place", () => {
+  test("adversary: while you edit your note it shows once, in the editor, and once again after Esc", async ({ page, birta }) => {
+    await open(page, birta, fixtureDoc("drafts"), { state: fixtureState("drafts") });
+    await focusOn(page, "10:1-10:16");
+    await expect.poll(() => shownWith(page, "drop this bullet")).toBe(1);
+    await page.keyboard.press("c");
+    await expect(composer(page)).toHaveValue("drop this bullet");
+    // No copy of the note anywhere else on the page, not only under its block
+    await expect.poll(() => shownWith(page, "drop this bullet")).toBe(0);
+    await page.keyboard.press("Escape");
+    await expect(composer(page)).toHaveCount(0);
+    await expect.poll(() => shownWith(page, "drop this bullet")).toBe(1);
+  });
+
+  test("adversary: editing your note on the last block of a long doc opens fully in view", async ({ page, birta }) => {
+    const LONG = longDoc();
+    const last = lineSp(LONG, "Filler paragraph 40.");
+    const body = "first line of my note\nsecond line\nthird line\nfourth line";
+    await open(page, birta, LONG, { state: notesState(LONG, [{ sp: last, body }]) });
+    await page.keyboard.press("End");
+    await expect.poll(() => focused(page)).toBe(last);
+    await page.waitForTimeout(SETTLE_MS);
+    await page.keyboard.press("c");
+    await expect(composer(page)).toHaveValue(body);
+    expect(await labelNow(page)).toBe("editing your note");
+    await expect.poll(() => composerPlace(page)).toBe("in view");
+  });
+});
+
+test.describe("adversary: keys in the field", () => {
+  test("adversary: Home, End, PageUp and PageDown in the field leave the focus on its stop and the words as typed", async ({ page, birta }) => {
+    const LONG = longDoc();
+    await open(page, birta, LONG, { state: notesState(LONG, []) });
+    const sp = await stopSp(page, "Filler paragraph 20.");
+    await focusOn(page, sp);
+    await page.keyboard.press("c");
+    await expect(composer(page)).toBeFocused();
+    await page.keyboard.type("two words");
+    await page.waitForTimeout(SETTLE_MS);
+    for (const key of ["End", "Home", "PageDown", "PageUp"]) {
+      await page.keyboard.press(key);
+      await page.waitForTimeout(150);
+      expect(await focused(page), `${key} moved the focus`).toBe(sp);
+      await expect(composer(page), `${key} left the field`).toBeFocused();
+      await expect(composer(page)).toHaveValue("two words");
+    }
+  });
+});
+
+test.describe("adversary: quotes by keyboard", () => {
+  test("adversary: the focused block's match leads and the rest keep the server's order; ↓↓ then ⏎ keeps the third", async ({ page, birta }) => {
+    const { mock } = await open(page, birta, STOPS_DOC);
+    const para = await stopSp(page, "When the upload");
+    const code = await stopSp(page, "retry(upload, 3);");
+    const detail = await stopSp(page, "Detail words.");
+    await focusOn(page, code);
+    await page.keyboard.press("c");
+    await page.keyboard.type('"upload" do it');
+    await expect.poll(() => mock.frames.filter((f) => f.msg.type === "resolve").length).toBeGreaterThan(0);
+    const ask = mock.frames.filter((f) => f.msg.type === "resolve").at(-1)!.msg;
+    const inPara = { k: "quote", q: "upload", pre: "", suf: "", sp: para, off: 9 };
+    const inCode = { k: "quote", q: "upload", pre: "", suf: "", sp: code, off: 6 };
+    const inDetail = { k: "quote", q: "upload", pre: "", suf: "", sp: detail, off: 0 };
+    // Server order puts the focused block's match in the middle: a reversal would lead with the last
+    mock.push({
+      type: "resolved",
+      cid: ask.cid,
+      candidates: [
+        { at: inPara, preview: "→ in the paragraph" },
+        { at: inCode, preview: "→ in the code" },
+        { at: inDetail, preview: "→ in the detail" },
+      ],
+    });
+    await expect.poll(() => pickShown(page)).toBe("→ in the code");
+    await page.keyboard.press(PICK_NEXT);
+    await expect.poll(() => pickShown(page)).toBe("→ in the paragraph");
+    await page.keyboard.press(PICK_NEXT);
+    await expect.poll(() => pickShown(page)).toBe("→ in the detail");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => mock.ops().length).toBe(1);
+    expect(mock.ops()[0].at).toStrictEqual(inDetail);
+  });
+
+  test("adversary: with one match, ↑ and ↓ keep it, the label names it, and ⏎ sends it", async ({ page, birta }) => {
+    const { mock } = await open(page, birta, STOPS_DOC);
+    const para = await stopSp(page, "When the upload");
+    const code = await stopSp(page, "retry(upload, 3);");
+    await focusOn(page, code);
+    await page.keyboard.press("c");
+    await page.keyboard.type('"hits a 503" do it');
+    await expect.poll(() => mock.frames.filter((f) => f.msg.type === "resolve").length).toBeGreaterThan(0);
+    const ask = mock.frames.filter((f) => f.msg.type === "resolve").at(-1)!.msg;
+    const only = { k: "quote", q: "hits a 503", pre: "", suf: "", sp: para, off: 16 };
+    mock.push({ type: "resolved", cid: ask.cid, candidates: [{ at: only, preview: "→ the only one" }] });
+    await expect.poll(() => pickShown(page)).toBe("→ the only one");
+    await expect.poll(() => labelNow(page)).toBe('note on "hits a 503"');
+    for (const key of [PICK_NEXT, PICK_NEXT, PICK_PREV, PICK_PREV, PICK_PREV]) {
+      await page.keyboard.press(key);
+      expect(await pickShown(page), key).toBe("→ the only one");
+    }
+    await page.keyboard.press("Enter");
+    await expect.poll(() => mock.ops().length).toBe(1);
+    expect(mock.ops()[0]).toMatchObject({ op: "comment", body: "do it" });
+    expect(mock.ops()[0].at).toStrictEqual(only);
+  });
+
+  test("adversary: on a real server, a loose list item's match leads though its words sit in an inner paragraph", async ({ page, birta }) => {
+    const doc = ["# Loose", "", "The upload starts in this paragraph.", "", "- first item", "", "- the upload retries in this item", ""].join("\n");
+    const { served, sent, received } = await openReal(page, birta, doc);
+    const item = await stopSp(page, "the upload retries");
+    // Setup: the stop is the list item, which holds its words in a paragraph of its own
+    expect(item.startsWith("7:")).toBe(true);
+    await focusOn(page, item);
+    await page.keyboard.press("c");
+    await page.keyboard.type('"upload" here');
+    await expect.poll(() => received.filter((f) => f.type === "resolved").at(-1)?.candidates?.length ?? 0).toBe(2);
+    const sps = received.filter((f) => f.type === "resolved").at(-1)!.candidates.map((c: State) => c.at.sp);
+    // Setup: the server names the item's inner paragraph, so matching the stop's sp exactly finds nothing
+    expect(sps, JSON.stringify(sps)).not.toContain(item);
+    await expect.poll(() => pickShown(page)).toMatch(/retries/);
+    await page.keyboard.press("Enter");
+    await expect.poll(() => (reviewLog(served.root) ?? []).filter((l) => l.op === "comment").length).toBe(1);
+    const op = sent.filter((f) => f.type === "op" && f.op === "comment").at(-1)!;
+    expect(String(op.at?.sp), JSON.stringify(op.at)).toMatch(/^7:/);
+  });
+});
+
+test.describe("adversary: c order", () => {
+  test("adversary: a selection over your unsent note writes a new note and leaves the draft as it was", async ({ page, birta }) => {
+    const s = fixtureState("flow");
+    const draft = notesState(FLOW_DOC, [{ sp: "5:1-6:68", body: "my unsent words", n: 60 }]).items[0];
+    s.items.push(draft);
+    s.counts.drafts += 1;
+    const { mock } = await open(page, birta, FLOW_DOC, { state: s });
+    await focusOn(page, "5:1-6:68");
+    await selectWord(page, "5:1-6:68", "we just fail");
+    await page.keyboard.press("c");
+    await expect(composer(page)).toHaveValue("");
+    await page.keyboard.type("new words");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => mock.ops().length).toBe(1);
+    await page.waitForTimeout(SETTLE_MS);
+    expect(mock.ops().map((o) => o.op)).toEqual(["comment"]);
+    expect(mock.ops()[0]).toMatchObject({ body: "new words", at: { k: "quote", q: "we just fail" } });
+    expect(await shownWith(page, "my unsent words")).toBe(1);
+  });
+});
+
+test.describe("adversary: the section wash", () => {
+  /** Whether a wash box covers the block holding `text` whole, or with `touch`, reaches over any of it. */
+  async function washed(page: Page, text: string, touch = false): Promise<boolean> {
+    const box = await page.evaluate((text) => {
+      let hit: Element | null = null;
+      document.querySelectorAll("#content [data-sourcepos]").forEach((el) => {
+        if ((el.textContent ?? "").includes(text)) hit = el;
+      });
+      if (!hit) throw new Error(`no block holds ${text}`);
+      const r = (hit as Element).getBoundingClientRect();
+      return { top: r.top, bottom: r.bottom };
+    }, text);
+    return (await marks(page)).some(
+      (m) => m.mark === "wash" && m.height > 0 && (touch ? m.top < box.bottom - 1 && m.bottom > box.top + 1 : m.top <= box.top + 1 && m.bottom >= box.bottom - 1),
+    );
+  }
+  const SECTION = ["retries on 503", "metrics dashboard", "retry(upload, 3);", "Detail words."];
+  const OUTSIDE = ["When the upload", "Stacked on", "Nothing yet.", "Filler paragraph 1."];
+
+  test("adversary: l on a heading washes its section too, not only x", async ({ page, birta }) => {
+    const { mock } = await open(page, birta, longDoc(), { viewport: { width: 1280, height: 500 } });
+    expect((await marks(page)).filter((m) => m.mark === "wash"), "setup: no wash before the verdict").toEqual([]);
+    await focusOn(page, await stopSp(page, "What changes"));
+    await page.keyboard.press("l");
+    await expect.poll(() => mock.ops().map((o) => o.verdict)).toEqual(["later"]);
+    for (const text of SECTION) await expect.poll(() => washed(page, text), { message: `the wash covers ${text}` }).toBe(true);
+  });
+
+  test("adversary: x on a heading washes nothing past its section, nor above it", async ({ page, birta }) => {
+    await open(page, birta, longDoc(), { viewport: { width: 1280, height: 500 } });
+    await focusOn(page, await stopSp(page, "What changes"));
+    await page.keyboard.press("x");
+    await expect.poll(() => washed(page, "Detail words."), { message: "setup: the section is washed" }).toBe(true);
+    for (const text of OUTSIDE) expect(await washed(page, text, true), `no wash over ${text}`).toBe(false);
+  });
+
+  test("adversary: a section verdict in the state stays washed with the focus outside the section and the heading off screen, through redraws", async ({
+    page,
+    birta,
+  }) => {
+    const LONG = longDoc();
+    const heading = lineSp(LONG, "## What changes");
+    const state = notesState(LONG, [{ sp: heading, body: "", verdict: "later", scope: "section", n: 50 }]);
+    const { mock } = await open(page, birta, LONG, { state, viewport: { width: 1280, height: 500 } });
+    const out = await stopSp(page, "Nothing yet.");
+    await page.evaluate(() => {
+      const el = Array.from(document.querySelectorAll("#content p")).find((p) => p.textContent === "Detail words.")!;
+      window.scrollBy(0, el.getBoundingClientRect().top - 60 - document.querySelector(".file-header")!.getBoundingClientRect().bottom);
+    });
+    await page.waitForTimeout(SETTLE_MS);
+    await focusOn(page, out);
+    await page.waitForTimeout(SETTLE_MS);
+    const headingBottom = await page.locator(`#content [data-sourcepos="${heading}"]`).evaluate((el) => el.getBoundingClientRect().bottom);
+    expect(headingBottom, "setup: the heading is above the view").toBeLessThan(0);
+    // A resize and a fresh state both redraw every mark from scratch
+    await page.setViewportSize({ width: 1200, height: 520 });
+    mock.pushState(state);
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await focused(page), "setup: the focus is outside the section").toBe(out);
+    for (const text of ["Detail words.", "retry(upload, 3);"]) await expect.poll(() => washed(page, text), { message: `the wash covers ${text}` }).toBe(true);
+    expect(await washed(page, "Nothing yet.", true), "no wash past the section").toBe(false);
+  });
+});
+
+// --- repair: a code block's label, and new round with a typed quote ----------------------------------
+
+test.describe("repair: composer labels", () => {
+  test("a code block is named by its first five words, as a paragraph is", async ({ page, birta }) => {
+    const doc = ["# Code", "", "```js", "let total = retry(upload, 3) + backoff(4);", "```", ""].join("\n");
+    await open(page, birta, doc);
+    await focusOn(page, await stopSp(page, "let total"));
+    await page.keyboard.press("c");
+    await expect.poll(() => labelNow(page)).toBe("note on let total = retry(upload, 3)… (code block)");
+  });
+
+  test("a typed quote in a new round's composer keeps the new round prefix", async ({ page, birta }) => {
+    const { mock } = await open(page, birta, fixtureDoc("approved"), { state: fixtureState("approved") });
+    await expect.poll(() => focused(page)).toBe("doc");
+    const why = await stopSp(page, "When the upload");
+    await page.keyboard.press("c");
+    await expect.poll(() => labelNow(page)).toBe("new round · note on whole doc");
+    await page.keyboard.type('"upload" again');
+    await expect.poll(() => mock.frames.filter((f) => f.msg.type === "resolve").length).toBeGreaterThan(0);
+    const ask = mock.frames.filter((f) => f.msg.type === "resolve").at(-1)!.msg;
+    mock.push({ type: "resolved", cid: ask.cid, candidates: [{ at: { k: "quote", q: "upload", pre: "", suf: "", sp: why, off: 9 }, preview: '→ "upload"' }] });
+    await expect.poll(() => labelNow(page)).toBe('new round · note on "upload"');
+    await page.keyboard.press("ControlOrMeta+a");
+    await page.keyboard.type("no quote now");
+    await expect.poll(() => labelNow(page)).toBe("new round · note on whole doc");
   });
 });

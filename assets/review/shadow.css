@@ -200,7 +200,6 @@
   /* Gives up its width long before the file name does */
   flex: 0 10000 auto;
   min-width: 0;
-  overflow: hidden;
   visibility: visible !important;
   opacity: 1 !important;
 }
@@ -226,13 +225,12 @@
 
 .phrase {
   display: block;
-  /* Room for three counts; the tooltip has the rest */
   max-width: 90ch;
   font: 12px/26px ui-monospace, SFMono-Regular, Menlo, monospace;
   color: var(--birta-fg-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* Never cut short: a long phrase wraps onto more header lines */
+  white-space: normal;
+  overflow-wrap: anywhere;
   cursor: pointer;
 }
 

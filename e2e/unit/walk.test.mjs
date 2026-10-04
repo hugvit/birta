@@ -358,7 +358,7 @@ test("an approved doc says how to start again", () => {
   assert.equal(phrase(bent("approved", (s) => (s.approve.later = 0))), "approved 14:13 · c to reopen");
 });
 
-test("changed since stays in the phrase; what waits for later goes to the tooltip", () => {
+test("changed since replaces c to reopen in the phrase; what waits for later goes to the tooltip", () => {
   assert.equal(phrase(state("approved")), "approved 14:13 · c to reopen");
   const s = state("approved");
   assert.equal(load().pure.phraseTitle(s, { now: s.server_now }), "approved 14:13 · 1 later · c to reopen");
@@ -367,7 +367,7 @@ test("changed since stays in the phrase; what waits for later goes to the toolti
     s.approve.changed_since = true;
     s.approve.current_matches = false;
   });
-  assert.equal(phrase(changed), "approved 14:13 · changed since · c to reopen");
+  assert.equal(phrase(changed), "approved 14:13 · changed since");
 });
 
 test("inside the approve's hold the phrase is still the one from before it", () => {
@@ -386,18 +386,19 @@ const changesOnly = () =>
 
 const button = (s) => plain(load().pure.turnButton(s, { now: s.server_now }));
 
-test("the Approve button counts unseen replies with unseen changes", () => {
-  assert.deepEqual(button(state("unseen")), { text: "Approve · 4 unseen", kbd: false, disabled: false });
-  assert.deepEqual(button(state("replied")), { text: "Approve · 2 unseen", kbd: false, disabled: false });
-  assert.deepEqual(button(changesOnly()), { text: "Approve · 3 unseen", kbd: false, disabled: false });
+test("the Approve button never counts: with things to check it is Approve with its key, and the guard counts", () => {
+  assert.deepEqual(button(state("unseen")), { text: "Approve", kbd: true, disabled: false });
+  assert.deepEqual(button(state("replied")), { text: "Approve", kbd: true, disabled: false });
+  assert.deepEqual(button(changesOnly()), { text: "Approve", kbd: true, disabled: false });
 });
 
-test("an unseen reply alone keeps the button from a plain Approve", () => {
+test("an unchecked reply alone leaves the button a plain Approve, and the guard still stops the first press", () => {
   const s = bent("unseen", (s) => {
     for (const c of s.changes) c.seen = true;
     s.counts.unseen = 0;
   });
-  assert.deepEqual(button(s), { text: "Approve · 1 unseen", kbd: false, disabled: false });
+  assert.deepEqual(button(s), { text: "Approve", kbd: true, disabled: false });
+  assert.match(load().pure.guardPill(s, KEY), /^\d+ to check · n next · /);
 });
 
 // --- Killers ------------------------------------------------------------------------------------

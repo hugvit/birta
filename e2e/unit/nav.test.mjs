@@ -97,13 +97,6 @@ const BINDINGS = {
   focus_last: "End",
 };
 
-/** A sheet as the lines it reads: each group's label and keys, then its notes. */
-function lines(sheet) {
-  return plain(sheet).flatMap((g) =>
-    g.rows.map((r, i) => [i === 0 ? g.label : "", r.keys.join(" "), r.note ?? ""].filter(Boolean).join("  ")),
-  );
-}
-
 test("the folder code loads the navigation helpers without a DOM", () => {
   for (const files of [ORDER, [...ORDER].reverse()]) {
     const BR = load(files);
@@ -113,31 +106,53 @@ test("the folder code loads the navigation helpers without a DOM", () => {
 
 // --- The ? sheet ---------------------------------------------------------------------------------
 
-test("the key sheet groups the default keys as the spec lists them", () => {
+/** Rows the sheet must hold with the default keys, keys then words (the same list as harness.ts `SHEET_WORDS`). */
+const SHEET_WORDS = [
+  ["y", "keep as is / keep / ok"],
+  ["x", "no: Claude cuts it"],
+  ["l", "later: Claude leaves it"],
+  [".", "your call: Claude decides"],
+  ["⏎", "open / follow"],
+  ["Esc", "close"],
+  ["Home End", "top / bottom"],
+];
+const SHEET_VERDICT_NOTE = "a verdict is a one-word note";
+
+/** Every row of the sheet as `{keys, note}`, its group left out. */
+const rowsOf = (sheet) => plain(sheet).flatMap((g) => g.rows.map((r) => ({ keys: r.keys, note: r.note ?? "" })));
+
+test("the key sheet gives the default keys their words", () => {
   const BR = load();
-  assert.deepEqual(lines(BR.pure.keySheet(BINDINGS, true)), [
-    "decide  y x l .",
-    "write  c q",
-    "move  j k n p ⇧J ⇧K Tab",
-    "take back  z",
-    "Claude's changes  u  revert Claude's change (open row)",
-    "hand back / approve  ⌘⏎",
-    "view  r d t m",
-    "⌥u  source view",
-  ]);
+  const rows = rowsOf(BR.pure.keySheet(BINDINGS, true));
+  for (const [keys, note] of SHEET_WORDS) {
+    assert.ok(
+      rows.some((r) => r.keys.join(" ") === keys && r.note === note),
+      `the sheet has the row "${keys} ${note}" in ${JSON.stringify(rows)}`,
+    );
+  }
+});
+
+test("every row of the key sheet has words, and the sheet says a verdict is a one-word note", () => {
+  const BR = load();
+  const sheet = BR.pure.keySheet(BINDINGS, true);
+  for (const r of rowsOf(sheet)) assert.ok(r.note.trim().length > 0, `a row with keys only: ${JSON.stringify(r)}`);
+  assert.ok(JSON.stringify(plain(sheet)).includes(SHEET_VERDICT_NOTE), JSON.stringify(plain(sheet)));
 });
 
 test("off a Mac the turn key reads Ctrl⏎", () => {
   const BR = load();
-  assert.ok(lines(BR.pure.keySheet(BINDINGS, false)).includes("hand back / approve  Ctrl⏎"));
+  const rows = rowsOf(BR.pure.keySheet(BINDINGS, false));
+  assert.ok(rows.some((r) => r.keys.length === 1 && r.keys[0] === "Ctrl⏎"), JSON.stringify(rows));
+  assert.ok(!rows.some((r) => r.keys.includes("⌘⏎")), JSON.stringify(rows));
 });
 
 test("the sheet names the keys as bound, and leaves out an unbound one", () => {
   const BR = load();
-  const got = lines(BR.pure.keySheet({ ...BINDINGS, yes: "g", hide_marks: "", next_file: "Shift+L" }, true));
-  assert.equal(got[0], "decide  g x l .");
-  assert.equal(got[2], "move  j k n p ⇧L ⇧K Tab");
-  assert.equal(got[6], "view  r d t");
+  const rows = rowsOf(BR.pure.keySheet({ ...BINDINGS, yes: "g", hide_marks: "", next_file: "Shift+L" }, true));
+  assert.ok(rows.some((r) => r.keys.join(" ") === "g" && r.note === "keep as is / keep / ok"), JSON.stringify(rows));
+  assert.ok(!rows.some((r) => r.keys.includes("y")), JSON.stringify(rows));
+  assert.ok(rows.some((r) => r.keys.includes("⇧L")), JSON.stringify(rows));
+  assert.ok(!rows.some((r) => r.keys.includes("m")), JSON.stringify(rows));
 });
 
 test("the sheet leaves its bindings alone", () => {
@@ -290,8 +305,9 @@ test("a drafter, or an agent that took a round, still gets Approve in a folder",
   const BR = load();
   const btn = (s) => plain(BR.pure.turnButton(s, folderOpts(s)));
   assert.deepEqual(btn(state("fresh")), B("Approve"));
+  // Approve never carries a count; the guard does the counting
   const claimed = bent("replied", (s) => (s.owner.drafted_by = null));
-  assert.match(btn(claimed).text, /^Approve/);
+  assert.deepEqual(btn(claimed), B("Approve"));
 });
 
 test("serving one file, a doc of yours keeps its Approve button, listing or not", () => {
@@ -304,22 +320,29 @@ test("serving one file, a doc of yours keeps its Approve button, listing or not"
   assert.deepEqual(plain(BR.pure.turnButton(s, { now: s.server_now, dir, path: "pr.md" })), B("Approve"));
 });
 
-test("in a folder with no drafter, the phrase offers the hand-off line once a hand-back sits unclaimed for 10 s", () => {
+test("in both modes, a hand-back unclaimed for 10 s turns the button into the hand-off line; the phrase stays", () => {
   const BR = load();
-  const s = bent("sent", (x) => (x.owner.drafted_by = null));
-  const sentAt = s.phrase.sent.ts;
-  const phrase = (now, extra = {}) => BR.pure.formatPhrase(s, { now, dir: dirState([]), path: "pr.md", folder: true, ...extra });
-  assert.equal(phrase(sentAt + 9_999), "sent 14:13 · not picked up yet");
-  assert.equal(phrase(sentAt + 10_000), "sent 14:13 · not picked up yet · copy hand-off line");
+  const mine = bent("sent", (x) => (x.owner.drafted_by = null));
+  const sentAt = mine.phrase.sent.ts;
   const others = dirState([listed("b.md", null, true)]);
-  assert.equal(phrase(sentAt + 10_000, { dir: others }), "sent 14:13 · not picked up yet · copy hand-off line · 1 other file ▾");
-  // Serving one file, or with a drafter, it never does
-  assert.equal(phrase(sentAt + 60_000, { folder: false }), "sent 14:13 · not picked up yet");
-  const drafted = state("sent");
-  assert.equal(
-    BR.pure.formatPhrase(drafted, { now: sentAt + 60_000, dir: dirState([]), path: "pr.md", folder: true }),
-    "sent 14:13 · not picked up yet",
-  );
+  const COPY_LINE = B("Copy hand-off line");
+  // A folder with no drafter, a folder with one, and one file served, with a drafter or not
+  const modes = [
+    ["a folder doc of yours", mine, { dir: dirState([]), path: "pr.md", folder: true }],
+    ["a folder doc Claude drafted", state("sent"), { dir: dirState([]), path: "pr.md", folder: true }],
+    ["one file Claude drafted", state("sent"), { dir: null, path: "pr.md", folder: false }],
+    ["one file of yours", mine, { dir: null, path: "pr.md", folder: false }],
+  ];
+  for (const [name, s, o] of modes) {
+    const btn = (now) => plain(BR.pure.turnButton(s, { ...o, now }));
+    const phrase = (now, extra = {}) => BR.pure.formatPhrase(s, { ...o, now, ...extra });
+    assert.match(btn(sentAt + 9_999).text, /^With /, name);
+    assert.equal(btn(sentAt + 9_999).disabled, true, name);
+    assert.deepEqual(btn(sentAt + 10_000), COPY_LINE, name);
+    assert.deepEqual(btn(sentAt + 60_000), COPY_LINE, name);
+    for (const now of [sentAt + 9_999, sentAt + 10_000, sentAt + 60_000]) assert.equal(phrase(now), "sent 14:13 · not picked up yet", name);
+    if (o.folder) assert.equal(phrase(sentAt + 10_000, { dir: others }), "sent 14:13 · not picked up yet · 1 other file ▾", name);
+  }
   // A file row's note is the phrase alone
   assert.equal(BR.pure.fileNote(listed("b.md", summary("sent")), { now: sentAt + 60_000 }), "sent 14:13 · not picked up yet");
 });

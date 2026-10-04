@@ -71,7 +71,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     }
     down = true;
     show(true);
-    BR.chrome.renderStrip();
+    BR.chrome.render();
     later();
   }
 
@@ -80,7 +80,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     down = false;
     clearTimeout(timer);
     show(false);
-    BR.chrome.renderStrip();
+    BR.chrome.render();
     BR.chrome.say(RECONNECTED, { ms: RECONNECTED_MS });
   }
 

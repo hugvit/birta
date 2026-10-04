@@ -13,7 +13,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   /**
    * What the lane draws for a state, before any geometry:
    * `{mark:'glyph', sp, verdict, role, n}`, `{mark:'veil', sp, section}` over a block or section
-   * told no, `{mark:'bar', sp, style, role, weight, fresh, check}`, `{mark:'wash', sp}`,
+   * told no, `{mark:'bar', sp, style, role, weight, fresh, check}`, `{mark:'wash', sp, section?}`
+   * over a block with unseen changes or a section with a verdict,
    * `{mark:'revert', sp}` where your revert put Claude's change back, and `{mark:'tick', after,
    * count}`, where `after` is null above the first block. A bar is 3 px and new until its change
    * is checked, then 1 px and muted.
@@ -28,6 +29,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       });
     }
     var out = [];
+    var sectionWashed = {};
     (state.items || [])
       .filter(function (i) {
         return i.verdict && i.status !== 'retracted' && i.at && i.at.loc && i.at.loc.sp;
@@ -38,6 +40,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         var yours = i.status === 'draft' || i.status === 'withdrawn' || !!held[i.n];
         out.push({ mark: 'glyph', sp: i.at.loc.sp, verdict: i.verdict, role: yours ? 'you' : 'agent', n: i.n });
         if (i.verdict === 'no') out.push({ mark: 'veil', sp: i.at.loc.sp, section: i.at.scope === 'section' });
+        // A section's verdict reaches every block of it, so the wash shows that scope
+        if (i.at.scope === 'section' && !sectionWashed[i.at.loc.sp]) {
+          sectionWashed[i.at.loc.sp] = true;
+          out.push({ mark: 'wash', sp: i.at.loc.sp, section: true });
+        }
       });
 
     var bySp = {};
@@ -246,7 +253,14 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     queued = false;
     var now = BR.chrome.now();
     // Approved, the doc reads clean: only the dots stay
-    var marks = current && !BR.pure.clean(current, now) ? BR.pure.laneMarks(current, { now: now }) : [];
+    var clean = current && BR.pure.clean(current, now);
+    var marks = current && !clean ? BR.pure.laneMarks(current, { now: now }) : [];
+    // Section verdicts on their way wash at once, as their glyph's state is still to come
+    if (!clean && BR.pending) {
+      BR.pending.sections().forEach(function (sp) {
+        if (!marks.some(function (m) { return m.mark === 'wash' && m.section && m.sp === sp; })) marks.push({ mark: 'wash', sp: sp, section: true });
+      });
+    }
     // A glyph shares its block's lane with the bar, so it moves to the slot beside it
     var barred = {};
     marks.forEach(function (m) { if (m.mark === 'bar') barred[m.sp] = m; });
@@ -303,10 +317,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         overOut.appendChild(box({ 'data-mark': 'veil', 'data-sp': m.sp }, 'veil', vl - F.left, vr.top - F.top, vright - vl, vr.bottom - vr.top));
       } else if (m.mark === 'wash') {
         // An item's wash reaches over its marker, and a wide table's stops at the doc's edge
-        var left = Math.max(el.localName === 'li' ? el.parentElement.getBoundingClientRect().left : r.left, C.left) - 8;
-        var right = Math.min(r.right, C.right) + 8;
+        var wr = m.section ? sectionRect(el, C) : r;
+        var left = Math.max(el.localName === 'li' ? el.parentElement.getBoundingClientRect().left : wr.left, C.left) - 8;
+        var right = Math.min(m.section ? C.right : r.right, C.right) + 8;
         underOut.appendChild(box({ 'data-mark': 'wash', 'data-sp': m.sp }, 'wash',
-          left - F.left, r.top - F.top, right - left, r.height));
+          left - F.left, wr.top - F.top, right - left, wr.bottom - wr.top));
       } else if (m.mark === 'glyph') {
         var k = stacked[m.sp] = (stacked[m.sp] || 0) + 1;
         var line = firstLine(el);

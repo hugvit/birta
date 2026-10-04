@@ -56,35 +56,19 @@ test("the phrase has a tooltip function", () => {
 const FIXTURE_PHRASE = {
   // No bare item count: a fresh doc says only who drafted it and whose turn it is
   fresh: same("drafted by Claude · your turn"),
-  // Notes and decided blocks together, never one in place of the other
-  drafts: same("your turn · 3 notes · 1 of 3 blocks decided"),
+  // The phrase never counts your notes or decided blocks; the button counts notes
+  drafts: same("drafted by Claude · your turn"),
   dir: same("read-only · notes only"),
-  // Drafting after a reply keeps the reply: unseen (changes and replies, as the button counts), notes, decided; the rest in the tooltip
-  flow: {
-    phrase: "Claude replied 14:13 · 6 unseen · your turn · 1 note · 2 of 3 blocks decided",
-    title:
-      "Claude replied 14:13 · 6 unseen · your turn · 1 note · 2 of 3 blocks decided · 2 done · 1 answered · 2 for you · 1 without a note · 3 not handled",
-  },
-  hold: same("your turn · 3 notes · 1 of 3 blocks decided"),
+  // Drafting after a reply keeps the reply and its one count, to check
+  flow: same("Claude replied 14:13 · 9 to check"),
+  hold: same("drafted by Claude · your turn"),
   sent: same("sent 14:13 · not picked up yet"),
   picked: same("Claude picked up 14:13"),
-  // With slots left after unseen and decided, the reply's tallies fill them in order
-  replied: {
-    phrase: "Claude replied 14:13 · 2 unseen · 1 of 3 blocks decided · 1 done",
-    title: "Claude replied 14:13 · 2 unseen · 1 of 3 blocks decided · 1 done · 1 answered · 1 not handled",
-  },
-  unseen: {
-    phrase: "Claude replied 14:13 · 4 unseen · 1 of 3 blocks decided · 1 done",
-    title: "Claude replied 14:13 · 4 unseen · 1 of 3 blocks decided · 1 done · 1 answered · 2 without a note · 1 not handled",
-  },
-  rewrite: {
-    phrase: "Claude replied 14:13 · 9 unseen · 1 of 3 blocks decided · 1 done",
-    title: "Claude replied 14:13 · 9 unseen · 1 of 3 blocks decided · 1 done · 1 answered · 6 without a note",
-  },
-  lost: {
-    phrase: "Claude replied 14:13 · 3 unseen · 1 of 3 blocks decided · 1 done",
-    title: "Claude replied 14:13 · 3 unseen · 1 of 3 blocks decided · 1 done · 1 answered · 1 not handled",
-  },
+  // One event and one count: the reply's own tallies are on its rows, not in the phrase or its tooltip
+  replied: same("Claude replied 14:13 · 3 to check"),
+  unseen: same("Claude replied 14:13 · 5 to check"),
+  rewrite: same("Claude replied 14:13 · 9 to check"),
+  lost: same("Claude replied 14:13 · 3 to check"),
   // The clean view: what the approve left stays in the tooltip
   approved: { phrase: "approved 14:13 · c to reopen", title: "approved 14:13 · 1 later · c to reopen" },
 };
@@ -109,20 +93,20 @@ const AT_2325 = Date.UTC(2026, 8, 21, 23, 25, 7);
 
 const CRAFTED = [
   [
-    "the spec's own example reads as written",
+    "a reply names its time and what is left to check, never notes or decided blocks",
     bent("flow", (s) => {
       allSeen(s);
-      Object.assign(s.counts, { unseen: 2, drafts: 1, decided: 1, items: 7 });
+      Object.assign(s.counts, { unseen: 2, drafts: 1, decided: 1, items: 7, to_check: 2 });
       Object.assign(s.phrase.replied, { ts: AT_2325, done: 0, answered: 0, asked: 0, unasked: 0, not_handled: 0 });
     }),
-    same("Claude replied 23:25 · 2 unseen · your turn · 1 note · 1 of 7 blocks decided"),
+    same("Claude replied 23:25 · 2 to check"),
   ],
   [
-    "notes with no verdict leave decided out",
+    "notes are never counted in the phrase",
     bent("drafts", (s) => (s.counts.decided = 0)),
-    same("your turn · 3 notes"),
+    same("drafted by Claude · your turn"),
   ],
-  ["one note is singular", bent("drafts", (s) => Object.assign(s.counts, { drafts: 1, decided: 0 })), same("your turn · 1 note")],
+  ["one note is not counted either", bent("drafts", (s) => Object.assign(s.counts, { drafts: 1, decided: 0 })), same("drafted by Claude · your turn")],
   [
     "a fresh doc of yours says only whose turn",
     bent("fresh", (s) => (s.owner.drafted_by = null)),
@@ -134,36 +118,30 @@ const CRAFTED = [
     same("drafted by Codex · your turn"),
   ],
   [
-    "a reply with nothing unseen and nothing decided shows its first three tallies",
+    "a reply's own tallies never show: with nothing left to check it says all checked",
     bent("replied", (s) => {
       allSeen(s);
-      s.counts.decided = 0;
+      Object.assign(s.counts, { decided: 0, to_check: 0 });
       Object.assign(s.phrase.replied, { done: 3, answered: 1, asked: 2, unasked: 1, not_handled: 2 });
     }),
-    {
-      phrase: "Claude replied 14:13 · 3 done · 1 answered · 2 for you",
-      title: "Claude replied 14:13 · 3 done · 1 answered · 2 for you · 1 without a note · 2 not handled",
-    },
+    same("Claude replied 14:13 · all checked"),
   ],
   [
-    "a reply with no tallies at all is just the reply",
+    "a reply with no tallies still carries its one count",
     bent("replied", (s) => {
       allSeen(s);
       s.counts.decided = 0;
       Object.assign(s.phrase.replied, { done: 0, answered: 0, asked: 0, unasked: 0, not_handled: 0 });
     }),
-    same("Claude replied 14:13"),
+    same("Claude replied 14:13 · 3 to check"),
   ],
   [
-    "a verdict after a reply counts decided and keeps what the turn left alone in the tooltip",
+    "a verdict and a note after a reply leave the phrase as the reply left it",
     bent("replied", (s) => {
       allSeen(s);
       Object.assign(s.counts, { drafts: 1, decided: 1 });
     }),
-    {
-      phrase: "Claude replied 14:13 · your turn · 1 note · 1 of 3 blocks decided · 1 done",
-      title: "Claude replied 14:13 · your turn · 1 note · 1 of 3 blocks decided · 1 done · 1 answered · 1 not handled",
-    },
+    same("Claude replied 14:13 · 3 to check"),
   ],
 ];
 
@@ -184,12 +162,13 @@ test("no phrase cuts a count to …, counts items or says unasked", () => {
   }
 });
 
-test("the phrase shows at most three counts, and the tooltip holds every part of it in order", () => {
+test("the phrase shows at most one count, and the tooltip holds every part of it in order", () => {
   const BR = load();
   for (const [name, s] of [...Object.keys(FIXTURE_PHRASE).map((n) => [n, state(n)]), ...CRAFTED.map(([n, s]) => [n, s])]) {
     const { phrase: p, title } = phrase(BR, s);
     const counts = p.split(" · ").filter((part) => /^\d/.test(part));
-    assert.ok(counts.length <= 3, `${name}: ${p}`);
+    assert.ok(counts.length <= 1, `${name}: ${p}`);
+    assert.doesNotMatch(p, /unseen|decided|\bdone\b|answered|for you|without a note/, `${name}: ${p}`);
     const parts = title.split(" · ");
     let at = -1;
     for (const part of p.split(" · ")) {
@@ -269,16 +248,15 @@ test("an outside change's weight follows settled too, and a changed-since approv
   const s = rounds((s) => Object.assign(s.changes[1], { attr: "outside", turn: null, seen: true, settled: true }));
   assert.deepEqual(bars(BR, s).map((b) => b.weight), [1, 1]);
   const a = bent("approved", (s) => (s.approve.changed_since = true));
-  assert.deepEqual(phrase(BR, a), {
-    phrase: "approved 14:13 · changed since · c to reopen",
-    title: "approved 14:13 · changed since · 1 later · c to reopen",
-  });
+  assert.equal(phrase(BR, a).phrase, "approved 14:13 · changed since");
+  // The tooltip is the phrase plus what waits for later
+  assert.equal(phrase(BR, a).title, "approved 14:13 · changed since · 1 later");
 });
 
-test("one block of one is singular", () => {
+test("a decided block of one is never counted in the phrase", () => {
   const BR = load();
   const s = bent("drafts", (s) => Object.assign(s.counts, { drafts: 1, decided: 1, items: 1 }));
-  assert.equal(BR.pure.formatPhrase(s, { now: s.server_now }), "your turn · 1 note · 1 of 1 block decided");
+  assert.equal(BR.pure.formatPhrase(s, { now: s.server_now }), "drafted by Claude · your turn");
 });
 
 test("a removal of whole blocks draws a tick and no bar", () => {

@@ -971,6 +971,35 @@ export function changeRows(page: Page, kinds: string[] = ["receipt"]): Promise<C
   }, kinds);
 }
 
+// --- The key sheet ----------------------------------------------------------------------------
+
+/**
+ * Rows the `?` sheet must hold with the default keys, keys then words, as a row reads with each
+ * text node apart. A group label may come before the keys.
+ */
+export const SHEET_WORDS: [string, string][] = [
+  ["y", "keep as is / keep / ok"],
+  ["x", "no: Claude cuts it"],
+  ["l", "later: Claude leaves it"],
+  [".", "your call: Claude decides"],
+  ["⏎", "open / follow"],
+  ["Esc", "close"],
+  ["Home End", "top / bottom"],
+];
+
+/** What the sheet says about a verdict, somewhere in its text. */
+export const SHEET_VERDICT_NOTE = "a verdict is a one-word note";
+
+/** Fails unless `lines` (the sheet's rows, text nodes joined by spaces) hold every row of `SHEET_WORDS`. */
+export function expectSheetWords(lines: string[]) {
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  for (const [keys, words] of SHEET_WORDS) {
+    const row = new RegExp(`(^| )${escape(keys)} ${escape(words)}$`);
+    expect(lines.some((l) => row.test(l)), `the sheet has the row "${keys} ${words}" in ${JSON.stringify(lines)}`).toBe(true);
+  }
+  expect(lines.join("\n"), "the sheet says a verdict is a one-word note").toContain(SHEET_VERDICT_NOTE);
+}
+
 /** A size label of the kind rows no longer show, e.g. `7 words → 10` or `section removed · 3 blocks`. */
 export const SIZE_LABEL = /\d+ (words?|lines?|list items?|blocks?|paragraphs?) (→|changed)|→ \d+|(paragraph|list item|section|block|heading) (removed|added)|\((paragraph|list item|section[^)]*|heading|block)\)/;
 

@@ -100,7 +100,7 @@ test("at the whole-doc stop each verdict key says what to do instead, and y name
   assert.equal(pill("yes", "Approve · 1 unanswered", false), "Ctrl⏎ approves");
   // A button that acts on nothing is read out; after approve the clean view's words win
   assert.equal(BR.pure.wholeDocPill("yes", { text: "With Claude", disabled: true }, true), "with Claude");
-  assert.equal(BR.pure.wholeDocPill("yes", { text: "Approved", disabled: true }, true), "approved · c to reopen");
+  assert.equal(BR.pure.wholeDocPill("yes", { text: "Approved ✓", disabled: true }, true), "approved · c to reopen");
   assert.equal(BR.pure.wholeDocPill("yes", null, true), null);
   // u there has nothing of Claude's to revert, whatever the button says
   assert.equal(pill("revert_change", "Approve"), "nothing here to revert");
@@ -134,6 +134,8 @@ function handingBack(notes, edit = () => {}) {
   const s = state("flow");
   s.hold = { n: 30, kind: "hand_back", count: notes, not_before: s.server_now + 5_000 };
   s.rounds.push({ submit: 30, ts: s.server_now, by: "", to: "*", items: [], released: false });
+  // The hand-back covers the earlier draft, so nothing is left written since it
+  s.counts.drafts = 0;
   edit(s);
   return s;
 }

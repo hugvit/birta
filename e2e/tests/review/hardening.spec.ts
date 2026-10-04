@@ -962,33 +962,47 @@ test.describe("the narrow lane", () => {
 // --- The header at a narrow width ---------------------------------------------------------
 
 test.describe("the header at a narrow width", () => {
-  test("at 520px the phrase gives way first and the file name stays whole", async ({ page, birta }) => {
-    await open(page, birta, fixtureDoc("unseen"), { state: fixtureState("unseen"), viewport: NARROW });
-    await expect.poll(() => turnOf(page)).not.toBeNull();
+  test("at 520px a long phrase wraps to a second line, never cut with …, and the file name stays whole", async ({
+    page,
+    birta,
+  }) => {
+    // A name long enough that the phrase can't fit on one line beside the name and the button
+    const agent = "an-agent-with-a-name-far-longer-than-any-header-has-room-for";
+    const state = fixtureState("unseen");
+    Object.assign(state.phrase.replied, { by: agent });
+    const want = "An-agent-with-a-name-far-longer-than-any-header-has-room-for replied 14:13 · 5 to check";
+    await open(page, birta, fixtureDoc("unseen"), { state, viewport: NARROW });
+    await expect.poll(() => phraseOf(page)).toBe(want);
     const h = await page.evaluate(() => {
       const box = (el: Element) => el.getBoundingClientRect();
       const name = document.querySelector(".file-header-name")!;
       const phraseHost = document.querySelector(".file-header birta-phrase")!;
-      const phrase = phraseHost.shadowRoot!.querySelector(".phrase")!;
+      const root = phraseHost.shadowRoot ?? phraseHost;
+      const els = [phraseHost, ...Array.from(root.querySelectorAll("*"))].filter((el) => el.localName !== "style");
+      const range = document.createRange();
+      range.selectNodeContents(root.querySelector(".phrase") ?? phraseHost);
+      const tops = new Set(Array.from(range.getClientRects()).filter((r) => r.width > 0).map((r) => Math.round(r.top)));
       const turn = document.querySelector(".file-header birta-turn")!;
       return {
         name: { text: name.textContent, scroll: name.scrollWidth, client: name.clientWidth, right: box(name).right },
         phrase: {
-          scroll: phrase.scrollWidth,
-          client: phrase.clientWidth,
+          cut: els.some((el) => el.scrollWidth > el.clientWidth + 1),
+          ellipsis: els.some((el) => getComputedStyle(el).textOverflow === "ellipsis" && el.scrollWidth > el.clientWidth + 1),
+          lines: tops.size,
           left: box(phraseHost).left,
           right: box(phraseHost).right,
           title: phraseHost.getAttribute("title"),
-          ellipsis: getComputedStyle(phrase).textOverflow,
         },
         turn: { left: box(turn).left, width: box(turn).width },
       };
     });
     expect(h.name.text).toBe("pr.md");
     expect(h.name.scroll, "the file name is cut").toBeLessThanOrEqual(h.name.client);
-    expect(h.phrase.scroll, "the phrase is not cut").toBeGreaterThan(h.phrase.client);
-    expect(h.phrase.ellipsis).toBe("ellipsis");
-    expect(h.phrase.title).toBe("Claude replied 14:13 · 4 unseen · 1 of 3 blocks decided · 1 done · 1 answered · 2 without a note · 1 not handled");
+    expect(h.phrase.cut, "the phrase is cut").toBe(false);
+    expect(h.phrase.ellipsis, "the phrase ends in …").toBe(false);
+    expect(h.phrase.lines, "the phrase wraps to a second line").toBeGreaterThanOrEqual(2);
+    // Nothing is left out, so the title is the phrase
+    expect(h.phrase.title).toBe(want);
     expect(h.phrase.left).toBeGreaterThanOrEqual(h.name.right);
     expect(h.phrase.right).toBeLessThanOrEqual(h.turn.left);
     expect(h.turn.width).toBeGreaterThanOrEqual(112);

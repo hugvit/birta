@@ -12,7 +12,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   // Keys that only modify the next one never count as "another key"
   var MODIFIERS = { Meta: 1, Control: 1, Shift: 1, Alt: 1, AltGraph: 1, CapsLock: 1, Fn: 1 };
   var COPY = 'copy hand-off line';
-  // How long a folder's hand-back sits unclaimed before the phrase points at the hand-off line
+  var COPY_BUTTON = 'Copy hand-off line';
+  // How long a hand-back sits unclaimed before the button offers the hand-off line
   var CUE_MS = 10000;
   var NACKS = {
     changed_since: 'changed since · try again',
@@ -41,34 +42,24 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   function view(s, now) {
     var held = holding(s, now);
     var c = s.counts || {};
-    var drafts = (c.drafts || 0) + (held && s.hold.kind === 'hand_back' ? s.hold.count : 0);
+    var handing = held && s.hold.kind === 'hand_back';
+    // A held hand-back counts what it carries, your answers too, plus what you wrote since
+    var drafts = handing ? s.hold.count + answersIn(s, s.hold.n) + since(s) : c.drafts || 0;
     var p = (held && s.phrase_before_hold) || s.phrase || { stage: 'idle' };
-    // A note written after approve reopens the round: until it goes back, it is your turn again
-    if (p.stage === 'approved' && drafts > 0) p = { stage: 'drafts' };
     return {
       held: held,
       p: p,
       drafts: drafts,
-      decided: c.decided || 0,
-      items: c.items || 0,
-      notHandled: c.not_handled || 0,
-      unseen: (c.unseen || 0) + unseenReplies(s),
-      asks: c.open_asks || 0
+      // A note written after approve reopens the round: until it goes back, it is your turn again
+      reopened: p.stage === 'approved' && drafts > 0
     };
-  }
-
-  // The agent's replies the reader hasn't seen, which the Approve button counts with changes
-  function unseenReplies(s) {
-    var n = 0;
-    (s.items || []).forEach(function (i) {
-      (i.replies || []).forEach(function (r) { if (r.by && r.by.type === 'agent' && !r.seen) n++; });
-    });
-    return n;
   }
 
   /** Whether `s` is approved and past its hold at `now`: the page then shows only dots. */
   BR.pure.clean = function (s, now) {
-    return !!s && s.log_writable !== false && view(s, now).p.stage === 'approved';
+    if (!s || s.log_writable === false) return false;
+    var v = view(s, now);
+    return v.p.stage === 'approved' && !v.reopened;
   };
 
   /**
@@ -80,6 +71,16 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var n = (s.counts && s.counts.to_check) || 0;
     if (!n) return null;
     return n + ' to check · n next · ' + opts.key + ' again approves as is';
+  };
+
+  /**
+   * A composer's keys: `⌘⏎` saves, then does what the turn button does now, so it names that and
+   * goes while the button is disabled. With no button yet, a saved note makes it a hand-back.
+   */
+  BR.pure.composerKeys = function (b, mac) {
+    var key = mac ? '⌘⏎' : 'Ctrl⏎';
+    var turn = b && b.disabled ? [] : [key + (b && b.text === COPY_BUTTON ? ' save & copy hand-off line' : ' save & hand back')];
+    return ['⏎ save', '⇧⏎ new line'].concat(turn, ['esc save & close']);
   };
 
   /** Whole minutes of silence once the fold's threshold has passed, else null. */
@@ -108,74 +109,76 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return chars.length > NAME_CHARS ? chars.slice(0, NAME_CHARS).join('') + '…' : name;
   }
 
-  // Counts the phrase shows before the rest go to its tooltip
-  var SHOWN_COUNTS = 3;
-
-  /** The header phrase for `s` at server time `opts.now` (design call 5, r-frontend §11). */
+  /** The header phrase for `s` at server time `opts.now`: one event and at most one count. */
   BR.pure.formatPhrase = function (s, opts) {
     return phraseOf(s, opts, !!opts.full);
   };
 
-  /** The phrase; `full` keeps every count and fact the header leaves to the tooltip. */
+  /** The phrase; `full` keeps the facts the header leaves to the tooltip. */
   function phraseOf(s, opts, full) {
     if (s.log_writable === false) return 'review unavailable · folder not writable';
+    if (opts.stopped) return 'birta stopped · notes wait here';
     var parts = docPhrase(s, opts);
-    var counts = full ? parts.counts : parts.counts.slice(0, SHOWN_COUNTS);
-    var base = parts.head.concat(counts, full ? parts.rest : [], parts.tail).join(' · ');
-    var others = opts.dir ? BR.pure.otherFiles(opts.dir, opts.path).length : 0;
-    return others ? base + ' · ' + plural(others, 'other file', 'other files') + ' ▾' : base;
+    var base = parts.head.concat(parts.counts, full ? parts.rest : [], parts.tail).join(' · ');
+    return opts.dir ? base + folderItem(s, opts) : base;
+  }
+
+  // Hand-backs written this close together came from one ⌘⏎ over the folder
+  var BATCH_MS = 2000;
+
+  /**
+   * The phrase's one folder menu item: a file of this doc's hand-back that no agent has picked up,
+   * else how many other files there are, else nothing.
+   */
+  function folderItem(s, opts) {
+    var others = BR.pure.otherFiles(opts.dir, opts.path);
+    var p = view(s, opts.now).p;
+    var mine = (p.stage === 'sent' || p.stage === 'picked_up') && p.sent ? p.sent.ts : null;
+    var stranded = mine === null ? null : others.filter(function (f) {
+      var o = f.summary;
+      return !!o && o.stage === 'sent' && !!o.phrase && !!o.phrase.sent && Math.abs(o.phrase.sent.ts - mine) <= BATCH_MS;
+    })[0];
+    if (stranded) return ' · ' + stranded.paths[0] + ' not picked up ▾';
+    return others.length ? ' · ' + plural(others.length, 'other file', 'other files') + ' ▾' : '';
   }
 
   /**
-   * The phrase in parts: `head`, then `counts` in priority order (unseen, notes, decided, then a
-   * reply's tallies), then `rest`, which only the tooltip shows, then `tail`. Only the first few
-   * counts show; the tooltip has them all.
+   * The phrase in parts: `head` (the event), `counts` (at most one), then `rest`, which only the
+   * tooltip shows, then `tail`. Your notes are counted on the button, never here.
    */
   function docPhrase(s, opts) {
     var v = view(s, opts.now);
     var p = v.p;
     function parts(head, counts, tail, rest) { return { head: head, counts: counts || [], tail: tail || [], rest: rest || [] }; }
     if (s.writable === false) return parts(['read-only · notes only']);
-    // Unseen, then your notes, then decided blocks: a new count never pushes an old one out
-    function yours() {
-      var out = [];
-      if (v.unseen) out.push(v.unseen + ' unseen');
-      if (v.drafts) out.push('your turn · ' + plural(v.drafts, 'note', 'notes'));
-      if (v.decided > 0) out.push(v.decided + ' of ' + plural(v.items, 'block', 'blocks') + ' decided');
-      return out;
-    }
-    switch (p.stage) {
-      case 'sent': {
-        var sent = 'sent ' + hhmm(p.sent.ts) + ' · not picked up yet';
-        return parts([cue(s, p, opts) ? sent + ' · ' + COPY : sent]);
-      }
+    // A hand-back held after approving has no approve left to name
+    var stage = p.stage === 'approved' && !s.approve ? 'drafts' : p.stage;
+    switch (stage) {
+      case 'sent':
+        return parts(['sent ' + hhmm(p.sent.ts) + ' · not picked up yet']);
       case 'picked_up': {
-        var out = [cap(p.picked_up.by) + ' picked up ' + hhmm(p.picked_up.ts)];
-        if (v.drafts) {
-          out.push((v.decided > 0 ? v.drafts + ' decided' : plural(v.drafts, 'note', 'notes')) + ' for next hand-back');
-        }
+        // The button can't count while the agent has the turn, so the phrase does
+        var waiting = v.drafts ? [plural(v.drafts, 'note', 'notes') + ' for next hand-back'] : [];
         var quiet = silence(p, opts.now);
-        if (quiet != null) out.push('no reply in ' + quiet + ' min', 'release');
-        return parts(out);
+        return parts([cap(p.picked_up.by) + ' picked up ' + hhmm(p.picked_up.ts)], waiting,
+          quiet != null ? ['no reply in ' + quiet + ' min'] : []);
       }
       case 'replied': {
         var r = p.replied;
-        var tally = [[r.done, 'done'], [r.answered, 'answered'], [r.asked, 'for you'], [r.unasked, 'without a note'],
-          [r.not_handled, 'not handled']];
-        return parts([cap(r.by) + ' replied ' + hhmm(r.ts)], yours().concat(
-          tally.filter(function (t) { return t[0] > 0; }).map(function (t) { return t[0] + ' ' + t[1]; })
-        ));
+        var left = (s.counts && s.counts.to_check) || 0;
+        return parts([cap(r.by) + ' replied ' + hhmm(r.ts)], [left ? left + ' to check' : 'all checked']);
       }
       case 'approved': {
         var a = s.approve;
-        var head = ['approved ' + hhmm(a.ts)].concat(a.changed_since ? ['changed since'] : []);
-        return parts(head, [], ['c to reopen'], a.later ? [a.later + ' later'] : []);
+        var at = 'approved ' + hhmm(a.ts);
+        var later = a.later ? [a.later + ' later'] : [];
+        if (v.reopened) return parts([at, 'reopened'], [], [], later);
+        if (a.changed_since) return parts([at, 'changed since'], [], [], later);
+        return parts([at], [], ['c to reopen'], later);
       }
-      case 'drafts':
-        return parts([], yours());
       default: {
-        var drafter = s.owner && s.owner.drafted_by ? ['drafted by ' + cap(s.owner.drafted_by)] : [];
-        return parts(drafter, yours(), ['your turn']);
+        var drafter = s.owner && s.owner.drafted_by;
+        return parts([drafter ? 'drafted by ' + cap(drafter) + ' · your turn' : 'your turn']);
       }
     }
   }
@@ -188,9 +191,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return BR.pure.formatPhrase(s, all);
   };
 
-  /** A folder with no drafter has no agent waiting on it: a hand-back left unclaimed needs the line. */
-  function cue(s, p, opts) {
-    return !!opts.folder && !(s.owner && s.owner.drafted_by) && !!s.hand_off && opts.now - p.sent.ts >= CUE_MS;
+  /** Whether a hand-back has sat unclaimed long enough that the agent needs the hand-off line. */
+  function cue(s, p, now) {
+    return p.stage === 'sent' && !!p.sent && !!s.hand_off && now - p.sent.ts >= CUE_MS;
   }
 
   /** This page's drafts as the listing last counted them; none while it doesn't list the page. */
@@ -204,35 +207,38 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   /** The turn button's label, whether it shows the key hint, and whether it acts; null for no button. */
   BR.pure.turnButton = function (s, opts) {
     if (s.log_writable === false) return null;
+    var b = turnButtonOf(s, opts);
+    // With birta stopped nothing can be sent: the button keeps its words and takes no press
+    if (b && opts.stopped) return button(b.text, false, true);
+    return b;
+  };
+
+  function turnButtonOf(s, opts) {
     var v = view(s, opts.now);
     var p = v.p;
-    function approve() {
-      // Unseen wins over open questions in the label
-      if (v.unseen) return button('Approve · ' + v.unseen + ' unseen');
-      if (v.asks) return button('Approve · ' + v.asks + ' unanswered');
-      return button('Approve', true);
-    }
-    if (v.held && s.hold.kind === 'approve') return approve();
+    if (v.held && s.hold.kind === 'approve') return button('Approve', true);
+    // Inside a folder's hold the button counts the hand-back and what was written since
+    if (opts.batch != null) return button('Hand back · ' + opts.batch, true);
     var t = opts.dir && opts.dir.totals;
     // Notes the page kept that no state shows yet still count: ⌘⏎ must never approve past them
     var mine = v.drafts + (opts.pending || 0);
     // This doc's own state can be ahead of the throttled listing, which may not count its newest note
     var total = t ? Math.max(t.drafts + (opts.pending || 0), t.drafts - listedHere(opts.dir, opts.path) + mine) : mine;
     if (opts.busy && total === 0) total = 1;
-    if (total > 0) {
-      if (t && t.unseen_files) return button('Hand back · ' + total + ' · ' + plural(t.unseen_files, 'file', 'files') + ' unseen');
-      return button('Hand back · ' + total, true);
-    }
-    if (p.stage === 'sent' || p.stage === 'picked_up') {
+    // From the hand-back to the reply the turn is the agent's: your new notes wait for the next one
+    var away = p.stage === 'sent' || p.stage === 'picked_up';
+    if (total > 0 && (!away || total > mine)) return button('Hand back · ' + total, true);
+    if (away) {
+      if (cue(s, p, opts.now)) return button(COPY_BUTTON, true);
       var who = holder(s, p);
       return button('With ' + (who ? short(cap(who)) : 'the agent'), false, true);
     }
     // Text that moved on since the approve can be approved again
-    if (p.stage === 'approved' && !s.approve.changed_since) return button('Approved', false, true);
+    if (p.stage === 'approved' && s.approve && !s.approve.changed_since) return button('Approved ✓', false, true);
     // A folder doc of yours that no agent has taken up has nothing to approve
     if (opts.folder && !(s.owner && s.owner.drafted_by) && !anyAgent(s)) return null;
-    return approve();
-  };
+    return button('Approve', true);
+  }
 
   /** Your answers to the agent that hand-back `n` carries: replies no earlier hand-back took. */
   function answersIn(s, n) {
@@ -248,12 +254,19 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return count;
   }
 
-  /** What the strip says during a hold, or null outside one. */
+  /** Notes written since the hold began: the drafts count leaves out what the hold covers. */
+  function since(s) {
+    return (s.counts && s.counts.drafts) || 0;
+  }
+
+  /** What the strip says during a hold, or null outside one: the same count the button shows. */
   BR.pure.holdPill = function (s, opts) {
     if (!holding(s, opts.now)) return null;
     if (s.hold.kind === 'approve') return 'approving · z to undo';
     var answers = answersIn(s, s.hold.n);
-    var parts = s.hold.count || !answers ? [plural(s.hold.count, 'note', 'notes')] : [];
+    // A note written during the hold joins it, as the button counts it
+    var notes = s.hold.count + since(s);
+    var parts = notes || !answers ? [plural(notes, 'note', 'notes')] : [];
     if (answers) parts.push(plural(answers, 'answer', 'answers'));
     return 'handing back · ' + parts.join(' · ') + ' · z to undo';
   };
@@ -296,11 +309,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (o.mode === 'reading') return row('reading mode', ['esc back']);
     if (o.mode === 'control') return row('on page controls', ['esc back to the doc']);
     if (o.stopped) return row('birta stopped', ['notes wait here', '? keys']);
-    if (o.composer) {
-      var b = o.button;
-      var turn = b && !b.disabled ? [(o.mac ? '⌘⏎' : 'Ctrl⏎') + ' save & hand back'] : [];
-      return row(o.composer, ['⏎ save', '⇧⏎ new line'].concat(turn, ['esc save & close']));
-    }
+    if (o.composer) return row(o.composer, BR.pure.composerKeys(o.button, o.mac));
     if (s && BR.pure.clean(s, o.now)) return row('approved', [key('note') + ' reopen', '? keys']);
     var crumb = f.k === 'doc' ? 'whole doc'
       : f.k === 'blank' ? "Claude's question"
@@ -354,7 +363,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var withdraw = null;
     if (p.stage === 'sent' && p.sent && p.sent.can_withdraw)
       withdraw = { id: 'withdraw', text: 'withdraw', op: { op: 'withdraw', to: p.sent.n } };
-    if (p.stage === 'approved' && s.approve && s.approve.can_withdraw)
+    if (p.stage === 'approved' && !v.reopened && s.approve && s.approve.can_withdraw)
       withdraw = { id: 'withdraw', text: 'withdraw', op: { op: 'withdraw', to: s.approve.n } };
     if (silence(p, opts.now) != null)
       rows.push({ id: 'release', text: 'release', op: { op: 'release', claim: p.picked_up.n } });
@@ -380,15 +389,38 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   // Literal keys in the sheet, which no binding names
   var TAB = { key: 'Tab' };
-  // The sheet's groups: each row is `[actions, note?]`
+  var ESC = { key: 'Esc' };
+  var HELP = { key: '?' };
+  // The sheet's groups: each row is `[actions, words]`; a row with no actions is words alone
   var SHEET = [
-    ['decide', [[['yes', 'no', 'later', 'your_call']]]],
-    ['write', [[['note', 'ask']]]],
-    ['move', [[['focus_next', 'focus_prev', 'next_item', 'prev_item', 'next_file', 'prev_file', TAB]]]],
-    ['take back', [[['undo']]]],
-    ["Claude's changes", [[['revert_change'], "revert Claude's change (open row)"]]],
-    ['hand back / approve', [[['turn']]]],
-    ['view', [[['toggle_reading', 'toggle_dark', 'focus_theme', 'hide_marks']], [['toggle_raw'], 'source view']]]
+    ['decide', [
+      [['yes'], 'keep as is / keep / ok'],
+      [['no'], 'no: Claude cuts it'],
+      [['later'], 'later: Claude leaves it'],
+      [['your_call'], 'your call: Claude decides'],
+      [[], 'on a block, a verdict is a one-word note to Claude']
+    ]],
+    ['write', [[['note'], 'note, or reply on Claude\'s change'], [['ask'], 'question to Claude']]],
+    ['move', [
+      [['focus_next', 'focus_prev'], 'next / previous stop'],
+      [['next_item', 'prev_item'], 'next / previous to check'],
+      [['focus_first', 'focus_last'], 'top / bottom'],
+      [['next_file', 'prev_file'], 'next / previous file with notes'],
+      [[TAB], 'the block\'s links, then the page controls'],
+      [['open'], 'open / follow'],
+      [[ESC], 'close']
+    ]],
+    ['take back', [[['undo'], 'take back your last action']]],
+    ["Claude's changes", [[['revert_change'], "revert / restore Claude's change"]]],
+    ['hand back / approve', [[['turn'], 'press the button']]],
+    ['view', [
+      [['toggle_reading'], 'reading mode'],
+      [['toggle_dark'], 'dark'],
+      [['focus_theme'], 'theme'],
+      [['hide_marks'], 'hide or show marks'],
+      [['toggle_raw'], 'source view'],
+      [[HELP], 'this sheet']
+    ]]
   ];
   var KEY_NAMES = { Enter: '⏎', Escape: 'Esc', ' ': 'Space', ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→' };
 
@@ -407,10 +439,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var b = bindings || {};
     return SHEET.map(function (g) {
       var rows = g[1].map(function (r) {
-        var keys = r[0].map(function (a) { return a === TAB ? TAB.key : b[a] ? keyName(b[a], mac) : ''; })
+        var keys = r[0].map(function (a) { return a.key ? a.key : b[a] ? keyName(b[a], mac) : ''; })
           .filter(function (k) { return k; });
-        return r[1] ? { keys: keys, note: r[1] } : { keys: keys };
-      }).filter(function (r) { return r.keys.length; });
+        // A row of words alone stays; a row whose keys are all unbound goes
+        return { keys: keys, note: r[1], gone: r[0].length > 0 && !keys.length };
+      }).filter(function (r) { return !r.gone; }).map(function (r) { return { keys: r.keys, note: r.note }; });
       return { label: g[0], rows: rows };
     }).filter(function (g) { return g.rows.length; });
   };
@@ -453,14 +486,34 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   function folderMode() { return typeof BOOT !== 'undefined' && !!(BOOT.review && BOOT.review.dir); }
 
-  function opts(t) { return { now: t, dir: dir, path: CURRENT_PATH, folder: folderMode() }; }
+  function stopped() { return !!BR.life && BR.life.stopped(); }
+
+  function opts(t) { return { now: t, dir: dir, path: CURRENT_PATH, folder: folderMode(), stopped: stopped() }; }
 
   function mac() { return /Mac/.test(navigator.platform); }
 
   /** The button's options: only in a folder do its count and hand-back take in every file. */
   function turnOpts(t) {
     var p = BR.pending;
-    return { now: t, dir: folderMode() ? dir : null, path: CURRENT_PATH, folder: folderMode(), pending: p ? p.adds() : 0, busy: !!p && p.any() };
+    var b = batchHold(t);
+    return { now: t, dir: folderMode() ? dir : null, path: CURRENT_PATH, folder: folderMode(), pending: p ? p.adds() : 0, busy: !!p && p.any(),
+      stopped: stopped(), batch: b ? batchCount(b, t) : null };
+  }
+
+  /** This doc's notes not yet handed back, the page's own on their way included. */
+  function ownDrafts() {
+    var s = BR.currentState();
+    return ((s && s.counts && s.counts.drafts) || 0) + (BR.pending ? BR.pending.adds() : 0);
+  }
+
+  /**
+   * A folder hold's count: what it handed back, plus the notes this page has written since. Until
+   * this doc's state shows its own hold, its drafts still hold what the batch took at the press.
+   */
+  function batchCount(b, t) {
+    var s = BR.currentState();
+    var fresh = !!s && !!s.hold && s.hold.kind === 'hand_back' && t < s.hold.not_before;
+    return b.count + (fresh ? ownDrafts() : Math.max(0, ownDrafts() - b.base));
   }
 
   /** The active hand-back of all, from its ack: `{batch, n, count, not_before}`, or null. */
@@ -523,6 +576,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       turnBtn.disabled = b.disabled;
     }
     renderStrip();
+    // The composer's ⌘⏎ hint follows the button
+    if (BR.flow && BR.flow.refreshHint) BR.flow.refreshHint();
     news(!!s && !!s.counts && s.counts.to_check > 0);
     if (menuOpen()) fillMenu();
     schedule(s, t);
@@ -533,7 +588,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var hold = s && BR.pure.holdPill(s, { now: t });
     var b = batchHold(t);
     // A folder's hand-back counts every file's notes, whichever doc it was sent from
-    if (b && !(hold && s.hold.kind === 'approve')) hold = 'handing back · ' + plural(b.count, 'note', 'notes') + ' · z to undo';
+    if (b && !(hold && s.hold.kind === 'approve')) hold = 'handing back · ' + plural(batchCount(b, t), 'note', 'notes') + ' · z to undo';
     // A new hold speaks over whatever was said before it
     var n = b ? 'batch ' + b.batch : hold ? s.hold.n : null;
     if (n !== null && n !== heldN) setMessage(null);
@@ -571,10 +626,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       now: t,
       mode: mode,
       composer: BR.flow.composerLabel(),
-      button: s && shown(s) ? BR.pure.turnButton(s, turnOpts(t)) : null,
+      button: s ? BR.pure.turnButton(s, turnOpts(t)) : null,
       mac: mac(),
       selection: selecting,
-      stopped: !!BR.life && BR.life.stopped(),
+      stopped: stopped(),
       keys: typeof KEYBINDINGS === 'undefined' ? null : KEYBINDINGS
     });
     strip.toggleAttribute('data-message', !!text);
@@ -657,7 +712,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       waits.push(due > t ? due - t : MIN - ((t - quiet.since_ts) % MIN));
     }
     if (message && message.until) waits.push(message.until - Date.now());
-    if (folderMode() && p.stage === 'sent' && p.sent && p.sent.ts + CUE_MS > t) waits.push(p.sent.ts + CUE_MS - t);
+    if (p.stage === 'sent' && p.sent && p.sent.ts + CUE_MS > t) waits.push(p.sent.ts + CUE_MS - t);
     if (!waits.length) return;
     timer = setTimeout(function () {
       render();
@@ -879,6 +934,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (!shown(s)) return;
     var b = BR.pure.turnButton(s, turnOpts(now()));
     if (!b || b.disabled) return;
+    if (b.text === COPY_BUTTON) {
+      if (s.hand_off && navigator.clipboard) navigator.clipboard.writeText(s.hand_off);
+      return;
+    }
     if (/^Hand back/.test(b.text)) handBackWhenAcked();
     // Inside an approve's hold the approve is already on its way
     else if (/^Approve/.test(b.text) && !(holding(s, now()) && s.hold.kind === 'approve')) approveGuarded(s);
@@ -957,7 +1016,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
           handBack();
         }
         if (handing && msg.cid === handing.cid && msg.batch != null) {
-          batch = { batch: msg.batch, n: msg.n, count: handing.count, not_before: msg.not_before };
+          batch = { batch: msg.batch, n: msg.n, count: handing.count, base: handing.base, not_before: msg.not_before };
         }
         if (handing && msg.cid === handing.cid) handing = null;
         if (msg.cid === withdrawing) batch = withdrawing = null;
@@ -990,7 +1049,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var b = BR.pure.turnButton(BR.currentState() || {}, turnOpts(now()));
     var count = b && /^Hand back · (\d+)/.exec(b.text);
     var cid = BR.op({ op: 'hand_back', scope: folderMode() ? 'all' : 'doc' });
-    handing = { cid: cid, count: count ? Number(count[1]) : 0 };
+    handing = { cid: cid, count: count ? Number(count[1]) : 0, base: ownDrafts() };
   }
 
   /** z inside a folder's hand-back: withdraws its whole batch. False when there is none. */
@@ -1096,6 +1155,26 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     button: function () {
       var s = BR.currentState();
       return shown(s) ? BR.pure.turnButton(s, turnOpts(now())) : null;
+    },
+    /** The turn button for the state as it stands, shown yet or not; null with no state. */
+    buttonNow: function () {
+      var s = BR.currentState();
+      return s ? BR.pure.turnButton(s, turnOpts(now())) : null;
+    },
+    /**
+     * What a composer's ⌘⏎ does once its note is saved (`saving`): the button's press, read before
+     * the save. Approve becomes the hand-back of that note; a disabled button does nothing.
+     */
+    afterSave: function (saving) {
+      var s = BR.currentState();
+      var b = s ? BR.pure.turnButton(s, turnOpts(now())) : null;
+      if (b && b.disabled) return null;
+      if (b && b.text === COPY_BUTTON) {
+        // Copied while the key's press still counts as the reader's own act
+        if (saving && s.hand_off && navigator.clipboard) navigator.clipboard.writeText(s.hand_off);
+        return null;
+      }
+      return handBack;
     },
     /** Server time, as this page knows it. */
     now: now,

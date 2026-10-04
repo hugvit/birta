@@ -164,6 +164,10 @@ async function clickDone(page: Page, has = "say why it fails") {
 }
 const reply = (page: Page, has: string) => page.locator('birta-flow[data-kind="reply"]', { hasText: has });
 
+/** The page's own count of stops left to check. */
+const toCheckCount = (page: Page) =>
+  page.evaluate(() => (window as unknown as { BR: { currentState(): State } }).BR.currentState().counts.to_check);
+
 /** The turn button's label without its key hint, and whether the hint shows. */
 function turnOf(page: Page): Promise<{ text: string; kbd: boolean } | null> {
   return page.evaluate(() => {
@@ -444,7 +448,9 @@ test.describe("seen", () => {
 test.describe("approve guard", () => {
   test("the first ⌘⏎ with something to check goes to it instead of approving; a later one approves", async ({ page, birta }) => {
     const { mock, state } = await openFixture(page, birta, "replied");
-    await expect.poll(() => turnOf(page)).toEqual({ text: "Approve · 2 unseen", kbd: false });
+    // The button never counts: the guard says what is left
+    await expect.poll(() => turnOf(page)).toEqual({ text: "Approve", kbd: true });
+    expect(await toCheckCount(page)).toBe(3);
     const key = await hint(page);
     await page.keyboard.press("ControlOrMeta+Enter");
     // Whole doc's reply and turn note come first in walk order; landing there checks nothing
@@ -456,16 +462,17 @@ test.describe("approve guard", () => {
     const seen = checkAll(echoSeen(state, "9.0"));
     seen.items.find((i: State) => i.n === 6).replies[0].seen = true;
     swap(mock, state, seen);
-    await expect.poll(() => turnOf(page)).toEqual({ text: "Approve", kbd: true });
+    await expect.poll(() => toCheckCount(page)).toBe(0);
+    expect(await turnOf(page)).toEqual({ text: "Approve", kbd: true });
     await page.waitForTimeout(DWELL_MS);
     await page.keyboard.press("ControlOrMeta+Enter");
     await expect.poll(() => opsNamed(mock, "approve")).toHaveLength(1);
     expect(opFields(opsNamed(mock, "approve")[0])).toEqual(fixtureOp("approve"));
   });
 
-  test("a click on Approve · N unseen goes there too", async ({ page, birta }) => {
+  test("a click on Approve with something to check goes there too", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "replied");
-    await expect.poll(() => turnOf(page)).toEqual({ text: "Approve · 2 unseen", kbd: false });
+    await expect.poll(() => turnOf(page)).toEqual({ text: "Approve", kbd: true });
     const key = await hint(page);
     await page.locator(".file-header birta-turn button").click();
     await expect.poll(() => stripMessage(page)).toBe(`3 to check · n next · ${key} again approves as is`);
@@ -1105,7 +1112,8 @@ test.describe("real server", () => {
   }) => {
     const s = seeded("\n", [FIX, UNASKED]);
     const { served } = await openSeeded(page, birta, s, ["7.0", "7.1"]);
-    await expect.poll(() => turnOf(page)).toEqual({ text: "Approve · 2 unseen", kbd: false });
+    await expect.poll(() => turnOf(page)).toEqual({ text: "Approve", kbd: true });
+    await expect.poll(() => toCheckCount(page)).toBe(2);
     const key = await hint(page);
     await page.keyboard.press("ControlOrMeta+Enter");
     await expect.poll(() => stripMessage(page)).toBe(`2 to check · n next · ${key} again approves as is`);
@@ -1115,7 +1123,8 @@ test.describe("real server", () => {
     await page.waitForTimeout(SETTLE_MS);
     // The jump checks nothing
     expect(reviewLog(served.root)!.filter((l) => l.op === "seen")).toEqual([]);
-    expect(await turnOf(page)).toEqual({ text: "Approve · 2 unseen", kbd: false });
+    expect(await turnOf(page)).toEqual({ text: "Approve", kbd: true });
+    expect(await toCheckCount(page)).toBe(2);
     expect(reviewLog(served.root)!.some((l) => l.op === "approve")).toBe(false);
     await page.waitForTimeout(DWELL_MS);
     await page.keyboard.press("ControlOrMeta+Enter");
@@ -1139,8 +1148,10 @@ test.describe("killers: the walk and seen", () => {
     await nTo(page, "5:1-6:68");
     await page.keyboard.press("y");
     await expect.poll(() => seenIds(mock)).toEqual([["#4", "9.0"]]);
+    const before = state.counts.to_check;
     swap(mock, state, echoSeen(state, "9.0", "#4"));
-    await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve · 3 unseen");
+    expect(state.counts.to_check).toBe(before - 1);
+    await expect.poll(() => toCheckCount(page)).toBe(state.counts.to_check);
     await page.keyboard.press("n");
     await expect.poll(() => focused(page)).toBe("10:1-10:16");
     await page.keyboard.press("n");
@@ -1253,7 +1264,8 @@ test.describe("killers: the approve guard", () => {
       // Everything else checked: the open question is all there is to check
       check(s, s.news.map((n: State) => n.id).filter((id: string) => id !== "#21"));
     });
-    await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve · 1 unanswered");
+    await expect.poll(() => turnOf(page)).toEqual({ text: "Approve", kbd: true });
+    expect(await toCheckCount(page)).toBe(1);
     const key = await hint(page);
     await page.keyboard.press("ControlOrMeta+Enter");
     await expect.poll(() => blankAt(page)).toBe("is 503 the only code?");

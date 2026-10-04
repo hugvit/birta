@@ -56,7 +56,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var key = mac ? '⌘⏎' : 'Ctrl⏎';
     if (/^Hand back/.test(b.text)) return key + ' hands back';
     if (/^Approve/.test(b.text) && !b.disabled) return key + ' approves';
-    if (b.text === 'Approved') return 'approved · ' + c + ' to reopen';
+    if (/^Approved/.test(b.text)) return 'approved · ' + c + ' to reopen';
     return b.text.charAt(0).toLowerCase() + b.text.slice(1);
   };
 
@@ -366,7 +366,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (r.top < top) window.scrollBy(0, r.top - top - 8);
     else if (r.bottom > bottom) window.scrollBy(0, Math.min(r.bottom - bottom + 8, r.top - top - 8));
     // The place to keep is the revealed one, not where the stop sat before
-    if (pinned && pinned.el === el) pinned.top = rectOf(el).top;
+    var pr = pinned && pinned.el && pinned.el.isConnected ? rectOf(pinned.el) : null;
+    if (pr) pinned.top = pr.top;
+    var kr = kept && kept.el.isConnected ? rectOf(kept.el) : null;
+    if (kr) kept = { el: kept.el, top: kr.top, y: window.scrollY };
   }
 
   // A stale selection would outrank the new focus as the next verdict's target
@@ -1175,7 +1178,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       // Claude's news on the stop takes y and u first, as one check of the whole stop
       if ((action === 'yes' || action === 'revert_change') && !selectedRange() && checkStop(action)) return true;
       // An open change row takes its keys first, the whole-doc stop's included; a selection beats it
-      var row = ROW_KEYS[action] && (action === 'revert_change' || !selectedRange()) ? BR.flow.openRow() : null;
+      // c: a selection, then your unsent note on the stop, then Claude's change, then the stop
+      var mine = action === 'note' && !selectedRange() && !!newestDraft(target());
+      var row = ROW_KEYS[action] && !mine && (action === 'revert_change' || !selectedRange()) ? BR.flow.openRow() : null;
       if (row) {
         BR.flow.rowKey(action, row);
         return true;
@@ -1289,6 +1294,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     },
     /** Notes the focus's place before the page changes under it; it is put back once the change is done. */
     pin: pin,
+    /** Scrolls `el` into the view between the header and the strip, as the page's own move. */
+    reveal: reveal,
     keyInput: keyInput,
     /** Puts an act of this page's on the z stack: `{cid, undo(n) -> op fields, item?, created?}`. */
     remember: remember,

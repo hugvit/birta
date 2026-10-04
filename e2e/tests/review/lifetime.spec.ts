@@ -172,6 +172,14 @@ function hostText(page: Page, sel: string): Promise<string | null> {
   }, sel);
 }
 const phraseOf = (page: Page) => hostText(page, ".file-header birta-phrase");
+const turnOf = (page: Page) => hostText(page, ".file-header birta-turn");
+/** Whether the turn button refuses presses, or null with no button. */
+const turnDisabled = (page: Page) =>
+  page.evaluate(() => {
+    const t = document.querySelector(".file-header birta-turn");
+    const b = t && (t.shadowRoot ?? t).querySelector("button");
+    return b ? b.disabled : null;
+  });
 
 /** The phrase menu's rows, opened by a click. */
 async function menuRows(page: Page): Promise<string[]> {
@@ -274,7 +282,12 @@ test.describe("a stopped server", () => {
     await page.keyboard.press("j");
     await page.keyboard.press("j");
     await keep(page, "way too verbose");
-    await expect.poll(() => phraseOf(page)).toBe("your turn · 1 note");
+    // The note is in the log before the server goes: the button alone counts it before its ack
+    await expect.poll(() => comments(s.root, name).length).toBe(1);
+    // The phrase never counts your notes; the button does
+    await expect.poll(() => turnOf(page)).toMatch(/^Hand back · 1( |$)/);
+    expect(await phraseOf(page)).toBe("your turn");
+    expect(await turnDisabled(page)).toBe(false);
     await expect(page.getByText("way too verbose")).toBeVisible();
     const at = await focused(page);
     expect(at).not.toBeNull();
@@ -283,6 +296,10 @@ test.describe("a stopped server", () => {
     await kill(first);
     const banner = page.getByText(bannerText(doc), { exact: true });
     await expect(banner).toBeVisible({ timeout: 3_000 });
+    // While stopped the phrase says so, and the button keeps its words but takes no press
+    await expect.poll(() => phraseOf(page)).toBe("birta stopped · notes wait here");
+    expect(await turnOf(page)).toMatch(/^Hand back · 1( |$)/);
+    expect(await turnDisabled(page)).toBe(true);
     await page.getByRole("button", { name: "copy", exact: true }).click();
     await expect.poll(() => copied(page)).toEqual([restartLine(doc)]);
     expect(first.port).toBe(derived(doc));
@@ -300,7 +317,9 @@ test.describe("a stopped server", () => {
 
     await expect(banner).toBeHidden({ timeout: 3_000 });
     await expect.poll(() => stripMessage(page), { timeout: 3_000 }).toBe("reconnected");
-    expect(await phraseOf(page)).toBe("your turn · 1 note");
+    expect(await phraseOf(page)).toBe("your turn");
+    expect(await turnOf(page)).toMatch(/^Hand back · 1( |$)/);
+    expect(await turnDisabled(page)).toBe(false);
     expect(await focused(page)).toBe(at);
     await expect(page.getByText("way too verbose")).toBeVisible();
 

@@ -163,6 +163,13 @@ function changesOnly(s: State) {
   check(s, ["#13", "#14"], 1);
 }
 
+/** The page's own count of stops left to check. */
+const toCheckCount = (page: Page) =>
+  page.evaluate(() => (window as unknown as { BR: { currentState(): State } }).BR.currentState().counts.to_check);
+
+/** The turn button as it reads whenever approving is yours: it never counts. */
+const APPROVE = { text: "Approve", kbd: true, disabled: false };
+
 /** What the guard says with `n` stops left to check. */
 const toCheck = (n: number, key: string) => `${n} to check · n next · ${key} again approves as is`;
 
@@ -184,7 +191,8 @@ test.describe("approve guard", () => {
   test("the first ⌘⏎ goes to the first stop to check, opens it, says what a second press does, and checks nothing", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "unseen", changesOnly);
     const key = await hint(page);
-    await expect.poll(() => turnOf(page)).toEqual({ text: "Approve · 3 unseen", kbd: false, disabled: false });
+    // The button never counts; the guard below does
+    await expect.poll(() => turnOf(page)).toEqual({ text: "Approve", kbd: true, disabled: false });
     await press(page);
     await expect.poll(() => focused(page)).toBe("5:1-6:68");
     await expect.poll(() => stripMessage(page)).toBe(toCheck(4, key));
@@ -287,7 +295,7 @@ test.describe("approve guard", () => {
       check(s, ["9.0", "#4", "nh:5", "10.0", "11.0"], 4);
     });
     const key = await hint(page);
-    await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve · 1 unseen");
+    await expect.poll(() => turnOf(page)).toEqual({ text: "Approve", kbd: true, disabled: false });
     await press(page);
     await expect.poll(() => focused(page)).toBe("doc");
     await expect.poll(() => stripMessage(page)).toBe(toCheck(1, key));
@@ -299,8 +307,8 @@ test.describe("approve guard", () => {
   test("the jump takes the first stop to check in walk order, whole doc above every change", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "unseen");
     const key = await hint(page);
-    // The button's count is 6.22's: three changes and the reply
-    await expect.poll(() => turnOf(page)).toEqual({ text: "Approve · 4 unseen", kbd: false, disabled: false });
+    // The button never counts: what is left to check is the guard's to say
+    await expect.poll(() => turnOf(page)).toEqual({ text: "Approve", kbd: true, disabled: false });
     await press(page);
     await expect.poll(() => focused(page)).toBe("doc");
     await expect.poll(() => stripMessage(page)).toBe(toCheck(5, key));
@@ -319,7 +327,7 @@ test.describe("approve guard", () => {
     expect(opsNamed(mock, "approve")).toEqual([]);
   });
 
-  test("a click on Approve · N unseen is the first press, and a later click approves", async ({ page, birta }) => {
+  test("a click on Approve with stops to check is the first press, and a later click approves", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "unseen", changesOnly);
     const button = page.locator(".file-header birta-turn button");
     await button.click();
@@ -341,7 +349,7 @@ test.describe("approve guard", () => {
       check(s, s.news.filter((n: State) => n.check == null && n.id !== "#21").map((n: State) => n.id), 8);
     });
     const key = await hint(page);
-    await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve · 1 unanswered");
+    await expect.poll(() => turnOf(page)).toEqual({ text: "Approve", kbd: true, disabled: false });
     await press(page);
     await expect.poll(() => stripMessage(page)).toBe(toCheck(1, key));
     // #22 above it is answered, so the first open one is #21 under ## Why; a blank is its own stop
@@ -460,7 +468,10 @@ test.describe("approve guard", () => {
     for (const k of Object.keys(state)) delete state[k];
     Object.assign(state, next);
     mock.pushState(state);
-    await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve · 4 unseen");
+    await expect
+      .poll(() => page.evaluate(() => (window as unknown as { BR: { currentState(): State } }).BR.currentState().news.some((n: { id: string }) => n.id === "20.0")))
+      .toBe(true);
+    expect(await turnOf(page)).toEqual(APPROVE);
     await page.waitForTimeout(DWELL_MS + 200);
     await press(page);
     await page.waitForTimeout(SETTLE_MS);
@@ -515,7 +526,7 @@ test.describe("approve guard", () => {
     expect(opsNamed(mock, "comment")).toHaveLength(1);
   });
 
-  test("a double-click on Approve · N unseen is two presses inside the dwell: it jumps and never approves", async ({
+  test("a double-click on Approve with stops to check is two presses inside the dwell: it jumps and never approves", async ({
     page,
     birta,
   }) => {
@@ -547,7 +558,8 @@ test.describe("approve guard on a real server", () => {
     await page.setViewportSize(WIDE);
     await page.goto(`${served.url}/view/pr.md`);
     await booted(page);
-    await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve · 1 unseen");
+    await expect.poll(() => turnOf(page)).toEqual(APPROVE);
+    expect(await toCheckCount(page)).toBe(2);
     const key = await hint(page);
     await press(page);
     const t0 = Date.now();
@@ -573,7 +585,8 @@ test.describe("approve guard on a real server", () => {
     await page.setViewportSize(WIDE);
     await page.goto(`${served.url}/view/pr.md`);
     await booted(page);
-    await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve · 2 unseen");
+    await expect.poll(() => turnOf(page)).toEqual(APPROVE);
+    expect(await toCheckCount(page)).toBe(3);
     const key = await hint(page);
     await press(page);
     // Whole doc with the done on your note, and the two changed blocks
@@ -589,7 +602,7 @@ test.describe("approve guard on a real server", () => {
 });
 
 test.describe("reopen after approve on a real server", () => {
-  test("a note written after approve shows as a draft, the header turns to it, and hand-back pills", async ({ page, birta }) => {
+  test("a note written after approve shows as a draft, the phrase says reopened, and hand-back pills", async ({ page, birta }) => {
     const s = seededRound(1);
     const ts = Date.now() - 60_000;
     const human = { type: "human", via: "browser" };
@@ -603,13 +616,13 @@ test.describe("reopen after approve on a real server", () => {
     await booted(page);
     await expect.poll(() => phraseOf(page)).toMatch(/c to reopen$/);
     await page.keyboard.press("c");
-    await expect.poll(() => composerText(page)).toContain("new round · whole doc");
+    await expect.poll(() => composerText(page)).toContain("new round · note on whole doc");
     expect((await composerText(page))!.split("new round").length).toBe(2);
     await page.keyboard.type("one more pass on the title");
     await page.keyboard.press("Enter");
     await expect.poll(() => reviewLog(served.root)!.filter((l) => l.op === "comment").length).toBe(2);
-    await expect.poll(() => phraseOf(page)).toBe("your turn · 1 note");
-    await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Hand back · 1");
+    await expect.poll(() => phraseOf(page)).toBe(`approved ${hhmm(ts)} · reopened`);
+    await expect.poll(() => turnOf(page)).toEqual({ text: "Hand back · 1", kbd: true, disabled: false });
     await expect.poll(() => shownHosts(page)).toContain("note");
     await press(page);
     await expect.poll(() => stripMessage(page)).toBe("handing back · 1 note · z to undo");
@@ -623,7 +636,8 @@ test.describe("approve guard on a real server: text that lands after the jump", 
     await page.setViewportSize(WIDE);
     await page.goto(`${served.url}/view/pr.md`);
     await booted(page);
-    await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve · 1 unseen");
+    await expect.poll(() => turnOf(page)).toEqual(APPROVE);
+    expect(await toCheckCount(page)).toBe(2);
     const key = await hint(page);
     await press(page);
     await expect.poll(() => stripMessage(page)).toBe(toCheck(2, key));
@@ -652,7 +666,7 @@ test.describe("clean view", () => {
   test("the phrase says how to start again, and the button is spent", async ({ page, birta }) => {
     const { state } = await openFixture(page, birta, "approved", approved);
     await expect.poll(() => phraseOf(page)).toBe(`approved ${hhmm(state.approve.ts)} · c to reopen`);
-    expect(await turnOf(page)).toEqual({ text: "Approved", kbd: false, disabled: true });
+    expect(await turnOf(page)).toEqual({ text: "Approved ✓", kbd: false, disabled: true });
   });
 
   test("what waits for later stays out of the phrase and goes to its tooltip", async ({ page, birta }) => {
@@ -669,7 +683,7 @@ test.describe("clean view", () => {
       s.approve.changed_since = true;
       s.approve.current_matches = false;
     });
-    await expect.poll(() => phraseOf(page)).toBe(`approved ${hhmm(state.approve.ts)} · changed since · c to reopen`);
+    await expect.poll(() => phraseOf(page)).toBe(`approved ${hhmm(state.approve.ts)} · changed since`);
     expect(await turnOf(page)).toEqual({ text: "Approve", kbd: true, disabled: false });
     await expect.poll(() => shownHosts(page)).toEqual([]);
     await press(page);
@@ -780,9 +794,9 @@ test.describe("clean view", () => {
     const { mock } = await openFixture(page, birta, "approved", approved);
     await expect.poll(() => phraseOf(page)).toMatch(/c to reopen$/);
     await page.keyboard.press("c");
-    await expect.poll(() => composerText(page)).toContain("new round · whole doc");
+    await expect.poll(() => composerText(page)).toContain("new round · note on whole doc");
     // The label prints once: the target line under it stays empty until a typed quote fills it
-    expect(await composerLines(page)).toEqual({ label: "new round · whole doc", target: "" });
+    expect(await composerLines(page)).toEqual({ label: "new round · note on whole doc", target: "" });
     expect((await composerText(page))!.split("new round").length).toBe(2);
     await page.keyboard.type("one more pass on the title");
     await page.keyboard.press("Enter");
@@ -802,18 +816,22 @@ test.describe("clean view", () => {
     expect(opsNamed(mock, "comment")[0]).toMatchObject({ at: { k: "block", sp: "3:1-3:6" } });
   });
 
-  test("a new round's label names a block as every label does: a section, or its first words", async ({ page, birta }) => {
+  test("a new round's label names kind and scope as every label does: a section, or a block's first words", async ({ page, birta }) => {
     await openFixture(page, birta, "approved", approved);
     await expect.poll(() => phraseOf(page)).toMatch(/c to reopen$/);
     await focusOn(page, "3:1-3:6");
     await page.keyboard.press("c");
-    await expect.poll(() => composerLines(page)).toEqual({ label: "new round · ## Why (section)", target: "" });
+    await expect.poll(() => composerLines(page)).toEqual({ label: "new round · note on ## Why (section)", target: "" });
     await page.keyboard.press("Escape");
     await expect.poll(() => composerLines(page)).toBeNull();
     await page.keyboard.press("j");
     await expect.poll(() => focused(page)).toBe("5:1-6:68");
     await page.keyboard.press("c");
-    await expect.poll(() => composerLines(page)).toEqual({ label: 'new round · "When the upload hits a 503…"', target: "" });
+    // How many words a label keeps is open; the kind, the scope and the cut are not
+    await expect.poll(() => composerLines(page)).toEqual({
+      label: expect.stringMatching(/^new round · note on When the upload \S.*… \(paragraph\)$/),
+      target: "",
+    });
   });
 
   test("inside the approve's hold the page is not clean yet, and z withdraws", async ({ page, birta }) => {

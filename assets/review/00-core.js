@@ -77,9 +77,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       fleeting[cid] = true;
     }
     if (!birtaBus.send(frame) && !kept) lose(cid);
+    if (frame.op === 'retract') retracts[frame.to] = true;
     if (DRAFT_OPS[frame.op]) {
-      pending[cid] = { n: null, dir: !!(frame.at && frame.at.k === 'dir'), adds: frame.op !== 'amend' };
+      pending[cid] = { n: null, dir: !!(frame.at && frame.at.k === 'dir'), adds: frame.op !== 'amend', frame: frame };
       if (BR.chrome && BR.chrome.render) BR.chrome.render();
+      // A verdict on a section washes it before the state shows it
+      if (BR.lane && BR.lane.redraw) BR.lane.redraw();
     }
     return cid;
   };
@@ -94,8 +97,18 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     /** Whether any is still waiting for its ack. */
     unacked: function () {
       return Object.keys(pending).some(function (c) { return pending[c].n === null; });
+    },
+    /** The headings' sps of section verdicts the page sent that no state shows yet, nor a retract took back. */
+    sections: function () {
+      return Object.keys(pending).map(function (c) { return pending[c]; }).filter(function (p) {
+        var f = p.frame;
+        return f.op === 'comment' && !!f.verdict && !!f.at && f.at.scope === 'section' && !!f.at.sp && !(p.n !== null && retracts[p.n]);
+      }).map(function (p) { return p.frame.at.sp; });
     }
   };
+
+  // Lines the page asked to retract, which a pending verdict no longer stands for
+  var retracts = {};
 
   /** Drops what a frame shows the server has: an ack's line once a state reaches it. */
   function settlePending(msg) {

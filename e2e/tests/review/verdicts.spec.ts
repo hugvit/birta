@@ -660,7 +660,7 @@ test.describe("c", () => {
       .toEqual([{ op: "comment", at: { k: "block", sp: "10:1-10:16", scope: "block" }, body: "one more" }]);
   });
 
-  test("an open change row wins over your draft on its block: c notes the change", async ({ page, birta }) => {
+  test("your draft on a block wins over its open change row: c edits your note", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow", (s) => {
       const note = JSON.parse(JSON.stringify(fixtureState("drafts").items.find((i: State) => i.n === 5)));
       onlyChange("13.0")(s);
@@ -669,10 +669,11 @@ test.describe("c", () => {
     });
     await page.keyboard.press("n");
     await page.keyboard.press("c");
-    await expect(composer(page)).toHaveValue("");
-    await page.keyboard.type("why?");
+    // 6.12's c order: a selection, then your unsent note on the stop, then Claude's change
+    await expect(composer(page)).toHaveValue("mine");
+    await composer(page).fill("mine, and why?");
     await page.keyboard.press("Enter");
-    await expect.poll(() => writes(mock)).toEqual([{ op: "comment", at: { k: "change", id: "13.0" }, body: "why?" }]);
+    await expect.poll(() => writes(mock)).toEqual([{ op: "amend", to: 40, body: "mine, and why?" }]);
   });
 
   test("at the doc stop c edits your whole-doc draft", async ({ page, birta }) => {
@@ -934,7 +935,7 @@ test.describe("blanks", () => {
     await expect.poll(() => reviewLog(served2.root)!.at(-1)).toMatchObject({ op: "retract", to: n });
   });
 
-  test("the hand-back pill counts answers beside notes", async ({ page, birta }) => {
+  test("the hand-back pill counts answers beside notes, and the button says the same count through the hold", async ({ page, birta }) => {
     await openReal(page, birta, STOPS_DOC, askedLog(STOPS_DOC));
     await walkToBlank(page, "only here?");
     await page.keyboard.press("y");
@@ -945,6 +946,23 @@ test.describe("blanks", () => {
     await expect(page.locator(".file-header birta-turn")).toContainText("Hand back · 2");
     await page.keyboard.press("ControlOrMeta+Enter");
     await expect.poll(() => stripMessage(page)).toBe("handing back · 1 note · 1 answer · z to undo");
+    // One count: the button inside the hold adds up what the message names
+    await expect(page.locator(".file-header birta-turn")).toContainText("Hand back · 2");
+    expect(await stripMessage(page)).toBe("handing back · 1 note · 1 answer · z to undo");
+  });
+
+  test("an answer alone is handed back as one answer, never a note, and the button counts it through the hold", async ({
+    page,
+    birta,
+  }) => {
+    await openReal(page, birta, STOPS_DOC, askedLog(STOPS_DOC));
+    await walkToBlank(page, "only here?");
+    await page.keyboard.press("y");
+    await expect(page.locator(".file-header birta-turn")).toContainText("Hand back · 1");
+    await page.keyboard.press("ControlOrMeta+Enter");
+    await expect.poll(() => stripMessage(page)).toBe("handing back · 1 answer · z to undo");
+    await expect(page.locator(".file-header birta-turn")).toContainText("Hand back · 1");
+    expect(await stripMessage(page)).toBe("handing back · 1 answer · z to undo");
   });
 });
 

@@ -8,6 +8,7 @@ import {
   State,
   booted,
   dispatchKey,
+  expectSheetWords,
   fixtureDoc,
   fixtureState,
   focusTo,
@@ -125,6 +126,15 @@ function chrome(page: Page): Promise<Chrome> {
 const sheetOf = async (page: Page) => (await chrome(page)).sheet;
 const hash = (page: Page) => page.evaluate(() => location.hash);
 const viewing = (page: Page) => decodeURIComponent(new URL(page.url()).pathname);
+
+/** Whether the turn button is disabled. */
+function turnDisabled(page: Page): Promise<boolean | null> {
+  return page.evaluate(() => {
+    const t = document.querySelector(".file-header birta-turn");
+    const b = t ? (t.shadowRoot ?? t).querySelector("button") : null;
+    return b ? b.disabled || b.getAttribute("aria-disabled") === "true" : null;
+  });
+}
 
 /** The turn key as the page names it. */
 function turnKey(page: Page): Promise<string> {
@@ -657,7 +667,10 @@ test.describe("a folder with no drafter", () => {
     await expect.poll(async () => (await chrome(page)).turn).toBe(`Hand back · 1 ${await turnKey(page)}`);
   });
 
-  test("adds the hand-off line to the phrase once a hand-back has sat unclaimed for 10 s", async ({ page, birta }) => {
+  test("turns the button into Copy hand-off line once a hand-back has sat unclaimed for 10 s; the phrase stays", async ({
+    page,
+    birta,
+  }) => {
     const state = bare("sent", INDEX_DOC, (s) => {
       s.owner.drafted_by = null;
       s.phrase.sent.ts = s.server_now - 8_000;
@@ -665,36 +678,63 @@ test.describe("a folder with no drafter", () => {
     const at = new Date(state.phrase.sent.ts).toISOString().slice(11, 16);
     await openFolder(page, birta, dirState([listed("pr.md", summary("sent"))]), state);
     await expect.poll(async () => (await chrome(page)).phrase).toBe(`sent ${at} · not picked up yet`);
+    expect((await chrome(page)).turn).toBe("With the agent");
+    expect(await turnDisabled(page)).toBe(true);
+    // No push: the page's own clock flips it
     await expect
-      .poll(async () => (await chrome(page)).phrase, { timeout: 5_000 })
-      .toBe(`sent ${at} · not picked up yet · copy hand-off line`);
+      .poll(async () => (await chrome(page)).turn, { timeout: 5_000 })
+      .toBe(`Copy hand-off line ${await turnKey(page)}`);
+    expect(await turnDisabled(page)).toBe(false);
+    expect((await chrome(page)).phrase).toBe(`sent ${at} · not picked up yet`);
   });
 });
 
 // --- #2 the ? sheet, the menu row, and the unbound-letter pill ---------------------------------------
 
-/** The sheet's lines with the default keys, the turn key as this page names it. */
-async function sheetLines(page: Page): Promise<string[]> {
-  return [
-    "decide y x l .",
-    "write c q",
-    "move j k n p ⇧J ⇧K Tab",
-    "take back z",
-    "Claude's changes u revert Claude's change (open row)",
-    `hand back / approve ${await turnKey(page)}`,
-    "view r d t m",
-    `${await page.evaluate(() => (/Mac/.test(navigator.platform) ? "⌥" : "Alt"))}u source view`,
-  ];
+/** The `.note` text of every row of the open key sheet, or null while it is closed. */
+function sheetNotes(page: Page): Promise<string[] | null> {
+  return page.evaluate(() => {
+    for (const h of Array.from(document.querySelectorAll("birta-pop"))) {
+      const root = (h.shadowRoot ?? h) as ParentNode;
+      for (const el of Array.from(root.querySelectorAll('[role="dialog"]'))) {
+        let open = false;
+        try {
+          open = el.matches(":popover-open") && el.getClientRects().length > 0;
+        } catch {
+          open = false;
+        }
+        if (open) return Array.from(el.querySelectorAll(".row")).map((r) => (r.querySelector(".note")?.textContent ?? "").trim());
+      }
+    }
+    return null;
+  });
+}
+
+/**
+ * The open sheet gives every key its words: the 6.12 rows, a note on every row, and the turn key
+ * and source view's key as this page names them.
+ */
+async function expectFullSheet(page: Page) {
+  await expect.poll(() => sheetOf(page)).not.toBeNull();
+  const lines = (await sheetOf(page))!;
+  expectSheetWords(lines);
+  const notes = (await sheetNotes(page))!;
+  expect(notes.length, "the sheet has rows").toBe(lines.length);
+  for (const [i, n] of notes.entries()) expect(n, `row "${lines[i]}" has words`).not.toBe("");
+  const turn = await turnKey(page);
+  expect(lines.some((l) => l.split(" ").includes(turn)), `the turn key ${turn} is on the sheet`).toBe(true);
+  const raw = `${await page.evaluate(() => (/Mac/.test(navigator.platform) ? "⌥" : "Alt"))}u`;
+  expect(lines.some((l) => l.split(" ").includes(raw)), `${raw} is on the sheet`).toBe(true);
 }
 
 test.describe("the ? sheet", () => {
-  test("? opens the key sheet, grouped; Esc closes it and leaves the focus", async ({ page, birta }) => {
+  test("? opens the key sheet, every key with its words; Esc closes it and leaves the focus", async ({ page, birta }) => {
     await open(page, birta, STOPS_DOC, { state: bare("drafts", STOPS_DOC) });
     const sp = await stopSp(page, "When the upload hits a 503");
     await focusOn(page, sp);
     // As a US keyboard sends it: Shift held
     await dispatchKey(page, { key: "?", code: "Slash", shiftKey: true });
-    await expect.poll(() => sheetOf(page)).toEqual(await sheetLines(page));
+    await expectFullSheet(page);
     await page.keyboard.press("Escape");
     await expect.poll(() => sheetOf(page)).toBeNull();
     expect(await focused(page)).toBe(sp);
@@ -732,7 +772,7 @@ test.describe("the ? sheet", () => {
     await expect.poll(async () => (await chrome(page)).menu?.at(-1)).toBe("keys ?");
     for (let i = 0; i < 6; i++) await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Enter");
-    await expect.poll(() => sheetOf(page)).toEqual(await sheetLines(page));
+    await expectFullSheet(page);
     expect((await chrome(page)).menu).toBeNull();
   });
 
@@ -741,7 +781,7 @@ test.describe("the ? sheet", () => {
     await page.locator(".file-header birta-phrase").click();
     await expect.poll(async () => (await chrome(page)).menu?.at(-1)).toBe("keys ?");
     await page.locator('birta-pop [role="menuitem"]', { hasText: "keys" }).click();
-    await expect.poll(() => sheetOf(page)).toEqual(await sheetLines(page));
+    await expectFullSheet(page);
     expect((await chrome(page)).menu).toBeNull();
   });
 
@@ -749,7 +789,7 @@ test.describe("the ? sheet", () => {
     await open(page, birta, STOPS_DOC, { state: bare("approved", STOPS_DOC) });
     await expect.poll(async () => (await chrome(page)).phrase).toMatch(/c to reopen$/);
     await dispatchKey(page, { key: "?", code: "Slash", shiftKey: true });
-    await expect.poll(() => sheetOf(page)).toEqual(await sheetLines(page));
+    await expectFullSheet(page);
     await page.keyboard.press("Escape");
     await expect.poll(() => sheetOf(page)).toBeNull();
     await page.keyboard.press("y");

@@ -17,7 +17,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (!f.summary) return f.news ? 'changed' : '';
     // A summary carries no approve time
     if (f.summary.stage === 'approved') return 'approved';
-    return BR.pure.formatPhrase({ phrase: f.summary.phrase, counts: f.summary.counts, owner: null }, { now: opts.now });
+    var phrase = BR.pure.formatPhrase({ phrase: f.summary.phrase, counts: f.summary.counts, owner: null }, { now: opts.now });
+    // A file row has no button to count its notes, so it says them itself
+    var drafts = f.summary.counts && f.summary.counts.drafts;
+    return phrase === 'your turn' && drafts ? phrase + ' · ' + drafts + (drafts === 1 ? ' note' : ' notes') : phrase;
   };
 
   /** The page for a lexical path; each segment is encoded, so `#` and `?` stay in the name. */

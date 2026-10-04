@@ -289,14 +289,14 @@ const viewing = (page: Page) => decodeURIComponent(new URL(page.url()).pathname)
 test.describe("the phrase in a folder", () => {
   test("names the other files with activity, and follows the listing", async ({ page, birta }) => {
     const { mock, dir } = await openFolder(page, birta);
-    await expect.poll(() => phraseOf(page)).toBe("your turn · 3 notes · 1 of 3 blocks decided · 4 other files ▾");
-    expect((await chrome(page)).title).toBe("your turn · 3 notes · 1 of 3 blocks decided · 4 other files ▾");
+    await expect.poll(() => phraseOf(page)).toBe("drafted by Claude · your turn · 4 other files ▾");
+    expect((await chrome(page)).title).toBe("drafted by Claude · your turn · 4 other files ▾");
 
     swapDir(mock, dir, dirState([listed("pr.md", summary("drafts")), listed("b.md", null, true)], { drafts: 3 }));
-    await expect.poll(() => phraseOf(page)).toBe("your turn · 3 notes · 1 of 3 blocks decided · 1 other file ▾");
+    await expect.poll(() => phraseOf(page)).toBe("drafted by Claude · your turn · 1 other file ▾");
 
     swapDir(mock, dir, dirState([listed("pr.md", summary("drafts"))], { drafts: 3 }));
-    await expect.poll(() => phraseOf(page)).toBe("your turn · 3 notes · 1 of 3 blocks decided");
+    await expect.poll(() => phraseOf(page)).toBe("drafted by Claude · your turn");
   });
 
   test("a page under a linked doc's other spelling is not one of the other files", async ({ page, birta }) => {
@@ -307,7 +307,7 @@ test.describe("the phrase in a folder", () => {
     await mockReview(page, { state: plan, dir: folderDir() });
     await page.goto(`${served.url}/view/plan.md`);
     await booted(page);
-    await expect.poll(() => phraseOf(page)).toBe("your turn · 3 notes · 1 of 3 blocks decided · 4 other files ▾");
+    await expect.poll(() => phraseOf(page)).toBe("drafted by Claude · your turn · 4 other files ▾");
   });
 
 });
@@ -353,10 +353,10 @@ test.describe("when the chrome shows in a folder", () => {
 });
 
 test.describe("the button in a folder", () => {
-  test("with unseen files elsewhere it reads the carry-forward label, with no key hint", async ({ page, birta }) => {
+  test("with unseen files elsewhere it still reads Hand back · N, with the key hint", async ({ page, birta }) => {
     const state = pageState("drafts", (s) => (s.counts.drafts = 1));
     await openFolder(page, birta, { state, dir: folderDir({ drafts: 3, unseen_files: 2 }) });
-    await expect.poll(() => turnOf(page)).toEqual({ text: "Hand back · 3 · 2 files unseen", kbd: null, disabled: false });
+    await expect.poll(() => turnOf(page)).toEqual({ text: "Hand back · 3", kbd: await hint(page), disabled: false });
   });
 
   test("counts every file's drafts, with the key hint", async ({ page, birta }) => {
@@ -409,7 +409,7 @@ test.describe("the menu in a folder", () => {
       "copy hand-off line",
       "drafted by Claude · mark as yours",
       "note on this folder",
-      "b.md Claude replied 14:13 · 1 unseen · 1 of 3 blocks decided · 1 done",
+      "b.md Claude replied 14:13 · 3 to check",
       "sub/c.md changed",
       "notes/plan.md your turn · 3 notes",
       "my notes.md changed",
@@ -422,7 +422,7 @@ test.describe("the menu in a folder", () => {
     await openMenu(page);
     const row = (await chrome(page)).menu!.find((r) => r.text.startsWith("b.md"))!;
     const pathPart = row.parts.find((p) => p.text === "b.md")!;
-    const note = row.parts.find((p) => p.text === "Claude replied 14:13 · 1 unseen · 1 of 3 blocks decided · 1 done")!;
+    const note = row.parts.find((p) => p.text === "Claude replied 14:13 · 3 to check")!;
     expect(pathPart, JSON.stringify(row.parts)).toBeTruthy();
     expect(note, JSON.stringify(row.parts)).toBeTruthy();
     expect(pathPart.fontSize).toBe("14px");
@@ -943,7 +943,7 @@ test.describe("a listing that comes before review starts", () => {
   test("still drives the phrase, the menu, the dots and Shift+J", async ({ page, birta }) => {
     await holdReviewScript(page);
     const { served } = await openFolder(page, birta);
-    await expect.poll(() => phraseOf(page)).toBe("your turn · 3 notes · 1 of 3 blocks decided · 4 other files ▾");
+    await expect.poll(() => phraseOf(page)).toBe("drafted by Claude · your turn · 4 other files ▾");
     await expect.poll(() => turnOf(page)).toEqual({ text: "Hand back · 6", kbd: await hint(page), disabled: false });
     await expect.poll(async () => (await dotted(page)).length).toBe(4);
     await openMenu(page);
@@ -1103,7 +1103,7 @@ test.describe("on a real server", () => {
     await composer(page).press("Enter");
     await expect.poll(() => bodies(path.join(served.root, "pr.md.birta.jsonl"))).toEqual(["PR-NOTE"]);
     // The sibling is listed, so its draft is in the totals the button must not count
-    await expect.poll(() => phraseOf(page), { timeout: 5_000 }).toBe("your turn · 1 note · 1 other file ▾");
+    await expect.poll(() => phraseOf(page), { timeout: 5_000 }).toBe("your turn · 1 other file ▾");
     expect((await turnOf(page))?.text).toBe("Hand back · 1");
     await page.keyboard.press("ControlOrMeta+Enter");
     await expect.poll(() => linesNamed(path.join(served.root, "pr.md.birta.jsonl"), "submit").length).toBe(1);
@@ -1309,11 +1309,54 @@ test("with no folder listing the chrome is what it was", async ({ page, birta })
   const mock = await mockReview(page, { state: pageState("drafts") });
   await page.goto(`${served.url}/view/pr.md`);
   await booted(page);
-  await expect.poll(() => phraseOf(page)).toBe("your turn · 3 notes · 1 of 3 blocks decided");
+  await expect.poll(() => phraseOf(page)).toBe("drafted by Claude · your turn");
   expect(await turnOf(page)).toEqual({ text: "Hand back · 3", kbd: await hint(page), disabled: false });
   expect(await dotted(page)).toEqual([]);
   await page.keyboard.press("Shift+J");
   await page.waitForTimeout(SETTLE_MS);
   expect(viewing(page)).toBe("/view/pr.md");
   expect(mock.ops()).toEqual([]);
+});
+
+// --- repair: a folder's hold counts what the button counts ---------------------------------------
+
+test.describe("repair: the folder hold's count", () => {
+  test("through a folder's hold the button and the message read one count, and a note written in it raises both", async ({
+    page,
+    birta,
+  }) => {
+    const served = await birta(
+      {
+        "pr.md": "# PR\n\nText.\n",
+        "b.md": "# B\n\nText.\n",
+        "b.md.birta.jsonl": seededLog("b.md", "# B\n\nText.\n", ["B-NOTE", "B-OTHER"]),
+      },
+      { ...GATE_ON, BIRTA_REVIEW_HOLD_MS: "8000" },
+      ["."],
+    );
+    const pr = path.join(served.root, "pr.md.birta.jsonl");
+    const b = path.join(served.root, "b.md.birta.jsonl");
+    await page.setViewportSize(WIDE);
+    await page.goto(`${served.url}/view/pr.md`);
+    await booted(page);
+    await page.keyboard.press("c");
+    await composer(page).fill("PR-NOTE");
+    await composer(page).press("Enter");
+    await expect.poll(async () => (await turnOf(page))?.text, { timeout: 5_000 }).toBe("Hand back · 3");
+    await page.keyboard.press("ControlOrMeta+Enter");
+    await expect.poll(() => [linesNamed(pr, "submit").length, linesNamed(b, "submit").length]).toEqual([1, 1]);
+    await expect.poll(() => stripMessage(page)).toBe("handing back · 3 notes · z to undo");
+    // Long enough for this doc's state and the folder's listing to show the batch
+    await page.waitForTimeout(1_500);
+    expect(await stripMessage(page)).toBe("handing back · 3 notes · z to undo");
+    expect((await turnOf(page))?.text).toBe("Hand back · 3");
+    await page.keyboard.press("c");
+    await composer(page).fill("LATE-NOTE");
+    await composer(page).press("Enter");
+    await expect.poll(() => stripMessage(page)).toBe("handing back · 4 notes · z to undo");
+    expect((await turnOf(page))?.text).toBe("Hand back · 4");
+    await page.waitForTimeout(1_000);
+    expect(await stripMessage(page)).toBe("handing back · 4 notes · z to undo");
+    expect((await turnOf(page))?.text).toBe("Hand back · 4");
+  });
 });

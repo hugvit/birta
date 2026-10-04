@@ -106,6 +106,25 @@ html[data-review-strip] .status {
   bottom: 40px;
 }
 
+/* The header grows with a phrase that wraps. Below this much room beside the button, the
+   phrase would stack word by word, so the button and its neighbours move to a second line */
+.file-header:has(birta-phrase[data-shown]) {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+.file-header-left:has(> birta-phrase[data-shown]) {
+  /* A zero basis: the header wraps only once the room left is under the minimum */
+  flex: 1 1 0;
+  height: auto;
+  min-height: 26px;
+  min-width: min(100%, 200px);
+}
+
+.file-header:has(birta-phrase[data-shown]) > .file-header-right {
+  margin-left: auto;
+}
+
 /* Room under the doc's end, so the last block can scroll clear of the strip */
 html[data-review-strip] body::after {
   content: "";

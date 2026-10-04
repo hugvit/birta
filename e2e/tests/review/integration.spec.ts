@@ -137,12 +137,15 @@ test.describe("hello", () => {
     const state = frames.got.find((f) => f.socket === 0 && has(f))!.msg.state;
     expect(state.rev).toBe(revOf(DOC));
     expect(state.items.find((i: State) => i.body === "way too verbose")).toMatchObject({ n, status: "draft" });
-    await expect.poll(() => phraseOf(page)).toBe("your turn · 1 note");
+    // The phrase never counts your notes; the button does
+    await expect.poll(() => phraseOf(page)).toBe("your turn");
+    await expect.poll(() => turnOf(page)).toMatch(/^Hand back · 1( |$)/);
 
     await page.reload();
     await booted(page);
     await expect.poll(() => frames.got.filter((f) => f.socket === 1 && has(f)).length).toBeGreaterThan(0);
-    await expect.poll(() => phraseOf(page)).toBe("your turn · 1 note");
+    await expect.poll(() => phraseOf(page)).toBe("your turn");
+    await expect.poll(() => turnOf(page)).toMatch(/^Hand back · 1( |$)/);
     await expect(page.locator("birta-flow").filter({ hasText: "way too verbose" })).toBeVisible();
   });
 });
@@ -216,8 +219,9 @@ test.describe("content before review_state", () => {
     });
     await saveAgainAndAgain(page, birta);
     await expect.poll(() => page.evaluate(() => document.getElementById("content")!.textContent)).toContain("Saved paragraph 6.");
-    // Its own saves are outside writes, which count as unseen before your note
-    await expect.poll(() => phraseOf(page)).toMatch(/^(\d+ unseen · )?your turn · 1 note$/);
+    // Its own saves are outside writes; the phrase counts neither them nor your note, the button counts the note
+    await expect.poll(() => phraseOf(page)).toBe("your turn");
+    await expect.poll(() => turnOf(page)).toMatch(/^Hand back · 1( |$)/);
     await expect(page.locator("birta-flow").filter({ hasText: "first" })).toBeVisible();
     await expect.poll(() => misaligned(page)).toEqual([]);
     expect(await page.evaluate(() => (window as unknown as { __mismatch: string[] }).__mismatch)).toEqual([]);
@@ -233,7 +237,8 @@ test.describe("hold", () => {
   }) => {
     const { served, frames } = await openReal(page, birta, { BIRTA_REVIEW_HOLD_MS: "300" });
     await keep(page, "say why");
-    await expect.poll(() => phraseOf(page)).toBe("your turn · 1 note");
+    await expect.poll(() => turnOf(page)).toMatch(/^Hand back · 1( |$)/);
+    expect(await phraseOf(page)).toBe("your turn");
     // Times every change of the phrase from inside the page
     await page.evaluate(() => {
       const w = window as unknown as { __phrases: [number, string][] };
@@ -295,7 +300,8 @@ test.describe("hold", () => {
       }, shift);
       const { served, frames } = await openReal(page, birta, { BIRTA_REVIEW_HOLD_MS: "300" });
       await keep(page, "say why");
-      await expect.poll(() => phraseOf(page)).toBe("your turn · 1 note");
+      await expect.poll(() => turnOf(page)).toMatch(/^Hand back · 1( |$)/);
+      expect(await phraseOf(page)).toBe("your turn");
       // Flip time on the real clock, which the shift doesn't touch
       await page.evaluate(() => {
         const w = window as unknown as { __flip: number | null };
@@ -432,7 +438,11 @@ test.describe("seen", () => {
     const responded = agent(served.root, ["respond", "pr.md", "--as", "claude"], `#${note.n} done\n`);
     expect(responded.status, responded.stdout + responded.stderr).toBe(0);
 
-    await expect.poll(() => turnOf(page), { timeout: 5_000 }).toMatch(/^Approve · 1 unseen/);
+    await expect.poll(() => linesNamed(served.root, "yield").length).toBe(1);
+    const replied = `Claude replied ${hhmm(linesNamed(served.root, "yield")[0].ts)}`;
+    await expect.poll(() => phraseOf(page), { timeout: 5_000 }).toMatch(new RegExp(`^${replied} · [1-9]\\d* to check$`));
+    // The button never counts
+    await expect.poll(() => turnOf(page)).toMatch(/^Approve(?! ·)/);
     const agentChange = () => {
       const s = [...frames.got].reverse().find((f) => f.msg.type === "review_state" && f.msg.path === "pr.md")?.msg.state;
       return (s?.changes ?? []).find((c: State) => c.attr === "agent") as State | undefined;
@@ -460,11 +470,12 @@ test.describe("seen", () => {
           (f.msg.state?.changes ?? []).some((c: State) => c.id === id && c.seen === true),
       );
     await expect.poll(() => seenInState(0)).toBe(true);
-    await expect.poll(() => turnOf(page)).toMatch(/^Approve(?! ·)/);
+    await expect.poll(() => phraseOf(page)).toBe(`${replied} · all checked`);
 
     await page.reload();
     await booted(page);
     await expect.poll(() => seenInState(1)).toBe(true);
+    await expect.poll(() => phraseOf(page)).toBe(`${replied} · all checked`);
     await expect.poll(() => turnOf(page)).toMatch(/^Approve(?! ·)/);
   });
 });

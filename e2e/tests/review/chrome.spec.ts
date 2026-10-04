@@ -23,6 +23,7 @@ import {
   withRev,
   stripKeys,
   stripMessage,
+  expectSheetWords,
 } from "./harness";
 
 // The phrase prints local times; UTC lets the spec name them from the epoch alone
@@ -202,12 +203,15 @@ const KEYS = "keys?";
 test.describe("phrase and button", () => {
   const SHOWN: [string, string, string, "hint" | null, boolean][] = [
     ["fresh", "drafted by Claude · your turn", "Approve", "hint", false],
-    ["drafts", "your turn · 3 notes · 1 of 3 blocks decided", "Hand back · 3", "hint", false],
+    // The phrase never counts your notes; the button does
+    ["drafts", "drafted by Claude · your turn", "Hand back · 3", "hint", false],
     ["dir", "read-only · notes only", "Hand back · 2", "hint", false],
-    ["sent", "sent 14:13 · not picked up yet", "With Claude", null, true],
-    // The button counts unseen replies with unseen changes
-    ["replied", "Claude replied 14:13 · 2 unseen · 1 of 3 blocks decided · 1 done", "Approve · 2 unseen", null, false],
-    ["approved", "approved 14:13 · c to reopen", "Approved", null, true],
+    // Nothing picked up the hand-back in its first 10 s
+    ["sent", "sent 14:13 · not picked up yet", "Copy hand-off line", "hint", false],
+    ["picked", "Claude picked up 14:13", "With Claude", null, true],
+    // One count: the stops left to check; the guard counts for Approve
+    ["replied", "Claude replied 14:13 · 3 to check", "Approve", "hint", false],
+    ["approved", "approved 14:13 · c to reopen", "Approved ✓", null, true],
   ];
   for (const [name, phrase, label, kbd, disabled] of SHOWN) {
     test(`${name}.json reads "${phrase}" beside "${label}"`, async ({ page, birta }) => {
@@ -217,25 +221,46 @@ test.describe("phrase and button", () => {
     });
   }
 
-  test("a long phrase gives way before the button, and keeps its full text as its title", async ({ page, birta }) => {
-    // A name long enough that three counts no longer fit
-    const name = "an-agent-with-a-name-far-longer-than-any-header-has-room-for";
-    const shown = "An-agent-with-a-name-far-longer-than-any-header-has-room-for replied 14:13 · 2 unseen · 1 of 3 blocks decided · 12 done";
-    const full = `${shown} · 3 answered · 2 for you · 4 without a note · 5 not handled`;
-    await openFixture(page, birta, "replied", (s) =>
-      Object.assign(s.phrase.replied, { by: name, done: 12, answered: 3, asked: 2, unasked: 4, not_handled: 5 }),
-    );
-    await expect.poll(() => phraseOf(page)).toBe(shown);
+  test("a long phrase wraps to a second header line, never cut short, and keeps clear of the button", async ({ page, birta }) => {
+    const name = "an-agent-with-a-name-far-longer-than-any-header-has-room-for-even-on-a-wide-screen";
+    const full = "An-agent-with-a-name-far-longer-than-any-header-has-room-for-even-on-a-wide-screen replied 14:13 · 3 to check";
+    await openFixture(page, birta, "replied", (s) => {
+      s.phrase.picked_up.by = s.phrase.replied.by = s.rounds[0].claimed_by = name;
+      Object.assign(s.phrase.replied, { done: 12, answered: 3, asked: 2, unasked: 4, not_handled: 5 });
+    });
+    await expect.poll(() => phraseOf(page)).toBe(full);
     const c = await chrome(page);
     expect(c.phrase!.title).toBe(full);
     expect(c.phrase!.box.right).toBeLessThanOrEqual(c.turn!.box.left);
-    // Truncated by CSS: some box in the phrase is narrower than its text, with an ellipsis
-    const cut = await page.evaluate(() => {
+    const laid = await page.evaluate((full) => {
       const host = document.querySelector(".file-header birta-phrase")!;
-      const els = [host, ...Array.from((host.shadowRoot ?? host).querySelectorAll("*"))];
-      return els.some((el) => el.scrollWidth > el.clientWidth + 1 && getComputedStyle(el).textOverflow === "ellipsis");
-    });
-    expect(cut).toBe(true);
+      const root = host.shadowRoot ?? host;
+      const els = [host, ...Array.from(root.querySelectorAll("*"))];
+      const cut = els.some((el) => el.scrollWidth > el.clientWidth + 1);
+      // The words on one line, in the phrase's own font, against the room the header leaves them
+      const words = (root.querySelector("*:not(style)") ?? host) as Element;
+      const ctx = document.createElement("canvas").getContext("2d")!;
+      ctx.font = getComputedStyle(words).font;
+      const room = document.querySelector(".file-header birta-turn")!.getBoundingClientRect().left - host.getBoundingClientRect().left;
+      // Each line of the words is its own run of client rects
+      const r = document.createRange();
+      r.selectNodeContents(root);
+      const tops = new Set(Array.from(r.getClientRects()).filter((x) => x.width > 0).map((x) => Math.round(x.top)));
+      const header = document.querySelector(".file-header")!.getBoundingClientRect();
+      const box = host.getBoundingClientRect();
+      return {
+        oneLine: ctx.measureText(full).width,
+        room,
+        cut,
+        lines: tops.size,
+        inHeader: box.top >= header.top - 0.5 && box.bottom <= header.bottom + 0.5,
+      };
+    }, full);
+    expect(laid.oneLine, "setup: the words can't fit on one line beside the button").toBeGreaterThan(laid.room);
+    expect(laid.cut, "no part of the phrase overflows its box").toBe(false);
+    expect(c.phrase!.text.endsWith("…"), "the phrase is never cut short with …").toBe(false);
+    expect(laid.lines, "the phrase wraps to a second line").toBeGreaterThanOrEqual(2);
+    expect(laid.inHeader, "the header grows to hold both lines").toBe(true);
   });
 
   for (const width of [1280, 1440]) {
@@ -247,10 +272,11 @@ test.describe("phrase and button", () => {
       const seq = [
         ["Approve", withRev(fixtureState("fresh"), revOf(doc))],
         ["Hand back · 3", withRev(fixtureState("drafts"), revOf(doc))],
-        ["Approve · 2 unseen", withRev(fixtureState("replied"), revOf(doc))],
-        ["With Claude", withRev(fixtureState("sent"), revOf(doc))],
-        ["Approved", withRev(fixtureState("approved"), revOf(doc))],
-        ["Approve · 2 unseen", long],
+        ["Approve", withRev(fixtureState("replied"), revOf(doc))],
+        ["With Claude", withRev(fixtureState("picked"), revOf(doc))],
+        ["Copy hand-off line", withRev(fixtureState("sent"), revOf(doc))],
+        ["Approved ✓", withRev(fixtureState("approved"), revOf(doc))],
+        ["Approve", long],
       ] as [string, State][];
       const rights: number[] = [];
       for (const [label, next] of seq) {
@@ -262,7 +288,7 @@ test.describe("phrase and button", () => {
         expect(c.turn!.box.right, label).toBeLessThanOrEqual(copy);
         expect(c.phrase!.box.right, label).toBeLessThanOrEqual(c.turn!.box.left);
         // The clean view leaves what waits for later to the tooltip, and a reply's tallies past three go there too
-        if (label === "Approved") expect(c.phrase!.title, label).toBe("approved 14:13 · 1 later · c to reopen");
+        if (label === "Approved ✓") expect(c.phrase!.title, label).toBe("approved 14:13 · 1 later · c to reopen");
         else expect(c.phrase!.title!.startsWith(c.phrase!.text), label).toBe(true);
         rights.push(c.turn!.box.right);
       }
@@ -276,8 +302,8 @@ test.describe("phrase and button", () => {
     await page.keyboard.press("m");
     await page.waitForTimeout(SETTLE_MS);
     const c = await chrome(page);
-    expect(c.phrase?.text).toBe("Claude replied 14:13 · 4 unseen · 1 of 3 blocks decided · 1 done");
-    expect(c.turn?.text).toBe("Approve · 4 unseen");
+    expect(c.phrase?.text).toBe("Claude replied 14:13 · 5 to check");
+    expect(c.turn?.text).toBe("Approve");
   });
 });
 
@@ -449,7 +475,10 @@ test.describe("turn", () => {
 
   for (const name of ["sent", "approved"]) {
     test(`with ${name}.json neither ⌘⏎ nor a click sends anything`, async ({ page, birta }) => {
-      const { mock } = await openFixture(page, birta, name);
+      // Within its first 10 s a hand-back's button is With Claude, disabled
+      const { mock } = await openFixture(page, birta, name, (s) => {
+        if (name === "sent") s.server_now = s.phrase.sent.ts + 2_000;
+      });
       await expect.poll(async () => (await turnOf(page))?.disabled).toBe(true);
       await page.keyboard.press("ControlOrMeta+Enter");
       await page.locator(".file-header birta-turn button").click({ force: true });
@@ -467,7 +496,7 @@ test.describe("hold", () => {
     await openFixture(page, birta, "hold", (s) => (s.hold.not_before = s.server_now + 20_000));
     await expect.poll(() => stripMessage(page)).toBe("handing back · 3 notes · z to undo");
     const c = await chrome(page);
-    expect(c.phrase?.text).toBe("your turn · 3 notes · 1 of 3 blocks decided");
+    expect(c.phrase?.text).toBe("drafted by Claude · your turn");
     expect(c.turn).toMatchObject({ text: "Hand back · 3", kbd: await hint(page), disabled: false });
     expect(await glyphRoles(page)).toEqual(["you", "you"]);
     await page.waitForTimeout(1_000);
@@ -492,7 +521,7 @@ test.describe("hold", () => {
     await openFixture(page, birta, "approved", (s) => (s.hold.not_before = s.server_now + 20_000));
     await expect.poll(() => stripMessage(page)).toBe("approving · z to undo");
     const c = await chrome(page);
-    expect(c.phrase?.text).toBe("Claude replied 14:13 · 2 of 3 blocks decided · 1 done · 1 answered");
+    expect(c.phrase?.text).toBe("Claude replied 14:13 · all checked");
     expect(c.turn).toMatchObject({ text: "Approve", kbd: await hint(page), disabled: false });
   });
 
@@ -514,7 +543,8 @@ test.describe("hold", () => {
     await page.keyboard.type("first note");
     await page.keyboard.press("Enter");
     await expect.poll(() => reviewLog(served.root)?.length ?? 0).toBe(4);
-    await expect.poll(() => phraseOf(page)).toBe("your turn · 1 note");
+    await expect.poll(async () => (await turnOf(page))?.text).toBe("Hand back · 1");
+    expect(await phraseOf(page)).toBe("drafted by Claude · your turn");
     await page.keyboard.press("ControlOrMeta+Enter");
     await expect.poll(() => reviewLog(served.root)?.length ?? 0).toBe(5);
     const submit = reviewLog(served.root)![4];
@@ -522,7 +552,7 @@ test.describe("hold", () => {
 
     const other = await secondPage(page, `${served.url}/view/pr.md`);
     const during = {
-      phrase: "your turn · 1 note",
+      phrase: "drafted by Claude · your turn",
       turn: { text: "Hand back · 1", kbd: await hint(page), disabled: false },
       pill: "handing back · 1 note · z to undo",
     };
@@ -545,7 +575,10 @@ test.describe("hold", () => {
     await other.locator('birta-pop [role="menuitem"]', { hasText: WITHDRAW }).click();
     await expect.poll(() => reviewLog(served.root)?.length ?? 0).toBe(6);
     expect(reviewLog(served.root)![5]).toMatchObject({ op: "withdraw", to: 5 });
-    for (const p of [page, other]) await expect.poll(() => phraseOf(p)).toBe("your turn · 1 note");
+    for (const p of [page, other]) {
+      await expect.poll(() => phraseOf(p)).toBe("drafted by Claude · your turn");
+      await expect.poll(async () => (await turnOf(p))?.text).toBe("Hand back · 1");
+    }
   });
 
   test("on a real server an approve holds, then names its time", async ({ page, birta }) => {
@@ -558,7 +591,7 @@ test.describe("hold", () => {
     expect(approve).toMatchObject({ op: "approve", rev: revOf(STOPS_DOC) });
     await expect.poll(() => phraseOf(page), { timeout: 6_000 }).toBe(`approved ${hhmm(approve.not_before)} · c to reopen`);
     expect(await stripMessage(page)).toBeNull();
-    expect(await turnOf(page)).toEqual({ text: "Approved", kbd: null, disabled: true });
+    expect(await turnOf(page)).toEqual({ text: "Approved ✓", kbd: null, disabled: true });
   });
 });
 
@@ -680,7 +713,7 @@ test.describe("menu", () => {
     });
   }
 
-  test("after 15 minutes of silence, with no push, the phrase says so and release lets go", async ({ page, birta }) => {
+  test("after 15 minutes of silence, with no push, the phrase says so and the menu's release lets go", async ({ page, birta }) => {
     const { mock, state } = await openFixture(page, birta, "picked", (s) => {
       s.server_now = s.phrase.picked_up.silence.since_ts + 15 * MIN - 1_500;
     });
@@ -688,9 +721,7 @@ test.describe("menu", () => {
     await openMenu(page);
     expect(await menuOf(page)).not.toContain("release");
     await page.keyboard.press("Escape");
-    await expect
-      .poll(() => phraseOf(page), { timeout: 4_000 })
-      .toBe("Claude picked up 14:13 · no reply in 15 min · release");
+    await expect.poll(() => phraseOf(page), { timeout: 4_000 }).toBe("Claude picked up 14:13 · no reply in 15 min");
     await openMenu(page);
     await page.locator('birta-pop [role="menuitem"]', { hasText: "release" }).click();
     await expect.poll(() => mock.ops().length).toBe(1);
@@ -907,8 +938,8 @@ test.describe("killers: clock", () => {
 
   test("the silence keeps counting minutes with no push", async ({ page, birta }) => {
     await openFixture(page, birta, "picked", (s) => (s.server_now = s.phrase.picked_up.silence.since_ts + 15 * MIN + 58_000));
-    await expect.poll(() => phraseOf(page)).toBe("Claude picked up 14:13 · no reply in 15 min · release");
-    await expect.poll(() => phraseOf(page), { timeout: 5_000 }).toBe("Claude picked up 14:13 · no reply in 16 min · release");
+    await expect.poll(() => phraseOf(page)).toBe("Claude picked up 14:13 · no reply in 15 min");
+    await expect.poll(() => phraseOf(page), { timeout: 5_000 }).toBe("Claude picked up 14:13 · no reply in 16 min");
   });
 
   test.describe("in a zone off UTC", () => {
@@ -936,9 +967,10 @@ test.describe("killers: menu and turn", () => {
     await expect.poll(() => menuOf(page)).toEqual([COPY, MINE, KEYS]);
   });
 
-  test("Approve with something unseen sends no approve at first; a press past the guard's dwell does", async ({ page, birta }) => {
+  test("Approve with something to check sends no approve at first; a press past the guard's dwell does", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "replied");
-    await expect.poll(async () => (await turnOf(page))?.text).toBe("Approve · 2 unseen");
+    await expect.poll(async () => (await turnOf(page))?.text).toBe("Approve");
+    expect(await phraseOf(page)).toBe("Claude replied 14:13 · 3 to check");
     await page.keyboard.press("ControlOrMeta+Enter");
     await page.locator(".file-header birta-turn button").click();
     await page.waitForTimeout(SETTLE_MS);
@@ -1018,11 +1050,10 @@ test.describe("killers: names and tab", () => {
     expect(await page.evaluate(() => (window as any).__pwned)).toBeUndefined();
   });
 
-  test("a long agent name keeps the button's right edge and the header on one line", async ({ page, birta }) => {
+  test("a long agent name keeps the button's right edge, and the phrase shows the whole name", async ({ page, birta }) => {
     const { mock, state } = await openFixture(page, birta, "picked");
     await expect.poll(async () => (await turnOf(page))?.text).toBe("With Claude");
-    const header = () => page.evaluate(() => document.querySelector(".file-header")!.getBoundingClientRect().height);
-    const before = { c: await chrome(page), h: await header() };
+    const before = { c: await chrome(page) };
     const long = JSON.parse(JSON.stringify(state));
     long.phrase.picked_up.by = long.rounds[0].claimed_by = "agent-" + "x".repeat(54);
     swap(mock, state, long);
@@ -1034,13 +1065,14 @@ test.describe("killers: names and tab", () => {
     expect(Math.abs(c.turn!.box.right - before.c.turn!.box.right)).toBeLessThanOrEqual(0.5);
     expect(c.turn!.box.right).toBeLessThanOrEqual(copy);
     expect(c.phrase!.box.right).toBeLessThanOrEqual(c.turn!.box.left);
-    expect(await header()).toBe(before.h);
+    // The phrase is never cut short: it wraps instead
+    expect(c.phrase!.text).toBe("Agent-" + "x".repeat(54) + " picked up 14:13");
   });
 
   test("the phrase's title follows every push", async ({ page, birta }) => {
     const { mock, state } = await openFixture(page, birta, "fresh");
     for (const [name, title] of [
-      ["drafts", "your turn · 3 notes · 1 of 3 blocks decided"],
+      ["drafts", "drafted by Claude · your turn"],
       ["sent", "sent 14:13 · not picked up yet"],
       ["approved", "approved 14:13 · 1 later · c to reopen"],
     ]) {
@@ -1207,4 +1239,258 @@ test.describe("rulings", () => {
     expect(await phraseOf(page)).toBe(after);
     expect(await stripMessage(page)).toBeNull();
   });
+});
+
+// --- The hand-off line on the button, in both modes ------------------------------------------------
+
+/** The serving modes a hand-back can sit unclaimed in: one file or a folder, Claude's draft or yours. */
+const HAND_OFF_MODES: [string, boolean, string | null][] = [
+  ["one file, Claude's draft", false, "claude"],
+  ["one file, your doc", false, null],
+  ["a folder, Claude's draft", true, "claude"],
+  ["a folder, your doc", true, null],
+];
+
+test.describe("the hand-off line", () => {
+  for (const [mode, folder, drafter] of HAND_OFF_MODES) {
+    test(`${mode}: 10 s unclaimed turns the button into Copy hand-off line, with no push; ⌘⏎ and a click copy it`, async ({
+      page,
+      birta,
+    }) => {
+      const copied = await captureClipboard(page);
+      const doc = fixtureDoc("sent");
+      const state = withRev(fixtureState("sent"), revOf(doc));
+      state.owner.drafted_by = drafter;
+      // Six seconds after the hand-back: still inside the 10 s the agent has to pick it up
+      state.server_now = state.phrase.sent.ts + 6_000;
+      const files: Record<string, string> = { "pr.md": doc };
+      let dir: State | undefined;
+      if (folder) {
+        files["checklist.md"] = "# Checklist\n";
+        dir = {
+          type: "dir_state",
+          root: "",
+          truncated: false,
+          folder: null,
+          files: [{ paths: ["pr.md"], summary: { stage: "sent", phrase: state.phrase, counts: state.counts, notes: 3 }, news: false }],
+          totals: { drafts: 0, unseen_files: 0, decided: 0, items: 0 },
+        };
+      }
+      const served = await birta(files, GATE_ON, folder ? ["."] : undefined);
+      await page.setViewportSize(WIDE);
+      const mock = await mockReview(page, { state, dir });
+      await page.goto(`${served.url}/view/pr.md`);
+      await booted(page);
+      const sent = `sent ${hhmm(state.phrase.sent.ts)} · not picked up yet`;
+      await expect.poll(() => phraseOf(page)).toBe(sent);
+      expect(await turnOf(page)).toEqual({ text: drafter ? "With Claude" : "With the agent", kbd: null, disabled: true });
+      // The spec pushes nothing from here on, so the page's own clock must flip it
+      await expect
+        .poll(() => turnOf(page), { timeout: 8_000 })
+        .toEqual({ text: "Copy hand-off line", kbd: await hint(page), disabled: false });
+      expect(await phraseOf(page)).toBe(sent);
+      await page.keyboard.press("ControlOrMeta+Enter");
+      await expect.poll(copied).toEqual([state.hand_off]);
+      await page.locator(".file-header birta-turn button").click();
+      await expect.poll(copied).toEqual([state.hand_off, state.hand_off]);
+      await page.waitForTimeout(SETTLE_MS);
+      expect(mock.ops()).toEqual([]);
+      expect(await phraseOf(page)).toBe(sent);
+    });
+  }
+
+  test("once the agent picks up, the button is With Claude again and ⌘⏎ copies nothing", async ({ page, birta }) => {
+    const copied = await captureClipboard(page);
+    const { mock, state } = await openFixture(page, birta, "sent");
+    await expect.poll(async () => (await turnOf(page))?.text).toBe("Copy hand-off line");
+    swap(mock, state, withRev(fixtureState("picked"), state.rev));
+    await expect.poll(() => turnOf(page)).toEqual({ text: "With Claude", kbd: null, disabled: true });
+    await page.keyboard.press("ControlOrMeta+Enter");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await copied()).toEqual([]);
+    expect(mock.ops()).toEqual([]);
+  });
+});
+
+// --- The key sheet's words ------------------------------------------------------------------------------
+
+/** The open key sheet's rows: each row's text nodes joined by spaces, its keys, and its words. */
+function sheetRows(page: Page): Promise<{ text: string; keys: string[]; note: string }[] | null> {
+  return page.evaluate(() => {
+    const words = (n: Node): string[] => {
+      if (n.nodeType === 3) return [(n.textContent ?? "").trim()].filter(Boolean);
+      if (n.nodeType === 1 && ["STYLE", "SCRIPT"].includes((n as Element).tagName)) return [];
+      const root = n.nodeType === 1 ? (n as Element).shadowRoot : null;
+      return Array.from((root ?? n).childNodes).flatMap(words);
+    };
+    for (const h of Array.from(document.querySelectorAll("birta-pop"))) {
+      const root = (h.shadowRoot ?? h) as ParentNode;
+      for (const el of Array.from(root.querySelectorAll('[role="dialog"]'))) {
+        let open = false;
+        try {
+          open = el.matches(":popover-open") && el.getClientRects().length > 0;
+        } catch {
+          open = false;
+        }
+        if (!open) continue;
+        return Array.from(el.querySelectorAll(".row")).map((r) => ({
+          text: words(r).join(" ").replace(/\s+/g, " "),
+          keys: Array.from(r.querySelectorAll("kbd")).map((k) => (k.textContent ?? "").trim()),
+          note: (r.querySelector(".note")?.textContent ?? "").trim(),
+        }));
+      }
+    }
+    return null;
+  });
+}
+
+test.describe("the key sheet", () => {
+  test("? gives every key its words, and says a verdict is a one-word note", async ({ page, birta }) => {
+    await openFixture(page, birta, "drafts");
+    await expect.poll(() => phraseOf(page)).not.toBeNull();
+    await page.keyboard.press("?");
+    await expect.poll(() => sheetRows(page)).not.toBeNull();
+    const rows = (await sheetRows(page))!;
+    expectSheetWords(rows.map((r) => r.text));
+    for (const r of rows) expect(r.note, `the row ${JSON.stringify(r.text)} has words`).not.toBe("");
+    const mac = await page.evaluate(() => /Mac/.test(navigator.platform));
+    // Every default key, the literal ones too, is on the sheet
+    const keys = rows.flatMap((r) => r.keys);
+    for (const k of ["y", "x", "l", ".", "c", "q", "j", "k", "n", "p", "⇧J", "⇧K", "Home", "End", "z", "u", "⏎", "Esc", "Tab", "?", "m"])
+      expect(keys, `the sheet names ${k}`).toContain(k);
+    expect(keys).toContain(await hint(page));
+    expect(keys).toContain(`${mac ? "⌥" : "Alt"}u`);
+    await page.keyboard.press("Escape");
+    await expect.poll(() => sheetRows(page)).toBeNull();
+  });
+});
+
+// --- adversary: the button the composer presses, and a phrase too long for two lines ---------------
+
+test.describe("adversary: the hand-off line from the composer", () => {
+  test("adversary: ⌘⏎ in the composer saves, then presses Copy hand-off line: it copies and never hands back again", async ({ page, birta }) => {
+    const copied = await captureClipboard(page);
+    const { mock, state } = await openFixture(page, birta, "sent");
+    await expect.poll(async () => (await turnOf(page))?.text).toBe("Copy hand-off line");
+    await page.keyboard.press("c");
+    const field = page.locator('birta-flow[data-kind="composer"] textarea');
+    await expect(field).toBeFocused();
+    await page.keyboard.type("one more thing");
+    await page.keyboard.press("ControlOrMeta+Enter");
+    await expect.poll(() => mock.ops().length).toBeGreaterThanOrEqual(1);
+    await page.waitForTimeout(SETTLE_MS);
+    expect(mock.ops().map((o) => o.op)).toEqual(["comment"]);
+    await expect.poll(copied).toEqual([state.hand_off]);
+  });
+});
+
+test.describe("adversary: a phrase three lines long", () => {
+  test("adversary: at 520 px a phrase that needs three lines shows them all, inside the header", async ({ page, birta }) => {
+    const name = "an-agent-with-a-name-far-longer-than-any-header-has-room-for-and-then-some-more-of-it-to-reach-a-third-line-at-least";
+    await openFixture(
+      page,
+      birta,
+      "replied",
+      (s) => (s.phrase.picked_up.by = s.phrase.replied.by = s.rounds[0].claimed_by = name),
+      { viewport: { width: 520, height: 900 } },
+    );
+    await expect.poll(() => phraseOf(page)).toMatch(/ replied 14:13 · 3 to check$/);
+    const laid = await page.evaluate(() => {
+      const host = document.querySelector(".file-header birta-phrase")!;
+      const root = host.shadowRoot ?? host;
+      const els = [host, ...Array.from(root.querySelectorAll("*"))].filter((el) => el.localName !== "style");
+      const r = document.createRange();
+      r.selectNodeContents(root);
+      const rects = Array.from(r.getClientRects()).filter((x) => x.width > 0);
+      const header = document.querySelector(".file-header")!.getBoundingClientRect();
+      const box = host.getBoundingClientRect();
+      return {
+        lines: new Set(rects.map((x) => Math.round(x.top))).size,
+        clipped: els.filter((el) => el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1).map((el) => el.localName),
+        // Every line of words is painted inside the phrase's box and the header's
+        outside: rects.filter((x) => x.top < Math.max(header.top, box.top) - 0.5 || x.bottom > Math.min(header.bottom, box.bottom) + 0.5).length,
+      };
+    });
+    expect(laid.lines, "setup: the phrase needs three lines").toBeGreaterThanOrEqual(3);
+    expect(laid.clipped, "no box in the phrase clips its words").toEqual([]);
+    expect(laid.outside, "no line of the phrase falls outside its box or the header").toBe(0);
+  });
+});
+
+// --- repair: the composer's ⌘⏎ hint follows the button live, and the header at narrow widths ------
+
+/** The open composer's hint line, or null with no composer. */
+const composerHint = (page: Page) =>
+  page.evaluate(() => {
+    const host = document.querySelector('birta-flow[data-kind="composer"]');
+    return host ? ((host.shadowRoot ?? host).querySelector(".hint")?.textContent ?? "").trim() : null;
+  });
+
+test.describe("repair: the composer's hint follows the button", () => {
+  test("open before the 10 s switch, the hint gains ⌘⏎ for Copy hand-off line when the button turns, and the strip says the same", async ({
+    page,
+    birta,
+  }) => {
+    await openFixture(page, birta, "sent", (s) => (s.server_now = s.phrase.sent.ts + 5_000));
+    await expect.poll(() => turnOf(page)).toEqual({ text: "With Claude", kbd: null, disabled: true });
+    await page.keyboard.press("c");
+    await expect(page.locator('birta-flow[data-kind="composer"] textarea')).toBeFocused();
+    expect(await composerHint(page)).toBe("⏎ save · ⇧⏎ new line · esc save & close");
+    const copy = `⏎ save · ⇧⏎ new line · ${await hint(page)} save & copy hand-off line · esc save & close`;
+    await expect.poll(() => composerHint(page), { timeout: 8_000 }).toBe(copy);
+    expect((await turnOf(page))?.text).toBe("Copy hand-off line");
+    await expect.poll(() => stripKeys(page)).toBe(copy);
+  });
+
+  test("open when birta stops, the hint drops ⌘⏎ as the button goes disabled", async ({ page, birta }) => {
+    const { mock } = await openFixture(page, birta, "fresh");
+    await page.keyboard.press("c");
+    await expect(page.locator('birta-flow[data-kind="composer"] textarea')).toBeFocused();
+    expect(await composerHint(page)).toBe(`⏎ save · ⇧⏎ new line · ${await hint(page)} save & hand back · esc save & close`);
+    // Later routes win: every reconnect is refused from here on
+    await page.routeWebSocket(/\/ws$/, (ws) => ws.close());
+    await mock.drop();
+    await expect.poll(() => phraseOf(page), { timeout: 5_000 }).toBe("birta stopped · notes wait here");
+    expect((await turnOf(page))?.disabled).toBe(true);
+    await expect.poll(() => composerHint(page)).toBe("⏎ save · ⇧⏎ new line · esc save & close");
+  });
+});
+
+test.describe("repair: the header at narrow widths", () => {
+  for (const width of [320, 520]) {
+    test(`at ${width} px the phrase takes at most two header lines, whole, and the header stays short`, async ({ page, birta }) => {
+      await openFixture(page, birta, "replied", undefined, { viewport: { width, height: 800 } });
+      await expect.poll(() => phraseOf(page)).toBe("Claude replied 14:13 · 3 to check");
+      const h = await page.evaluate(() => {
+        const host = document.querySelector(".file-header birta-phrase")!;
+        const root = host.shadowRoot ?? host;
+        // Lines of the words themselves: each text node's own rects, not the boxes around them
+        const tops = new Set<number>();
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        for (let t = walker.nextNode(); t; t = walker.nextNode()) {
+          if (!(t.textContent ?? "").trim() || t.parentElement?.localName === "style") continue;
+          const r = document.createRange();
+          r.selectNodeContents(t);
+          for (const x of Array.from(r.getClientRects())) if (x.width > 0) tops.add(Math.round(x.top));
+        }
+        const lines = tops.size;
+        const name = document.querySelector(".file-header-name")!;
+        const header = document.querySelector(".file-header")!.getBoundingClientRect();
+        const turn = document.querySelector(".file-header birta-turn")!.getBoundingClientRect();
+        return {
+          lines,
+          width: host.getBoundingClientRect().width,
+          header: header.height,
+          nameWhole: name.scrollWidth <= name.clientWidth && name.getBoundingClientRect().width > 0,
+          turnInside: turn.left >= header.left - 0.5 && turn.right <= header.right + 0.5 && turn.width >= 112,
+        };
+      });
+      expect(h.lines, "the phrase wraps to two lines at most").toBeLessThanOrEqual(2);
+      expect(h.width, "the phrase gets a line's worth of room, not a column").toBeGreaterThanOrEqual(150);
+      // A header row is 26 px: two phrase lines and a row for the button, with padding
+      expect(h.header, "the header stays a few lines tall").toBeLessThanOrEqual(130);
+      expect(h.nameWhole, "the file name shows whole").toBe(true);
+      expect(h.turnInside, "the button keeps its width inside the header").toBe(true);
+    });
+  }
 });

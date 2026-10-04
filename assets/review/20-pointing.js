@@ -20,7 +20,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var REOPEN = 'approved · c to reopen';
   // After approve these only say how to start again
   var REOPENS = { yes: 1, no: 1, later: 1, your_call: 1, ask: 1, next_item: 1, prev_item: 1 };
-  var RENDERED = 'rendered view';
+  var SOURCE_SAYS = 'source view · esc back';
+  var READING_SAYS = 'reading mode · esc back';
   // What a change row takes before the block under it does
   var ROW_KEYS = { yes: 1, no: 1, note: 1, revert_change: 1 };
   var WORD = { yes: 'yes', no: 'no', later: 'later', your_call: 'your call' };
@@ -232,12 +233,13 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     a.focus();
   }
 
-  /** Tab and Shift+Tab: steps the pick through the focused block's links, round the end. False when it has none. */
+  /** Tab and Shift+Tab: steps the pick through the focused block's links. False past either end, where the browser's Tab goes on. */
   function tab(step) {
     var links = focus && !isSummary(focus) ? linksIn(focus) : [];
-    if (!links.length) return false;
     var at = links.indexOf(picked);
-    pick(links[at < 0 ? (step > 0 ? 0 : links.length - 1) : (at + step + links.length) % links.length]);
+    var next = at < 0 ? (step > 0 ? 0 : links.length - 1) : at + step;
+    if (next < 0 || next >= links.length) return false;
+    pick(links[next]);
     return true;
   }
 
@@ -697,20 +699,48 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     BR.flow.open('note', at, newestDraft(at));
   }
 
-  /** Flips the source view, keeping the focused block and saying how back. */
-  function toggleRaw() {
-    if (typeof setViewMode !== 'function') return false;
-    var raw = viewMode !== 'raw';
-    var kept = focus;
-    setViewMode(raw ? 'raw' : 'preview');
-    showPill(raw ? 'source view · ' + BR.keyName('toggle_raw') + ' back' : RENDERED);
-    if (raw) return true;
+  // --- The viewer's modes: source view and reading mode ---
+
+  // Whether focus last moved by Tab rather than by the pointer
+  var byKeys = false;
+
+  function rawShown() { return typeof viewMode !== 'undefined' && viewMode === 'raw'; }
+  function readingShown() { return typeof isReadingMode !== 'undefined' && isReadingMode === true; }
+
+  /** Leaves reading mode, then the source view, so a key acts on the rendered doc. */
+  function leaveModes() {
+    var view = window.birtaView;
+    if (!view) return;
+    // Reading mode puts back the source view it was entered from, so it goes first
+    if (readingShown()) view.toggleReadingMode(false);
+    if (rawShown()) view.setViewMode('preview');
+  }
+
+  // Review follows the view, never the key, so the Source button and ⌥u keep focus alike
+  function onView(e) {
+    var d = e.detail || {};
+    if (d.reading) return showPill(READING_SAYS);
+    if (d.mode === 'raw') return showPill(SOURCE_SAYS);
+    if (pillSays(SOURCE_SAYS) || pillSays(READING_SAYS)) showPill('');
     BR.lane.redraw();
-    if (kept && kept.isConnected) {
-      setFocus(kept);
-      reveal(kept);
-    }
-    return true;
+    if (!focus || !focus.isConnected) return;
+    BR.lane.focus(focus);
+    reveal(focus);
+  }
+
+  /** A header control holding DOM focus: the page's buttons, or review's phrase and turn button. */
+  function pageControl() {
+    var t = document.activeElement;
+    if (!t || t === document.body || content().contains(t)) return null;
+    // Reading mode hides the header, and a hidden control is no place to be
+    if (readingShown() && t.closest('.header, .file-header')) return null;
+    if (BR.isHost(t)) return t.closest('.file-header, .header') ? t : null;
+    return t.closest('button, [role="button"], [role="menu"], .theme-dropdown') ? t : null;
+  }
+
+  // Heading anchors show only on hover, so Tab never stops on one
+  function untabAnchors() {
+    content().querySelectorAll('a.anchor:not([tabindex])').forEach(function (a) { a.setAttribute('tabindex', '-1'); });
   }
 
   /** Whether the note on line `n` has left the drafts, so z can no longer touch it. */
@@ -820,7 +850,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       var mine = userScroll;
       userScroll = false;
       // The source view hides the doc; its focus comes back with it
-      if (!mine || !focus || (typeof viewMode !== 'undefined' && viewMode === 'raw')) return;
+      if (!mine || !focus || rawShown()) return;
       // Once your scroll has moved focus, it keeps to the first stop in view until that scroll ends
       if (focus !== scrolledTo) {
         if (inView(focus)) return;
@@ -950,6 +980,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       document.addEventListener('click', onClick);
       document.addEventListener('focusout', onFocusOut);
       document.addEventListener('focusin', onFocusIn);
+      document.addEventListener('birta-view', onView);
+      window.addEventListener('keydown', function (e) { if (e.key === 'Tab') byKeys = true; }, true);
+      window.addEventListener('pointerdown', function () { byKeys = false; }, true);
+      untabAnchors();
       window.addEventListener('scroll', onScroll, { passive: true });
       window.addEventListener('wheel', onScrollInput, { passive: true, capture: true });
       window.addEventListener('touchmove', onScrollInput, { passive: true, capture: true });
@@ -960,7 +994,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         var apply = birtaPatch.apply;
         birtaPatch.apply = function (html, o) {
           pin();
-          return apply.call(birtaPatch, html, o);
+          var out = apply.call(birtaPatch, html, o);
+          untabAnchors();
+          return out;
         };
       }
       birtaBus.on(onFrame);
@@ -990,7 +1026,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       }
       // Its own key with no row open: a revert needs a change to revert
       if (action === 'revert_change') {
-        if (focus === docStop && !selectedRange()) showPill(BR.pure.wholeDocPill(action));
+        if (!selectedRange()) showPill(BR.pure.wholeDocPill(action));
         return true;
       }
       if (action === 'focus_next' || action === 'focus_prev') {
@@ -1055,8 +1091,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     isTitle: isTitle,
     /** Writes verdict `name` on request target `at`, as its key would on that block. */
     verdictOn: verdictOn,
-    /** The shared key away from a change row: the source view and back, focus kept. */
-    toggleRaw: toggleRaw,
+    /** Leaves reading mode, then the source view, so a key acts on the rendered doc. */
+    leaveModes: leaveModes,
     /**
      * The approve guard's jump: to the first unseen change or reply in doc order, else the first
      * open question. False when there is neither.
@@ -1085,17 +1121,38 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     /** Puts an act of this page's on the z stack: `{cid, undo(n) -> op fields, item?, created?}`. */
     remember: remember,
     tab: tab,
-    /** Drops one Esc layer: the phrase menu or key sheet, the composer, the selection, a picked link. False when none is there; focus stays. */
+    /**
+     * Drops one Esc layer: the phrase menu or key sheet, the composer, the selection, a picked
+     * link or page control, then reading mode or the source view. A layer the source view hides is
+     * skipped. False when none is there; focus stays.
+     */
     escape: function () {
       if (BR.chrome.escape()) return true;
-      if (BR.flow.escape()) return true;
+      var raw = rawShown();
+      if (!raw && BR.flow.escape()) return true;
       var s = getSelection();
-      if (s && s.rangeCount && !s.isCollapsed) {
+      if (!raw && s && s.rangeCount && !s.isCollapsed) {
         s.removeAllRanges();
         onSelection();
         return true;
       }
-      return unpick();
-    }
+      if (!raw && unpick()) return true;
+      // A control a click focused shows no ring, so only one Tab reached is a layer
+      var ctl = byKeys && pageControl();
+      if (ctl) {
+        ctl.blur();
+        return true;
+      }
+      if (readingShown() && window.birtaView) {
+        window.birtaView.toggleReadingMode(false);
+        return true;
+      }
+      if (raw && window.birtaView) {
+        window.birtaView.setViewMode('preview');
+        return true;
+      }
+      return false;
+    },
+    pageControl: pageControl
   };
 })();

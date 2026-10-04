@@ -1005,19 +1005,26 @@ test.describe("lane edges", () => {
     expect(got.scrolled).toBe(true);
   });
 
-  test("Tab reaches a heading's link and the overlay shows it", async ({ page, birta, browserName }) => {
+  test("Tab never reaches a heading's hidden link icon, and the overlay still shows it when focused", async ({
+    page,
+    birta,
+    browserName,
+  }) => {
     await open(page, birta, fixtureDoc("fresh"), { state: fixtureState("fresh") });
     // WebKit on macOS moves focus to links only with Option held, as Safari does
     const tab = browserName === "webkit" ? "Alt+Tab" : "Tab";
-    let sp: string | null = null;
-    for (let i = 0; i < 40 && !sp; i++) {
-      await page.keyboard.press(tab);
-      sp = await page.evaluate(() => {
+    const anchorSp = () =>
+      page.evaluate(() => {
         const a = document.activeElement;
         return a && a.matches("#content a.anchor") ? a.closest("h1,h2,h3,h4,h5,h6")!.getAttribute("data-sourcepos") : null;
       });
+    for (let i = 0; i < 40; i++) {
+      await page.keyboard.press(tab);
+      expect(await anchorSp(), `Tab ${i + 1} lands on no heading link`).toBeNull();
     }
-    expect(sp, "a heading link takes focus").not.toBeNull();
+    await page.locator("#content a.anchor").first().focus();
+    const sp = await anchorSp();
+    expect(sp, "a heading link can still take focus").not.toBeNull();
     await expect.poll(async () => inkIn(page, only(await marks(page), "anchor", sp!), WHITE)).not.toBeNull();
   });
 

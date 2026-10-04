@@ -191,7 +191,7 @@ function onlyChange(id: string, sp?: string) {
 
 const sourceShown = (page: Page) => page.locator("#source-view").isVisible();
 
-// --- C1: u reverts the open row's change, and is the source view everywhere else --------------
+// --- C1: u reverts the open row's change, and never shows the source; ⌥u does ------------------
 
 test.describe("u", () => {
   test("on an open change row u reverts that change, with no confirm, and the page stays rendered", async ({
@@ -219,22 +219,27 @@ test.describe("u", () => {
     expect(await sourceShown(page)).toBe(false);
   });
 
-  test("with no row open u shows the source and says how back, and u again returns to the focused block", async ({
+  test("with no row open u says there is nothing to revert; ⌥u shows the source and says how back, and ⌥u again returns to the focused block", async ({
     page,
     birta,
   }) => {
-    await open(page, birta, longDoc());
+    const { mock } = await open(page, birta, longDoc());
     // Focus a block well down the page, so the source view's height change would scroll it away
     const target = await stopSp(page, "Filler paragraph 20.");
     const header = (await page.locator(".file-header").boundingBox())!;
     await focusOn(page, target);
 
     await page.keyboard.press("u");
+    await expect.poll(() => pillOf(page)).toBe("nothing here to revert");
+    expect(await sourceShown(page)).toBe(false);
+    expect(writes(mock)).toEqual([]);
+    await page.keyboard.press("Alt+KeyU");
     await expect(page.locator("#source-view")).toBeVisible();
-    await expect.poll(() => pillOf(page)).toBe("source view · u back");
-    await page.keyboard.press("u");
+    await expect.poll(() => pillOf(page)).toBe("source view · esc back");
+    await page.keyboard.press("Alt+KeyU");
     await expect(page.locator("#lane-frame")).toBeVisible();
-    await expect.poll(() => pillOf(page)).toBe("rendered view");
+    await expect.poll(() => pillOf(page)).not.toBe("source view · esc back");
+    expect(await pillOf(page)).not.toBe("rendered view");
     await expect.poll(() => focused(page)).toBe(target);
     const box = (await page.locator(`#content [data-sourcepos="${target}"]`).boundingBox())!;
     expect(box.y).toBeGreaterThanOrEqual(header.y + header.height - 1);
@@ -250,21 +255,24 @@ test.describe("u", () => {
     const bars = async () => (await marks(page)).filter((m) => m.mark === "bar" && m.height > 0).map((m) => m.sp).sort();
     await expect.poll(async () => (await bars()).length).toBeGreaterThan(0);
     const before = await bars();
-    await page.keyboard.press("u");
+    await page.keyboard.press("Alt+KeyU");
     await expect(page.locator("#source-view")).toBeVisible();
     mock.pushState(state);
     await page.waitForTimeout(SETTLE_MS);
-    await page.keyboard.press("u");
+    await page.keyboard.press("Alt+KeyU");
     await expect(page.locator("#lane-frame")).toBeVisible();
     await expect.poll(bars).toEqual(before);
   });
 
-  test("after approve, u with no row open still toggles the source view", async ({ page, birta }) => {
+  test("after approve, ⌥u still toggles the source view, and u shows no source", async ({ page, birta }) => {
     await openFixture(page, birta, "approved");
     await page.keyboard.press("j");
     await page.keyboard.press("u");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await sourceShown(page)).toBe(false);
+    await page.keyboard.press("Alt+KeyU");
     await expect(page.locator("#source-view")).toBeVisible();
-    await page.keyboard.press("u");
+    await page.keyboard.press("Alt+KeyU");
     await expect(page.locator("#lane-frame")).toBeVisible();
   });
 });
@@ -317,7 +325,7 @@ test.describe("rows that can't take a no or a revert", () => {
     expect(writes(mock)).toEqual([]);
   });
 
-  test("u on a muted row from an earlier round toggles the source view and reverts nothing", async ({ page, birta }) => {
+  test("u on a muted row from an earlier round shows no source and reverts nothing", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow", (s) => {
       onlyChange("13.0")(s);
       // A later round the agent has answered: 13.0 is from the one before
@@ -325,10 +333,8 @@ test.describe("rows that can't take a no or a revert", () => {
     });
     await page.keyboard.press("n");
     await page.keyboard.press("u");
-    await expect(page.locator("#source-view")).toBeVisible();
-    await page.keyboard.press("u");
-    await expect(page.locator("#lane-frame")).toBeVisible();
     await page.waitForTimeout(SETTLE_MS);
+    expect(await sourceShown(page)).toBe(false);
     expect(opsNamed(mock, "undo_change")).toEqual([]);
   });
 });
@@ -984,22 +990,23 @@ function quoteDraftOnFlow(s: State) {
 }
 
 test.describe("killers: u and the row", () => {
-  test("K5: after approve, u on a changed block toggles the source view and reverts nothing", async ({ page, birta }) => {
+  test("K5: after approve, u on a changed block reverts nothing and shows no source", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "approved");
     await focusOn(page, "5:1-6:68");
     await page.keyboard.press("u");
-    await expect(page.locator("#source-view")).toBeVisible();
     await page.waitForTimeout(SETTLE_MS);
+    expect(await sourceShown(page)).toBe(false);
     expect(opsNamed(mock, "undo_change")).toEqual([]);
   });
 
-  test("K6: a click away from the open row leaves u the source view", async ({ page, birta }) => {
+  test("K6: a click away from the open row leaves u nothing to revert", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow", onlyChange("13.0"));
     await page.keyboard.press("n");
     await page.locator('#content [data-sourcepos="16:1-16:19"]').click();
     await page.keyboard.press("u");
-    await expect(page.locator("#source-view")).toBeVisible();
+    await expect.poll(() => pillOf(page)).toBe("nothing here to revert");
     await page.waitForTimeout(SETTLE_MS);
+    expect(await sourceShown(page)).toBe(false);
     expect(opsNamed(mock, "undo_change")).toEqual([]);
   });
 
@@ -1096,23 +1103,23 @@ test.describe("killers: u and the row", () => {
       await page.keyboard.press("x");
       await expect.poll(() => pillOf(page)).toBe(`x = no to this text · ${revert} reverts Claude's change · x again for no`);
       if (raw === "u") {
-        // u is only the source view here, row or not
+        // No review action is on u, so review tabs leave the source view there, row or not
         await page.keyboard.press("u");
         await expect(page.locator("#source-view")).toBeVisible();
-        await expect.poll(() => pillOf(page)).toBe("source view · u back");
+        await expect.poll(() => pillOf(page)).toBe("source view · esc back");
         await page.keyboard.press("u");
         await expect(page.locator("#lane-frame")).toBeVisible();
       } else {
         // Off the change's block, as Esc no longer drops focus
         await focusTop(page);
         expect(await focused(page)).toBe("doc");
-        // With no row open the revert's own key does nothing
+        // With no row open the revert's own key only says so
         await page.keyboard.press("u");
-        await page.waitForTimeout(SETTLE_MS);
+        await expect.poll(() => pillOf(page)).toBe("nothing here to revert");
         expect(await sourceShown(page)).toBe(false);
         await page.keyboard.press("s");
         await expect(page.locator("#source-view")).toBeVisible();
-        await expect.poll(() => pillOf(page)).toBe("source view · s back");
+        await expect.poll(() => pillOf(page)).toBe("source view · esc back");
         await page.keyboard.press("s");
         await expect(page.locator("#lane-frame")).toBeVisible();
         // Focus on the changed block opens its row again

@@ -326,12 +326,8 @@ test.describe("keys on whole doc", () => {
     expect(await focused(page)).toBe("doc");
   });
 
-  test("u says nothing here to revert, and writes nothing", async ({ page, birta }) => {
-    // The source view's key moved off u, as review tabs will have it
-    const { mock } = await open(page, birta, fixtureDoc("fresh"), {
-      state: fixtureState("fresh"),
-      args: ["pr.md", "--bind", "toggle_raw=s"],
-    });
+  test("u says nothing here to revert, writes nothing and shows no source", async ({ page, birta }) => {
+    const { mock } = await open(page, birta, fixtureDoc("fresh"), { state: fixtureState("fresh") });
     await expect.poll(() => phraseOf(page)).not.toBeNull();
     await onWholeDoc(page);
     await page.keyboard.press("u");
@@ -339,6 +335,7 @@ test.describe("keys on whole doc", () => {
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops()).toEqual([]);
     expect(await focused(page)).toBe("doc");
+    await expect(page.locator("#source-view")).toBeHidden();
   });
 
   test("⏎ opens and closes the lost-notes row, and focus stays on whole doc", async ({ page, birta }) => {

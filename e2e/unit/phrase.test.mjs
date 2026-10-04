@@ -42,11 +42,13 @@ const MIN = 60_000;
 // Results come from the vm context, whose objects have their own prototypes
 const plain = (v) => (v == null ? v : JSON.parse(JSON.stringify(v)));
 
-/** Everything the chrome says for `s` at server time `now`; the menu without its closing keys row. */
+/** Everything the chrome says for `s` at server time `now`; the menu without the key sheet's row. */
 function chrome(BR, s, now = s.server_now, dir = null) {
   const menu = plain(BR.pure.menuRows(s, { now, dir })).map((r) => r.text);
-  // Every menu review can act in ends with the key sheet's row
+  // Every menu review can act in ends with the key sheet's row, then withdraw where there is one
+  const withdraw = menu[menu.length - 1] === "withdraw" ? menu.pop() : null;
   if (s.log_writable !== false) assert.equal(menu.pop(), "keys");
+  if (withdraw) menu.push(withdraw);
   return {
     phrase: BR.pure.formatPhrase(s, { now, dir }),
     button: plain(BR.pure.turnButton(s, { now, dir })),
@@ -106,7 +108,7 @@ const FIXTURE_CHROME = {
     phrase: "sent 14:13 · not picked up yet",
     button: B("With Claude", false, true),
     pill: null,
-    menu: ["withdraw", COPY, MINE],
+    menu: [COPY, MINE, "withdraw"],
   },
   picked: { phrase: "Claude picked up 14:13", button: B("With Claude", false, true), pill: null, menu: [COPY, MINE] },
   replied: {
@@ -138,7 +140,7 @@ const FIXTURE_CHROME = {
     phrase: "approved 14:13 · c to reopen",
     button: B("Approved", false, true),
     pill: null,
-    menu: ["withdraw", COPY, MINE],
+    menu: [COPY, MINE, "withdraw"],
   },
 };
 
@@ -297,7 +299,7 @@ const CRAFTED = [
   [
     "before pickup a doc of yours names no one",
     bent("sent", (s) => (s.owner.drafted_by = null)),
-    { button: B("With the agent", false, true), menu: ["withdraw", COPY] },
+    { button: B("With the agent", false, true), menu: [COPY, "withdraw"] },
   ],
 
   // The agent's name comes from the state
@@ -503,7 +505,7 @@ const CRAFTED = [
   [
     "an approval ends the silence too",
     state("approved"),
-    { phrase: "approved 14:13 · c to reopen", menu: ["withdraw", COPY, MINE] },
+    { phrase: "approved 14:13 · c to reopen", menu: [COPY, MINE, "withdraw"] },
     (s) => s.phrase.picked_up.silence.since_ts + 20 * MIN,
   ],
   [
@@ -573,7 +575,7 @@ const CRAFTED = [
   [
     "a read-only doc that was sent still waits, and can still be withdrawn",
     bent("sent", (s) => (s.writable = false)),
-    { phrase: "read-only · notes only", button: B("With Claude", false, true), menu: ["withdraw", COPY, MINE] },
+    { phrase: "read-only · notes only", button: B("With Claude", false, true), menu: [COPY, MINE, "withdraw"] },
   ],
 ];
 

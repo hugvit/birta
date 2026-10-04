@@ -294,7 +294,11 @@ async fn serve(cli: Cli, config: birta::config::Config, review_on: bool) -> anyh
         show_header: merged.show_header,
         reading_mode: merged.reading_mode,
         raw_mode: merged.raw_mode,
-        keybindings_json,
+        keybindings_json: if review_on {
+            keybindings.for_review().to_json()
+        } else {
+            keybindings_json
+        },
         variant_explicit,
         drafted_by: cli.drafted_by.filter(|_| review_on),
         review: review_on,

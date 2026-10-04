@@ -499,11 +499,12 @@ test.describe("m and reading mode", () => {
     await expect.poll(() => paintedDots(page)).toEqual(["/view/b.md"]);
   });
 
-  test("m on, then reading mode on and off, then m off, and every mark is back", async ({ page, birta }) => {
+  test("m in reading mode leaves it and hides the marks, then m again brings every mark back", async ({ page, birta }) => {
     await openLinked(page, birta);
     await page.keyboard.press("r");
+    await expect.poll(() => page.evaluate(() => document.body.classList.contains("reading-mode"))).toBe(true);
     await page.keyboard.press("m");
-    await page.keyboard.press("r");
+    await expect.poll(() => page.evaluate(() => document.body.classList.contains("reading-mode"))).toBe(false);
     expect(await laneShown(page)).toBe(false);
     await expect.poll(async () => (await flowHosts(page)).filter((h) => h.shown).length).toBeGreaterThan(2);
     await page.keyboard.press("m");

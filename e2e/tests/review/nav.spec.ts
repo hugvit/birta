@@ -206,7 +206,11 @@ test.describe("links in the focused block", () => {
     expect(await hash(page)).toBe("");
   });
 
-  test("Tab and Shift+Tab cycle the block's links with a ring, and ⏎ opens the picked one", async ({ page, birta }) => {
+  test("Tab and Shift+Tab step the block's links with a ring, go on past its last into the next link's block, and ⏎ opens the picked one", async ({
+    page,
+    birta,
+    browserName,
+  }) => {
     await open(page, birta, LINK_DOC);
     const para = await stopSp(page, "See alpha");
     await focusOn(page, para);
@@ -214,12 +218,18 @@ test.describe("links in the focused block", () => {
     expect(await picked(page)).toEqual({ text: "alpha", ring: true });
     await page.keyboard.press("Tab");
     expect(await picked(page)).toEqual({ text: "beta", ring: true });
-    // Round the end, within the block
-    await page.keyboard.press("Tab");
-    expect(await picked(page)).toEqual({ text: "alpha", ring: true });
-    await page.keyboard.press("Shift+Tab");
+    // Past the block's last link review leaves Tab to the browser, in every engine
+    expect(await dispatchKey(page, { key: "Tab", code: "Tab" })).toBe(false);
     expect(await picked(page)).toEqual({ text: "beta", ring: true });
-    expect(await focused(page)).toBe(para);
+    // The browser's Tab goes on, and the focus follows the link (WebKit needs ⌥ for links)
+    await page.keyboard.press(browserName === "webkit" ? "Alt+Tab" : "Tab");
+    await expect.poll(() => focused(page)).toBe(await stopSp(page, "Only gamma"));
+    expect(await picked(page)).toEqual({ text: "gamma", ring: true });
+    // Before the block's first link Shift+Tab is the browser's too
+    expect(await dispatchKey(page, { key: "Tab", code: "Tab", shiftKey: true })).toBe(false);
+    await page.keyboard.press(browserName === "webkit" ? "Alt+Shift+Tab" : "Shift+Tab");
+    await expect.poll(() => focused(page)).toBe(para);
+    expect(await picked(page)).toEqual({ text: "beta", ring: true });
     await page.keyboard.press("Enter");
     await expect.poll(() => hash(page)).toBe("#to-beta");
   });
@@ -264,9 +274,10 @@ test.describe("links in the focused block", () => {
     expect(await hash(page)).toBe("");
   });
 
-  test("on three links Tab and Shift+Tab step each way and wrap, and ⏎ with none picked counts them", async ({
+  test("on three links Tab and Shift+Tab step each way, never wrap, and ⏎ with none picked counts them", async ({
     page,
     birta,
+    browserName,
   }) => {
     await open(page, birta, LINK_DOC);
     const three = await stopSp(page, "Three:");
@@ -275,8 +286,12 @@ test.describe("links in the focused block", () => {
     await expect.poll(() => pillOf(page)).toBe("3 links · Tab to pick");
     for (const key of ["Tab", "Tab", "Shift+Tab"]) await page.keyboard.press(key);
     expect(await picked(page)).toEqual({ text: "one", ring: true });
-    for (const key of ["Tab", "Tab", "Tab"]) await page.keyboard.press(key);
-    expect((await picked(page))?.text).toBe("one");
+    for (const key of ["Tab", "Tab"]) await page.keyboard.press(key);
+    expect((await picked(page))?.text).toBe("three");
+    // Past the last link: on to the next link in the doc, past the heading's own icon
+    await page.keyboard.press(browserName === "webkit" ? "Alt+Tab" : "Tab");
+    await expect.poll(() => focused(page)).toBe(await stopSp(page, "Heading with delta"));
+    expect(await picked(page)).toEqual({ text: "delta", ring: true });
     await page.keyboard.press("Escape");
     await focusOn(page, three);
     await page.keyboard.press("Shift+Tab");
@@ -664,7 +679,7 @@ async function sheetLines(page: Page): Promise<string[]> {
     "Claude's changes u revert Claude's change (open row)",
     `hand back / approve ${await turnKey(page)}`,
     "view r d t m",
-    "u source view",
+    `${await page.evaluate(() => (/Mac/.test(navigator.platform) ? "⌥" : "Alt"))}u source view`,
   ];
 }
 

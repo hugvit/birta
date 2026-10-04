@@ -148,15 +148,29 @@ fn presses(binding: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether action `a` on key `ka` and action `b` on key `kb` answer to one press. The change
-/// revert and the raw view may share one: the page picks by whether a change row is open.
-fn clash(a: &str, ka: &str, b: &str, kb: &str) -> bool {
-    let pair = [a, b];
-    if pair.contains(&"revert_change") && pair.contains(&"toggle_raw") {
-        return false;
-    }
+/// The page's own actions; every other action is review's.
+const VIEWER_ACTIONS: [&str; 5] = [
+    "toggle_reading",
+    "exit_reading",
+    "toggle_dark",
+    "focus_theme",
+    "toggle_raw",
+];
+
+/// Whether action `a` on key `ka` and action `b` on key `kb` answer to one press.
+fn clash(_a: &str, ka: &str, _b: &str, kb: &str) -> bool {
     let kb = presses(kb);
     presses(ka).iter().any(|p| kb.contains(p))
+}
+
+/// A clash that holds on some page. The raw view on a review action's key is none: plain
+/// pages run no review actions, and review pages move the raw view under Alt.
+fn collides(a: &str, ka: &str, b: &str, kb: &str) -> bool {
+    let raw_and_review = |x: &str, y: &str| x == "toggle_raw" && !VIEWER_ACTIONS.contains(&y);
+    if raw_and_review(a, b) || raw_and_review(b, a) {
+        return false;
+    }
+    clash(a, ka, b, kb)
 }
 
 impl KeybindingsConfig {
@@ -219,17 +233,48 @@ impl KeybindingsConfig {
         })
     }
 
-    /// The first two actions sharing a key press, if any.
+    /// The first two actions sharing a key press on some page, if any.
     fn first_clash(&self) -> Option<(&'static str, &'static str, String)> {
         let slots = self.slots();
         for (i, (a, key)) in slots.iter().enumerate() {
             for (b, other) in &slots[i + 1..] {
-                if clash(a, key, b, other) {
+                if collides(a, key, b, other) {
                     return Some((a, b, (*key).clone()));
                 }
             }
         }
         None
+    }
+
+    /// The bindings a review page gets: a raw-view key that a review action also uses moves
+    /// under Alt, so the key stays the review action's.
+    pub fn for_review(&self) -> Self {
+        let mut out = self.clone();
+        let taken = self.slots().iter().any(|(a, key)| {
+            !VIEWER_ACTIONS.contains(a) && clash(a, key, "toggle_raw", &self.toggle_raw)
+        });
+        let has_alt = self.toggle_raw.split('+').any(|m| m == "Alt");
+        if taken && !has_alt {
+            let mut parts: Vec<&str> = self.toggle_raw.split('+').collect();
+            let key = parts.pop().unwrap_or_default();
+            // The viewer reads a letter under a modifier by its physical key only in lower case
+            let key = if key.chars().count() == 1 {
+                key.to_lowercase()
+            } else {
+                key.to_string()
+            };
+            parts.insert(0, "Alt");
+            let moved = format!("{}+{key}", parts.join("+"));
+            // Onto a key another action holds, the move would trade one clash for another
+            let free = self
+                .slots()
+                .iter()
+                .all(|(a, held)| *a == "toggle_raw" || !clash(a, held, "toggle_raw", &moved));
+            if free {
+                out.toggle_raw = moved;
+            }
+        }
+        out
     }
 
     /// Serialize to JSON for injection into a `<script>` block in the viewer
@@ -275,7 +320,7 @@ impl KeybindingsConfig {
         for (i, (a, key)) in binds.iter().enumerate() {
             if let Some((b, _)) = binds[i + 1..]
                 .iter()
-                .find(|(b, other)| b != a && clash(a, key, b, other))
+                .find(|(b, other)| b != a && collides(a, key, b, other))
             {
                 return Err(format!(
                     "keybindings: --bind {a} and --bind {b} are both on \"{key}\""
@@ -294,7 +339,7 @@ impl KeybindingsConfig {
             let losers: Vec<&'static str> = out
                 .slots()
                 .iter()
-                .filter(|(other, held)| !bound(other) && clash(action, key, other, held))
+                .filter(|(other, held)| !bound(other) && collides(action, key, other, held))
                 .map(|(other, _)| *other)
                 .collect();
             for loser in losers {
@@ -304,10 +349,9 @@ impl KeybindingsConfig {
                     .find(|(a, _)| *a == loser)
                     .map(|(_, k)| (*k).clone())
                     .unwrap_or_default();
-                let free = out
-                    .slots()
-                    .iter()
-                    .all(|(other, held)| *other == loser || !clash(loser, &fallback, other, held));
+                let free = out.slots().iter().all(|(other, held)| {
+                    *other == loser || !collides(loser, &fallback, other, held)
+                });
                 let now = if free { fallback } else { String::new() };
                 let shown = if now.is_empty() {
                     "unbound".to_string()
@@ -715,6 +759,106 @@ focus_first = "g"
         let json = keys_json(&kb);
         assert_eq!(json["focus_last"], "Shift+G");
         assert_eq!(json["focus_first"], "");
+    }
+
+    #[test]
+    fn keybindings_default_loads_with_no_clash_in_either_mode() {
+        let kb = KeybindingsConfig::default()
+            .with_binds(&[])
+            .expect("the defaults load");
+        assert_eq!(kb.toggle_raw, "u");
+        assert_eq!(kb.revert_change, "u");
+        let review = kb.for_review();
+        assert_eq!(review.first_clash(), None);
+        let config: Config = toml::from_str("[keybindings]\n").unwrap();
+        assert!(config.keybindings.with_binds(&[]).is_ok());
+    }
+
+    #[test]
+    fn keybindings_raw_and_revert_on_one_key_clash() {
+        assert!(clash("revert_change", "u", "toggle_raw", "u"));
+        assert!(clash("toggle_raw", "U", "revert_change", "u"));
+        assert!(!clash("toggle_raw", "Alt+u", "revert_change", "u"));
+    }
+
+    #[test]
+    fn keybindings_for_review_moves_the_raw_view_to_alt() {
+        let kb = KeybindingsConfig::default();
+        let review = kb.for_review();
+        assert_eq!(review.toggle_raw, "Alt+u");
+        let json = keys_json(&review);
+        assert_eq!(json["toggle_raw"], "Alt+u");
+        // Only the raw view's key moves
+        let mut want = keys_json(&kb);
+        want["toggle_raw"] = "Alt+u".into();
+        assert_eq!(json, want);
+        // Any review action's key counts, not only the revert's
+        let on_yes = KeybindingsConfig {
+            toggle_raw: "y".to_string(),
+            ..KeybindingsConfig::default()
+        };
+        assert_eq!(on_yes.for_review().toggle_raw, "Alt+y");
+    }
+
+    #[test]
+    fn keybindings_for_review_keeps_a_raw_key_no_review_action_uses() {
+        let config: Config = toml::from_str("[keybindings]\ntoggle_raw = \"s\"\n").unwrap();
+        let kb = config.keybindings.with_binds(&[]).unwrap();
+        assert_eq!(kb.for_review().toggle_raw, "s");
+
+        let kb = KeybindingsConfig::default()
+            .with_binds(&["toggle_raw=s".to_string()])
+            .unwrap();
+        assert_eq!(kb.for_review().toggle_raw, "s");
+
+        // The revert moved off u leaves u to the raw view in review tabs too
+        let kb = KeybindingsConfig::default()
+            .with_binds(&["revert_change=s".to_string()])
+            .unwrap();
+        assert_eq!(kb.revert_change, "s");
+        assert_eq!(kb.for_review().toggle_raw, "u");
+        assert_eq!(kb.for_review().first_clash(), None);
+    }
+
+    #[test]
+    fn keybindings_for_review_compares_presses_not_strings() {
+        // Letters match case-blind, so U is the revert's press
+        let upper = KeybindingsConfig {
+            toggle_raw: "U".to_string(),
+            ..KeybindingsConfig::default()
+        };
+        let review = upper.for_review();
+        assert!(
+            review.toggle_raw.eq_ignore_ascii_case("Alt+u"),
+            "{}",
+            review.toggle_raw
+        );
+        assert_eq!(review.first_clash(), None);
+        // A raw key already under Alt is no review action's, so it stays as bound
+        for raw in ["Alt+u", "Alt+s"] {
+            let kb = KeybindingsConfig {
+                toggle_raw: raw.to_string(),
+                ..KeybindingsConfig::default()
+            };
+            assert_eq!(kb.for_review().toggle_raw, raw);
+        }
+    }
+
+    #[test]
+    fn keybindings_for_review_never_doubles_alt_or_moves_onto_a_taken_key() {
+        // Already under Alt and on a review action's press: no Alt+Alt+x
+        let doubled = KeybindingsConfig {
+            toggle_raw: "Alt+x".to_string(),
+            no: "Alt+x".to_string(),
+            ..KeybindingsConfig::default()
+        };
+        assert_eq!(doubled.for_review().toggle_raw, "Alt+x");
+        // Alt+u is a viewer key already, so the raw view keeps the user's binding
+        let taken = KeybindingsConfig {
+            toggle_reading: "Alt+u".to_string(),
+            ..KeybindingsConfig::default()
+        };
+        assert_eq!(taken.for_review().toggle_raw, "u");
     }
 
     #[test]

@@ -578,7 +578,7 @@ test.describe("menu", () => {
     await expect.poll(() => phraseOf(page)).not.toBeNull();
     expect(await menuOf(page)).toBeNull();
     await page.locator(".file-header birta-phrase").click();
-    await expect.poll(() => menuOf(page)).toEqual([WITHDRAW, COPY, MINE, KEYS]);
+    await expect.poll(() => menuOf(page)).toEqual([COPY, MINE, KEYS, WITHDRAW]);
   });
 
   test("the phrase opens its menu on every click while states keep arriving", async ({ page, birta }) => {
@@ -660,16 +660,15 @@ test.describe("menu", () => {
         if (where === "on the page") await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
       };
       await openMenu();
-      // The first row is current on open
-      await page.keyboard.press("j");
+      // The first row, the safest, is current on open
       await page.keyboard.press("Enter");
       await expect.poll(copied).toEqual([state.hand_off]);
       expect(await focused(page)).toBe("doc");
       expect(mock.ops()).toEqual([]);
       await expect.poll(() => menuOf(page)).toBeNull();
       await openMenu();
-      await page.keyboard.press("j");
-      await page.keyboard.press("k");
+      // withdraw is last: j stops there, and k and j step back and forth
+      for (const key of ["j", "j", "j", "j", "k", "j"]) await page.keyboard.press(key);
       await page.keyboard.press("Enter");
       await expect.poll(() => mock.ops().length).toBe(1);
       expect(mock.ops()[0]).toMatchObject({ op: "withdraw", to: state.phrase.sent.n });

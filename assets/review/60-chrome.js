@@ -269,11 +269,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var v = view(s, opts.now);
     var p = v.p;
     var rows = [];
-    // Inside the hold z takes it back, so the menu only offers it after
+    // Inside the hold z takes it back, so the menu only offers it after; last, as the menu opens on its first row
+    var withdraw = null;
     if (p.stage === 'sent' && p.sent && p.sent.can_withdraw)
-      rows.push({ id: 'withdraw', text: 'withdraw', op: { op: 'withdraw', to: p.sent.n } });
+      withdraw = { id: 'withdraw', text: 'withdraw', op: { op: 'withdraw', to: p.sent.n } };
     if (p.stage === 'approved' && s.approve && s.approve.can_withdraw)
-      rows.push({ id: 'withdraw', text: 'withdraw', op: { op: 'withdraw', to: s.approve.n } });
+      withdraw = { id: 'withdraw', text: 'withdraw', op: { op: 'withdraw', to: s.approve.n } };
     if (silence(p, opts.now) != null)
       rows.push({ id: 'release', text: 'release', op: { op: 'release', claim: p.picked_up.n } });
     if (s.hand_off) rows.push({ id: 'copy', text: COPY, copy: s.hand_off });
@@ -292,6 +293,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       });
     }
     rows.push({ id: 'keys', text: 'keys', note: '?' });
+    if (withdraw) rows.push(withdraw);
     return rows;
   };
 

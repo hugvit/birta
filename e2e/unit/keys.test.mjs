@@ -11,13 +11,14 @@ const SHARED_BR = "var BR = BR && BR.__birta === true ? BR : { __birta: true };"
 const OURS = ["10-keys.js", "20-pointing.js"];
 const ORDER = ["quote.js", "00-core.js", "10-keys.js", "20-pointing.js", "40-lane.js"];
 
-/** The server's default bindings, the viewer's and review's together. */
+/** The bindings a review page gets by default, the viewer's and review's together. */
 const KB = {
   toggle_reading: "r",
   exit_reading: "Escape",
   toggle_dark: "d",
   focus_theme: "t",
-  toggle_raw: "u",
+  toggle_raw: "Alt+u",
+  revert_change: "u",
   focus_next: "j",
   focus_prev: "k",
   note: "c",
@@ -171,4 +172,24 @@ test("keyAction reads the event and bindings without changing them", () => {
   const e = Object.freeze({ ...EVENT_DEFAULTS, key: "J" });
   const kb = Object.freeze({ ...KB });
   assert.equal(BR.pure.keyAction(e, kb), "focus_next");
+});
+
+// --- The source view's key: ⌥u in review tabs, the viewer's alone ------------------------------
+
+test("u is only the revert in a review tab, and ⌥u is no review action", () => {
+  const { BR } = load();
+  const act = (init, kb = KB) => BR.pure.keyAction({ ...EVENT_DEFAULTS, ...init }, kb) ?? null;
+  assert.equal(act({ key: "u", code: "KeyU" }), "revert_change");
+  // Option on macOS types a dead key or another glyph; the viewer matches ⌥u by its physical key
+  assert.equal(act({ key: "u", code: "KeyU", altKey: true }), null);
+  assert.equal(act({ key: "Dead", code: "KeyU", altKey: true }), null);
+  assert.equal(act({ key: "¨", code: "KeyU", altKey: true }), null);
+  // A plain preview tab's u is the viewer's too
+  assert.equal(act({ key: "u", code: "KeyU" }, { ...KB, toggle_raw: "u", revert_change: "" }), null);
+});
+
+test("review keeps no source-view toggle of its own", () => {
+  const { BR } = load();
+  assert.equal(typeof BR.pointing, "object");
+  assert.equal(BR.pointing.toggleRaw, undefined);
 });

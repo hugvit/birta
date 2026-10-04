@@ -26,13 +26,13 @@ function state(name) {
   return JSON.parse(fs.readFileSync(path.join(FIXTURES, `${name}.json`), "utf-8"));
 }
 
-/** The server's default bindings, with the change revert sharing u with the raw view. */
+/** The server's default bindings for a review page: u is the change revert, and the raw view is ⌥u. */
 const KB = {
   toggle_reading: "r",
   exit_reading: "Escape",
   toggle_dark: "d",
   focus_theme: "t",
-  toggle_raw: "u",
+  toggle_raw: "Alt+u",
   revert_change: "u",
   focus_next: "j",
   focus_prev: "k",
@@ -54,7 +54,7 @@ const KB = {
 
 const EVENT = { code: "", shiftKey: false, altKey: false, ctrlKey: false, metaKey: false, repeat: false, isComposing: false, keyCode: 0 };
 
-// --- C1: u is the change revert, and the raw view's key where no row is open ----------------
+// --- C1: u is the change revert, and only that ------------------------------------------------
 
 test("u asks for revert_change at its default binding, once per press", () => {
   const BR = load();

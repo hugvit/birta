@@ -69,13 +69,13 @@ function dirState(files, totals = {}, folder = null) {
 
 const B = (text, kbd = true, disabled = false) => ({ text, kbd, disabled });
 
-/** The defaults `KeybindingsConfig` serves, plus the change-revert key. */
+/** The defaults `KeybindingsConfig` serves a review page: the source view on ⌥u, off the revert's u. */
 const BINDINGS = {
   toggle_reading: "r",
   exit_reading: "Escape",
   toggle_dark: "d",
   focus_theme: "t",
-  toggle_raw: "u",
+  toggle_raw: "Alt+u",
   revert_change: "u",
   focus_next: "j",
   focus_prev: "k",
@@ -123,7 +123,7 @@ test("the key sheet groups the default keys as the spec lists them", () => {
     "Claude's changes  u  revert Claude's change (open row)",
     "hand back / approve  ⌘⏎",
     "view  r d t m",
-    "u  source view",
+    "⌥u  source view",
   ]);
 });
 
@@ -195,12 +195,15 @@ test("Home and End go to the first and the last stop, and say nothing, even ther
 
 // --- The menu's keys row -------------------------------------------------------------------------
 
-test("every writable doc's menu ends with a keys row, after the other files", () => {
+test("every writable doc's menu ends with a keys row, after the other files, and only withdraw after it", () => {
   const BR = load();
   const dir = dirState([listed("pr.md", summary("drafts")), listed("b.md", summary("replied"))], { drafts: 3 });
   for (const name of ["fresh", "drafts", "sent", "picked", "replied", "approved", "hold"]) {
     const s = state(name);
-    const rows = plain(BR.pure.menuRows(s, { now: s.server_now, dir, path: "pr.md", folder: true }));
+    const all = plain(BR.pure.menuRows(s, { now: s.server_now, dir, path: "pr.md", folder: true }));
+    const at = all.findIndex((r) => r.id === "withdraw");
+    assert.ok(at < 0 || at === all.length - 1, `${name}: withdraw is last`);
+    const rows = at < 0 ? all : all.slice(0, -1);
     const last = rows[rows.length - 1];
     assert.deepEqual({ id: last.id, text: last.text, note: last.note }, { id: "keys", text: "keys", note: "?" }, name);
     assert.equal(last.op, undefined, name);

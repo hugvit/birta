@@ -343,35 +343,41 @@ test.describe("guard, edges", () => {
     await expect(page.locator("textarea")).toHaveCount(0);
   });
 
-  test("in the raw view review keys do nothing, and the view toggle still works", async ({ page, birta }) => {
+  test("in the source view a review key brings the doc back, then acts, and the view toggle still works", async ({
+    page,
+    birta,
+  }) => {
     const { mock } = await open(page, birta, fixtureDoc("unseen"), { state: fixtureState("unseen") });
     await expect.poll(() => laneShown(page)).toBe(true);
-    await page.keyboard.press("u");
-    await expect(page.locator("#source-view")).toBeVisible();
-    for (const key of ["j", "x", "y", "m", "z", "End"]) await page.keyboard.press(key);
-    await page.waitForTimeout(SETTLE_MS);
-    await page.keyboard.press("u");
-    await expect(page.locator("#lane-frame")).toBeVisible();
-    expect(mock.ops()).toEqual([]);
-    expect(await focused(page)).toBe("doc");
+    for (const key of ["j", "End"]) {
+      await page.keyboard.press("Alt+KeyU");
+      await expect(page.locator("#source-view")).toBeVisible();
+      await page.keyboard.press(key);
+      await expect(page.locator("#lane-frame")).toBeVisible();
+      await expect(page.locator("#source-view")).toBeHidden();
+    }
+    const all = await stops(page);
+    await expect.poll(() => focused(page)).toBe(all[all.length - 1].sp);
+    expect(mock.ops().filter((o) => o.op !== "seen")).toEqual([]);
     await expect.poll(() => laneShown(page)).toBe(true);
-    await page.keyboard.press("j");
-    await expect.poll(() => focused(page)).toBe((await stops(page))[0].sp);
+    await page.keyboard.press("Alt+KeyU");
+    await expect(page.locator("#source-view")).toBeVisible();
+    await page.keyboard.press("Alt+KeyU");
+    await expect(page.locator("#lane-frame")).toBeVisible();
+    await expect.poll(() => laneShown(page)).toBe(true);
   });
 
-  test("review keys do nothing while the theme menu button has focus", async ({ page, birta }) => {
+  test("on the theme menu button a review key returns focus to the doc's stop, then acts", async ({ page, birta }) => {
     const { mock } = await open(page, birta, fixtureDoc("unseen"), { state: fixtureState("unseen") });
     await expect.poll(() => laneShown(page)).toBe(true);
     await page.focus("#theme-dropdown-btn");
-    for (const key of ["j", "k", "x", "y", "l", ".", "z", "m", "End"]) await page.keyboard.press(key);
-    await page.waitForTimeout(SETTLE_MS);
-    expect(mock.ops()).toEqual([]);
-    expect(await focused(page)).toBe("doc");
-    expect(await laneShown(page)).toBe(true);
-    // Once the control lets go, the same key acts
-    await page.evaluate(() => (document.activeElement as HTMLElement).blur());
     await page.keyboard.press("j");
     await expect.poll(() => focused(page)).toBe((await stops(page))[0].sp);
+    expect(await page.evaluate(() => document.activeElement?.id)).not.toBe("theme-dropdown-btn");
+    await page.focus("#theme-dropdown-btn");
+    await page.keyboard.press("m");
+    await expect.poll(() => laneShown(page)).toBe(false);
+    expect(mock.ops()).toEqual([]);
   });
 
   test("a held z takes back nothing more", async ({ page, birta }) => {
@@ -390,7 +396,7 @@ test.describe("guard, edges", () => {
 });
 
 test.describe("existing keys", () => {
-  test("r, d, t and u still work with review on", async ({ page, birta }) => {
+  test("r, d, t and ⌥u still work with review on, and u never shows the source", async ({ page, birta }) => {
     await open(page, birta, STOPS_DOC);
     await page.keyboard.press("r");
     expect(await readingMode(page)).toBe(true);
@@ -408,9 +414,12 @@ test.describe("existing keys", () => {
     await expect(page.locator(".theme-dropdown")).not.toHaveClass(/\bopen\b/);
 
     await page.keyboard.press("u");
+    await page.waitForTimeout(SETTLE_MS);
+    await expect(page.locator("#source-view")).toBeHidden();
+    await page.keyboard.press("Alt+KeyU");
     await expect(page.locator("#source-view")).toBeVisible();
     await expect(page.locator("#lane-frame")).toBeHidden();
-    await page.keyboard.press("u");
+    await page.keyboard.press("Alt+KeyU");
     await expect(page.locator("#lane-frame")).toBeVisible();
   });
 
@@ -466,10 +475,11 @@ test.describe("Esc ladder", () => {
   }) => {
     await open(page, birta, STOPS_DOC);
     const all = await stops(page);
-    await page.keyboard.press("r");
+    // Focus first: a review key in reading mode leaves it
     await page.keyboard.press("j");
     await page.keyboard.press("j");
     await expect.poll(() => focused(page)).toBe(all[1].sp);
+    await page.keyboard.press("r");
     // Select a word inside the focused heading, so no click moves focus
     await page.evaluate((sp) => {
       const h = document.querySelector(`#content [data-sourcepos="${sp}"]`)!;

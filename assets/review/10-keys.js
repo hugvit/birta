@@ -40,7 +40,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   /** Whether a keydown matches one binding, as review's actions match theirs. */
   BR.pure.keyMatches = matches;
 
-  var NAMED = { yes: 'y', no: 'x', note: 'c', undo: 'z', focus_next: 'j', toggle_raw: 'u', revert_change: 'u', open: 'Enter' };
+  var NAMED = { yes: 'y', no: 'x', note: 'c', undo: 'z', focus_next: 'j', revert_change: 'u', open: 'Enter' };
 
   /** How a pill names `action`'s key under `bindings`: a letter as typed, Enter as ⏎. */
   BR.pure.keyName = function (action, bindings) {
@@ -76,26 +76,23 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   function reviewable() {
     var state = BR.currentState();
-    if (state && state.log_writable === false) return false;
-    // The raw view shows no doc to point at
-    return typeof viewMode === 'undefined' || viewMode !== 'raw';
+    return !(state && state.log_writable === false);
   }
+
+  function bindings() { return typeof KEYBINDINGS === 'undefined' ? null : KEYBINDINGS; }
 
   /** Runs the review action a key asks for; true when it acted. */
   function run(e) {
-    var kb = typeof KEYBINDINGS === 'undefined' ? null : KEYBINDINGS;
-    var action = BR.pure.keyAction(e, kb);
-    // The revert shares its key with the source view: an open change row decides which it is
-    var row = action === 'revert_change' && reviewable() && BR.flow.openRow();
-    // A held revert acts once, and its repeats never flip the view either
-    if (e.repeat && kb && matches(e, kb.revert_change) && reviewable() && BR.flow.openRow()) return true;
-    var shown = !row && action === 'revert_change' && reviewable() && BR.flow.focusedRow();
+    var action = BR.pure.keyAction(e, bindings());
+    if (!action || !reviewable()) return false;
+    // Source view and reading mode hide the doc the key acts on
+    BR.pointing.leaveModes();
+    var row = action === 'revert_change' && BR.flow.openRow();
+    var shown = !row && action === 'revert_change' && BR.flow.focusedRow();
     if (shown && shown.undone_by != null) {
       BR.chrome.pill('already reverted · ' + BR.keyName('note') + ' note to ask for it back');
       return true;
     }
-    if (!row && kb && !e.isComposing && e.keyCode !== 229 && matches(e, kb.toggle_raw)) return BR.pointing.toggleRaw();
-    if (!action || !reviewable()) return false;
     // The menu and what a key opens are never open together
     BR.chrome.closeMenu();
     return BR.pointing.act(action);
@@ -105,6 +102,16 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   function presses(e, t) {
     return (e.key === 'Enter' || e.key === ' ') && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey &&
       !!t && !!t.closest && !!t.closest('button, a, [role="button"]');
+  }
+
+  // When the last Tab was pressed, so a control it lands on can say how back
+  var tabbedAt = -Infinity;
+  var CONTROL_SAYS = 'on page controls · esc back to the doc';
+
+  // A control reached by Tab names the way back to the doc
+  function onFocusIn() {
+    if (Date.now() - tabbedAt > 500 || !BR.pointing.pageControl()) return;
+    BR.chrome.pill(CONTROL_SAYS);
   }
 
   // A review host's keys reach its own handlers and then fromHost, never this
@@ -135,8 +142,20 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     BR.chrome.pill('? for keys');
   }
 
+  /**
+   * The header control a key was pressed on, which a review key hands back to the doc: a page
+   * control, or review's phrase or turn button. Null for anything else.
+   */
+  function headerControl(e, own) {
+    if (!own) return onControl(e.target) ? e.target : null;
+    var t = e.composedPath()[0];
+    var root = t && t.getRootNode && t.getRootNode();
+    return root && root.host && root.host.closest('.file-header, .header') ? t : null;
+  }
+
   /** Acts on a key; `own` is for a key from inside a review host, whose controls are review's. */
   function handle(e, own) {
+    if (e.key === 'Tab') tabbedAt = Date.now();
     if (BR.chrome.menuKey(e)) {
       e.preventDefault();
       e.stopPropagation();
@@ -153,7 +172,20 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       }
       return;
     }
-    if (!own && onControl(e.target)) return;
+    var ctl = headerControl(e, own);
+    if (ctl) {
+      // Tab moves between controls, and ⏎ or Space press one
+      if (e.key === 'Tab' || presses(e, ctl)) return;
+      var sheet = e.key === '?' && plain(e);
+      if (!sheet && !(BR.pure.keyAction(e, bindings()) && reviewable())) {
+        if (!own) return;
+      } else {
+        // The theme menu a click opened would stay over the page the key moves on
+        var menu = ctl.closest && ctl.closest('.theme-dropdown');
+        if (menu) menu.classList.remove('open');
+        ctl.blur();
+      }
+    }
     // Shift or not, as layouts differ on whether ? needs it
     if (e.key === '?' && plain(e)) {
       BR.chrome.toggleKeys();
@@ -179,6 +211,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     init: function () {
       // Capture, so the viewer's own handler sees a consumed key as defaultPrevented
       document.addEventListener('keydown', onKey, true);
+      document.addEventListener('focusin', onFocusIn);
     }
   };
 })();

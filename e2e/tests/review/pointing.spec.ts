@@ -361,9 +361,12 @@ test.describe("focus", () => {
       const m = await focusMark(page);
       return !!m && near1(m.top, b.top - 2) && near1(m.bottom, b.bottom + 2) && near1(m.left, b.left - 8);
     };
-    // Focused in reading mode; leaving it brings back the file header and pushes the doc down
+    // Focused by a click in reading mode, which a review key would leave; leaving it pushes the doc down
+    await page.keyboard.press("j");
     await page.keyboard.press("r");
-    await focusOn(page, sp);
+    await expect.poll(() => page.evaluate(() => document.body.classList.contains("reading-mode"))).toBe(true);
+    await page.locator(`#content [data-sourcepos="${sp}"]`).click();
+    await expect.poll(() => focused(page)).toBe(sp);
     await page.keyboard.press("r");
     await expect.poll(onBlock).toBe(true);
     await page.setViewportSize({ width: 800, height: 900 });

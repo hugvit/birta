@@ -708,17 +708,21 @@ test.describe("clean view", () => {
     });
   }
 
-  test("u still toggles the source view, and says nothing", async ({ page, birta }) => {
-    await openFixture(page, birta, "approved", approved);
+  test("⌥u still toggles the source view, and u shows no source", async ({ page, birta }) => {
+    const { mock } = await openFixture(page, birta, "approved", approved);
     await expect.poll(() => phraseOf(page)).toMatch(/c to reopen$/);
     await page.keyboard.press("u");
+    await page.waitForTimeout(SETTLE_MS);
+    await expect(page.locator("#source-view")).toBeHidden();
+    expect(mock.ops()).toEqual([]);
+    await page.keyboard.press("Alt+KeyU");
     await expect(page.locator("#source-view")).toBeVisible();
-    expect(await pillOf(page)).not.toBe(REOPEN);
-    await page.keyboard.press("u");
+    await expect.poll(() => pillOf(page)).toBe("source view · esc back");
+    await page.keyboard.press("Alt+KeyU");
     await expect(page.locator("#lane-frame")).toBeVisible();
   });
 
-  test("u on a changed block still only toggles the source view, and writes nothing", async ({ page, birta }) => {
+  test("⌥u on a changed block still only toggles the source view, u there shows none, and neither writes", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "approved", (s) => {
       approved(s);
       s.changes[0].seen = false;
@@ -727,8 +731,11 @@ test.describe("clean view", () => {
     await expect.poll(() => phraseOf(page)).toMatch(/c to reopen$/);
     await focusOn(page, "5:1-6:68");
     await page.keyboard.press("u");
+    await page.waitForTimeout(SETTLE_MS);
+    await expect(page.locator("#source-view")).toBeHidden();
+    await page.keyboard.press("Alt+KeyU");
     await expect(page.locator("#source-view")).toBeVisible();
-    await page.keyboard.press("u");
+    await page.keyboard.press("Alt+KeyU");
     await expect(page.locator("#lane-frame")).toBeVisible();
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops()).toEqual([]);

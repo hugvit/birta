@@ -3,6 +3,7 @@ import { execFileSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { test as reviewTest, GATE_ON, booted } from "./review/harness";
 
 /** Gap between the file header and the source view, in px. */
 async function sourceOffset(page: Page): Promise<number> {
@@ -37,4 +38,31 @@ test("the raw view sits right under the file header in a --static bundle", async
   } finally {
     fs.rmSync(out, { recursive: true, force: true });
   }
+});
+
+// A private server per test, so no user config on this machine decides the keys
+reviewTest("a plain preview tab keeps u for the source view, and ⌥u leaves it alone", async ({ page, birta }) => {
+  const served = await birta({ "pr.md": "# Plain\n\nWords.\n" }, {});
+  await page.goto(`${served.url}/view/pr.md`);
+  await page.keyboard.press("Alt+KeyU");
+  await page.waitForTimeout(400);
+  await expect(page.locator("#source-view")).toBeHidden();
+  await page.keyboard.press("u");
+  await expect(page.locator("#source-view")).toBeVisible();
+  await page.keyboard.press("u");
+  await expect(page.locator("#lane-frame")).toBeVisible();
+});
+
+reviewTest("a review tab moves the source view to ⌥u, and u leaves it alone", async ({ page, birta }) => {
+  const served = await birta({ "pr.md": "# Review\n\nWords.\n" }, GATE_ON);
+  await page.goto(`${served.url}/view/pr.md`);
+  await booted(page);
+  await page.keyboard.press("u");
+  await page.waitForTimeout(400);
+  await expect(page.locator("#source-view")).toBeHidden();
+  await page.keyboard.press("Alt+KeyU");
+  await expect(page.locator("#source-view")).toBeVisible();
+  expect(await sourceOffset(page)).toBe(0);
+  await page.keyboard.press("Alt+KeyU");
+  await expect(page.locator("#lane-frame")).toBeVisible();
 });

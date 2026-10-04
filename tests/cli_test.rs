@@ -576,7 +576,7 @@ fn a_review_key_bound_to_a_free_key_takes_it() {
     assert!(warnings(&stderr).is_empty(), "{stderr}");
 }
 
-// --- revert_change: on u with the raw view, which only that pair may share ---
+// --- the raw view may share a review action's key: review tabs move it to Alt ---
 
 #[test]
 fn the_change_revert_shares_u_with_the_raw_view_by_default() {
@@ -590,7 +590,7 @@ fn the_change_revert_shares_u_with_the_raw_view_by_default() {
 }
 
 #[test]
-fn the_change_revert_may_share_a_key_with_the_raw_view_only() {
+fn the_raw_view_may_share_a_review_actions_key_but_no_viewer_key() {
     let (keys, stderr) = bound(
         "[keybindings]\ntoggle_raw = \"s\"\nrevert_change = \"s\"\n",
         &[],
@@ -608,9 +608,20 @@ fn the_change_revert_may_share_a_key_with_the_raw_view_only() {
         names_both(&stderr, "revert_change", "toggle_reading"),
         "{stderr}"
     );
-    // The raw view itself still collides with everything else
-    let stderr = refused("[keybindings]\ntoggle_raw = \"x\"\n", &[]);
-    assert!(names_both(&stderr, "toggle_raw", "no"), "{stderr}");
+    // A review action's key is the raw view's on a plain page, and Alt+x in review tabs
+    let (keys, stderr) = bound("[keybindings]\ntoggle_raw = \"x\"\n", &[]);
+    assert_eq!(
+        (&keys["toggle_raw"], &keys["no"]),
+        (&"x".into(), &"x".into()),
+        "{keys}"
+    );
+    assert!(warnings(&stderr).is_empty(), "{stderr}");
+    // A viewer key is in use on every page
+    let stderr = refused("[keybindings]\ntoggle_raw = \"r\"\n", &[]);
+    assert!(
+        names_both(&stderr, "toggle_raw", "toggle_reading"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -643,17 +654,16 @@ fn moving_the_raw_view_leaves_the_revert_on_u() {
 }
 
 #[test]
-fn a_bind_flag_that_takes_u_takes_it_from_the_revert_and_the_raw_view() {
+fn a_bind_flag_that_takes_u_takes_it_from_the_revert_and_leaves_the_raw_view() {
     let (keys, stderr) = bound("", &["no=u"]);
     assert_eq!(keys["no"], "u", "{keys}");
     assert_eq!(
         (&keys["revert_change"], &keys["toggle_raw"]),
-        (&"".into(), &"".into()),
+        (&"".into(), &"u".into()),
         "{keys}"
     );
-    assert_eq!(warnings(&stderr).len(), 2, "{stderr}");
+    assert_eq!(warnings(&stderr).len(), 1, "{stderr}");
     assert!(names_both(&stderr, "no", "revert_change"), "{stderr}");
-    assert!(names_both(&stderr, "no", "toggle_raw"), "{stderr}");
 }
 
 #[test]
@@ -693,7 +703,7 @@ fn either_one_bound_onto_the_others_key_is_no_clash() {
 }
 
 #[test]
-fn a_flag_that_takes_their_shared_key_sends_both_back_to_u() {
+fn a_flag_that_takes_their_shared_key_sends_the_revert_back_to_u() {
     let (keys, stderr) = bound("[keybindings]\nrevert_change = \"s\"\n", &["yes=s"]);
     assert_eq!(keys["revert_change"], "u", "{keys}");
     let warned = warnings(&stderr);
@@ -701,14 +711,15 @@ fn a_flag_that_takes_their_shared_key_sends_both_back_to_u() {
         warned.len() == 1 && warned[0].contains("on \"u\""),
         "{stderr}"
     );
+    // The raw view keeps s: it may share a review action's key
     let (keys, stderr) = bound(
         "[keybindings]\ntoggle_raw = \"s\"\nrevert_change = \"s\"\n",
         &["yes=s"],
     );
     assert_eq!(
         (&keys["revert_change"], &keys["toggle_raw"], &keys["yes"]),
-        (&"u".into(), &"u".into(), &"s".into()),
+        (&"u".into(), &"s".into(), &"s".into()),
         "{keys}"
     );
-    assert_eq!(warnings(&stderr).len(), 2, "{stderr}");
+    assert_eq!(warnings(&stderr).len(), 1, "{stderr}");
 }

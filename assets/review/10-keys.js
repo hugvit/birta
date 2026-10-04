@@ -3,7 +3,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   BR.pure = BR.pure || {};
 
   var ACTIONS = ['focus_next', 'focus_prev', 'note', 'ask', 'yes', 'no', 'later', 'your_call', 'next_item',
-    'prev_item', 'next_file', 'prev_file', 'undo', 'hide_marks', 'open', 'turn', 'revert_change'];
+    'prev_item', 'next_file', 'prev_file', 'undo', 'hide_marks', 'open', 'turn', 'revert_change', 'focus_first', 'focus_last'];
   // A held key repeats; these write to the review file or flip a toggle, so they act once
   var ONCE = { yes: 1, no: 1, later: 1, your_call: 1, undo: 1, turn: 1, hide_marks: 1, revert_change: 1 };
   // What a composing IME or a dead key reports instead of a character
@@ -171,6 +171,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   BR.keys = {
     /** A key inside a review host that its own handlers left: acts as it would on the page. */
     fromHost: function (e) {
+      BR.pointing.keyInput(e);
       var t = e.composedPath()[0];
       if (e.defaultPrevented || typing(t) || presses(e, t)) return;
       handle(e, true);

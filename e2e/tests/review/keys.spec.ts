@@ -18,6 +18,7 @@ import {
   pixelsOf,
   reviewLog,
   shot,
+  stopSp,
   stops,
   watchSent,
 } from "./harness";
@@ -25,7 +26,7 @@ import {
 const WIDE = { width: 1280, height: 900 };
 const WHITE: Rgb = [255, 255, 255];
 /** Every review key at its default binding, as Playwright names them. */
-const REVIEW_KEYS = ["j", "k", "c", "q", "y", "x", "l", ".", "n", "p", "z", "m", "Enter", "Shift+J", "Shift+K"];
+const REVIEW_KEYS = ["j", "k", "c", "q", "y", "x", "l", ".", "n", "p", "z", "m", "Enter", "Shift+J", "Shift+K", "Home", "End"];
 /** How long a key that should do nothing is given to do something anyway. */
 const SETTLE_MS = 400;
 /** A paragraph the unseen fixture draws a bar and a glyph beside. */
@@ -231,15 +232,17 @@ test.describe("keys with focus in a review host", () => {
     await expect.poll(() => (reviewLog(served.root) ?? []).filter((l) => l.op === "withdraw").length).toBe(1);
   });
 
-  test("after clicking a note, j moves the focus and Esc drops it", async ({ page, birta }) => {
+  test("after clicking a note, j moves the focus and Esc leaves it there", async ({ page, birta }) => {
     await open(page, birta, fixtureDoc("flow"), { state: fixtureState("flow") });
     await page.locator('birta-flow[data-kind="note"]').first().click();
     expect(await active(page)).toBe("birta-flow");
     expect(await focused(page)).toBeNull();
     await page.keyboard.press("j");
     await expect.poll(() => focused(page)).not.toBeNull();
+    const at = await focused(page);
     await page.keyboard.press("Escape");
-    await expect.poll(() => focused(page)).toBeNull();
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await focused(page)).toBe(at);
   });
 
   test("a focused settled note swallows the verdict and note keys it doesn't own, and j still moves", async ({
@@ -332,7 +335,7 @@ test.describe("guard, edges", () => {
     const state = { ...fixtureState("unseen"), log_writable: false };
     const { mock } = await open(page, birta, fixtureDoc("unseen"), { state });
     await expect.poll(() => laneShown(page)).toBe(true);
-    for (const key of ["x", "y", "l", ".", "c", "q", "z", "j", "m"]) await page.keyboard.press(key);
+    for (const key of ["x", "y", "l", ".", "c", "q", "z", "j", "m", "End"]) await page.keyboard.press(key);
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops()).toEqual([]);
     expect(await focused(page)).toBeNull();
@@ -345,7 +348,7 @@ test.describe("guard, edges", () => {
     await expect.poll(() => laneShown(page)).toBe(true);
     await page.keyboard.press("u");
     await expect(page.locator("#source-view")).toBeVisible();
-    for (const key of ["j", "x", "y", "m", "z"]) await page.keyboard.press(key);
+    for (const key of ["j", "x", "y", "m", "z", "End"]) await page.keyboard.press(key);
     await page.waitForTimeout(SETTLE_MS);
     await page.keyboard.press("u");
     await expect(page.locator("#lane-frame")).toBeVisible();
@@ -360,7 +363,7 @@ test.describe("guard, edges", () => {
     const { mock } = await open(page, birta, fixtureDoc("unseen"), { state: fixtureState("unseen") });
     await expect.poll(() => laneShown(page)).toBe(true);
     await page.focus("#theme-dropdown-btn");
-    for (const key of ["j", "k", "x", "y", "l", ".", "z", "m"]) await page.keyboard.press(key);
+    for (const key of ["j", "k", "x", "y", "l", ".", "z", "m", "End"]) await page.keyboard.press(key);
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops()).toEqual([]);
     expect(await focused(page)).toBeNull();
@@ -457,7 +460,7 @@ test.describe("existing keys", () => {
 });
 
 test.describe("Esc ladder", () => {
-  test("Esc drops one layer per press: theme menu, selection, focus, then reading mode", async ({
+  test("Esc drops one layer per press: theme menu, selection, then reading mode; focus stays", async ({
     page,
     birta,
   }) => {
@@ -493,15 +496,13 @@ test.describe("Esc ladder", () => {
     await page.keyboard.press("Escape");
     await expect.poll(layers).toEqual({ menu: false, selection: false, focus: all[1].sp, reading: true });
     await page.keyboard.press("Escape");
-    await expect.poll(layers).toEqual({ menu: false, selection: false, focus: null, reading: true });
-    await page.keyboard.press("Escape");
-    await expect.poll(layers).toEqual({ menu: false, selection: false, focus: null, reading: false });
+    await expect.poll(layers).toEqual({ menu: false, selection: false, focus: all[1].sp, reading: false });
     await page.keyboard.press("Escape");
     await page.waitForTimeout(SETTLE_MS);
-    expect(await layers()).toEqual({ menu: false, selection: false, focus: null, reading: false });
+    expect(await layers()).toEqual({ menu: false, selection: false, focus: all[1].sp, reading: false });
   });
 
-  test("Esc drops one layer per press: theme menu, composer, then focus", async ({ page, birta }) => {
+  test("Esc drops one layer per press: theme menu, then composer; focus stays", async ({ page, birta }) => {
     const { mock } = await open(page, birta, STOPS_DOC);
     const all = await stops(page);
     await page.keyboard.press("j");
@@ -526,11 +527,11 @@ test.describe("Esc ladder", () => {
     await expect.poll(layers).toEqual({ menu: false, composer: 1, focus: all[1].sp });
     await page.keyboard.press("Escape");
     await expect.poll(layers).toEqual({ menu: false, composer: 0, focus: all[1].sp });
-    await page.keyboard.press("Escape");
-    await expect.poll(layers).toEqual({ menu: false, composer: 0, focus: null });
-    await page.keyboard.press("Escape");
-    await page.waitForTimeout(SETTLE_MS);
-    expect(await layers()).toEqual({ menu: false, composer: 0, focus: null });
+    for (let i = 0; i < 2; i++) {
+      await page.keyboard.press("Escape");
+      await page.waitForTimeout(SETTLE_MS);
+      expect(await layers()).toEqual({ menu: false, composer: 0, focus: all[1].sp });
+    }
     expect(mock.ops()).toEqual([]);
   });
 
@@ -681,7 +682,8 @@ test.describe("files and activation", () => {
     });
     await page.keyboard.press("j");
     await expect.poll(() => mock.ops().map((o) => [o.op, o.verdict])).toEqual([["comment", "yes"]]);
-    expect(await focused(page)).toBeNull();
+    // The selection made its block the focus; j didn't move it
+    expect(await focused(page)).toBe(await stopSp(page, "Detail words."));
     await page.keyboard.press("y");
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops()).toHaveLength(1);

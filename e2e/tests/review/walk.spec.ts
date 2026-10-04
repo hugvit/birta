@@ -8,6 +8,8 @@ import {
   booted,
   fixtureDoc,
   fixtureState,
+  focusTo,
+  focusTop,
   focused,
   mockReview,
   revOf,
@@ -182,35 +184,42 @@ test.describe("the n walk", () => {
     expect(seenIds(mock)).toHaveLength(before);
   });
 
-  test("after the end, Esc and n start the walk again from the top", async ({ page, birta }) => {
+  test("after the end, Esc keeps the focus; k back to the title and n go on from there", async ({ page, birta }) => {
     await openFixture(page, birta, "unseen");
     for (let i = 0; i < UNSEEN_WALK.length; i++) await page.keyboard.press("n");
     await page.keyboard.press("n");
     await expect.poll(() => pillOf(page)).toBe(END);
-    while ((await focused(page)) !== null) await page.keyboard.press("Escape");
-    await page.keyboard.press("n");
-    await expect.poll(() => pillOf(page)).toBe(at(1, 5));
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await focused(page)).toBe("14:1-14:13");
+    await focusTop(page);
+    expect(await focused(page)).toBe("1:1-1:16");
     await page.keyboard.press("n");
     await expect.poll(() => pillOf(page)).toBe(at(2, 5));
     expect(await focused(page)).toBe("5:1-6:68");
   });
 
   for (const [key, want] of [
-    ["n", at(4, 5)],
-    ["p", at(3, 5)],
+    ["n", at(5, 5)],
+    ["p", at(4, 5)],
   ] as const) {
-    test(`with nothing focused, ${key} goes on from the top of the viewport, never from the top of the doc`, async ({ page, birta }) => {
+    test(`your scroll moves the focus to the first stop in view, and ${key} goes on from it, never from the top of the doc`, async ({
+      page,
+      birta,
+    }) => {
       await openFixture(page, birta, "unseen", undefined, { width: 1280, height: 320 });
       for (let i = 0; i < 2; i++) await page.keyboard.press("n");
       await expect.poll(() => focused(page)).toBe("5:1-6:68");
-      while ((await focused(page)) !== null) await page.keyboard.press("Escape");
-      // Scrolled so 10.0's bullet is the first block at or below the header
-      await page.evaluate(() => {
+      // Wheeled so 10.0's bullet is the first block at or below the header
+      const by = await page.evaluate(() => {
         const el = document.querySelector('#content [data-sourcepos="11:1-11:44"]')!;
         const header = document.querySelector(".file-header")!.getBoundingClientRect().bottom;
-        scrollBy(0, el.getBoundingClientRect().top - header - 2);
+        return el.getBoundingClientRect().top - header - 2;
       });
-      await page.waitForTimeout(100);
+      await page.mouse.move(640, 200);
+      await page.mouse.wheel(0, by);
+      await expect.poll(() => focused(page)).toBe("11:1-11:44");
+      await page.waitForTimeout(SETTLE_MS);
       await page.keyboard.press(key);
       await expect.poll(() => pillOf(page)).toBe(want);
     });
@@ -400,9 +409,7 @@ const CITED = "because you said";
 
 /** Walks j to `sp`, whose change rows open while it has focus. */
 async function openRowOn(page: Page, sp: string) {
-  while ((await focused(page)) !== null) await page.keyboard.press("Escape");
-  for (let i = 0; i < 20 && (await focused(page)) !== sp; i++) await page.keyboard.press("j");
-  await expect.poll(() => focused(page)).toBe(sp);
+  await focusTo(page, sp);
 }
 const ARMED = "x = no to this text · u reverts Claude's change · x again for no";
 

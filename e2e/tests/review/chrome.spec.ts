@@ -706,7 +706,7 @@ test.describe("menu", () => {
     await expect.poll(() => phraseOf(page)).toBe("your turn");
   });
 
-  test("Esc drops one layer per press: theme menu, phrase menu, composer, then focus", async ({ page, birta }) => {
+  test("Esc drops one layer per press: theme menu, phrase menu, then composer; focus stays", async ({ page, birta }) => {
     await open(page, birta, STOPS_DOC, { state: withRev(fixtureState("fresh"), revOf(STOPS_DOC)) });
     const all = await stops(page);
     await page.keyboard.press("j");
@@ -733,10 +733,11 @@ test.describe("menu", () => {
     await page.keyboard.press("Escape");
     await expect.poll(layers).toEqual({ theme: false, menu: false, composer: 0, focus: all[1].sp });
     await page.keyboard.press("Escape");
-    await expect.poll(layers).toEqual({ theme: false, menu: false, composer: 0, focus: null });
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await layers()).toEqual({ theme: false, menu: false, composer: 0, focus: all[1].sp });
   });
 
-  test("with focus on the page, Esc closes the menu before the composer and the doc's focus", async ({ page, birta }) => {
+  test("with focus on the page, Esc closes the menu before the composer, and the doc's focus stays", async ({ page, birta }) => {
     await open(page, birta, STOPS_DOC, { state: withRev(fixtureState("fresh"), revOf(STOPS_DOC)) });
     const all = await stops(page);
     await page.keyboard.press("j");
@@ -758,7 +759,8 @@ test.describe("menu", () => {
     await page.keyboard.press("Escape");
     await expect.poll(layers).toEqual({ menu: false, composer: 0, focus: all[1].sp });
     await page.keyboard.press("Escape");
-    await expect.poll(layers).toEqual({ menu: false, composer: 0, focus: null });
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await layers()).toEqual({ menu: false, composer: 0, focus: all[1].sp });
   });
 
   for (const [name, edit] of [

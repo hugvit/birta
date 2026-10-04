@@ -9,6 +9,8 @@ import {
   booted,
   fixtureDoc,
   fixtureState,
+  focusTo,
+  focusTop,
   focused,
   longDoc,
   marks,
@@ -121,18 +123,14 @@ const opsNamed = (mock: Mock, name: string) => mock.ops().filter((o) => o.op ===
 /** Every op but seen, which moving onto a changed block sends. */
 const writes = (mock: Mock) => mock.ops().filter((o) => o.op !== "seen").map(opFields);
 
-/** Drops focus to nothing with Esc: k stops at a whole-doc H1, so it can't reach the doc. */
+/** Goes to the doc stop: k up to the doc, or to a whole-doc H1, which stands for it. */
 async function unfocus(page: Page) {
-  for (let i = 0; i < 4 && (await focused(page)) !== null; i++) await page.keyboard.press("Escape");
-  expect(await focused(page)).toBeNull();
+  await focusTop(page);
 }
 
-/** Presses j from nothing until `sp` has focus. */
+/** Presses j or k until `sp` has focus. */
 async function focusOn(page: Page, sp: string) {
-  await unfocus(page);
-  const all = await stops(page);
-  for (let i = 0; i <= all.length + 4 && (await focused(page)) !== sp; i++) await page.keyboard.press("j");
-  await expect.poll(() => focused(page)).toBe(sp);
+  await focusTo(page, sp);
 }
 
 /** The question of the blank that holds the keyboard, or null. */
@@ -1108,8 +1106,9 @@ test.describe("killers: u and the row", () => {
         await page.keyboard.press("u");
         await expect(page.locator("#lane-frame")).toBeVisible();
       } else {
-        await page.keyboard.press("Escape");
-        await expect.poll(() => focused(page)).toBeNull();
+        // Off the change's block, as Esc no longer drops focus
+        await focusTop(page);
+        expect(await focused(page)).toBe("1:1-1:16");
         // With no row open the revert's own key does nothing
         await page.keyboard.press("u");
         await page.waitForTimeout(SETTLE_MS);

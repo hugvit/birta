@@ -93,6 +93,8 @@ const BINDINGS = {
   hide_marks: "m",
   open: "Enter",
   turn: "Mod+Enter",
+  focus_first: "Home",
+  focus_last: "End",
 };
 
 /** A sheet as the lines it reads: each group's label and keys, then its notes. */
@@ -143,6 +145,52 @@ test("the sheet leaves its bindings alone", () => {
   const before = JSON.stringify(BINDINGS);
   BR.pure.keySheet(BINDINGS, true);
   assert.equal(JSON.stringify(BINDINGS), before);
+});
+
+// --- j, k, Home and End at the ends --------------------------------------------------------------
+
+/** A keydown as the browser reports it, for `keyAction`. */
+const key = (k, mods = {}) => ({ key: k, shiftKey: false, ctrlKey: false, metaKey: false, altKey: false, repeat: false, ...mods });
+
+test("Home and End are the first- and last-stop keys, and a modifier leaves them to the browser", () => {
+  const BR = load();
+  assert.equal(BR.pure.keyAction(key("Home"), BINDINGS), "focus_first");
+  assert.equal(BR.pure.keyAction(key("End"), BINDINGS), "focus_last");
+  // Held, they go on moving, as j and k do
+  assert.equal(BR.pure.keyAction(key("End", { repeat: true }), BINDINGS), "focus_last");
+  for (const mods of [{ shiftKey: true }, { ctrlKey: true }, { metaKey: true }, { altKey: true }]) {
+    assert.equal(BR.pure.keyAction(key("Home", mods), BINDINGS), null, JSON.stringify(mods));
+    assert.equal(BR.pure.keyAction(key("End", mods), BINDINGS), null, JSON.stringify(mods));
+  }
+  // Rebound, the new key moves and the old one is the browser's again
+  const moved = { ...BINDINGS, focus_first: "g", focus_last: "Shift+G" };
+  assert.equal(BR.pure.keyAction(key("g"), moved), "focus_first");
+  assert.equal(BR.pure.keyAction(key("G", { shiftKey: true }), moved), "focus_last");
+  assert.equal(BR.pure.keyAction(key("Home"), moved), null);
+});
+
+test("j and k step one stop, and at the ends stay put and say which end", () => {
+  const BR = load();
+  const step = (at, count, by) => plain(BR.pure.focusStep(at, count, by));
+  assert.deepEqual(step(0, 5, 1), { to: 1, says: null });
+  assert.deepEqual(step(3, 5, 1), { to: 4, says: null });
+  assert.deepEqual(step(4, 5, -1), { to: 3, says: null });
+  assert.deepEqual(step(1, 5, -1), { to: 0, says: null });
+  // Nothing wraps
+  assert.deepEqual(step(4, 5, 1), { to: 4, says: "end of the doc" });
+  assert.deepEqual(step(0, 5, -1), { to: 0, says: "top of the doc" });
+  // One stop is both ends
+  assert.deepEqual(step(0, 1, 1), { to: 0, says: "end of the doc" });
+  assert.deepEqual(step(0, 1, -1), { to: 0, says: "top of the doc" });
+});
+
+test("Home and End go to the first and the last stop, and say nothing, even there already", () => {
+  const BR = load();
+  const step = (at, count, by) => plain(BR.pure.focusStep(at, count, by));
+  assert.deepEqual(step(3, 5, "first"), { to: 0, says: null });
+  assert.deepEqual(step(1, 5, "last"), { to: 4, says: null });
+  assert.deepEqual(step(0, 5, "first"), { to: 0, says: null });
+  assert.deepEqual(step(4, 5, "last"), { to: 4, says: null });
 });
 
 // --- The menu's keys row -------------------------------------------------------------------------

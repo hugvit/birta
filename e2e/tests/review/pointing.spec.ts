@@ -15,6 +15,8 @@ import {
   fixtureDoc,
   fixtureState,
   focusMark,
+  focusTo,
+  focusTop,
   focused,
   hex,
   highlighted,
@@ -60,15 +62,10 @@ async function open(
   return { served, mock };
 }
 
-/** Presses j until `sp` has focus, failing if the walk passes the last stop first. */
+/** Presses j or k until `sp` has focus. */
 async function focusOn(page: Page, sp: string) {
-  const all = await stops(page);
-  const at = all.findIndex((s) => s.sp === sp);
-  if (at < 0) throw new Error(`${sp} is not a stop`);
-  while ((await focused(page)) !== null) await page.keyboard.press("Escape");
-  // Blanks are stops too, so walk until the block has focus rather than count
-  for (let i = 0; i <= at + 8 && (await focused(page)) !== sp; i++) await page.keyboard.press("j");
-  await expect.poll(() => focused(page)).toBe(sp);
+  if (!(await stops(page)).some((s) => s.sp === sp)) throw new Error(`${sp} is not a stop`);
+  await focusTo(page, sp);
 }
 
 /** The live sp of the paragraph or item whose text is exactly `text`. */
@@ -279,20 +276,30 @@ test.describe("focus", () => {
     expect(b.bottom).toBeLessThanOrEqual(height + 1);
   });
 
-  test("focus scrolled out of view drops back to the doc and stays there", async ({ page, birta }) => {
+  test("focus your scroll takes out of view moves to a stop in view, and a scroll from script leaves it there", async ({
+    page,
+    birta,
+  }) => {
     await open(page, birta, longDoc());
     const all = await stops(page);
     await page.keyboard.press("j");
     await page.keyboard.press("j");
     await expect.poll(() => focused(page)).toBe(all[1].sp);
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await expect.poll(() => focused(page)).toBeNull();
+    await page.mouse.move(640, 500);
+    await page.mouse.wheel(0, 100_000);
+    await expect.poll(async () => ![null, all[1].sp].includes(await focused(page))).toBe(true);
+    await page.waitForTimeout(SETTLE_MS);
+    const moved = (await focused(page))!;
+    const b = (await blockBox(page, moved))!;
+    const header = (await page.locator(".file-header").boundingBox())!;
+    expect(b.top).toBeGreaterThanOrEqual(header.y + header.height - 1);
+    expect(b.top).toBeLessThan(WIDE.height);
     await page.evaluate(() => window.scrollTo(0, 0));
     await page.waitForTimeout(SETTLE_MS);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe(moved);
   });
 
-  test("focus follows its block through an edit above it, and drops to the doc when the block goes", async ({
+  test("focus follows its block through an edit above it, and moves to the next stop below when the block goes", async ({
     page,
     birta,
   }) => {
@@ -308,7 +315,8 @@ test.describe("focus", () => {
 
     served.write("pr.md", STOPS_DOC.replace("Detail words.\n", ""));
     await expect.poll(() => liveSp(page, "Detail words.")).toBeNull();
-    await expect.poll(() => focused(page)).toBeNull();
+    await expect.poll(() => focused(page)).toBe(await liveSp(page, "Stacked on"));
+    expect(await focused(page)).not.toBeNull();
   });
 
   test("the focus outline is painted; r hides it and keeps focus, and m leaves it", async ({ page, birta }) => {
@@ -357,8 +365,9 @@ test.describe("focus", () => {
     await expect.poll(() => liveSp(page, "More detail.")).not.toBeNull();
     const last = (await blockBox(page, (await liveSp(page, "More detail."))!))!;
     await expect.poll(async () => near1((await scopeMark(page))!.bottom, last.bottom)).toBe(true);
-    while ((await focused(page)) !== null) await page.keyboard.press("Escape");
-    for (const _ of [0, 1, 2]) await page.keyboard.press("j");
+    // Up to the whole-doc H1, then down past ## Why
+    await focusTop(page);
+    for (const _ of [0, 1]) await page.keyboard.press("j");
     await expect.poll(() => focused(page)).toBe(await liveSp(page, "A new first paragraph."));
   });
 
@@ -477,8 +486,9 @@ test.describe("verdict keys", () => {
     await page.keyboard.press("Escape");
     await page.keyboard.press("l");
     await expect.poll(() => mock.ops().length).toBe(2);
-    await page.keyboard.press("Escape");
-    await expect.poll(() => focused(page)).toBeNull();
+    // The whole-doc H1 stands for the doc, and Esc no longer drops focus to it
+    await focusTop(page);
+    expect(await focused(page)).toBe((await stops(page))[0].sp);
     // A whole-doc verdict tells the agent nothing it can act on
     await page.keyboard.press(".");
     await expect(page.getByText("your call needs a block · j")).toBeVisible();
@@ -509,16 +519,18 @@ test.describe("verdict keys", () => {
       await expect.poll(() => focused(page)).toBe(sp);
       expect(await page.evaluate(() => getSelection()!.toString())).toBe("");
       await expect(page.getByText("c note · q ask · x cut")).toHaveCount(0);
-      // Reselect for the next round, then check where a verdict lands after the move
+      // Reselect inside the focused block, since a selection elsewhere would move the focus to it
       if (key === "j") {
         await page.evaluate((sp) => {
-          const t = document.querySelector(`#content [data-sourcepos="${sp}"]`)!.firstChild as Text;
+          const h = document.querySelector(`#content [data-sourcepos="${sp}"]`)!;
+          const t = Array.from(h.childNodes).find((n) => n.nodeType === 3 && n.textContent!.trim()) as Text;
           const r = document.createRange();
-          r.setStart(t, 9);
-          r.setEnd(t, 15);
+          r.setStart(t, 0);
+          r.setEnd(t, 4);
           getSelection()!.removeAllRanges();
           getSelection()!.addRange(r);
-        }, para);
+        }, sp);
+        await expect(page.getByText("c note · q ask · x cut")).toBeVisible();
       }
     }
     await page.keyboard.press("x");
@@ -650,6 +662,8 @@ test.describe("verdict keys", () => {
       );
     await focusOn(page, await stopSp(page, "Detail words."));
     await select(para, "upload");
+    // The selection's block becomes the focus
+    await expect.poll(() => focused(page)).toBe(para);
     await page.keyboard.press("y");
     await expect.poll(() => mock.ops().length).toBe(1);
     expect(mock.ops()[0].at).toMatchObject({ k: "quote", sp: para, q: "upload", off: 9 });
@@ -659,9 +673,10 @@ test.describe("verdict keys", () => {
     await page.keyboard.press("x");
     await expect.poll(() => mock.ops().length).toBe(2);
     expect(mock.ops()[1].at).toStrictEqual({ k: "block", sp: why, scope: "section" });
-    // Esc skips the empty selection and drops focus in one press
+    // Esc skips the empty selection, and on a stop does nothing
     await page.keyboard.press("Escape");
-    await expect.poll(() => focused(page)).toBeNull();
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await focused(page)).toBe(why);
   });
 });
 

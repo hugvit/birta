@@ -8,7 +8,10 @@ import {
   fixtureState,
   frameBox,
   hex,
+  longDoc,
   mockReview,
+  revOf,
+  withRev,
   near,
   shot,
 } from "./harness";
@@ -66,4 +69,38 @@ test("a note is typed and kept in a closed root, and its keys are never verdicts
   );
   expect(roots.length).toBeGreaterThan(0);
   expect(roots.every(Boolean)).toBe(true);
+});
+
+test("Space on a button in a closed root presses it and is no scroll of yours: a script scroll right after keeps the focus", async ({
+  page,
+  birta,
+  browserName,
+}) => {
+  const doc = longDoc();
+  const served = await birta({ "pr.md": doc }, GATE_ON);
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await mockReview(page, { state: withRev(fixtureState("fresh"), revOf(doc)) });
+  await page.goto(`${served.url}/view/pr.md`);
+  await booted(page);
+  // The lane's roots are closed too, so the focus is read from the page's own pointing
+  const focusedText = () =>
+    page.evaluate(() => {
+      const el = (window as unknown as { BR: { pointing: { focused(): Element | null } } }).BR.pointing.focused();
+      return el ? (el.textContent ?? "").trim() : null;
+    });
+  for (let i = 0; i < 30 && (await focusedText()) !== "Filler paragraph 5."; i++) await page.keyboard.press("j");
+  expect(await focusedText()).toBe("Filler paragraph 5.");
+  // The turn button sits in a closed root: the page sees only its host
+  const held = () => page.evaluate(() => document.activeElement?.localName ?? null);
+  // WebKit's Tab skips buttons unless Option is held, as on a Mac
+  const tab = browserName === "webkit" ? "Alt+Tab" : "Tab";
+  for (let i = 0; i < 20 && (await held()) !== "birta-turn"; i++) await page.keyboard.press(tab);
+  expect(await held()).toBe("birta-turn");
+  await page.waitForTimeout(300);
+  const y = await page.evaluate(() => scrollY);
+  await page.keyboard.press("Space");
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  await page.waitForTimeout(400);
+  expect(await page.evaluate(() => scrollY)).toBeGreaterThan(y + 1000);
+  expect(await focusedText()).toBe("Filler paragraph 5.");
 });

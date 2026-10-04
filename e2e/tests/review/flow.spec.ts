@@ -13,6 +13,8 @@ import {
   draftFiles,
   fixtureDoc,
   fixtureState,
+  focusTo,
+  focusTop,
   focused,
   frameBox,
   hex,
@@ -91,20 +93,15 @@ function watchReceived(page: Page): State[] {
   return got;
 }
 
-/** Presses j until `sp` has focus, failing if the walk passes the last stop first. */
+/** Presses j or k until `sp` has focus. */
 async function focusOn(page: Page, sp: string) {
-  const all = await stops(page);
-  const at = all.findIndex((s) => s.sp === sp);
-  if (at < 0) throw new Error(`${sp} is not a stop`);
-  while ((await focused(page)) !== null) await page.keyboard.press("Escape");
-  // Blanks are stops too, so walk until the block has focus rather than count
-  for (let i = 0; i <= at + 8 && (await focused(page)) !== sp; i++) await page.keyboard.press("j");
-  await expect.poll(() => focused(page)).toBe(sp);
+  if (!(await stops(page)).some((s) => s.sp === sp)) throw new Error(`${sp} is not a stop`);
+  await focusTo(page, sp);
 }
 
-/** Presses j from nothing until the blank asking `question` holds the keyboard. */
+/** Presses j from the top until the blank asking `question` holds the keyboard. */
 async function focusBlank(page: Page, question: string) {
-  while ((await focused(page)) !== null) await page.keyboard.press("Escape");
+  await focusTop(page);
   const has = () => page.evaluate((q) => {
     const a = document.activeElement;
     return !!a && a.getAttribute("data-kind") === "blank" && (a.shadowRoot?.textContent ?? "").includes(q);
@@ -347,14 +344,16 @@ test.describe("composer", () => {
     await page.keyboard.press("Enter");
     await expect(composer(page)).toHaveCount(0);
     expect(await focused(page)).toBe(para);
-    await page.keyboard.press("Escape");
-    await expect.poll(() => focused(page)).toBeNull();
+    // The whole-doc H1 stands for the doc
+    const title = (await stops(page))[0].sp;
+    await focusTop(page);
+    expect(await focused(page)).toBe(title);
     await page.keyboard.press("c");
     await page.keyboard.type("on the doc");
     await page.keyboard.press("Enter");
     await expect(composer(page)).toHaveCount(0);
     await page.waitForTimeout(SETTLE_MS);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe(title);
   });
 
   test("q opens a one-line composer and keeps an ask", async ({ page, birta }) => {
@@ -1971,9 +1970,7 @@ test.describe("a note kept after the doc moved under it", () => {
   /** Walks to the block holding `text` as the doc shows it now, whatever the boot data said. */
   async function focusText(page: Page, text: string) {
     const sp = await spNow(page, text);
-    while ((await focused(page)) !== null) await page.keyboard.press("Escape");
-    for (let i = 0; i < 20 && (await focused(page)) !== sp; i++) await page.keyboard.press("j");
-    expect(await focused(page)).toBe(sp);
+    await focusTo(page, sp!);
   }
 
   test("a block note kept after a paragraph lands above it goes on its own block", async ({ page, birta }) => {

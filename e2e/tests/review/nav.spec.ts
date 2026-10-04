@@ -10,6 +10,7 @@ import {
   dispatchKey,
   fixtureDoc,
   fixtureState,
+  focusTo,
   focused,
   marks,
   mockReview,
@@ -50,15 +51,10 @@ function bare(name: string, doc: string, edit?: (s: State) => void): State {
   return s;
 }
 
-/** Presses j from nothing until `sp` has focus. */
+/** Presses j or k until `sp` has focus. */
 async function focusOn(page: Page, sp: string) {
-  const all = await stops(page);
-  const at = all.findIndex((s) => s.sp === sp);
-  if (at < 0) throw new Error(`${sp} is not a stop`);
-  while ((await focused(page)) !== null) await page.keyboard.press("Escape");
-  // Blanks are stops too, and a whole-doc H1 is not, so walk until the block has focus rather than count
-  for (let i = 0; i <= at + 8 && (await focused(page)) !== sp; i++) await page.keyboard.press("j");
-  await expect.poll(() => focused(page)).toBe(sp);
+  if (!(await stops(page)).some((s) => s.sp === sp)) throw new Error(`${sp} is not a stop`);
+  await focusTo(page, sp);
 }
 
 interface Chrome {
@@ -306,11 +302,14 @@ test.describe("links in the focused block", () => {
   test("scrolling the focus away or clicking elsewhere drops the pick", async ({ page, birta }) => {
     const filler = Array.from({ length: 60 }, (_, i) => `Filler paragraph ${i + 1}.\n`).join("\n");
     await open(page, birta, `${LINK_DOC}\n${filler}`);
-    await focusOn(page, await stopSp(page, "Only gamma"));
+    const gamma = await stopSp(page, "Only gamma");
+    await focusOn(page, gamma);
     await page.keyboard.press("Tab");
     expect((await picked(page))?.text).toBe("gamma");
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await expect.poll(() => focused(page)).toBeNull();
+    // Your own scroll moves the focus to a stop in view, and the pick stays behind
+    await page.mouse.move(640, 500);
+    await page.mouse.wheel(0, 100_000);
+    await expect.poll(async () => ![null, gamma].includes(await focused(page))).toBe(true);
     expect(await noPick(page)).toBe(true);
 
     await page.evaluate(() => window.scrollTo(0, 0));

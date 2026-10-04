@@ -71,6 +71,8 @@ pub struct KeybindingsConfig {
     pub hide_marks: String,
     pub open: String,
     pub turn: String,
+    pub focus_first: String,
+    pub focus_last: String,
 }
 
 impl Default for KeybindingsConfig {
@@ -99,6 +101,8 @@ impl Default for KeybindingsConfig {
             hide_marks: key("m"),
             open: key("Enter"),
             turn: key("Mod+Enter"),
+            focus_first: key("Home"),
+            focus_last: key("End"),
         }
     }
 }
@@ -156,7 +160,7 @@ fn clash(a: &str, ka: &str, b: &str, kb: &str) -> bool {
 }
 
 impl KeybindingsConfig {
-    fn slots(&self) -> [(&'static str, &String); 22] {
+    fn slots(&self) -> [(&'static str, &String); 24] {
         [
             ("toggle_reading", &self.toggle_reading),
             ("exit_reading", &self.exit_reading),
@@ -180,6 +184,8 @@ impl KeybindingsConfig {
             ("hide_marks", &self.hide_marks),
             ("open", &self.open),
             ("turn", &self.turn),
+            ("focus_first", &self.focus_first),
+            ("focus_last", &self.focus_last),
         ]
     }
 
@@ -207,6 +213,8 @@ impl KeybindingsConfig {
             "hide_marks" => &mut self.hide_marks,
             "open" => &mut self.open,
             "turn" => &mut self.turn,
+            "focus_first" => &mut self.focus_first,
+            "focus_last" => &mut self.focus_last,
             _ => return None,
         })
     }
@@ -646,6 +654,8 @@ toggle_dark = ""
             ("hide_marks", "m"),
             ("open", "Enter"),
             ("turn", "Mod+Enter"),
+            ("focus_first", "Home"),
+            ("focus_last", "End"),
         ];
         for (action, key) in want {
             assert_eq!(json[action], key, "{action} in {json}");
@@ -682,6 +692,29 @@ turn = "Ctrl+Enter"
         assert_eq!(json["yes"], "g");
         assert_eq!(json["hide_marks"], "");
         assert_eq!(json["focus_next"], "j");
+    }
+
+    #[test]
+    fn keybindings_focus_ends_rebind_in_config_and_with_bind() {
+        let config: Config = toml::from_str(
+            r#"
+[keybindings]
+focus_first = "g"
+"#,
+        )
+        .unwrap();
+        let json = keys_json(&config.keybindings);
+        assert_eq!(json["focus_first"], "g");
+        assert_eq!(json["focus_last"], "End");
+
+        let mut kb = KeybindingsConfig::default();
+        kb.apply_overrides(&[
+            "focus_last=Shift+G".to_string(),
+            "focus_first=none".to_string(),
+        ]);
+        let json = keys_json(&kb);
+        assert_eq!(json["focus_last"], "Shift+G");
+        assert_eq!(json["focus_first"], "");
     }
 
     #[test]

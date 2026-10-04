@@ -700,8 +700,8 @@ export async function misaligned(page: Page): Promise<string[]> {
 // --- Keys, focus and the review file ------------------------------------------------------
 
 /**
- * The sp of the focused stop, `summary` on a closed details' summary, or null while focus is
- * on the doc. Read from the `focus` mark, which stays in the lane's root while it is hidden.
+ * The sp of the focused stop, `summary` on a closed details' summary, `blank` on a question, or
+ * null while focus is on the doc. Read from the `focus` mark, which stays in the lane's root while it is hidden.
  */
 export async function focused(page: Page): Promise<string | null> {
   const found = (await marks(page)).filter((m) => m.mark === "focus");
@@ -711,6 +711,45 @@ export async function focused(page: Page): Promise<string | null> {
 
 export async function focusMark(page: Page): Promise<Mark | null> {
   return (await marks(page)).find((m) => m.mark === "focus") ?? null;
+}
+
+/**
+ * Presses j or k, toward `sp` from wherever focus is, until `sp` has focus. Esc never drops
+ * focus, so a walk can't start from nothing; a stop with no line of its own is placed by its mark.
+ */
+export async function focusTo(page: Page, sp: string, max = 80): Promise<void> {
+  const line = parseInt(sp, 10);
+  for (let i = 0; i < max; i++) {
+    const at = await focused(page);
+    if (at === sp) break;
+    let down = true;
+    if (at && /^\d+:/.test(at)) down = parseInt(at, 10) <= line;
+    else if (at) {
+      const m = await focusMark(page);
+      const b = await blockBox(page, sp);
+      down = !m || !b || m.top < b.top;
+    }
+    await page.keyboard.press(down ? "j" : "k");
+  }
+  await expect.poll(() => focused(page)).toBe(sp);
+}
+
+/** What holds focus, told apart even where two stops have no sp: "doc" for the doc target. */
+async function focusKey(page: Page): Promise<string> {
+  const m = await focusMark(page);
+  return m ? `${m.sp}|${m.target}|${Math.round(m.top)}` : "doc";
+}
+
+/** Presses k until focus stops moving: on the doc target, or on a whole-doc H1, which stands for it. */
+export async function focusTop(page: Page, max = 80): Promise<void> {
+  let was = await focusKey(page);
+  for (let i = 0; i < max; i++) {
+    await page.keyboard.press("k");
+    const now = await focusKey(page);
+    if (now === was) return;
+    was = now;
+  }
+  throw new Error(`k never reached the top in ${max} presses`);
 }
 
 export interface KeyInit {

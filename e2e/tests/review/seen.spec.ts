@@ -11,6 +11,8 @@ import {
   booted,
   fixtureDoc,
   fixtureState,
+  focusTo,
+  focusTop,
   focused,
   marks,
   mockReview,
@@ -160,15 +162,10 @@ async function washed(page: Page): Promise<string[]> {
     .sort();
 }
 
-/** Presses j until `sp` has focus, failing if the walk passes the last stop first. */
+/** Presses j or k until `sp` has focus. */
 async function focusOn(page: Page, sp: string) {
-  const all = await stops(page);
-  const at = all.findIndex((s) => s.sp === sp);
-  if (at < 0) throw new Error(`${sp} is not a stop`);
-  while ((await focused(page)) !== null) await page.keyboard.press("Escape");
-  // Blanks are stops too, so walk until the block has focus rather than count
-  for (let i = 0; i <= at + 8 && (await focused(page)) !== sp; i++) await page.keyboard.press("j");
-  await expect.poll(() => focused(page)).toBe(sp);
+  if (!(await stops(page)).some((s) => s.sp === sp)) throw new Error(`${sp} is not a stop`);
+  await focusTo(page, sp);
 }
 
 /** Presses n until the walk lands on `sp`, failing after `max` stops. */
@@ -367,7 +364,7 @@ test.describe("seen", () => {
       viewport: { width: 1280, height: 480 },
     });
     await expect.poll(() => washed(page)).toContain("5:1-6:68");
-    // Focus first, so the scroll also drops it back to the doc
+    // Focus first, so the scroll also moves it, which must send nothing either
     await page.keyboard.press("j");
     await expect.poll(() => focused(page)).toBe("1:1-1:16");
     for (let i = 0; i < 12; i++) {
@@ -724,7 +721,7 @@ function hide(page: Page) {
 
 /** Keeps a whole-doc note from the doc stop. */
 async function noteOnDoc(page: Page, body: string) {
-  while ((await focused(page)) !== null) await page.keyboard.press("Escape");
+  await focusTop(page);
   await page.keyboard.press("c");
   await page.keyboard.type(body);
   await page.keyboard.press("Enter");

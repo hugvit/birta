@@ -2,14 +2,19 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 (function () {
   // Blocks that own quote text, as quote.js finds them
   var OWNERS = 'p,li,h1,h2,h3,h4,h5,h6,td,th,dt,dd,pre';
+  // Moving keys leave a picked link behind
+  var MOVES = { focus_next: 1, focus_prev: 1, focus_first: 1, focus_last: 1, next_item: 1, prev_item: 1 };
   // Only these start review in a tab; the rest act without it
-  var ACTIVATES = { focus_next: 1, focus_prev: 1, note: 1, ask: 1, yes: 1, no: 1, later: 1, your_call: 1, next_item: 1, prev_item: 1 };
+  var ACTIVATES = { focus_next: 1, focus_prev: 1, focus_first: 1, focus_last: 1, note: 1, ask: 1, yes: 1, no: 1, later: 1,
+    your_call: 1, next_item: 1, prev_item: 1 };
   var VERDICTS = { yes: 1, no: 1, later: 1, your_call: 1 };
   var ACTIVE_KEY = 'birta-review-active';
   var HINT = 'c note · q ask · x cut';
   var CLAMPED = 'selection clamped to this paragraph';
   var CREATED = 'note saved · z to undo';
   var END = 'no more · j/k to move';
+  var TOP_OF_DOC = 'top of the doc';
+  var END_OF_DOC = 'end of the doc';
   var REOPEN = 'approved · c to reopen';
   // After approve these only say how to start again
   var REOPENS = { yes: 1, no: 1, later: 1, your_call: 1, ask: 1, next_item: 1, prev_item: 1 };
@@ -18,6 +23,13 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var ROW_KEYS = { yes: 1, no: 1, note: 1, revert_change: 1 };
   var WORD = { yes: 'yes', no: 'no', later: 'later', your_call: 'your call' };
   var LABEL_WORDS = 6;
+  // Keys the browser scrolls the page with when no field or control takes them
+  var SCROLL_KEYS = { ' ': 1, PageUp: 1, PageDown: 1, ArrowUp: 1, ArrowDown: 1, ArrowLeft: 1, ArrowRight: 1 };
+  // A scroll this soon after your wheel, touch or scroll key is your own
+  var USER_MS = 200;
+  // A smooth scroll's later frames stay yours while they keep coming this close, up to USER_MAX_MS after the input
+  var USER_GAP_MS = 100;
+  var USER_MAX_MS = 1000;
 
   /**
    * The doc stop's block, when the first stop is an H1 whose section holds every later stop:
@@ -48,6 +60,20 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return b.text.charAt(0).toLowerCase() + b.text.slice(1);
   };
 
+  /**
+   * Where j, k, Home and End take the focus among `count` stops from stop `at`: `step` is 1, -1,
+   * "first" or "last". Nothing wraps; `says` names the end a step ran into, else null.
+   */
+  BR.pure.focusStep = function (at, count, step) {
+    if (!count) return { to: -1, says: null };
+    if (step === 'first') return { to: 0, says: null };
+    if (step === 'last') return { to: count - 1, says: null };
+    var to = at + step;
+    if (to < 0) return { to: 0, says: TOP_OF_DOC };
+    if (to > count - 1) return { to: count - 1, says: END_OF_DOC };
+    return { to: to, says: null };
+  };
+
   /** Up to six words of `text`, with … only when it was cut. */
   BR.pure.fewWords = function (text) {
     var words = String(text || '').trim().split(/\s+/).filter(Boolean);
@@ -62,6 +88,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var picked = null;
   // What the focused block looked like, to find it again when a patch replaces its node
   var focusWas = null;
+  // The stops as they were when focus last settled, to find what comes after it once it goes
+  var focusList = null;
   var active = false;
   // This page's own acts, newest last; z takes back the top once its ack names its line
   var undos = [];
@@ -81,6 +109,21 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   // The walk's stops for the state they came from
   var walkFor = null;
   var walkStops = [];
+  // When your last wheel, touch or scroll key came, and the last scroll counted as yours
+  var userAt = -Infinity;
+  var userLast = -Infinity;
+  var userScroll = false;
+  // The stop your scroll moved focus to; while that scroll goes on, focus stays on the first stop in view
+  var scrolledTo = null;
+  // The stops there when that scroll first moved focus; a stop the page adds meanwhile never takes it
+  var scrolledFrom = null;
+  // The focus's place on screen before the page changed under it, put back once the change is done
+  var pinned = null;
+  // The focus held in place after a page-made change while late layout settles, until any other scroll
+  var kept = null;
+  var settleQueued = false;
+  // A frame changed the stops, so the list focus was found in is taken again
+  var relist = false;
 
   function content() { return document.getElementById('content'); }
 
@@ -221,55 +264,103 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (document.activeElement !== el) BR.flow.release(document.activeElement);
     focus = el;
     pointedAway = false;
-    focusWas = el && { name: el.localName, text: el.textContent, sp: el.getAttribute('data-sourcepos'), at: (all || targets()).indexOf(el) };
+    focusList = el ? all || targets() : null;
+    focusWas = el && describe(el, focusList);
     BR.lane.focus(el);
     BR.flow.focusBlock(el);
     paintDoc();
   }
 
+  /** What the focused stop looked like, to find it, or what replaced it, once a patch has gone through. */
+  function describe(el, list) {
+    var w = { name: el.localName, text: el.textContent, sp: el.getAttribute('data-sourcepos'), at: list.indexOf(el) };
+    if (BR.isHost(el)) {
+      w.item = BR.flow.blankItem(el);
+      w.owner = blockUnder(el, list);
+    }
+    return w;
+  }
+
+  /** The stop a blank sits under, or null when it sits above the first block. */
+  function blockUnder(host, list) {
+    var under = host.parentElement && host.parentElement.localName === 'li' ? host.parentElement : host.previousElementSibling;
+    while (under && BR.isHost(under)) under = under.previousElementSibling;
+    if (!under || !content().contains(under)) return null;
+    if (list.indexOf(under) >= 0) return under;
+    // A table or a closed details holds the stop the blank is under
+    var hit = null;
+    list.forEach(function (el) { if (!BR.isHost(el) && under.contains(el)) hit = el; });
+    return hit;
+  }
+
   function reveal(el) {
+    // Its own scrolls are the page's, never yours
+    userAt = userLast = -Infinity;
     var r = el.getBoundingClientRect();
     var top = headerBottom();
     if (r.top < top) window.scrollBy(0, r.top - top - 8);
     else if (r.bottom > innerHeight) window.scrollBy(0, Math.min(r.bottom - innerHeight + 8, r.top - top - 8));
+    // The place to keep is the revealed one, not where the stop sat before
+    if (pinned && pinned.el === el) pinned.top = el.getBoundingClientRect().top;
   }
 
-  function move(step) {
-    // A stale selection would outrank the new focus as the next verdict's target
+  // A stale selection would outrank the new focus as the next verdict's target
+  function dropSelection() {
     var s = getSelection();
     if (s && s.rangeCount && !s.isCollapsed) {
       s.removeAllRanges();
       onSelection();
     }
-    var all = targets();
-    if (!all.length) return;
-    var next;
-    if (!focus) {
-      if (step < 0) return;
-      var top = headerBottom() - 1;
-      next = all.find(function (el) { return el.getBoundingClientRect().top >= top; }) || all[all.length - 1];
-    } else {
-      var at = all.indexOf(focus);
-      var i = at + step;
-      if (at < 0) {
-        // Focus sits inside a details that has since closed: count from where it was
-        var after = all.findIndex(function (el) {
-          return focus.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING;
-        });
-        if (after < 0) after = all.length;
-        i = step > 0 ? after : after - 1;
-      }
-      if (i < 0) {
-        // A whole-doc H1 is the doc stop, so the topmost stop is the end
-        if (!wholeDoc()) setFocus(null);
-        return;
-      }
-      next = all[Math.min(i, all.length - 1)];
-    }
+  }
+
+  function go(next, all) {
     setFocus(next, all);
     reveal(next);
     if (BR.isHost(next)) BR.flow.hold(next);
     else see(next);
+  }
+
+  function move(step) {
+    dropSelection();
+    var all = targets();
+    if (!all.length) return;
+    if (!focus) {
+      // The doc sits above every block
+      if (step < 0) {
+        showPill(TOP_OF_DOC);
+        return;
+      }
+      var top = headerBottom() - 1;
+      go(all.find(function (el) { return el.getBoundingClientRect().top >= top; }) || all[all.length - 1], all);
+      return;
+    }
+    var at = all.indexOf(focus);
+    if (at < 0) {
+      // Focus sits inside a details that has since closed: count from where it was
+      var after = all.findIndex(function (el) {
+        return focus.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING;
+      });
+      if (after < 0) after = all.length;
+      at = step > 0 ? after - 1 : after;
+    }
+    // The doc is a stop above the first block, unless a whole-doc H1 stands for it
+    var lead = wholeDoc() ? 0 : 1;
+    var r = BR.pure.focusStep(at + lead, all.length + lead, step);
+    if (r.says) showPill(r.says);
+    var next = r.to < lead ? null : all[r.to - lead];
+    if (next === focus) return;
+    if (next) go(next, all);
+    else setFocus(null, all);
+  }
+
+  /** Home and End: the first or the last stop, brought into view. */
+  function jump(which) {
+    dropSelection();
+    var all = targets();
+    if (!all.length) return;
+    var next = all[BR.pure.focusStep(-1, all.length, which).to];
+    if (next === focus) reveal(next);
+    else go(next, all);
   }
 
   // --- seen and the attention walk ---
@@ -428,11 +519,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
    * The block that replaced the focused one: same tag and text, nearest its old place; else, as
    * when a revert rewrote it, the same tag starting on the same line.
    */
-  function refind() {
-    if (!focusWas) return null;
+  function refind(all) {
+    // A blank is the same host or gone; its words are its shadow's, so none of them match
+    if (!focusWas || focusWas.item !== undefined) return null;
     var best = null;
     var gap = Infinity;
-    var all = targets();
     all.forEach(function (el, i) {
       if (el.localName !== focusWas.name || el.textContent !== focusWas.text) return;
       if (Math.abs(i - focusWas.at) < gap) {
@@ -485,6 +576,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     }
     var owner = q.sp ? blockOf(q.sp) : null;
     showPill(q.crossBlock && owner && drops(range, owner) ? CLAMPED : HINT);
+    // A selection outranks the stop: the block its quote is in takes the focus
+    var stop = owner ? stopAt(owner) : null;
+    if (stop && stop !== focus) setFocus(stop);
   }
 
   // --- verdicts and z ---
@@ -656,12 +750,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (msg.type === 'content') {
       if (msg.path && msg.path !== CURRENT_PATH) return;
       if (msg.stops) stops = msg.stops;
-      if (focus && !focus.isConnected) {
-        var landedHere = focus === cursorAt;
-        setFocus(refind());
-        // The block n landed on, rebuilt, is still where the walk is
-        if (landedHere) cursorAt = focus;
-      }
+      relist = true;
+      queueSettle();
+    } else if (msg.type === 'review_state') {
+      relist = true;
+      queueSettle();
     } else if (msg.type === 'ack' || msg.type === 'nack') {
       var entry = undos.filter(function (u) { return u.cid === msg.cid; })[0];
       if (!entry) return;
@@ -675,17 +768,166 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     }
   }
 
-  // Focus the reader scrolled away from would aim a key at a block they can't see
+  // --- what moves focus, and what never does ---
+
+  function inView(el) {
+    if (!el.getClientRects().length) return false;
+    var r = el.getBoundingClientRect();
+    return r.bottom > headerBottom() && r.top < innerHeight;
+  }
+
+  /** The first of `list` whose top is in view, else the first that shows at all; null for none. */
+  function firstInView(list) {
+    var top = headerBottom();
+    var shown = list.filter(inView);
+    return shown.filter(function (el) { return el.getBoundingClientRect().top >= top - 1; })[0] || shown[0] || null;
+  }
+
+  function onScrollInput() { userAt = performance.now(); }
+
+  /** Marks a scroll key as your scroll input; `e` is seen where its real target shows, inside a review host too. */
+  function keyInput(e) {
+    if (e.defaultPrevented || !SCROLL_KEYS[e.key]) return;
+    // Arrows and Page keys scroll with a modifier too (⌘↓, ⌥↓); Space with one is the system's
+    if (e.key === ' ' && (e.altKey || e.ctrlKey || e.metaKey)) return;
+    var t = e.composedPath()[0];
+    // A field keeps its keys, and Space presses a button
+    if (t && (t.isContentEditable || /^(input|textarea|select)$/.test(t.localName))) return;
+    if (e.key === ' ' && t && t.closest && t.closest('button, summary, [role="button"]')) return;
+    onScrollInput();
+  }
+
+  // A closed review host shows the page only itself; its own root reports the key (BR.keys.fromHost)
+  function onKeyInput(e) {
+    if (!BR.isHost(e.composedPath()[0])) keyInput(e);
+  }
+
+  // Only your own scroll moves the focus: once it leaves the view, to the first stop in view
   function onScroll() {
+    if (kept && Math.abs(window.scrollY - kept.y) > 1) kept = null;
+    var now = performance.now();
+    var chained = now - userLast <= USER_GAP_MS;
+    if (now - userAt <= USER_MS || (chained && now - userAt <= USER_MAX_MS)) {
+      if (!chained) scrolledTo = null;
+      userLast = now;
+      userScroll = true;
+    }
     if (scrollQueued) return;
     scrollQueued = true;
     requestAnimationFrame(function () {
       scrollQueued = false;
+      var mine = userScroll;
+      userScroll = false;
       // The source view hides the doc; its focus comes back with it
-      if (!focus || (typeof viewMode !== 'undefined' && viewMode === 'raw')) return;
-      var r = focus.getBoundingClientRect();
-      if (r.bottom <= headerBottom() || r.top >= innerHeight || !focus.getClientRects().length) setFocus(null);
+      if (!mine || !focus || (typeof viewMode !== 'undefined' && viewMode === 'raw')) return;
+      // Once your scroll has moved focus, it keeps to the first stop in view until that scroll ends
+      if (focus !== scrolledTo) {
+        if (inView(focus)) return;
+        scrolledFrom = targets();
+      }
+      var next = firstInView(scrolledFrom);
+      if (!next || next === focus) return;
+      setFocus(next);
+      scrolledTo = next;
+      if (BR.isHost(next)) BR.flow.hold(next);
     });
+  }
+
+  /** Notes where the focus sits on screen before the page changes, to put it back after. */
+  function pin() {
+    if (!pinned) pinned = focus && focus.isConnected && inView(focus) ? { el: focus, top: focus.getBoundingClientRect().top } : {};
+    queueSettle();
+  }
+
+  function queueSettle() {
+    if (settleQueued) return;
+    settleQueued = true;
+    Promise.resolve().then(settle);
+  }
+
+  // Puts the focus back where the reader last saw it, so a page-made change above never moves it
+  function keepAt(el, top) {
+    var dy = el.getBoundingClientRect().top - top;
+    if (Math.abs(dy) >= 1) window.scrollBy(0, dy);
+    if (pinned && pinned.el === el) pinned.top = top;
+    kept = { el: el, top: top, y: window.scrollY };
+  }
+
+  // A row or note can take its full height a frame late, as WebKit lays out a new host
+  function onResize() {
+    if (kept && kept.el === focus && kept.el.isConnected) keepAt(kept.el, kept.top);
+  }
+
+  function gone(el) {
+    return !el.isConnected || (BR.isHost(el) && BR.flow.blankItem(el) == null);
+  }
+
+  /** After a frame, a patch or a row opening: focus that went is handed on, and focus that stayed keeps its place. */
+  function settle() {
+    settleQueued = false;
+    var was = pinned || {};
+    pinned = null;
+    if (focus && gone(focus)) {
+      var lost = focus;
+      var next = replacement();
+      setFocus(next.el);
+      relist = false;
+      // The block n landed on, rebuilt, is still where the walk is
+      if (lost === cursorAt) cursorAt = focus;
+      if (next.same && was.el === lost) keepAt(focus, was.top);
+      return;
+    }
+    if (relist && focus) {
+      focusList = targets();
+      focusWas = describe(focus, focusList);
+    }
+    relist = false;
+    if (focus && was.el === focus) keepAt(focus, was.top);
+  }
+
+  /**
+   * What takes the place of a focus that went: a question folded into its note hands it to the
+   * note's block; a rebuilt block is itself; else the next stop below, or the last above.
+   */
+  function replacement() {
+    var all = targets();
+    var w = focusWas || { at: -1 };
+    if (w.item != null) {
+      var state = BR.currentState();
+      var item = state && (state.items || []).filter(function (i) { return i.n === w.item; })[0];
+      if (item && item.status !== 'retracted' && item.status !== 'withdrawn') {
+        if (!w.owner) return { el: null };
+        var under = survivor(w.owner, all, w.at - 1);
+        if (under) return { el: under };
+      }
+    }
+    var same = refind(all);
+    if (same) return { el: same, same: true };
+    var old = focusList || [];
+    for (var i = w.at + 1; i < old.length; i++) {
+      var below = survivor(old[i], all, i);
+      if (below) return { el: below };
+    }
+    for (var j = w.at - 1; j >= 0; j--) {
+      var above = survivor(old[j], all, j);
+      if (above) return { el: above };
+    }
+    return { el: null };
+  }
+
+  /** `el` while it is still a stop, else the stop a patch put in its place: same tag and words, nearest `near`. */
+  function survivor(el, all, near) {
+    if (!el) return null;
+    if (all.indexOf(el) >= 0) return el;
+    if (BR.isHost(el)) return null;
+    var best = null;
+    var gap = Infinity;
+    all.forEach(function (t, i) {
+      if (t.localName !== el.localName || t.textContent !== el.textContent || Math.abs(i - near) >= gap) return;
+      gap = Math.abs(i - near);
+      best = t;
+    });
+    return best;
   }
 
   BR.pointing = {
@@ -698,12 +940,24 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       document.addEventListener('focusout', onFocusOut);
       document.addEventListener('focusin', onFocusIn);
       window.addEventListener('scroll', onScroll, { passive: true });
+      window.addEventListener('wheel', onScrollInput, { passive: true, capture: true });
+      window.addEventListener('touchmove', onScrollInput, { passive: true, capture: true });
+      window.addEventListener('keydown', onKeyInput);
+      if (typeof ResizeObserver !== 'undefined') new ResizeObserver(onResize).observe(content());
+      // A doc patch pins the focus here; the flow pins it before it redraws (BR.pointing.pin)
+      if (typeof birtaPatch !== 'undefined') {
+        var apply = birtaPatch.apply;
+        birtaPatch.apply = function (html, o) {
+          pin();
+          return apply.call(birtaPatch, html, o);
+        };
+      }
       birtaBus.on(onFrame);
     },
     /** Runs a review action; false leaves the key to the page. */
     act: function (action) {
       if (ACTIVATES[action]) activate();
-      if (action === 'focus_next' || action === 'focus_prev' || action === 'next_item' || action === 'prev_item') unpick();
+      if (MOVES[action]) unpick();
       if (action !== 'no') BR.flow.disarm();
       // The clean view hides the rows, so its keys come before theirs
       if (BR.chrome.clean()) {
@@ -727,6 +981,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       if (action === 'revert_change') return true;
       if (action === 'focus_next' || action === 'focus_prev') {
         move(action === 'focus_next' ? 1 : -1);
+        return true;
+      }
+      if (action === 'focus_first' || action === 'focus_last') {
+        jump(action === 'focus_first' ? 'first' : 'last');
         return true;
       }
       if (action === 'next_item' || action === 'prev_item') {
@@ -804,10 +1062,13 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       var stop = which === 'last' ? all[all.length - 1] : all[0];
       if (stop) land(stop, state);
     },
+    /** Notes the focus's place before the page changes under it; it is put back once the change is done. */
+    pin: pin,
+    keyInput: keyInput,
     /** Puts an act of this page's on the z stack: `{cid, undo(n) -> op fields, item?, created?}`. */
     remember: remember,
     tab: tab,
-    /** Drops one Esc layer: the phrase menu or key sheet, the composer, the selection, a picked link, then the focus. False when none is there. */
+    /** Drops one Esc layer: the phrase menu or key sheet, the composer, the selection, a picked link. False when none is there; focus stays. */
     escape: function () {
       if (BR.chrome.escape()) return true;
       if (BR.flow.escape()) return true;
@@ -817,12 +1078,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         onSelection();
         return true;
       }
-      if (unpick()) return true;
-      if (focus) {
-        setFocus(null);
-        return true;
-      }
-      return false;
+      return unpick();
     }
   };
 })();

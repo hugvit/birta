@@ -366,7 +366,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       var fl = Math.max(focused.localName === 'li' ? focused.parentElement.getBoundingClientRect().left : own.left, C.left) - 8;
       var fright = Math.min(own.right, C.right) + 8;
       outline.appendChild(box({ 'data-mark': 'focus', 'data-sp': focused.getAttribute('data-sourcepos'),
-        'data-target': focused.localName === 'summary' ? 'summary' : null }, 'focus',
+        'data-target': focused.localName === 'summary' ? 'summary' : BR.isHost(focused) ? 'blank' : null }, 'focus',
         fl - F.left, own.top - 2 - F.top, fright - fl, own.bottom - own.top + 4));
       if (/^h[1-6]$/.test(focused.localName)) {
         var sr = sectionRect(focused, C);

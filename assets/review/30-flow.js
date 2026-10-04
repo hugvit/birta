@@ -867,6 +867,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   function reconcile() {
     if (!content()) return;
+    // Rows change height before they move, so the focus's place is taken first
+    BR.pointing.pin();
     var list = entries();
     var want = {};
     var groups = new Map();
@@ -1659,6 +1661,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         if (h.blank && h.host.isConnected && h.host.getClientRects().length) out.push(h.host);
       });
       return out;
+    },
+    /** The item a blank host asks, or null for any other node. */
+    blankItem: function (node) {
+      var n = null;
+      hosts.forEach(function (h) { if (h.host === node && h.blank) n = h.blank.n; });
+      return n;
     },
     /** Gives blank `host` the keyboard. */
     hold: function (host) {

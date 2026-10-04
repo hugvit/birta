@@ -12,6 +12,8 @@ import {
   distance,
   fixtureDoc,
   fixtureState,
+  focusTo,
+  focusTop,
   focused,
   frameBox,
   hex,
@@ -133,15 +135,10 @@ const openRow = (page: Page) => page.evaluate(() => (window as unknown as W).BR.
 /** The row on show for the focus, muted or not. */
 const focusedRow = (page: Page) => page.evaluate(() => (window as unknown as W).BR.flow.focusedRow()?.id ?? null);
 
-/** Presses j until `sp` has focus. */
+/** Presses j or k until `sp` has focus. */
 async function focusOn(page: Page, sp: string) {
-  const all = await stops(page);
-  const at = all.findIndex((s) => s.sp === sp);
-  if (at < 0) throw new Error(`${sp} is not a stop`);
-  while ((await focused(page)) !== null) await page.keyboard.press("Escape");
-  // Blanks are stops too, so walk until the block has focus rather than count
-  for (let i = 0; i <= at + 8 && (await focused(page)) !== sp; i++) await page.keyboard.press("j");
-  await expect.poll(() => focused(page)).toBe(sp);
+  if (!(await stops(page)).some((s) => s.sp === sp)) throw new Error(`${sp} is not a stop`);
+  await focusTo(page, sp);
 }
 
 /** Presses n until the open row is change `id`. */
@@ -263,7 +260,12 @@ test.describe("rows on focus", () => {
     await page.keyboard.press("k");
     await expect.poll(() => openRow(page)).toBe("19.0");
     await expect.poll(async () => (await hostWith(page, "without a note"))?.kbd).toEqual(["y", "u", "c"]);
+    // Esc keeps the focus and its row; the title holds no change
     await page.keyboard.press("Escape");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await openRow(page)).toBe("19.0");
+    await focusTop(page);
+    expect(await focused(page)).toBe("1:1-1:16");
     await expect.poll(() => openRow(page)).toBeNull();
     await expect.poll(() => hostWith(page, "without a note")).toBeNull();
   });
@@ -364,7 +366,7 @@ test.describe("click", () => {
     await expect.poll(() => focused(page)).toBe("11:1-11:44");
   });
 
-  test("a click on a link, or a drag that selects words, moves no focus", async ({ page, birta }) => {
+  test("a click on a link moves no focus, and a drag that selects words focuses their block", async ({ page, birta }) => {
     const doc = "# T\n\nSee [the end](#end) here.\n\nOther words to select.\n\n## End\n\nDone.\n";
     await open(page, birta, doc, laneState(doc, {}));
     const link = page.locator("#content a", { hasText: "the end" });
@@ -379,7 +381,8 @@ test.describe("click", () => {
     await page.mouse.up();
     await page.waitForTimeout(SETTLE_MS);
     expect(await page.evaluate(() => getSelection()!.toString())).toContain("words");
-    expect(await focused(page)).toBeNull();
+    // A selection outranks the stop
+    await expect.poll(() => focused(page)).toBe("5:1-5:22");
   });
 
   test("before review starts in the tab, a click on a doc with no review file moves no focus", async ({ page, birta }) => {
@@ -497,7 +500,8 @@ test.describe("reverted row on a real server", () => {
     await page.keyboard.press("u");
     await expect.poll(() => reviewLog(served.root)!.filter((l) => l.op === "edit").length).toBe(1);
     await expect.poll(async () => (await page.evaluate(() => (window as unknown as W).BR.currentState().changes)).length).toBe(2);
-    while ((await focused(page)) !== null) await page.keyboard.press("Escape");
+    // Off the walk's last landing, so n goes on from the focus
+    await focusTop(page);
     await page.keyboard.press("n");
     await expect.poll(() => focused(page)).toMatch(/^5:1-/);
     await expect.poll(() => hostWith(page, "reverted")).toMatchObject({ text: `reverted · ${c.label}` });

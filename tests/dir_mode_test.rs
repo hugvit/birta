@@ -682,6 +682,51 @@ async fn a_folder_note_lands_in_the_folder_review_file() {
 }
 
 #[tokio::test]
+async fn a_folder_retract_lands_in_the_folder_review_file_and_not_the_docs() {
+    let site = review_site();
+    let a_log = site.read("a.md.birta.jsonl").unwrap();
+    let served = site.serve(&["."], &[GATE_ON]);
+    let (mut ws, _) = served.viewing("a.md").await;
+    let n = served::acked(&mut ws, folder_note("f1", "a.md", A_MD, "FOLDER-NOTE")).await["n"]
+        .as_u64()
+        .unwrap();
+    let retract = serde_json::json!({"type": "op", "cid": "r1", "path": "a.md",
+        "rev": birta::rev::Rev::of(A_MD.as_bytes()), "op": "retract", "to": n, "at": {"k": "dir"}});
+    served::acked(&mut ws, retract).await;
+    let retracts = served::ops_named(&site.path(".birta.jsonl"), "retract");
+    assert_eq!(retracts.len(), 1, "{retracts:#?}");
+    assert_eq!(retracts[0]["to"], n);
+    assert_eq!(
+        site.read("a.md.birta.jsonl").unwrap(),
+        a_log,
+        "the doc's own review file is untouched"
+    );
+    // Taken back once: a second retract of the same note is refused
+    let again = serde_json::json!({"type": "op", "cid": "r2", "path": "a.md",
+        "rev": birta::rev::Rev::of(A_MD.as_bytes()), "op": "retract", "to": n, "at": {"k": "dir"}});
+    assert_eq!(served::nacked(&mut ws, again).await, "no_such_note");
+    assert_eq!(
+        served::ops_named(&site.path(".birta.jsonl"), "retract").len(),
+        1
+    );
+
+    // A folder note a hand-back took stays with it
+    let n = served::acked(&mut ws, folder_note("f2", "a.md", A_MD, "SENT-NOTE")).await["n"]
+        .as_u64()
+        .unwrap();
+    let hand_back = serde_json::json!({"type": "op", "cid": "h1", "path": "a.md",
+        "rev": birta::rev::Rev::of(A_MD.as_bytes()), "op": "hand_back", "scope": "all"});
+    served::acked(&mut ws, hand_back).await;
+    let sent = serde_json::json!({"type": "op", "cid": "r3", "path": "a.md",
+        "rev": birta::rev::Rev::of(A_MD.as_bytes()), "op": "retract", "to": n, "at": {"k": "dir"}});
+    assert_eq!(served::nacked(&mut ws, sent).await, "not_editable");
+    assert_eq!(
+        served::ops_named(&site.path(".birta.jsonl"), "retract").len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn a_folder_note_from_a_linked_folder_lands_at_the_served_root() {
     let site = served::Site::new();
     site.write("index.md", "# Index\n");

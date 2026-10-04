@@ -1247,7 +1247,7 @@ test.describe("on a real server", () => {
     await expect.poll(() => dotted(page), { timeout: 5_000 }).toEqual([]);
   });
 
-  test("z after a folder note takes back nothing of this doc's", async ({ page, birta }) => {
+  test("z after a folder note takes it back from the folder's file, and nothing of this doc's", async ({ page, birta }) => {
     const text = "# PR\n\nText.\n";
     const served = await birta(
       { "pr.md": text, "pr.md.birta.jsonl": seededLog("pr.md", text, ["KEEP-ME"]) },
@@ -1267,9 +1267,9 @@ test.describe("on a real server", () => {
     await expect.poll(() => linesNamed(folderLog, "comment").map((l) => l.n)).toEqual([linesNamed(prLog, "comment")[0].n]);
     await page.waitForTimeout(SETTLE_MS);
     await page.keyboard.press("z");
+    await expect.poll(() => linesNamed(folderLog, "retract").map((l) => l.to)).toEqual([linesNamed(folderLog, "comment")[0].n]);
     await page.waitForTimeout(SETTLE_MS);
     expect(linesNamed(prLog, "retract")).toEqual([]);
-    expect(linesNamed(folderLog, "retract")).toEqual([]);
   });
 
   test("links to files written since start get a dot, which goes once the file is viewed", async ({ page, birta }) => {

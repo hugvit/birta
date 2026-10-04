@@ -571,6 +571,9 @@ enum WsOp {
     },
     Retract {
         to: u32,
+        /// `{"k":"dir"}` takes back a note on the served folder, in the folder's review file.
+        #[serde(default)]
+        at: Option<AnchorReq>,
     },
     Reply {
         to: u32,
@@ -689,6 +692,10 @@ fn apply(app: &Arc<AppState>, frame: OpFrame, beacon: bool) -> Result<Acked, Nac
         WsOp::Comment {
             at: AnchorReq::Dir, ..
         } => return folder_note(app, hub, &frame),
+        WsOp::Retract {
+            to,
+            at: Some(AnchorReq::Dir),
+        } => return folder_retract(app, hub, &frame, *to),
         WsOp::UndoChange { change } => undo_change(&doc, &frame, change)?,
         WsOp::HandBack {
             scope: HandBackScope::All,
@@ -913,7 +920,7 @@ fn build(
                 drop_verdict: *drop_verdict,
             }]
         }
-        WsOp::Retract { to } => {
+        WsOp::Retract { to, .. } => {
             editable(parsed, text, *to)?;
             vec![Op::Retract { to: *to }]
         }
@@ -1313,6 +1320,47 @@ fn folder_note(app: &Arc<AppState>, hub: &ReviewHub, frame: &OpFrame) -> Result<
             kind: *kind,
             turn: None,
         }])
+    })?;
+    drop(held);
+    if hub.dir.refresh_folder() {
+        push_dir(app);
+    }
+    Ok(acked)
+}
+
+/// Takes back the page's note on line `to` of the folder's review file, as z does.
+fn folder_retract(
+    app: &Arc<AppState>,
+    hub: &ReviewHub,
+    frame: &OpFrame,
+    to: u32,
+) -> Result<Acked, Nack> {
+    if !hub.dir_mode {
+        return Err("bad_anchor");
+    }
+    let log = Log::open(&app.roots.root().join(FOLDER_REVIEW)).git_exclude(hub.git_exclude);
+    let mut held = log.hold().map_err(|_| "no_such_note")?;
+    let acked = append_plain(&mut held, frame, |parsed| {
+        let note = parsed
+            .lines
+            .iter()
+            .find(|l| l.n == to && matches!(l.op, Op::Comment { at: At::Dir, .. }))
+            .ok_or("no_such_note")?;
+        if note.by.kind != ByKind::Human {
+            return Err("not_editable");
+        }
+        if !live_note(parsed, to) {
+            return Err("no_such_note");
+        }
+        // A hand-back took it, until that hand-back is withdrawn
+        let sent = fold::scan(parsed, 0)
+            .rounds
+            .iter()
+            .any(|r| r.withdrawn.is_none() && r.n > to && r.upto >= to);
+        if sent {
+            return Err("not_editable");
+        }
+        Ok(vec![Op::Retract { to }])
     })?;
     drop(held);
     if hub.dir.refresh_folder() {

@@ -797,22 +797,31 @@ test.describe("dots", () => {
     await expect.poll(async () => (await dots(page)).length).toBe(1);
   });
 
-  test("the first dot ever pills once, and not again after a reload", async ({ page, birta }) => {
+  test("the tip waits for focus to land on a dot, shows once, and not again after a reload", async ({ page, birta }) => {
     await open(page, birta, FLOW, folded());
+    await expect.poll(async () => (await dots(page)).length).toBe(1);
+    // A dot drawn is no tip; focus landing on it is
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await stripMessage(page)).toBeNull();
+    await focusOn(page, "11:1-11:44");
     await expect.poll(() => stripMessage(page)).toBe("• a settled note · ⏎ opens it");
     await page.reload();
     await booted(page);
     await expect.poll(async () => (await dots(page)).length).toBe(1);
+    await focusOn(page, "11:1-11:44");
     await page.waitForTimeout(SETTLE_MS);
     expect(await stripMessage(page)).not.toBe("• a settled note · ⏎ opens it");
   });
 
-  test("a doc with no dots leaves the first-dot pill for the first dot a push brings", async ({ page, birta }) => {
+  test("a dot a push brings shows no tip until focus lands on it", async ({ page, birta }) => {
     const { mock } = await open(page, birta, FLOW, fixtureState("flow"));
     await page.waitForTimeout(SETTLE_MS);
     expect(await stripMessage(page)).toBeNull();
     mock.pushState(folded());
     await expect.poll(async () => (await dots(page)).length).toBe(1);
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await stripMessage(page)).toBeNull();
+    await focusOn(page, "11:1-11:44");
     await expect.poll(() => stripMessage(page)).toBe("• a settled note · ⏎ opens it");
   });
 

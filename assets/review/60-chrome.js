@@ -7,6 +7,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var NACK_MS = 4000;
   // A plain message gives the keys back after this long; a moment passes its own
   var SAY_MS = 4000;
+  // A moment's message: an approve, a reply, a reconnect
+  var MOMENT_MS = 6000;
+  var SENT = 'sent · you can keep reading';
+  var APPROVED = 'approved ✓ · this text is final · nothing is published without you';
+  var COPIED = 'copied · paste it to Claude';
   // A ⌘⏎ this soon after the approve guard's jump is a reflex, not a second press
   var DWELL_MS = 1000;
   // Keys that only modify the next one never count as "another key"
@@ -470,6 +475,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   // Its batch once acked; another doc's hold the page's own state never shows
   var batch = null;
   var withdrawing = null;
+  // The hold z withdrew: `{cid, n, acked}`
+  var withdrawn = null;
   // The strip's message: {text, until?, arm?}, or {nack, until} for a refused op; an armed one waits for a key
   var message = null;
   // The approve guard's jump, until a key other than ⌘⏎ or its message going disarms it: {at, ids, left}
@@ -554,6 +561,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   function render() {
     var s = BR.currentState();
     var t = now();
+    holdEnd(s, t);
     var on = shown(s);
     show(phrase, on);
     var b = on ? BR.pure.turnButton(s, turnOpts(t)) : null;
@@ -583,9 +591,35 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     schedule(s, t);
   }
 
+  // A hold this page watched run, `{n, kind, not_before}`, so its end gets its moment
+  var watched = null;
+
+  /** A hold this page watched ending says so: sent, or the approved moment. One withdrawn says nothing. */
+  function holdEnd(s, t) {
+    var h = s && s.hold;
+    if (h && t < h.not_before) {
+      watched = { n: h.n, kind: h.kind, not_before: h.not_before };
+      return;
+    }
+    var w = watched;
+    if (!w) return;
+    if (t < w.not_before) {
+      if (!h || h.n !== w.n) watched = null;
+      return;
+    }
+    watched = null;
+    if ((h && h.n !== w.n) || (withdrawn && withdrawn.n === w.n)) return;
+    var stage = s && s.phrase ? s.phrase.stage : null;
+    if (w.kind === 'approve') {
+      if (stage === 'approved') say(APPROVED, { ms: MOMENT_MS, moment: true });
+    } else if (stage === 'sent' || stage === 'picked_up' || stage === 'replied') say(SENT);
+  }
+
   /** The message the strip shows now, or '' for none: a hold speaks over any other. */
   function messageText(s, t) {
     var hold = s && BR.pure.holdPill(s, { now: t });
+    // A hold the page withdrew says so at once, before the state that drops it
+    if (hold && withdrawn && withdrawn.n === s.hold.n && withdrawn.acked) hold = null;
     var b = batchHold(t);
     // A folder's hand-back counts every file's notes, whichever doc it was sent from
     if (b && !(hold && s.hold.kind === 'approve')) hold = 'handing back · ' + plural(batchCount(b, t), 'note', 'notes') + ' · z to undo';
@@ -823,7 +857,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     closeMenu();
     if (!r) return;
     if (r.op) BR.op(r.op);
-    if (r.copy && navigator.clipboard) navigator.clipboard.writeText(r.copy);
+    if (r.copy && navigator.clipboard) copy(r.copy);
     if (r.href) BR.dir.open(r.href);
     if (r.id === 'folder') BR.flow.open('note', { k: 'dir' }, null);
     if (r.id === 'keys') openKeys();
@@ -928,6 +962,22 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   // --- The turn ---
 
+  /**
+   * Shows `text` in the strip in place of the keys, or clears it for ''. It goes after 4 s, or
+   * `opts.ms`; an armed one, `opts.arm` `{keep(e), off()}`, goes on the next key `keep` doesn't claim, and `off` runs then.
+   */
+  function say(text, opts) {
+    var o = opts || {};
+    setMessage(text ? { text: text, until: o.arm ? null : Date.now() + (o.ms || SAY_MS), arm: o.arm || null, moment: !!o.moment } : null);
+    render();
+  }
+
+  /** Copies the hand-off line, and says what to do with it. */
+  function copy(text) {
+    navigator.clipboard.writeText(text);
+    say(COPIED);
+  }
+
   function act() {
     var s = BR.currentState();
     // A plain reader's ⌘⏎ never writes: review has to be on in the tab first
@@ -935,7 +985,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var b = BR.pure.turnButton(s, turnOpts(now()));
     if (!b || b.disabled) return;
     if (b.text === COPY_BUTTON) {
-      if (s.hand_off && navigator.clipboard) navigator.clipboard.writeText(s.hand_off);
+      if (s.hand_off && navigator.clipboard) copy(s.hand_off);
       return;
     }
     if (/^Hand back/.test(b.text)) handBackWhenAcked();
@@ -990,6 +1040,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return BR.pure.keyAction(e, typeof KEYBINDINGS === 'undefined' ? null : KEYBINDINGS) === 'turn';
   }
 
+  var clockMoved = false;
+
   function onFrame(msg) {
     switch (msg.type) {
       case 'open':
@@ -1001,7 +1053,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       case 'review_state':
         if (msg.path === CURRENT_PATH && msg.state && msg.state.server_now) {
           var d = msg.state.server_now - Date.now();
+          var was = skew;
           skew = skew === null ? d : Math.max(skew, d);
+          // The flow drew the first state before the server's time was known, which can put a hold already past
+          clockMoved = was === null;
         }
         // News the arm never covered must be reached before approve as is counts for it
         if (guard && msg.path === CURRENT_PATH && msg.state && newNews(msg.state)) setMessage(null);
@@ -1015,11 +1070,14 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
           handBackDue = false;
           handBack();
         }
+        // z withdraws this tab's own hand-back until it's picked up
+        if (handing && msg.cid === handing.cid && msg.n != null) BR.pointing.remember({ kind: 'handback', cid: msg.cid, n: msg.n });
         if (handing && msg.cid === handing.cid && msg.batch != null) {
           batch = { batch: msg.batch, n: msg.n, count: handing.count, base: handing.base, not_before: msg.not_before };
         }
         if (handing && msg.cid === handing.cid) handing = null;
         if (msg.cid === withdrawing) batch = withdrawing = null;
+        if (withdrawn && msg.cid === withdrawn.cid) withdrawn.acked = true;
         break;
       case 'nack':
         // A refused note leaves the others: hand back what was kept, and never approve instead
@@ -1033,6 +1091,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         break;
     }
     render();
+    if (clockMoved) {
+      clockMoved = false;
+      BR.flow.refresh();
+      BR.lane.redraw();
+    }
   }
 
   // A ⌘⏎ that came while the page's own notes were still on their way
@@ -1063,8 +1126,13 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   BR.chrome = {
     handBack: handBack,
     withdrawBatch: withdrawBatch,
+    /** z withdrew the hold on line `n` with op `cid`: once acked, its message gives way to z's. */
+    withdrew: function (cid, n) { withdrawn = { cid: cid, n: n, acked: false }; },
     init: function () {
       baseTitle = document.title.replace(/^● /, '');
+      // The viewer's copy button speaks in the strip, as every other copy does
+      var md = document.getElementById('copy-md-btn');
+      if (md) md.addEventListener('click', function () { say('markdown copied'); });
       var link = document.querySelector('link[rel~="icon"]');
       plainIcon = link ? link.getAttribute('href') : null;
 
@@ -1171,7 +1239,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       if (b && b.disabled) return null;
       if (b && b.text === COPY_BUTTON) {
         // Copied while the key's press still counts as the reader's own act
-        if (saving && s.hand_off && navigator.clipboard) navigator.clipboard.writeText(s.hand_off);
+        if (saving && s.hand_off && navigator.clipboard) {
+          navigator.clipboard.writeText(s.hand_off);
+          // After the save's own message, which this one replaces
+          setTimeout(function () { say(COPIED); }, 0);
+        }
         return null;
       }
       return handBack;
@@ -1192,14 +1264,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     closeKeys: closeKeys,
     /** Whether the review chrome shows on this page (design call 4). */
     shown: function () { return shown(BR.currentState()); },
-    /**
-     * Shows `text` in the strip in place of the keys, or clears it for ''. It goes after 4 s, or
-     * `opts.ms`; an armed one, `opts.arm` `{keep(e), off()}`, goes on the next key `keep` doesn't claim, and `off` runs then.
-     */
-    say: function (text, opts) {
-      var o = opts || {};
-      setMessage(text ? { text: text, until: o.arm ? null : Date.now() + (o.ms || SAY_MS), arm: o.arm || null } : null);
-      render();
+    say: say,
+    /** Shows `text` as a moment, for 6 s; without it, whether a moment shows now, which no tip may cover. */
+    moment: function (text) {
+      if (arguments.length) say(text, { ms: MOMENT_MS, moment: true });
+      return !!message && !!message.moment && (!message.until || Date.now() < message.until);
     },
     says: function (text) { return !!message && message.text === text; },
     /** Shows a refused op's reason until the next acked op, a new hold, or 4 s. */

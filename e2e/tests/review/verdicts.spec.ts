@@ -534,6 +534,18 @@ test.describe("verdict pills", () => {
     expect(writes(mock)).toEqual([{ op: "amend", to: 5, drop_verdict: true }]);
   });
 
+  test('z on a block verdict says it removed that verdict from that block', async ({ page, birta }) => {
+    const served = await openReal(page, birta, STOPS_DOC);
+    await focusOn(page, await stopSp(page, "Nothing yet."));
+    await page.keyboard.press("l");
+    await expect.poll(() => stripMessage(page)).toBe('later · "Nothing yet." (paragraph) · z to undo');
+    await expect.poll(() => reviewLog(served.root)?.length ?? 0).toBe(4);
+    await page.keyboard.press("z");
+    // 6.12 gives the section form only; a block's name in it is not pinned
+    await expect.poll(() => stripMessage(page)).toMatch(/^"later" removed from \S/);
+    await expect.poll(() => reviewLog(served.root)!.at(-1)).toMatchObject({ op: "retract", to: 4 });
+  });
+
   test("on a fresh doc the first verdict's pill names its scope and stays, not review file created", async ({ page, birta }) => {
     const served = await openReal(page, birta, STOPS_DOC);
     const why = await stopSp(page, "Why");
@@ -763,7 +775,7 @@ test.describe("blanks", () => {
     });
   }
 
-  test("z takes back the answer you just gave", async ({ page, birta }) => {
+  test("z takes back the answer you just gave, and says answer removed", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow", blanksOnly);
     await walkToBlank(page, OPEN_Q);
     await page.keyboard.press("y");
@@ -772,6 +784,21 @@ test.describe("blanks", () => {
     await page.keyboard.press("z");
     // The mock acks the reply as line 101
     await expect.poll(() => opsNamed(mock, "retract")).toEqual([{ op: "retract", to: 101 }]);
+    await expect.poll(() => stripMessage(page)).toBe("answer removed");
+  });
+
+  test("a written answer says answer saved, and z takes it back saying answer removed", async ({ page, birta }) => {
+    const { mock } = await openFixture(page, birta, "flow", blanksOnly);
+    await walkToBlank(page, OPEN_Q);
+    await page.keyboard.press("Enter");
+    await expect(answerField(page)).toBeFocused();
+    await page.keyboard.type("only 503");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => opsNamed(mock, "reply")).toEqual([{ op: "reply", to: 21, body: "only 503" }]);
+    await expect.poll(() => stripMessage(page)).toBe("answer saved · z to undo");
+    await page.keyboard.press("z");
+    await expect.poll(() => opsNamed(mock, "retract")).toEqual([{ op: "retract", to: 101 }]);
+    await expect.poll(() => stripMessage(page)).toBe("answer removed");
   });
 
   for (const key of ["Enter", "c"]) {
@@ -1331,7 +1358,7 @@ test.describe("killers: blanks", () => {
     await expect.poll(() => writes(mock)).toEqual([{ op: "amend", to: 25, verdict: "yes", body: "" }]);
   });
 
-  test("K16: once the hand-back's hold is over, z takes no answer back", async ({ page, birta }) => {
+  test("K16: once the hand-back's hold is over, z withdraws the hand-back and takes no answer back", async ({ page, birta }) => {
     const served = await openReal(page, birta, STOPS_DOC, askedLog(STOPS_DOC), { BIRTA_REVIEW_HOLD_MS: "300" });
     await walkToBlank(page, "only here?");
     await page.keyboard.press("y");
@@ -1339,10 +1366,15 @@ test.describe("killers: blanks", () => {
     await page.locator('birta-flow[data-kind="reply"]', { hasText: "↳ you · yes" }).waitFor();
     await page.keyboard.press("ControlOrMeta+Enter");
     await expect.poll(() => reviewLog(served.root)!.at(-1)).toMatchObject({ op: "submit" });
+    const submit = reviewLog(served.root)!.length;
     await page.waitForTimeout(1_000);
+    // Not picked up yet, so z takes the whole hand-back back, never the answer alone
     await page.keyboard.press("z");
+    await expect.poll(() => stripMessage(page)).toBe("hand-back withdrawn · your notes are back");
     await page.waitForTimeout(SETTLE_MS);
-    expect(reviewLog(served.root)!.filter((l) => l.op === "retract" || l.op === "withdraw")).toEqual([]);
+    expect(reviewLog(served.root)!.filter((l) => l.op === "retract" || l.op === "withdraw")).toEqual([
+      expect.objectContaining({ op: "withdraw", to: submit }),
+    ]);
   });
 
   test("K22: Esc mid-composition in a blank's field belongs to the IME", async ({ page, birta }) => {

@@ -15,12 +15,16 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   // Before review shows, a mode's way back is a plain message, as the strip names it once review does
   var SOURCE_SAYS = 'source view · esc back';
   var READING_SAYS = 'reading mode · esc back';
-  var CREATED = 'note saved · z to undo';
+  var NOTHING = 'nothing to undo';
+  var WITHDRAWN = 'hand-back withdrawn · your notes are back';
+  var APPROVE_WITHDRAWN = 'approve withdrawn';
+  var WITH_CLAUDE = 'already with Claude · c adds a note';
+  var UNDO_KEY = 'birta-undo:';
   var TOP_OF_DOC = 'top of the doc';
   var END_OF_DOC = 'end of the doc';
   var REOPEN = 'approved · c to reopen';
   // After approve these only say how to start again
-  var REOPENS = { yes: 1, no: 1, later: 1, your_call: 1, ask: 1, next_item: 1, prev_item: 1 };
+  var REOPENS = { yes: 1, no: 1, later: 1, your_call: 1, revert_change: 1, next_item: 1, prev_item: 1 };
   // What a change row takes before the block under it does
   var ROW_KEYS = { yes: 1, no: 1, note: 1, revert_change: 1 };
   var WORD = { yes: 'yes', no: 'no', later: 'later', your_call: 'your call' };
@@ -93,8 +97,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   // The stops as they were when focus last settled, to find what comes after it once it goes
   var focusList = null;
   var active = false;
-  // This page's own acts, newest last; z takes back the top once its ack names its line
+  // This tab's own acts on this path, newest last, as plain data kept across a reload; z takes back the top once its line is known
   var undos = [];
+  // Entries a reload brought back, unchecked until the first state shows what was sent since
+  var unchecked = false;
+  // z pressed before that state came
+  var waitingZ = 0;
   var scrollQueued = false;
   // The walk's place, `{lo, hi}` as `[line, rank, order]`: n goes on past hi and p back before lo.
   // Null is before the first stop, where a tab opens and Claude's reply puts it back
@@ -312,6 +320,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     BR.lane.focus(el);
     BR.flow.focusBlock(el === docStop ? null : el);
     keepStop(el);
+    if (!byPage) BR.flow.tipDot(el);
     BR.chrome.renderStrip();
   }
 
@@ -714,9 +723,38 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     })[0] || null;
   }
 
+  /**
+   * Puts an act on the z history: `{cid, undo, label, item?, n?}`, where `undo` is the op that takes
+   * it back (a `to` of null names the act's own line), or `{marker}` for an act z can't take back.
+   */
   function remember(entry) {
-    entry.n = null;
+    if (entry.n === undefined) entry.n = null;
     undos.push(entry);
+    keepUndos();
+  }
+
+  function undoKey() { return UNDO_KEY + (birtaBus.tab ? birtaBus.tab() : '') + ':' + CURRENT_PATH; }
+
+  function keepUndos() {
+    try {
+      // A list that can't be written must not come back stale
+      sessionStorage.removeItem(undoKey());
+      sessionStorage.setItem(undoKey(), JSON.stringify(undos.map(function (u) {
+        var o = {};
+        Object.keys(u).forEach(function (k) { if (k !== 'queued') o[k] = u[k]; });
+        return o;
+      })));
+    } catch (e) {}
+  }
+
+  function restoreUndos() {
+    var got = null;
+    try { got = JSON.parse(sessionStorage.getItem(undoKey()) || 'null'); } catch (e) {}
+    // An entry of another shape, e.g. from another build, is no act z can take back
+    undos = Array.isArray(got) ? got.filter(function (u) {
+      return !!u && typeof u === 'object' && (typeof u.marker === 'string' || u.kind === 'handback' || (!!u.undo && typeof u.undo.op === 'string'));
+    }) : [];
+    unchecked = undos.length > 0;
   }
 
   /** What a verdict on `at` is on, as its message names it. */
@@ -725,6 +763,13 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var el = at.sp ? blockOf(at.sp) : null;
     return el ? BR.flow.blockLabel(el, true) : 'this block';
   }
+
+  /** What a verdict's take-back names: `"no" removed from ## Stacked on`, with no kind after it. */
+  function verdictGone(name, at) { return '"' + WORD[name] + '" removed from ' + bareScope(at); }
+
+  function verdictBack(name, at) { return '"' + WORD[name] + '" back on ' + bareScope(at); }
+
+  function bareScope(at) { return scopeLabel(at).replace(/ \([^)]*\)$/, ''); }
 
   function verdict(name) {
     var at = target();
@@ -742,8 +787,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var own = draftVerdictAt(at);
     if (!own) {
       remember({
+        kind: 'verdict',
         cid: BR.op({ op: 'comment', at: at, verdict: name }),
-        undo: function (n) { return { op: 'retract', to: n }; }
+        undo: { op: 'retract', to: null },
+        label: verdictGone(name, at)
       });
       say(WORD[name] + ' · ' + scopeLabel(at) + ' · ' + BR.keyName('undo') + ' to undo');
       return;
@@ -751,9 +798,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var was = own.verdict;
     if (own.verdict !== name) {
       remember({
+        kind: 'verdict',
         cid: BR.op({ op: 'amend', to: own.n, verdict: name }),
         item: own.n,
-        undo: function () { return { op: 'amend', to: own.n, verdict: was }; }
+        itemCid: own.cid,
+        undo: { op: 'amend', to: own.n, verdict: was },
+        label: verdictGone(name, at)
       });
       say(WORD[name] + ' · ' + scopeLabel(at) + ' · ' + BR.keyName('undo') + ' to undo');
       return;
@@ -761,14 +811,19 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (own.body) {
       // The same key clears the verdict; the words stay
       remember({
+        kind: 'verdict',
         cid: BR.op({ op: 'amend', to: own.n, drop_verdict: true }),
         item: own.n,
-        undo: function () { return { op: 'amend', to: own.n, verdict: was }; }
+        itemCid: own.cid,
+        undo: { op: 'amend', to: own.n, verdict: was },
+        label: verdictBack(was, at)
       });
     } else {
       remember({
+        kind: 'verdict',
         cid: BR.op({ op: 'retract', to: own.n }),
-        undo: function () { return { op: 'comment', at: at, verdict: was }; }
+        undo: { op: 'comment', at: at, verdict: was },
+        label: verdictBack(was, at)
       });
     }
     say(WORD[name] + ' removed · ' + BR.keyName('undo') + ' to undo');
@@ -865,35 +920,172 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return handed || (!!item && item.status !== 'draft' && item.status !== 'retracted');
   }
 
+  /** The op that takes `entry` back: its own line where the op names none. */
+  function undoOp(entry) {
+    var f = {};
+    Object.keys(entry.undo).forEach(function (k) { f[k] = entry.undo[k]; });
+    if (f.to === null) f.to = entry.n;
+    return f;
+  }
+
   function takeBack(entry) {
     undos.splice(undos.indexOf(entry), 1);
     var n = entry.item != null ? entry.item : entry.n;
-    // What went out with a hand-back stays there; so does everything before it
-    if (sent(n)) {
+    // What went out with a hand-back stays there; so does everything before it. A folder note's line is
+    // in the folder's file, which this doc's state doesn't hold: the server refuses one a hand-back took
+    if (!entry.folder && sent(n)) {
       undos = [];
+      keepUndos();
+      say(nothingLeft());
       return;
     }
-    BR.op(entry.undo(entry.n));
-    if (says(CREATED)) say('');
+    BR.op(undoOp(entry));
+    keepUndos();
+    say(entry.label || NOTHING);
+  }
+
+  /** What z says with nothing of yours left to take back: while Claude works, that the hand-back is with it. */
+  function nothingLeft() {
+    var state = BR.currentState();
+    if (state && state.phrase && state.phrase.stage === 'picked_up') return WITH_CLAUDE.replace(/^(.*· )c /, '$1' + BR.keyName('note') + ' ');
+    return NOTHING;
+  }
+
+  /** Whether `state` holds your reply on line `n`. */
+  function replyAt(state, n) {
+    return (state.items || []).some(function (i) {
+      return (i.replies || []).some(function (r) { return r.n === n && !!r.by && r.by.type === 'human'; });
+    });
+  }
+
+  /**
+   * Whether a reload's entry still names what this tab wrote: its own line holds the op with its
+   * cid, and the note it edits is the one it had, so a log reset in between never takes back another line.
+   */
+  function stillOurs(state, u) {
+    if (u.marker || u.kind === 'handback' || u.folder || u.n == null) return true;
+    if (u.undo && u.undo.to === null) return u.kind === 'answer' ? replyAt(state, u.n) : lineOfCid(state, u.cid) === u.n;
+    if (u.item == null) return true;
+    if (u.itemCid) return lineOfCid(state, u.itemCid) === u.item;
+    return replyAt(state, u.item) || (state.items || []).some(function (i) { return i.n === u.item; });
+  }
+
+  /** The line of a note or reply the state holds with `cid`, or null. */
+  function lineOfCid(state, cid) {
+    var found = null;
+    (state.items || []).forEach(function (i) {
+      if (i.cid === cid) found = i.n;
+      (i.replies || []).forEach(function (r) { if (r.cid === cid && r.n != null) found = r.n; });
+    });
+    return found;
+  }
+
+  /** The round a hand-back on line `n` started, or null while the state shows none. */
+  function roundFrom(state, n) {
+    return (state.rounds || []).filter(function (r) { return r.submit === n; })[0] || null;
+  }
+
+  /** A hand-back on the history: withdrawn by z before pickup; a gone one is passed over. True when z is done. */
+  function takeBackHandBack(top, state) {
+    var p = (state && state.phrase) || {};
+    if (p.stage === 'sent' && p.sent && p.sent.n === top.n && p.sent.can_withdraw) {
+      undos.pop();
+      keepUndos();
+      BR.op({ op: 'withdraw', to: top.n });
+      say(WITHDRAWN);
+      return true;
+    }
+    var round = state ? roundFrom(state, top.n) : null;
+    // Its ack came before the state that shows it
+    if (!round && state && state.log && state.log.lines < top.n) return true;
+    // Picked up since: it and all before it are Claude's
+    if (round && round.claim != null) {
+      undos = [];
+      keepUndos();
+      say(nothingLeft());
+      return true;
+    }
+    undos.pop();
+    keepUndos();
+    return false;
   }
 
   function undo() {
-    if (BR.chrome.withdrawBatch()) return;
+    var state = BR.currentState();
+    // A reload's entries wait for the state that says what was sent meanwhile
+    if (unchecked && !state) {
+      // One press waits; more would all land at once, unseen
+      waitingZ = 1;
+      return;
+    }
+    if (BR.chrome.withdrawBatch()) {
+      say(WITHDRAWN);
+      return;
+    }
     var hold = BR.flow.holdActive();
     if (hold) {
-      BR.op({ op: 'withdraw', to: hold.n });
+      BR.chrome.withdrew(BR.op({ op: 'withdraw', to: hold.n }), hold.n);
+      undos = undos.filter(function (u) { return !(u.kind === 'handback' && u.n === hold.n); });
+      keepUndos();
+      say(hold.kind === 'approve' ? APPROVE_WITHDRAWN : WITHDRAWN);
       return;
     }
-    var top = undos[undos.length - 1];
-    if (!top) return;
-    if (top.marker) {
-      undos.pop();
-      say(top.marker);
+    for (;;) {
+      var top = undos[undos.length - 1];
+      if (!top) {
+        say(nothingLeft());
+        return;
+      }
+      if (top.marker) {
+        undos.pop();
+        keepUndos();
+        say(top.marker);
+        return;
+      }
+      if (top.kind === 'handback') {
+        if (takeBackHandBack(top, state)) return;
+        continue;
+      }
+      if (top.n == null && state && top.cid && !top.folder) top.n = lineOfCid(state, top.cid);
+      // Before its ack the line isn't known: take it back once the ack names it
+      if (top.n == null) top.queued = true;
+      else takeBack(top);
       return;
     }
-    // Before its ack the line isn't known: take it back once the ack names it
-    if (top.n == null) top.queued = true;
-    else takeBack(top);
+  }
+
+  /** A state came: a reload's entries learn their lines, a pickup clears what it took, and a waiting z runs. */
+  function checkUndos(state) {
+    var changed = false;
+    if (unchecked) {
+      var kept = undos.filter(function (u) { return stillOurs(state, u); });
+      changed = kept.length !== undos.length;
+      undos = kept;
+    }
+    undos.forEach(function (u) {
+      if (u.n == null && u.cid && !u.marker && !u.folder && u.kind !== 'handback') {
+        var n = lineOfCid(state, u.cid);
+        if (n != null) {
+          u.n = n;
+          changed = true;
+        }
+      }
+    });
+    for (var i = undos.length - 1; i >= 0; i--) {
+      var u = undos[i];
+      var round = u.kind === 'handback' ? roundFrom(state, u.n) : null;
+      if (round && round.claim != null) {
+        undos = undos.slice(i + 1);
+        changed = true;
+        break;
+      }
+    }
+    if (changed) keepUndos();
+    unchecked = false;
+    if (waitingZ) {
+      waitingZ = 0;
+      undo();
+    }
   }
 
   function onFrame(msg) {
@@ -906,15 +1098,18 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       relist = true;
       stateCame = true;
       queueSettle();
+      var state = BR.currentState();
+      if (state && msg.path === CURRENT_PATH) checkUndos(state);
     } else if (msg.type === 'ack' || msg.type === 'nack') {
       var entry = undos.filter(function (u) { return u.cid === msg.cid; })[0];
       if (!entry) return;
       if (msg.type === 'nack') {
         undos.splice(undos.indexOf(entry), 1);
+        keepUndos();
         return;
       }
-      entry.n = msg.n;
-      if (entry.created) say(CREATED);
+      if (msg.n != null) entry.n = msg.n;
+      keepUndos();
       if (entry.queued) takeBack(entry);
     }
   }
@@ -1128,6 +1323,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     init: function () {
       stops = (BOOT.stops || []).slice();
       try { active = sessionStorage.getItem(ACTIVE_KEY) === '1'; } catch (e) {}
+      restoreUndos();
       docStop = BR.flow.docStop();
       // A tab opens on whole doc, or on the stop it had before a reload
       var back = restored();
@@ -1169,9 +1365,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
           say(REOPEN);
           return true;
         }
-        if (action === 'note') {
+        if (action === 'note' || action === 'ask') {
           var on = target();
-          BR.flow.open('note', on, null, 'new round · ' + BR.flow.label(on));
+          var kind = action === 'ask' ? 'ask' : 'note';
+          BR.flow.open(kind, on, null, 'new round · ' + BR.flow.label(on, kind));
           return true;
         }
       }
@@ -1297,7 +1494,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     /** Scrolls `el` into the view between the header and the strip, as the page's own move. */
     reveal: reveal,
     keyInput: keyInput,
-    /** Puts an act of this page's on the z stack: `{cid, undo(n) -> op fields, item?, created?}`. */
+    /** Puts an act of this tab's on the z history: `{kind, cid, undo, label, item?, n?}`, or `{marker}`. */
     remember: remember,
     tab: tab,
     /**

@@ -719,7 +719,7 @@ test.describe("clean view", () => {
   });
 
   for (const where of ["on a block", "at the doc"] as const) {
-    test(`y x l . q n p ${where} say how to reopen and send nothing`, async ({ page, birta }) => {
+    test(`y x l . u n p ${where} say how to reopen and send nothing`, async ({ page, birta }) => {
       const { mock } = await openFixture(page, birta, "approved", approved);
       await expect.poll(() => phraseOf(page)).toMatch(/c to reopen$/);
       if (where === "on a block") {
@@ -727,7 +727,7 @@ test.describe("clean view", () => {
         await expect.poll(async () => focused(page)).toBe((await stops(page))[2].sp);
       } else await expect.poll(() => focused(page)).toBe("doc");
       const was = await focused(page);
-      for (const key of ["y", "x", "l", ".", "q", "n", "p"]) {
+      for (const key of ["y", "x", "l", ".", "u", "n", "p"]) {
         await page.evaluate(() => {
           // Each key must put the pill up itself
           (window as unknown as { BR: { chrome: { say(t: string): void } } }).BR.chrome.say("");
@@ -742,10 +742,38 @@ test.describe("clean view", () => {
     });
   }
 
-  test("⌥u still toggles the source view, and u shows no source", async ({ page, birta }) => {
+  for (const where of ["on a block", "at the doc"] as const) {
+    test(`q ${where} opens a new round's question, as c opens a note`, async ({ page, birta }) => {
+      const { mock } = await openFixture(page, birta, "approved", approved);
+      await expect.poll(() => phraseOf(page)).toMatch(/c to reopen$/);
+      if (where === "on a block") await focusOn(page, "3:1-3:6");
+      await page.keyboard.press("q");
+      await expect.poll(() => composerLines(page)).toEqual({
+        label: where === "on a block" ? "new round · question on ## Why (section)" : "new round · question on whole doc",
+        target: "",
+      });
+      expect(await stripMessage(page)).not.toBe(REOPEN);
+      await page.keyboard.type("is this final?");
+      await page.keyboard.press("Enter");
+      await expect.poll(() => opsNamed(mock, "comment")).toHaveLength(1);
+      expect(opsNamed(mock, "comment")[0]).toMatchObject({ verdict: "ask", body: "is this final?" });
+    });
+  }
+
+  test("z after the approve's hold has nothing to undo and sends nothing", async ({ page, birta }) => {
+    const { mock } = await openFixture(page, birta, "approved", approved);
+    await expect.poll(() => phraseOf(page)).toMatch(/c to reopen$/);
+    await page.keyboard.press("z");
+    await expect.poll(() => stripMessage(page)).toBe("nothing to undo");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(mock.ops()).toEqual([]);
+  });
+
+  test("⌥u still toggles the source view, and u shows no source but says how to reopen", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "approved", approved);
     await expect.poll(() => phraseOf(page)).toMatch(/c to reopen$/);
     await page.keyboard.press("u");
+    await expect.poll(() => stripMessage(page)).toBe(REOPEN);
     await page.waitForTimeout(SETTLE_MS);
     await expect(page.locator("#source-view")).toBeHidden();
     expect(mock.ops()).toEqual([]);
@@ -845,6 +873,13 @@ test.describe("clean view", () => {
     await expect.poll(async () => (await laneMarks(page)).length).toBeGreaterThan(0);
     await page.keyboard.press("z");
     await expect.poll(() => opsNamed(mock, "withdraw")).toEqual([expect.objectContaining({ to: state.hold.n })]);
+    // The words for it are not in the spec; it must say something, and neither of these
+    await expect
+      .poll(async () => {
+        const m = await stripMessage(page);
+        return m !== null && m !== "nothing to undo" && m !== "approving · z to undo";
+      })
+      .toBe(true);
   });
 
   test("the page cleans itself up once the hold ends, with no new state", async ({ page, birta }) => {

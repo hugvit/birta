@@ -708,7 +708,7 @@ test.describe("files and activation", () => {
     expect(mock.ops()).toHaveLength(1);
   });
 
-  test("a verdict pressed just before a reload is kept once, and z takes back nothing from an earlier page", async ({
+  test("a verdict pressed just before a reload is kept once, and z after the reload takes it back once", async ({
     page,
     birta,
   }) => {
@@ -723,8 +723,14 @@ test.describe("files and activation", () => {
     await page.reload();
     await booted(page);
     await expect.poll(() => reviewLog(served.root)?.length ?? 0).toBe(4);
+    // The history survives the reload, even for a verdict whose ack the old page never saw
     await page.keyboard.press("z");
+    await expect.poll(() => stripMessage(page)).toBe('"no" removed from ## Why');
+    await expect.poll(() => reviewLog(served.root)?.length ?? 0).toBe(5);
+    expect(reviewLog(served.root)![4]).toMatchObject({ op: "retract", to: 4 });
+    await page.keyboard.press("z");
+    await expect.poll(() => stripMessage(page)).toBe("nothing to undo");
     await page.waitForTimeout(SETTLE_MS);
-    expect(reviewLog(served.root)).toHaveLength(4);
+    expect(reviewLog(served.root)).toHaveLength(5);
   });
 });

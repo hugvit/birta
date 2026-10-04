@@ -193,6 +193,7 @@ const glyphRoles = async (page: Page) =>
     .map((m) => m.role);
 
 const WITHDRAW = "withdraw";
+const SENT = "sent · you can keep reading";
 const COPY = "copy hand-off line";
 const MINE = "drafted by Claude · mark as yours";
 // The row's label and its key, which this probe reads as one run of text
@@ -509,7 +510,8 @@ test.describe("hold", () => {
     expect(await glyphRoles(page)).toEqual(["you", "you"]);
     await expect.poll(() => phraseOf(page), { timeout: 4_000 }).toBe(`sent ${hhmm(state.phrase.sent.ts)} · not picked up yet`);
     const c = await chrome(page);
-    expect(c.message).toBeNull();
+    // The hold's end is the hand-back's moment
+    expect(c.message).toBe(SENT);
     expect(c.turn).toMatchObject({ text: "With Claude", kbd: null, disabled: true });
     await expect.poll(() => glyphRoles(page)).toEqual(["agent", "agent"]);
   });
@@ -566,7 +568,8 @@ test.describe("hold", () => {
     const after = `sent ${hhmm(submit.not_before)} · not picked up yet`;
     for (const p of [page, other]) {
       await expect.poll(() => phraseOf(p), { timeout: 8_000 }).toBe(after);
-      expect(await stripMessage(p)).toBeNull();
+      // Each tab watched the hold run, so each says it was sent
+      expect(await stripMessage(p)).toBe(SENT);
       expect(await turnOf(p)).toEqual({ text: "With Claude", kbd: null, disabled: true });
     }
 
@@ -590,7 +593,7 @@ test.describe("hold", () => {
     const approve = log[log.length - 1];
     expect(approve).toMatchObject({ op: "approve", rev: revOf(STOPS_DOC) });
     await expect.poll(() => phraseOf(page), { timeout: 6_000 }).toBe(`approved ${hhmm(approve.not_before)} · c to reopen`);
-    expect(await stripMessage(page)).toBeNull();
+    expect(await stripMessage(page)).toBe("approved ✓ · this text is final · nothing is published without you");
     expect(await turnOf(page)).toEqual({ text: "Approved ✓", kbd: null, disabled: true });
   });
 });
@@ -921,7 +924,7 @@ test.describe("killers: clock", () => {
     });
     await expect.poll(() => stripMessage(page)).toBe("handing back · 3 notes · z to undo");
     await expect.poll(() => phraseOf(page), { timeout: 4_000 }).toBe(`sent ${hhmm(state.phrase.sent.ts)} · not picked up yet`);
-    expect(await stripMessage(page)).toBeNull();
+    expect(await stripMessage(page)).toBe(SENT);
   });
 
   test("a hold that arrives in a later push ends on time with no further push", async ({ page, birta }) => {
@@ -1012,7 +1015,7 @@ test.describe("killers: pill and socket", () => {
     await expect.poll(() => stripMessage(page)).toBe("handing back · 1 note · z to undo");
     await expect.poll(() => phraseOf(page), { timeout: 4_000 }).toMatch(/^sent \d\d:\d\d · not picked up yet$/);
     await page.waitForTimeout(SETTLE_MS);
-    expect(await stripMessage(page)).toBeNull();
+    expect(await stripMessage(page)).toBe(SENT);
     expect(reviewLog(served.root)!.some((l) => l.op === "submit")).toBe(true);
   });
 
@@ -1237,7 +1240,7 @@ test.describe("rulings", () => {
     mock.pushState(state);
     await page.waitForTimeout(SETTLE_MS);
     expect(await phraseOf(page)).toBe(after);
-    expect(await stripMessage(page)).toBeNull();
+    expect(await stripMessage(page)).toBe(SENT);
   });
 });
 

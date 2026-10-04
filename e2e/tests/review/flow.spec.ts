@@ -1265,6 +1265,11 @@ test.describe("verdict keys on a block that has one", () => {
   });
 });
 
+/** Whether z said something of its own: a message, neither `nothing to undo` nor the one before it (`was`). */
+function said(m: string | null, was: RegExp): boolean {
+  return m !== null && m !== "nothing to undo" && !was.test(m);
+}
+
 test.describe("z", () => {
   test("during a hold z withdraws the hand-back", async ({ page, birta }) => {
     const state = fixtureState("hold");
@@ -1275,11 +1280,12 @@ test.describe("z", () => {
     expect(mock.ops()[0]).toMatchObject({ op: "withdraw", to: state.hold.n });
   });
 
-  test("once the hold has passed z withdraws nothing", async ({ page, birta }) => {
+  test("once the hold has passed, a tab that made no hand-back has nothing to undo", async ({ page, birta }) => {
     const state = fixtureState("hold");
     state.hold.not_before = state.server_now - 1_000;
     const { mock } = await open(page, birta, fixtureDoc("hold"), { state });
     await page.keyboard.press("z");
+    await expect.poll(() => stripMessage(page)).toBe("nothing to undo");
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops()).toEqual([]);
   });
@@ -1290,10 +1296,13 @@ test.describe("z", () => {
     await page.keyboard.type("take me back");
     await page.keyboard.press("Enter");
     await expect.poll(() => mock.ops().length).toBe(1);
+    await expect.poll(() => stripMessage(page)).toBe("note saved · z to undo");
     // The mock acks with n = 101
     await page.keyboard.press("z");
     await expect.poll(() => mock.ops().length).toBe(2);
     expect(mock.ops()[1]).toMatchObject({ op: "retract", to: 101 });
+    // The undo's message replaces the save's
+    await expect.poll(() => stripMessage(page)).toBe("note removed");
   });
 
   test("z puts back a verdict you just replaced", async ({ page, birta }) => {
@@ -1304,6 +1313,8 @@ test.describe("z", () => {
     await page.keyboard.press("z");
     await expect.poll(() => mock.ops().length).toBe(2);
     expect(mock.ops()[1]).toMatchObject({ op: "amend", to: 5, verdict: "no" });
+    // The words for undoing a replaced verdict are not in the spec; z is never silent
+    await expect.poll(async () => said(await stripMessage(page), /^yes · /)).toBe(true);
   });
 
   test("z brings back a verdict you just cleared", async ({ page, birta }) => {
@@ -1320,6 +1331,7 @@ test.describe("z", () => {
       at: { k: "block", sp: "10:1-10:16", scope: "block" },
     });
     expect(mock.ops()[1].body).toBeUndefined();
+    await expect.poll(async () => said(await stripMessage(page), /^no removed · /)).toBe(true);
   });
 });
 
@@ -1728,9 +1740,10 @@ test.describe("names, verdicts and z", () => {
     ]);
   });
 
-  test("z with no act of yours on this page does nothing, whatever drafts the state holds", async ({ page, birta }) => {
+  test("z with no act of yours on this page says nothing to undo, whatever drafts the state holds", async ({ page, birta }) => {
     const { mock } = await open(page, birta, fixtureDoc("drafts"), { state: fixtureState("drafts") });
     await page.keyboard.press("z");
+    await expect.poll(() => stripMessage(page)).toBe("nothing to undo");
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops()).toEqual([]);
   });
@@ -1746,6 +1759,8 @@ test.describe("names, verdicts and z", () => {
     mock.pushState(state);
     await expect.poll(async () => texts(await docSlot(page)).join("\n")).toContain("gone out");
     await page.keyboard.press("z");
+    // A note another tab sent is no hand-back of this tab's: z says so rather than reaching it
+    await expect.poll(() => stripMessage(page)).toBe("nothing to undo");
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops()).toHaveLength(1);
   });
@@ -1788,6 +1803,7 @@ test.describe("names, verdicts and z", () => {
       ["reply", 21, "yes"],
       ["retract", 101, undefined],
     ]);
+    await expect.poll(() => stripMessage(page)).toBe("answer removed");
   });
 
   test("a verdict key on a heading answers the heading, not the blank under it", async ({ page, birta }) => {

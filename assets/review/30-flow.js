@@ -391,7 +391,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   // Keys a closed blank leaves to the page: moving, taking back, and switches that write nothing
   var BLANK_PASSES = { focus_next: 1, focus_prev: 1, next_item: 1, prev_item: 1, next_file: 1, prev_file: 1, undo: 1,
     hide_marks: 1, turn: 1, revert_change: 1 };
-  // Shown once ever, the first time a note folds to its dot
+  // Shown once ever, the first time your move lands on a note folded to its dot
   var DOT_HINT = '• a settled note · ⏎ opens it';
   var DOT_HINT_KEY = 'birta-dot-hint';
   var RESOLVE_MS = 120;
@@ -399,6 +399,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var QUOTE_CHARS = 40;
   var UNSENT = 'unsent · ⏎ to keep';
   var MOVED = 'its block changed · c to re-point';
+  var REOPENED = 'reopened · hand back when ready · z keeps it approved';
 
   // Group order under one anchor: notes with their replies, then what the page added, then facts
   var G_NOTE = 1, G_DRAFT = 2, G_UNSENT = 3, G_COMPOSER = 4, G_RECEIPT = 5, G_FACT = 6, G_BLANK = 7,
@@ -1231,7 +1232,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     }
     drafts.forEach(function (d) {
       if (cids[d.cid]) return;
-      add({ id: 'd' + d.cid, kind: 'note', lead: 'you · ', text: d.body, rule: ['dashed', 'you'] }, slotOfAt(d.at), [G_DRAFT, d.seq, 0]);
+      // Kept here while birta is stopped; it saves once the tab reconnects
+      var waiting = BR.life && BR.life.stopped() ? ' · waiting to save' : null;
+      add({ id: 'd' + d.cid, kind: 'note', lead: 'you · ', text: d.body, tail: waiting, rule: ['dashed', 'you'] }, slotOfAt(d.at), [G_DRAFT, d.seq, 0]);
     });
     unsent.forEach(function (u, k) {
       if (comp && comp.key === u.key) return;
@@ -1358,20 +1361,22 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       refreshHint();
       refocus();
     }
-    if (dotList.length) hintDots();
     if (BR.lane && BR.lane.redraw) BR.lane.redraw();
   }
 
-  /** The first dot ever says what it is, once; storage that refuses keeps it to this page. */
-  function hintDots() {
-    if (dotHinted) return;
+  /**
+   * The first time ever your own move lands on a dotted block, its tip says what the dot is.
+   * A moment showing keeps it for later; storage that refuses keeps it to this page.
+   */
+  function tipDot(block) {
+    var sp = block && block.getAttribute && block.getAttribute('data-sourcepos');
+    if (dotHinted || !sp || !dotList.some(function (d) { return d.sp === sp; }) || BR.chrome.moment()) return;
     dotHinted = true;
     try {
       if (localStorage.getItem(DOT_HINT_KEY)) return;
       localStorage.setItem(DOT_HINT_KEY, '1');
     } catch (e) {}
-    // A state can be drawn before the chrome that shows messages is up
-    setTimeout(function () { BR.chrome.say(DOT_HINT); }, 0);
+    BR.chrome.say(DOT_HINT);
   }
 
   // --- the composer ---
@@ -1760,7 +1765,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     }
     var cid;
     if (!at && comp.own) {
-      cid = BR.op({ op: 'amend', to: comp.own.n, body: body });
+      cid = amendNote(comp.own.n, body);
     } else {
       at = at || aim(comp.at, comp.tie, comp.rev);
       if (!at) {
@@ -1786,20 +1791,45 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     close();
   }
 
-  /** Sends a note, shows it at once as a dashed draft, and puts it on the z stack. */
+  /** Sends a note, shows it at once as a dashed draft, puts it on the z history, and says so. */
   function submit(at, body, kind) {
-    var s = state;
+    var reopening = BR.chrome.clean();
     var f = { op: 'comment', at: at, body: body };
     if (kind === 'ask') f.verdict = 'ask';
     var cid = BR.op(f);
-    // A folder note lives in the folder's review file, never in this doc's state, and z here can't reach it
-    if (at.k === 'dir') return cid;
+    var z = ' · ' + BR.keyName('undo') + ' to undo';
+    // A folder note lives in the folder's review file, never in this doc's state, so its retract names the folder
+    if (at.k === 'dir') {
+      BR.chrome.say('note saved' + z);
+      BR.pointing.remember({ kind: 'note', folder: true, cid: cid, undo: { op: 'retract', to: null, at: { k: 'dir' } }, label: 'note removed' });
+      return cid;
+    }
+    // A note after the approve opens a new round, which is the news here
+    if (reopening) BR.chrome.moment(REOPENED.replace(/ z /, ' ' + BR.keyName('undo') + ' '));
+    else BR.chrome.say((kind === 'ask' ? 'question saved' : 'note saved') + z);
     drafts.push({ cid: cid, at: at, body: body, seq: ++seq });
     BR.pointing.remember({
+      kind: 'note',
       cid: cid,
-      created: !s || !s.log || !s.log.lines,
-      undo: function (n) { return { op: 'retract', to: n }; }
+      undo: { op: 'retract', to: null },
+      label: kind === 'ask' ? 'question removed' : 'note removed'
     });
+    return cid;
+  }
+
+  /** Sends the edit of note `n` to `body`, puts it on the z history with the words it had, and says so. */
+  function amendNote(n, body) {
+    var item = ((state && state.items) || []).filter(function (i) { return i.n === n; })[0];
+    var was = item ? item.body || '' : null;
+    var cid = BR.op({ op: 'amend', to: n, body: body });
+    // With no words to go back to, z can't take it back, and stops here rather than reach past it
+    if (was == null) {
+      BR.pointing.remember({ marker: 'nothing to undo' });
+      BR.chrome.say('note updated');
+      return cid;
+    }
+    BR.pointing.remember({ kind: 'edit', cid: cid, item: n, itemCid: item ? item.cid : null, undo: { op: 'amend', to: n, body: was }, label: 'edit undone' });
+    BR.chrome.say('note updated · ' + BR.keyName('undo') + ' to undo');
     return cid;
   }
 
@@ -1810,7 +1840,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var cid;
     var p = BR.pure.parseTypedQuote(u.text);
     if (t.to != null) {
-      cid = BR.op({ op: 'amend', to: t.to, body: u.text });
+      cid = amendNote(t.to, u.text);
     } else if (p) {
       // As a composer's ⏎ before its quote resolves: the server searches
       cid = submit({ k: 'quote', q: p.quote, pre: '', suf: '' }, p.rest || u.text, t.kind);
@@ -2005,14 +2035,16 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var r = draftAnswer(n);
     if (!r) {
       BR.pointing.remember({
+        kind: 'answer',
         cid: BR.op({ op: 'reply', to: n, verdict: verdict }),
-        undo: function (line) { return { op: 'retract', to: line }; }
+        undo: { op: 'retract', to: null },
+        label: 'answer removed'
       });
     } else if (r.verdict !== verdict || r.body) {
       var f = { op: 'amend', to: r.n, verdict: verdict };
       // The key's answer stands alone, so typed words go
       if (r.body) f.body = '';
-      BR.pointing.remember({ cid: BR.op(f), item: r.n, undo: function () { return restore(r); } });
+      BR.pointing.remember({ kind: 'answer', cid: BR.op(f), item: r.n, undo: restore(r), label: 'answer undone' });
     }
     BR.chrome.say('answered ' + ANSWERED[verdict] + ' · ' + BR.keyName('undo') + ' to undo');
   }
@@ -2062,11 +2094,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         var f = { op: 'amend', to: r.n, body: words };
         if (r.verdict) f.drop_verdict = true;
         cid = BR.op(f);
-        BR.pointing.remember({ cid: cid, item: r.n, undo: function () { return restore(r); } });
+        BR.pointing.remember({ kind: 'answer', cid: cid, item: r.n, undo: restore(r), label: 'answer undone' });
       } else {
         cid = BR.op({ op: 'reply', to: n, body: words });
-        BR.pointing.remember({ cid: cid, undo: function (line) { return { op: 'retract', to: line }; } });
+        BR.pointing.remember({ kind: 'answer', cid: cid, undo: { op: 'retract', to: null }, label: 'answer removed' });
       }
+      BR.chrome.say('answer saved · ' + BR.keyName('undo') + ' to undo');
       pending[cid] = { blank: n, text: words };
     }
     area.addEventListener('keydown', function (ev) {
@@ -2359,6 +2392,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       return out;
     },
     dots: function () { return dotList; },
+    tipDot: tipDot,
     /** Reading mode: hides every note but an open composer or a blank being answered. */
     hide: function (on) {
       hiddenAll = on;

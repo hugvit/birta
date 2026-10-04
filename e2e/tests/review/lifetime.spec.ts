@@ -248,6 +248,7 @@ const quoted = (p: string) => `'${p.replace(/'/g, `'\\''`)}'`;
 const GATE_PREFIX = "BIRTA_REVIEW=1 ";
 const restartLine = (served: string) => `${GATE_PREFIX}birta ${quoted(served)} --no-open`;
 const bannerText = (served: string) => `birta stopped · run ${GATE_PREFIX}birta ${quoted(served)} to reconnect`;
+const RECONNECTED = "reconnected · nothing lost";
 
 /** Times of every `whoami` probe the page makes. */
 function whoamiTimes(page: Page): number[] {
@@ -302,6 +303,7 @@ test.describe("a stopped server", () => {
     expect(await turnDisabled(page)).toBe(true);
     await page.getByRole("button", { name: "copy", exact: true }).click();
     await expect.poll(() => copied(page)).toEqual([restartLine(doc)]);
+    await expect.poll(() => stripMessage(page)).toBe("copied · run it in a terminal");
     expect(first.port).toBe(derived(doc));
 
     // Long enough down that a doubling backoff would wait past the 2 s the tab promises
@@ -316,7 +318,8 @@ test.describe("a stopped server", () => {
     expect(again.port).toBe(first.port);
 
     await expect(banner).toBeHidden({ timeout: 3_000 });
-    await expect.poll(() => stripMessage(page), { timeout: 3_000 }).toBe("reconnected");
+    await expect.poll(() => stripMessage(page), { timeout: 3_000, intervals: [50] }).toBe(RECONNECTED);
+    const back = Date.now();
     expect(await phraseOf(page)).toBe("your turn");
     expect(await turnOf(page)).toMatch(/^Hand back · 1( |$)/);
     expect(await turnDisabled(page)).toBe(false);
@@ -335,10 +338,53 @@ test.describe("a stopped server", () => {
     }).then((r) => r.status)`);
     expect(flushed).not.toBe(403);
 
+    // A moment: still there at 5 s, gone by 8 s
+    await page.waitForTimeout(Math.max(0, back + 5_000 - Date.now()));
+    expect(await stripMessage(page)).toBe(RECONNECTED);
+    await expect.poll(() => stripMessage(page), { timeout: Math.max(1, back + 8_000 - Date.now()) }).not.toBe(RECONNECTED);
+
     // The restarted server takes the page's ops
     await page.keyboard.press("j");
     await keep(page, "and this one");
     await expect.poll(() => comments(s.root, name).map((l: State) => l.body)).toEqual(["way too verbose", "and this one"]);
+  });
+
+  /** Serves DOC, opens it, and stops the server; returns the site, its doc's name and the banner. */
+  async function stopped(page: Page) {
+    const s = tracked({});
+    const name = await freeName(s, "pr", ".md");
+    fs.writeFileSync(path.join(s.root, name), DOC);
+    const first = await launch(s, [name], GATE_ON);
+    await page.setViewportSize(WIDE);
+    await page.goto(`${first.url}/view/${name}`);
+    await booted(page);
+    await kill(first);
+    const banner = page.getByText(bannerText(path.join(s.root, name)), { exact: true });
+    await expect(banner).toBeVisible({ timeout: 3_000 });
+    return { s, name, banner };
+  }
+
+  test("the banner sits under the header, never over it", async ({ page }) => {
+    const { banner } = await stopped(page);
+    const header = (await page.locator("header.header").boundingBox())!;
+    const box = (await banner.boundingBox())!;
+    expect(box.y).toBeGreaterThanOrEqual(header.y + header.height - 1);
+  });
+
+  test("a note made while stopped says waiting to save until it is acked", async ({ page }) => {
+    test.setTimeout(60_000);
+    const { s, name, banner } = await stopped(page);
+    await page.keyboard.press("j");
+    await page.keyboard.press("j");
+    await keep(page, "while it was down");
+    const note = page.locator('birta-flow[data-kind="note"]', { hasText: "while it was down" });
+    await expect(note).toContainText("waiting to save");
+    expect(comments(s.root, name)).toEqual([]);
+
+    await launch(s, [name], GATE_ON);
+    await expect(banner).toBeHidden({ timeout: 5_000 });
+    await expect.poll(() => comments(s.root, name).map((l: State) => l.body)).toEqual(["while it was down"]);
+    await expect(note).not.toContainText("waiting to save");
   });
 
   test("never reconnects to another server on its port, and comes back once its own is", async ({ page }) => {
@@ -360,7 +406,7 @@ test.describe("a stopped server", () => {
     await expect.poll(() => stripMessage(page), { timeout: 5_000 }).toBe("another birta is on this port");
     await page.waitForTimeout(4_000);
     await expect(banner).toBeVisible();
-    expect(await stripMessage(page)).not.toBe("reconnected");
+    expect(await stripMessage(page)).not.toBe(RECONNECTED);
     expect(opened.n).toBe(before);
     await expect(page.locator("#content h1")).toHaveText("Upload retries");
     expect(new URL(page.url()).port).toBe(String(first.port));
@@ -379,7 +425,7 @@ test.describe("a stopped server", () => {
     const again = await launch(s, [name], GATE_ON);
     expect(again.port).toBe(first.port);
     await expect(banner).toBeHidden({ timeout: 3_000 });
-    await expect.poll(() => stripMessage(page), { timeout: 3_000 }).toBe("reconnected");
+    await expect.poll(() => stripMessage(page), { timeout: 3_000 }).toBe(RECONNECTED);
   });
 
   test("names the served file, not the doc the tab moved to", async ({ page }) => {
@@ -402,7 +448,7 @@ test.describe("a stopped server", () => {
     const again = await launchLine(s, (await copied(page))[0], {}, s.base);
     expect(again.port).toBe(first.port);
     await expect(banner).toBeHidden({ timeout: 3_000 });
-    await expect.poll(() => stripMessage(page), { timeout: 3_000 }).toBe("reconnected");
+    await expect.poll(() => stripMessage(page), { timeout: 3_000 }).toBe(RECONNECTED);
     await expect(page).toHaveURL(/\/view\/docs\/plan\.md$/);
   });
 
@@ -428,7 +474,7 @@ test.describe("a stopped server", () => {
     const again = await launchLine(s, line, {}, s.base);
     expect(again.port).toBe(first.port);
     await expect(banner).toBeHidden({ timeout: 3_000 });
-    await expect.poll(() => stripMessage(page), { timeout: 3_000 }).toBe("reconnected");
+    await expect.poll(() => stripMessage(page), { timeout: 3_000 }).toBe(RECONNECTED);
     for (const where of [s.base, s.root, dir]) expect(fs.existsSync(path.join(where, "pwned"))).toBe(false);
   });
 

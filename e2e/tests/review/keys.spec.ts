@@ -21,6 +21,7 @@ import {
   stopSp,
   stops,
   watchSent,
+  stripMessage,
 } from "./harness";
 
 const WIDE = { width: 1280, height: 900 };
@@ -226,7 +227,7 @@ test.describe("keys with focus in a review host", () => {
     await page.locator(".file-header birta-turn button").click();
     await expect.poll(() => (reviewLog(served.root) ?? []).filter((l) => l.op === "submit").length).toBe(1);
     // WebKit never focuses a clicked button, so only chromium puts the key in the host
-    await expect(page.locator("birta-pop .pill")).toContainText("handing back");
+    await expect.poll(async () => (await stripMessage(page)) ?? "").toContain("handing back");
     if (browserName === "chromium") expect(await active(page)).toBe("birta-turn");
     await page.keyboard.press("z");
     await expect.poll(() => (reviewLog(served.root) ?? []).filter((l) => l.op === "withdraw").length).toBe(1);

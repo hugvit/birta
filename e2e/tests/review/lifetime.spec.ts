@@ -5,7 +5,7 @@ import * as fs from "fs";
 import * as net from "net";
 import * as os from "os";
 import * as path from "path";
-import { test, expect, BIN, GATE_ON, State, booted, ensureBuilt, focused, reviewLog } from "./harness";
+import { test, expect, BIN, GATE_ON, State, booted, ensureBuilt, focused, reviewLog, stripMessage } from "./harness";
 
 // A server that stops and comes back: the banner, the reconnect, and what a server lists as its own.
 
@@ -173,25 +173,6 @@ function hostText(page: Page, sel: string): Promise<string | null> {
 }
 const phraseOf = (page: Page) => hostText(page, ".file-header birta-phrase");
 
-/** The pill's text while it shows, else null. */
-function pillOf(page: Page): Promise<string | null> {
-  return page.evaluate(() => {
-    for (const host of Array.from(document.querySelectorAll("birta-pop"))) {
-      for (const el of Array.from((host.shadowRoot ?? host).querySelectorAll('[role="status"]'))) {
-        let open = false;
-        try {
-          open = el.matches(":popover-open");
-        } catch {
-          // no popover support
-        }
-        const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
-        if (open && text) return text;
-      }
-    }
-    return null;
-  });
-}
-
 /** The phrase menu's rows, opened by a click. */
 async function menuRows(page: Page): Promise<string[]> {
   await page.locator(".file-header birta-phrase").click();
@@ -318,7 +299,7 @@ test.describe("a stopped server", () => {
     expect(again.port).toBe(first.port);
 
     await expect(banner).toBeHidden({ timeout: 3_000 });
-    await expect.poll(() => pillOf(page), { timeout: 3_000 }).toBe("reconnected");
+    await expect.poll(() => stripMessage(page), { timeout: 3_000 }).toBe("reconnected");
     expect(await phraseOf(page)).toBe("your turn · 1 note");
     expect(await focused(page)).toBe(at);
     await expect(page.getByText("way too verbose")).toBeVisible();
@@ -357,10 +338,10 @@ test.describe("a stopped server", () => {
     const before = opened.n;
 
     const foreign = await launch(s, ["other.md", "--port", String(first.port)], GATE_ON);
-    await expect.poll(() => pillOf(page), { timeout: 5_000 }).toBe("another birta is on this port");
+    await expect.poll(() => stripMessage(page), { timeout: 5_000 }).toBe("another birta is on this port");
     await page.waitForTimeout(4_000);
     await expect(banner).toBeVisible();
-    expect(await pillOf(page)).not.toBe("reconnected");
+    expect(await stripMessage(page)).not.toBe("reconnected");
     expect(opened.n).toBe(before);
     await expect(page.locator("#content h1")).toHaveText("Upload retries");
     expect(new URL(page.url()).port).toBe(String(first.port));
@@ -379,7 +360,7 @@ test.describe("a stopped server", () => {
     const again = await launch(s, [name], GATE_ON);
     expect(again.port).toBe(first.port);
     await expect(banner).toBeHidden({ timeout: 3_000 });
-    await expect.poll(() => pillOf(page), { timeout: 3_000 }).toBe("reconnected");
+    await expect.poll(() => stripMessage(page), { timeout: 3_000 }).toBe("reconnected");
   });
 
   test("names the served file, not the doc the tab moved to", async ({ page }) => {
@@ -402,7 +383,7 @@ test.describe("a stopped server", () => {
     const again = await launchLine(s, (await copied(page))[0], {}, s.base);
     expect(again.port).toBe(first.port);
     await expect(banner).toBeHidden({ timeout: 3_000 });
-    await expect.poll(() => pillOf(page), { timeout: 3_000 }).toBe("reconnected");
+    await expect.poll(() => stripMessage(page), { timeout: 3_000 }).toBe("reconnected");
     await expect(page).toHaveURL(/\/view\/docs\/plan\.md$/);
   });
 
@@ -428,7 +409,7 @@ test.describe("a stopped server", () => {
     const again = await launchLine(s, line, {}, s.base);
     expect(again.port).toBe(first.port);
     await expect(banner).toBeHidden({ timeout: 3_000 });
-    await expect.poll(() => pillOf(page), { timeout: 3_000 }).toBe("reconnected");
+    await expect.poll(() => stripMessage(page), { timeout: 3_000 }).toBe("reconnected");
     for (const where of [s.base, s.root, dir]) expect(fs.existsSync(path.join(where, "pwned"))).toBe(false);
   });
 

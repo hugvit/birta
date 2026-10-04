@@ -142,18 +142,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     step: function (step) {
       var path = BR.pure.nextFile(dir, CURRENT_PATH, step, true);
       if (path) return go(path, 'first', BR.pure.fileStepSays(dir, path));
-      if (!BR.pure.nextFile(dir, CURRENT_PATH, -step, true)) return BR.chrome.pill('no other file has notes or news');
+      if (!BR.pure.nextFile(dir, CURRENT_PATH, -step, true)) return BR.chrome.say('no other file has notes or news');
       var back = BR.keyName(step > 0 ? 'prev_file' : 'next_file').replace(/^Shift\+/, '⇧');
-      BR.chrome.pill('no more files with notes · ' + back + ' back');
-    },
-    /**
-     * n past this page's last stop, or p before its first: the next file with news, at its first
-     * or last stop. False when there is none.
-     */
-    cross: function (step) {
-      var path = BR.pure.nextFile(dir, CURRENT_PATH, step);
-      if (path) go(path, step > 0 ? 'first' : 'last');
-      return !!path;
+      BR.chrome.say('no more files with notes · ' + back + ' back');
     },
     open: function (href) { location.href = href; }
   };

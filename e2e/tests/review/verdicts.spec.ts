@@ -19,11 +19,13 @@ import {
   reviewLog,
   stopSp,
   stops,
+  stripMessage,
+  stripText,
 } from "./harness";
 
 const WIDE = { width: 1280, height: 900 };
 const SETTLE_MS = 400;
-/** How long the first x on an open change row waits for the second. */
+/** The old window a first x on an open change row armed for; the arm now lasts as long as its message. */
 const ARM_MS = 3_000;
 
 const ROW_X = "x = no to this text · u reverts Claude's change · x again for no";
@@ -90,26 +92,6 @@ function askedLog(doc: string): State[] {
     { by: AGENT, op: "done", to: 4, turn: 6 },
     { by: AGENT, op: "yield", turn: 6 },
   ];
-}
-
-/** The pill's text while it is open in the top layer and painted, else null. */
-function pillOf(page: Page): Promise<string | null> {
-  return page.evaluate(() => {
-    for (const host of document.querySelectorAll("birta-pop")) {
-      const root = host.shadowRoot ?? host;
-      for (const el of root.querySelectorAll('[role="status"]')) {
-        let open = false;
-        try {
-          open = el.matches(":popover-open") && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
-        } catch {
-          open = false;
-        }
-        const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
-        if (open && text) return text;
-      }
-    }
-    return null;
-  });
 }
 
 /** The fields of an op frame, without the envelope the core adds. */
@@ -213,7 +195,7 @@ test.describe("u", () => {
     });
     await page.keyboard.press("n");
     await page.keyboard.press("u");
-    await expect.poll(() => pillOf(page)).toBe("can't undo this one · c instead");
+    await expect.poll(() => stripMessage(page)).toBe("can't undo this one · c instead");
     await page.waitForTimeout(SETTLE_MS);
     expect(writes(mock)).toEqual([]);
     expect(await sourceShown(page)).toBe(false);
@@ -230,16 +212,16 @@ test.describe("u", () => {
     await focusOn(page, target);
 
     await page.keyboard.press("u");
-    await expect.poll(() => pillOf(page)).toBe("nothing here to revert");
+    await expect.poll(() => stripMessage(page)).toBe("nothing here to revert");
     expect(await sourceShown(page)).toBe(false);
     expect(writes(mock)).toEqual([]);
     await page.keyboard.press("Alt+KeyU");
     await expect(page.locator("#source-view")).toBeVisible();
-    await expect.poll(() => pillOf(page)).toBe("source view · esc back");
+    await expect.poll(() => stripText(page)).toBe("source view · esc back");
     await page.keyboard.press("Alt+KeyU");
     await expect(page.locator("#lane-frame")).toBeVisible();
-    await expect.poll(() => pillOf(page)).not.toBe("source view · esc back");
-    expect(await pillOf(page)).not.toBe("rendered view");
+    await expect.poll(() => stripText(page)).not.toBe("source view · esc back");
+    expect(await stripMessage(page)).not.toBe("rendered view");
     await expect.poll(() => focused(page)).toBe(target);
     const box = (await page.locator(`#content [data-sourcepos="${target}"]`).boundingBox())!;
     expect(box.y).toBeGreaterThanOrEqual(header.y + header.height - 1);
@@ -284,7 +266,7 @@ test.describe("x on an open change row", () => {
     const { mock } = await openFixture(page, birta, "flow", onlyChange("13.0"));
     await page.keyboard.press("n");
     await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe(ROW_X);
+    await expect.poll(() => stripMessage(page)).toBe(ROW_X);
     await page.waitForTimeout(SETTLE_MS);
     expect(writes(mock)).toEqual([]);
     await page.keyboard.press("x");
@@ -293,15 +275,14 @@ test.describe("x on an open change row", () => {
       .toEqual([{ op: "comment", at: { k: "block", sp: "5:1-6:68", scope: "block" }, verdict: "no" }]);
   });
 
-  test("a second x after the arm window asks again instead of writing", async ({ page, birta }) => {
+  test("the arm lasts as long as its message: a second x after the old window still writes the no", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow", onlyChange("13.0"));
     await page.keyboard.press("n");
     await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe(ROW_X);
+    await expect.poll(() => stripMessage(page)).toBe(ROW_X);
     await page.waitForTimeout(ARM_MS + 300);
-    await page.keyboard.press("x");
-    await page.waitForTimeout(SETTLE_MS);
     expect(writes(mock)).toEqual([]);
+    expect(await stripMessage(page)).toBe(ROW_X);
     await page.keyboard.press("x");
     await expect.poll(() => opsNamed(mock, "comment")).toHaveLength(1);
     expect(opsNamed(mock, "undo_change")).toEqual([]);
@@ -319,7 +300,7 @@ test.describe("rows that can't take a no or a revert", () => {
     });
     await page.keyboard.press("n");
     await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe("nothing to say no to · u reverts");
+    await expect.poll(() => stripMessage(page)).toBe("nothing to say no to · u reverts");
     await page.keyboard.press("x");
     await page.waitForTimeout(SETTLE_MS);
     expect(writes(mock)).toEqual([]);
@@ -371,8 +352,8 @@ test.describe("the whole-doc stop", () => {
     const said: Record<string, string | null> = {};
     for (const key of ["l", ".", "x", "y"]) {
       await page.keyboard.press(key);
-      await expect.poll(() => pillOf(page)).not.toBe(said[Object.keys(said).at(-1) ?? ""] ?? null);
-      said[key] = await pillOf(page);
+      await expect.poll(() => stripMessage(page)).not.toBe(said[Object.keys(said).at(-1) ?? ""] ?? null);
+      said[key] = await stripMessage(page);
     }
     expect(said).toEqual({
       l: "later needs a block · j",
@@ -388,7 +369,7 @@ test.describe("the whole-doc stop", () => {
     const { mock } = await openFixture(page, birta, "drafts");
     await expect.poll(() => focused(page)).toBe("doc");
     await page.keyboard.press("y");
-    await expect.poll(() => pillOf(page)).toBe(`${await turnKey(page)} hands back`);
+    await expect.poll(() => stripMessage(page)).toBe(`${await turnKey(page)} hands back`);
     await page.waitForTimeout(SETTLE_MS);
     expect(writes(mock)).toEqual([]);
   });
@@ -423,9 +404,9 @@ test.describe("the whole-doc stop", () => {
     await expect.poll(() => focused(page)).toBe("doc");
     await expect(page.locator(".file-header-name[data-review-focus]")).toHaveCount(0);
     await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe("whole doc: c to say what's wrong");
+    await expect.poll(() => stripMessage(page)).toBe("whole doc: c to say what's wrong");
     await page.keyboard.press("l");
-    await expect.poll(() => pillOf(page)).toBe("later needs a block · j");
+    await expect.poll(() => stripMessage(page)).toBe("later needs a block · j");
     await page.waitForTimeout(SETTLE_MS);
     expect(writes(mock)).toEqual([]);
   });
@@ -438,7 +419,7 @@ test.describe("the whole-doc stop", () => {
     await expect
       .poll(() => writes(mock))
       .toEqual([{ op: "comment", at: { k: "block", sp: "1:1-1:5", scope: "section" }, verdict: "no" }]);
-    await expect.poll(() => pillOf(page)).toBe("no · # One (section) · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("no · # One (section) · z to undo");
     await page.keyboard.press("k");
     await expect.poll(() => focused(page)).toBe("doc");
   });
@@ -450,7 +431,7 @@ test.describe("the whole-doc stop", () => {
     await page.keyboard.press("u");
     await expect.poll(() => opsNamed(mock, "undo_change")).toEqual([{ op: "undo_change", change: "13.0" }]);
     await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe(ROW_X);
+    await expect.poll(() => stripMessage(page)).toBe(ROW_X);
     const seenBefore = opsNamed(mock, "seen").length;
     await page.keyboard.press("y");
     await expect.poll(() => opsNamed(mock, "seen").length).toBe(seenBefore + 1);
@@ -478,13 +459,13 @@ test.describe("verdict pills", () => {
     const { mock } = await openFixture(page, birta, "drafts");
     await focusOn(page, "3:1-3:6");
     await page.keyboard.press("l");
-    await expect.poll(() => pillOf(page)).toBe("later · ## Why (section) · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("later · ## Why (section) · z to undo");
     await focusOn(page, await stopSp(page, "Nothing yet."));
     await page.keyboard.press(".");
-    await expect.poll(() => pillOf(page)).toBe('your call · "Nothing yet." (paragraph) · z to undo');
+    await expect.poll(() => stripMessage(page)).toBe('your call · "Nothing yet." (paragraph) · z to undo');
     await focusOn(page, await stopSp(page, "backoff of 1, 2 and 4 seconds"));
     await page.keyboard.press("y");
-    await expect.poll(() => pillOf(page)).toBe('yes · "backoff of 1, 2 and 4…" (list item) · z to undo');
+    await expect.poll(() => stripMessage(page)).toBe('yes · "backoff of 1, 2 and 4…" (list item) · z to undo');
     expect(writes(mock).map((o) => o.verdict)).toEqual(["later", "your_call", "yes"]);
   });
 
@@ -492,7 +473,7 @@ test.describe("verdict pills", () => {
     await openFixture(page, birta, "drafts");
     await focusOn(page, "5:1-6:54");
     await page.keyboard.press("y");
-    await expect.poll(() => pillOf(page)).toBe('yes · "When the upload hits a 503…" (paragraph) · z to undo');
+    await expect.poll(() => stripMessage(page)).toBe('yes · "When the upload hits a 503…" (paragraph) · z to undo');
   });
 
   test("a verdict on a selection names the selected words", async ({ page, birta }) => {
@@ -507,14 +488,14 @@ test.describe("verdict pills", () => {
       getSelection()!.addRange(r);
     }, sp);
     await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe('no · "Detail" · z to undo');
+    await expect.poll(() => stripMessage(page)).toBe('no · "Detail" · z to undo');
   });
 
   test("replacing a verdict names the new one", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "drafts", bareVerdict);
     await focusOn(page, "10:1-10:16");
     await page.keyboard.press("y");
-    await expect.poll(() => pillOf(page)).toBe('yes · "retries on 503" (list item) · z to undo');
+    await expect.poll(() => stripMessage(page)).toBe('yes · "retries on 503" (list item) · z to undo');
     expect(writes(mock)).toEqual([{ op: "amend", to: 5, verdict: "yes" }]);
   });
 
@@ -525,7 +506,7 @@ test.describe("verdict pills", () => {
     });
     await focusOn(page, "10:1-10:16");
     await page.keyboard.press("l");
-    await expect.poll(() => pillOf(page)).toBe("later removed · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("later removed · z to undo");
     expect(writes(mock)).toEqual([{ op: "retract", to: 5 }]);
   });
 
@@ -533,7 +514,7 @@ test.describe("verdict pills", () => {
     const { mock } = await openFixture(page, birta, "drafts");
     await focusOn(page, "10:1-10:16");
     await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe("no removed · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("no removed · z to undo");
     expect(writes(mock)).toEqual([{ op: "amend", to: 5, drop_verdict: true }]);
   });
 
@@ -544,7 +525,7 @@ test.describe("verdict pills", () => {
     await page.keyboard.press("x");
     await expect.poll(() => reviewLog(served.root)?.length ?? 0).toBe(4);
     await page.waitForTimeout(SETTLE_MS);
-    expect(await pillOf(page)).toBe("no · ## Why (section) · z to undo");
+    expect(await stripMessage(page)).toBe("no · ## Why (section) · z to undo");
   });
 });
 
@@ -759,7 +740,7 @@ test.describe("blanks", () => {
       await walkToBlank(page, OPEN_Q);
       await page.keyboard.press(key);
       await expect.poll(() => opsNamed(mock, "reply")).toEqual([{ op: "reply", to: 21, verdict }]);
-      await expect.poll(() => pillOf(page)).toBe(`answered ${word} · z to undo`);
+      await expect.poll(() => stripMessage(page)).toBe(`answered ${word} · z to undo`);
     });
   }
 
@@ -807,7 +788,7 @@ test.describe("blanks", () => {
     const { mock } = await openFixture(page, birta, "flow", blanksOnly);
     await walkToBlank(page, OPEN_Q);
     await page.keyboard.press("h");
-    await expect.poll(() => pillOf(page)).toBe("⏎ to type an answer");
+    await expect.poll(() => stripMessage(page)).toBe("⏎ to type an answer");
     await page.waitForTimeout(SETTLE_MS);
     expect(await answerField(page).count()).toBe(0);
     expect(writes(mock)).toEqual([]);
@@ -818,7 +799,7 @@ test.describe("blanks", () => {
     await walkToBlank(page, OPEN_Q);
     await page.keyboard.press("1");
     await page.waitForTimeout(SETTLE_MS);
-    expect(await pillOf(page)).not.toBe("⏎ to type an answer");
+    expect(await stripMessage(page)).not.toBe("⏎ to type an answer");
     // As a US keyboard types it, with the blank holding the keys
     await page.keyboard.press("Shift+Slash");
     const sheetOpen = () =>
@@ -831,7 +812,7 @@ test.describe("blanks", () => {
         }
       });
     await expect.poll(sheetOpen).toBe(true);
-    expect(await pillOf(page)).not.toBe("⏎ to type an answer");
+    expect(await stripMessage(page)).not.toBe("⏎ to type an answer");
     expect(writes(mock)).toEqual([]);
   });
 
@@ -842,17 +823,17 @@ test.describe("blanks", () => {
     const y = await page.evaluate(() => scrollY);
     await page.keyboard.press("Space");
     await expect.poll(() => page.evaluate(() => scrollY)).toBeGreaterThan(y);
-    expect(await pillOf(page)).not.toBe("⏎ to type an answer");
+    expect(await stripMessage(page)).not.toBe("⏎ to type an answer");
   });
 
   test("⏎ after the how-to-type pill takes the pill away with it", async ({ page, birta }) => {
     await openFixture(page, birta, "flow", blanksOnly);
     await walkToBlank(page, OPEN_Q);
     await page.keyboard.press("h");
-    await expect.poll(() => pillOf(page)).toBe("⏎ to type an answer");
+    await expect.poll(() => stripMessage(page)).toBe("⏎ to type an answer");
     await page.keyboard.press("Enter");
     await expect(answerField(page)).toBeFocused();
-    await expect.poll(() => pillOf(page)).toBeNull();
+    await expect.poll(() => stripMessage(page)).toBeNull();
   });
 
   test("Esc saves a blank's typed answer, and an empty field writes nothing", async ({ page, birta }) => {
@@ -945,7 +926,7 @@ test.describe("blanks", () => {
     await page.keyboard.press("Enter");
     await expect(page.locator(".file-header birta-turn")).toContainText("Hand back · 2");
     await page.keyboard.press("ControlOrMeta+Enter");
-    await expect.poll(() => pillOf(page)).toBe("handing back · 1 note · 1 answer · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("handing back · 1 note · 1 answer · z to undo");
   });
 });
 
@@ -1004,7 +985,7 @@ test.describe("killers: u and the row", () => {
     await page.keyboard.press("n");
     await page.locator('#content [data-sourcepos="16:1-16:19"]').click();
     await page.keyboard.press("u");
-    await expect.poll(() => pillOf(page)).toBe("nothing here to revert");
+    await expect.poll(() => stripMessage(page)).toBe("nothing here to revert");
     await page.waitForTimeout(SETTLE_MS);
     expect(await sourceShown(page)).toBe(false);
     expect(opsNamed(mock, "undo_change")).toEqual([]);
@@ -1014,10 +995,10 @@ test.describe("killers: u and the row", () => {
     const { mock } = await openFixture(page, birta, "flow", twoChanges);
     await page.keyboard.press("n");
     await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe(ROW_X);
+    await expect.poll(() => stripMessage(page)).toBe(ROW_X);
     await page.keyboard.press("n");
     await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe(ROW_X);
+    await expect.poll(() => stripMessage(page)).toBe(ROW_X);
     await page.keyboard.press("j");
     await page.keyboard.press("k");
     await page.keyboard.press("x");
@@ -1035,7 +1016,7 @@ test.describe("killers: u and the row", () => {
     await page.keyboard.press("n");
     await page.keyboard.press("x");
     await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe('no · "When the upload hits a 503…" (paragraph) · z to undo');
+    await expect.poll(() => stripMessage(page)).toBe('no · "When the upload hits a 503…" (paragraph) · z to undo');
     await page.keyboard.press("z");
     // The mock acks every op in turn from line 101, the walk's seen first
     const line = 101 + mock.ops().findIndex((o) => o.op === "comment");
@@ -1059,7 +1040,7 @@ test.describe("killers: u and the row", () => {
     });
     await page.keyboard.press("n");
     await page.keyboard.press("u");
-    await expect.poll(() => pillOf(page)).toBe("already reverted · c note to ask for it back");
+    await expect.poll(() => stripMessage(page)).toBe("already reverted · c note to ask for it back");
     await page.waitForTimeout(SETTLE_MS);
     expect(await sourceShown(page)).toBe(false);
     expect(writes(mock)).toEqual([]);
@@ -1072,7 +1053,7 @@ test.describe("killers: u and the row", () => {
     });
     await page.keyboard.press("n");
     await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe("x = no to this text · x again for no");
+    await expect.poll(() => stripMessage(page)).toBe("x = no to this text · x again for no");
   });
 
   test("Q6: a selection beats the open row: x is no on the words", async ({ page, birta }) => {
@@ -1101,12 +1082,12 @@ test.describe("killers: u and the row", () => {
       await booted(page);
       await page.keyboard.press("n");
       await page.keyboard.press("x");
-      await expect.poll(() => pillOf(page)).toBe(`x = no to this text · ${revert} reverts Claude's change · x again for no`);
+      await expect.poll(() => stripMessage(page)).toBe(`x = no to this text · ${revert} reverts Claude's change · x again for no`);
       if (raw === "u") {
         // No review action is on u, so review tabs leave the source view there, row or not
         await page.keyboard.press("u");
         await expect(page.locator("#source-view")).toBeVisible();
-        await expect.poll(() => pillOf(page)).toBe("source view · esc back");
+        await expect.poll(() => stripText(page)).toBe("source view · esc back");
         await page.keyboard.press("u");
         await expect(page.locator("#lane-frame")).toBeVisible();
       } else {
@@ -1115,11 +1096,11 @@ test.describe("killers: u and the row", () => {
         expect(await focused(page)).toBe("doc");
         // With no row open the revert's own key only says so
         await page.keyboard.press("u");
-        await expect.poll(() => pillOf(page)).toBe("nothing here to revert");
+        await expect.poll(() => stripMessage(page)).toBe("nothing here to revert");
         expect(await sourceShown(page)).toBe(false);
         await page.keyboard.press("s");
         await expect(page.locator("#source-view")).toBeVisible();
-        await expect.poll(() => pillOf(page)).toBe("source view · esc back");
+        await expect.poll(() => stripText(page)).toBe("source view · esc back");
         await page.keyboard.press("s");
         await expect(page.locator("#lane-frame")).toBeVisible();
         // Focus on the changed block opens its row again
@@ -1201,7 +1182,7 @@ test.describe("killers: the whole-doc stop", () => {
     const { mock } = await openFixture(page, birta, "approved");
     await expect.poll(() => focused(page)).toBe("doc");
     await page.keyboard.press("y");
-    await expect.poll(() => pillOf(page)).toBe("approved · c to reopen");
+    await expect.poll(() => stripMessage(page)).toBe("approved · c to reopen");
     await page.waitForTimeout(SETTLE_MS);
     expect(writes(mock)).toEqual([]);
   });
@@ -1358,7 +1339,7 @@ test.describe("killers: pill words", () => {
     });
     await focusOn(page, "10:1-10:16");
     await page.keyboard.press(".");
-    await expect.poll(() => pillOf(page)).toBe("your call removed · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("your call removed · z to undo");
     expect(writes(mock)).toEqual([{ op: "retract", to: 5 }]);
   });
 
@@ -1373,7 +1354,7 @@ test.describe("killers: pill words", () => {
     for (const [text, pill] of cases) {
       await focusOn(page, await stopSp(page, text));
       await page.keyboard.press("l");
-      await expect.poll(() => pillOf(page), { message: text }).toBe(pill);
+      await expect.poll(() => stripMessage(page), { message: text }).toBe(pill);
     }
   });
 });

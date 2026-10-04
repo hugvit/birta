@@ -51,7 +51,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       return r.ok ? r.json() : null;
     }).then(function (me) {
       if (!me || me.served !== BOOT.review.served) {
-        if (me && !BR.chrome.pillSays(FOREIGN)) BR.chrome.pill(FOREIGN);
+        if (me && !BR.chrome.says(FOREIGN)) BR.chrome.say(FOREIGN);
         return later();
       }
       // The restarted server checks the beacon against its own token
@@ -71,6 +71,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     }
     down = true;
     show(true);
+    BR.chrome.renderStrip();
     later();
   }
 
@@ -79,13 +80,13 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     down = false;
     clearTimeout(timer);
     show(false);
-    BR.chrome.pill(RECONNECTED);
-    setTimeout(function () {
-      if (BR.chrome.pillSays(RECONNECTED)) BR.chrome.pill('');
-    }, RECONNECTED_MS);
+    BR.chrome.renderStrip();
+    BR.chrome.say(RECONNECTED, { ms: RECONNECTED_MS });
   }
 
   BR.life = {
+    /** Whether the server went away and this tab waits for it. */
+    stopped: function () { return down; },
     init: function () {
       var restart = BOOT.review.restart;
       // Without a served path there is nothing to check a restart against

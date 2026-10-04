@@ -5,8 +5,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var MIN = 60000;
   var NAME_CHARS = 24;
   var NACK_MS = 4000;
-  // A status pill that stayed would sit over what the reader looks at next
-  var PILL_MS = 4000;
+  // A plain message gives the keys back after this long; a moment passes its own
+  var SAY_MS = 4000;
   // A ⌘⏎ this soon after the approve guard's jump is a reflex, not a second press
   var DWELL_MS = 1000;
   // Keys that only modify the next one never count as "another key"
@@ -253,7 +253,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return count;
   }
 
-  /** What the pill says during a hold, or null outside one. */
+  /** What the strip says during a hold, or null outside one. */
   BR.pure.holdPill = function (s, opts) {
     if (!holding(s, opts.now)) return null;
     if (s.hold.kind === 'approve') return 'approving · z to undo';
@@ -261,6 +261,102 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var parts = s.hold.count || !answers ? [plural(s.hold.count, 'note', 'notes')] : [];
     if (answers) parts.push(plural(answers, 'answer', 'answers'));
     return 'handing back · ' + parts.join(' · ') + ' · z to undo';
+  };
+
+  // A settled note folds to its dot; an agent question still taking answers never does
+  var FOLDED = { handled: 1, answered: 1, later: 1 };
+
+  /** The stop a news item sits on, as a key: a removal or a question is a stop of its own, in its gap or under its block. */
+  function stopKey(kind, id, sp) {
+    if (kind === 'removal') return 'r:' + id;
+    if (kind === 'question' || kind === 'blank') return 'q:' + id;
+    return sp ? 'b:' + sp : 'doc';
+  }
+
+  /**
+   * Claude's news as `{key, kind}` per item, in walk order: the state's `news`, else the walk's
+   * stops of Claude's, where a removal still walks at the block above its gap.
+   */
+  function newsItems(s) {
+    if (Array.isArray(s.news)) {
+      return s.news.map(function (n) { return { key: stopKey(n.kind, n.id, n.sp), kind: n.kind }; });
+    }
+    return BR.pure.walk(s).filter(function (w) { return w.kind !== 'draft' && w.kind !== 'lost'; }).map(function (w) {
+      return { key: stopKey(w.kind, w.id, w.sp), kind: w.kind === 'blank' ? 'question' : w.kind };
+    });
+  }
+
+  function focusKey(f) {
+    if (!f || f.k === 'doc') return 'doc';
+    if (f.k === 'removal') return 'r:' + f.change;
+    if (f.k === 'blank') return 'q:' + f.id;
+    return 'b:' + f.sp;
+  }
+
+  function onStop(i, f) {
+    var at = i.at || {};
+    if (f.k === 'doc') return at.kind === 'doc';
+    return f.k === 'block' && at.kind !== 'doc' && !!at.loc && at.loc.sp === f.sp;
+  }
+
+  /**
+   * The strip's two sides for the focused stop: `where` names it, and `keys` says what works there.
+   * `focus` is `{k:"doc"}`, `{k:"block", sp, heading, kind}`, `{k:"removal", change, heading, kind}`
+   * or `{k:"blank", id}`; `opts` is `{now, mode, composer, button, mac, selection, stopped, keys}`,
+   * `mode` one of "raw", "reading" and "control". `N of M` counts the stops holding Claude's news.
+   */
+  BR.pure.stripText = function (s, focus, opts) {
+    var o = opts || {};
+    var f = focus || { k: 'doc' };
+    function key(action) { return BR.pure.keyName(action, o.keys); }
+    function row(where, keys) { return { where: where, keys: keys.join(' · ') }; }
+    if (o.mode === 'raw') return row('source view', ['esc back']);
+    if (o.mode === 'reading') return row('reading mode', ['esc back']);
+    if (o.mode === 'control') return row('on page controls', ['esc back to the doc']);
+    if (o.stopped) return row('birta stopped', ['notes wait here', '? keys']);
+    if (o.composer) {
+      var b = o.button;
+      var turn = b && !b.disabled ? [(o.mac ? '⌘⏎' : 'Ctrl⏎') + ' save & hand back'] : [];
+      return row(o.composer, ['⏎ save', '⇧⏎ new line'].concat(turn, ['esc save & close']));
+    }
+    if (s && BR.pure.clean(s, o.now)) return row('approved', [key('note') + ' reopen', '? keys']);
+    var crumb = f.k === 'doc' ? 'whole doc'
+      : f.k === 'blank' ? "Claude's question"
+      : f.k === 'removal' ? (f.heading ? f.heading + ' › ' : '') + 'removed ' + (f.kind || 'block')
+      : f.heading ? (f.kind ? f.heading + ' › ' + f.kind : f.heading) : f.kind || 'block';
+    if (o.selection) return row(crumb, [key('note') + ' note', key('ask') + ' ask', key('no') + ' cut these words']);
+    var stage = s ? view(s, o.now).p.stage : null;
+    if (stage === 'sent' || stage === 'picked_up') {
+      return row(crumb + ' · with Claude', [key('note') + ' note for next hand-back', '? keys']);
+    }
+    var items = s ? newsItems(s) : [];
+    var stops = [];
+    items.forEach(function (i) { if (stops.indexOf(i.key) < 0) stops.push(i.key); });
+    var here = focusKey(f);
+    var at = stops.indexOf(here);
+    if (at >= 0) {
+      var first = items.filter(function (i) { return i.key === here; })[0].kind;
+      var place = (at + 1) + ' of ' + stops.length + ' · ';
+      var next = key('next_item') + ' next';
+      if (first === 'question') return row(place + crumb, [key('open') + ' answer', key('yes') + ' yes', key('no') + ' no', next]);
+      if (first === 'removal') {
+        return row(place + crumb, [key('yes') + ' keep the cut', key('revert_change') + ' put it back', key('note') + ' reply', next]);
+      }
+      if (first === 'change' && f.k !== 'doc') {
+        return row(place + crumb + " · Claude's change",
+          [key('yes') + ' keep', key('revert_change') + ' revert', key('note') + ' reply', next]);
+      }
+      return row(place + crumb + ' · Claude replied', [key('yes') + ' ok', key('note') + ' reply', next]);
+    }
+    var notes = s && f.k !== 'blank' && f.k !== 'removal' ? (s.items || []).filter(function (i) { return onStop(i, f); }) : [];
+    if (notes.some(function (i) { return i.by && i.by.type === 'human' && i.status === 'draft'; })) {
+      return row(crumb + ' · your note', [key('note') + ' edit note', key('undo') + ' undo', '? more']);
+    }
+    if (notes.some(function (i) { return FOLDED[i.status] && !(i.by && i.by.type === 'agent' && i.verdict === 'ask'); })) {
+      return row(crumb + ' · settled note', [key('open') + ' open note', '? more']);
+    }
+    if (f.k === 'doc') return row(crumb, [key('note') + ' note on the whole doc', key('focus_next') + ' down', '? keys']);
+    return row(crumb, [key('note') + ' note', key('ask') + ' ask', key('no') + ' cut', key('yes') + ' keep as is', '? more']);
   };
 
   /** The phrase menu's rows: `{id, text, op?, copy?}`, in order. */
@@ -345,7 +441,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   // --- The header, the popovers and the tab ---
 
-  var phrase, phraseText, phraseWords, turn, turnBtn, turnWords, turnKbd, pop, menu, pill, sheet;
+  var phrase, phraseText, phraseWords, turn, turnBtn, turnWords, turnKbd, pop, menu, sheet;
+  var strip, stripBox, stripWhere, stripKeys;
   // Server time minus this page's clock; it only moves forward, so a passed hold never comes back
   var skew = null;
   var dir = null;
@@ -355,9 +452,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   // Its batch once acked; another doc's hold the page's own state never shows
   var batch = null;
   var withdrawing = null;
-  // The pill's own message: {text, until?, arm?} from pointing, or {nack, until} for a refused op
+  // The strip's message: {text, until?, arm?}, or {nack, until} for a refused op; an armed one waits for a key
   var message = null;
-  // The approve guard's jump, until a key other than ⌘⏎ or its pill going disarms it: {at, ids, unseen}
+  // The approve guard's jump, until a key other than ⌘⏎ or its message going disarms it: {at, ids, unseen}
   var guard = null;
   var heldN = null;
   var rows = [];
@@ -440,71 +537,129 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       if (turnBtn.getAttribute('title') !== title) turnBtn.setAttribute('title', title);
       turnBtn.disabled = b.disabled;
     }
-    renderPill(s, t);
+    renderStrip();
     news(!!s && !!s.counts && s.counts.attention > 0);
     if (menuOpen()) fillMenu();
     schedule(s, t);
   }
 
-  function renderPill(s, t) {
+  /** The message the strip shows now, or '' for none: a hold speaks over any other. */
+  function messageText(s, t) {
     var hold = s && BR.pure.holdPill(s, { now: t });
     var b = batchHold(t);
     // A folder's hand-back counts every file's notes, whichever doc it was sent from
     if (b && !(hold && s.hold.kind === 'approve')) hold = 'handing back · ' + plural(b.count, 'note', 'notes') + ' · z to undo';
-    // A new hold speaks over whatever the pill said before it
+    // A new hold speaks over whatever was said before it
     var n = b ? 'batch ' + b.batch : hold ? s.hold.n : null;
-    if (n !== null && n !== heldN) say(null);
+    if (n !== null && n !== heldN) setMessage(null);
     heldN = n;
     // A deadline runs on the page's own clock
-    if (message && message.until && Date.now() >= message.until) say(null);
-    var text = hold ? (down ? 'connection lost · hand-back stands' : hold)
+    if (message && message.until && Date.now() >= message.until) setMessage(null);
+    return hold ? (down ? 'connection lost · hand-back stands' : hold)
       : message ? (message.nack ? BR.pure.nackText(message.nack, s) : message.text) : '';
-    if (pill.textContent !== text) pill.textContent = text;
-    popover(pill, !!text);
-    place();
   }
 
-  /** Replaces the pill's message; an armed one going takes its arm with it. */
-  function say(next) {
+  /** The viewer's mode the strip names, read from its globals, or a header control Tab reached. */
+  function stripMode() {
+    if (typeof viewMode !== 'undefined' && viewMode === 'raw') return 'raw';
+    if (typeof isReadingMode !== 'undefined' && isReadingMode === true) return 'reading';
+    return BR.pointing.keyedControl() ? 'control' : null;
+  }
+
+  /**
+   * The strip: where focus is on the left, its keys or the message on the right. Before review
+   * shows it appears only to carry a message or a selection's hint, and names no place.
+   */
+  function renderStrip() {
+    if (!strip) return;
+    var s = BR.currentState();
+    var t = now();
+    var text = messageText(s, t);
+    var selecting = BR.pointing.selecting();
+    var mode = stripMode();
+    var chrome = shown(s);
+    var on = chrome || !!text || selecting;
+    strip.hidden = !on;
+    document.documentElement.toggleAttribute('data-review-strip', on);
+    if (!on) return;
+    var r = BR.pure.stripText(s, BR.pointing.stripFocus(), {
+      now: t,
+      mode: mode,
+      composer: BR.flow.composerLabel(),
+      button: s && shown(s) ? BR.pure.turnButton(s, turnOpts(t)) : null,
+      mac: mac(),
+      selection: selecting,
+      stopped: !!BR.life && BR.life.stopped(),
+      keys: typeof KEYBINDINGS === 'undefined' ? null : KEYBINDINGS
+    });
+    strip.toggleAttribute('data-message', !!text);
+    strip.toggleAttribute('data-dim', mode === 'reading');
+    var where = chrome ? r.where : '';
+    if (stripWhere.textContent !== where) stripWhere.textContent = where;
+    var parts = text ? [text] : r.keys.split(' · ');
+    var was = Array.prototype.map.call(stripKeys.children, function (k) { return k.getAttribute('data-key'); });
+    if (was.join('\n') !== parts.join('\n')) {
+      stripKeys.textContent = '';
+      parts.forEach(function (p, i) {
+        var k = document.createElement('span');
+        k.className = 'key';
+        k.setAttribute('data-key', p);
+        if (i) k.appendChild(document.createElement('span')).textContent = ' · ';
+        k.appendChild(document.createTextNode(p));
+        stripKeys.appendChild(k);
+      });
+    }
+    fit(!!text);
+  }
+
+  /** Narrow widths drop keys from the right, but the last, `? keys`, always stays. */
+  function fit(saying) {
+    var keys = Array.prototype.slice.call(stripKeys.children);
+    keys.forEach(function (k) { k.hidden = false; });
+    if (saying) return;
+    for (var i = keys.length - 2; i >= 0 && cut(); i--) keys[i].hidden = true;
+    // The first key shown leads with no separator
+    var lead = true;
+    keys.forEach(function (k) {
+      if (k.hidden) return;
+      if (k.firstChild && k.firstChild.nodeType === 1) k.firstChild.hidden = lead;
+      lead = false;
+    });
+  }
+
+  function cut() {
+    return stripWhere.scrollWidth > stripWhere.clientWidth + 1 || stripBox.scrollWidth > stripBox.clientWidth + 1;
+  }
+
+  var stripping = false;
+
+  /** Draws the strip again once the change in hand is done: a focus, a key, a mode, a selection. */
+  function stripSoon() {
+    if (stripping) return;
+    stripping = true;
+    Promise.resolve().then(function () {
+      stripping = false;
+      renderStrip();
+    });
+  }
+
+  /** Replaces the message; an armed one going takes its arm with it. */
+  function setMessage(next) {
     var was = message;
     message = next;
     if (was && was.arm && was !== next && was.arm.off) was.arm.off();
   }
 
-  /** Any key but the one an armed pill waits for disarms it; a bare modifier is not a key yet. */
+  /** Any key but the one an armed message waits for disarms it; a bare modifier is not a key yet. */
   function onAnyKey(e) {
     // A held key's repeats are not new keys
     if (!message || !message.arm || MODIFIERS[e.key] || e.repeat) return;
     if (message.arm.keep && message.arm.keep(e)) return;
-    say(null);
+    setMessage(null);
     render();
   }
 
-  // A pill never covers an open composer: it moves above it, or below when there is no room
-  function place() {
-    pill.style.removeProperty('top');
-    pill.style.removeProperty('bottom');
-    var c = BR.flow.composerRect && BR.flow.composerRect();
-    if (!c || !pill.textContent) return;
-    var p = pill.getBoundingClientRect();
-    if (!p.height || p.bottom <= c.top || p.top >= c.bottom || p.right <= c.left || p.left >= c.right) return;
-    var top = c.top - p.height - 8;
-    pill.style.setProperty('bottom', 'auto');
-    pill.style.setProperty('top', (top >= 0 ? top : c.bottom + 8) + 'px');
-  }
-
-  var placing = false;
-
-  function placeSoon() {
-    if (placing) return;
-    placing = true;
-    requestAnimationFrame(function () {
-      placing = false;
-      place();
-    });
-  }
-
-  /** Re-renders when the next hold ends, the silence threshold passes or its minute ticks, or a nack pill expires. */
+  /** Re-renders when the next hold ends, the silence threshold passes or its minute ticks, or a message expires. */
   function schedule(s, t) {
     clearTimeout(timer);
     var waits = [];
@@ -746,12 +901,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   /**
    * Approves, unless something unseen or an open question is left: then the first press goes
-   * there and says so, and a press past the dwell, while that pill stands, approves anyway.
+   * there and says so, and a press past the dwell, while that message stands, approves anyway.
    */
   function approveGuarded(s) {
     if (guard) {
       if (Date.now() - guard.at < DWELL_MS) return;
-      say(null);
+      setMessage(null);
       BR.op({ op: 'approve' });
       return;
     }
@@ -763,7 +918,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     // Counts that say unseen with no stop to land on still arm: approve is never silent
     BR.pointing.guard();
     var mine = guard = { at: Date.now(), ids: unseenIds(s), unseen: view(s, now()).unseen };
-    say({ text: text, arm: { keep: turnKey, off: function () { if (guard === mine) guard = null; } } });
+    setMessage({ text: text, arm: { keep: turnKey, off: function () { if (guard === mine) guard = null; } } });
     render();
   }
 
@@ -805,13 +960,13 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
           skew = skew === null ? d : Math.max(skew, d);
         }
         // New unseen text must be seen before approve anyway counts for it
-        if (guard && msg.path === CURRENT_PATH && msg.state && newUnseen(msg.state)) say(null);
+        if (guard && msg.path === CURRENT_PATH && msg.state && newUnseen(msg.state)) setMessage(null);
         break;
       case 'dir_state':
         dir = msg;
         break;
       case 'ack':
-        if (message && message.nack) say(null);
+        if (message && message.nack) setMessage(null);
         if (handBackDue && !BR.pending.unacked()) {
           handBackDue = false;
           handBack();
@@ -902,10 +1057,6 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       right.insertBefore(turn, right.firstChild);
 
       pop = host('birta-pop');
-      pill = document.createElement('div');
-      pill.className = 'pill';
-      pill.setAttribute('role', 'status');
-      pill.setAttribute('popover', 'manual');
       menu = document.createElement('div');
       menu.className = 'menu';
       menu.setAttribute('role', 'menu');
@@ -917,8 +1068,24 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       sheet.setAttribute('role', 'dialog');
       sheet.setAttribute('aria-label', 'keys');
       sheet.setAttribute('popover', 'manual');
-      pop.root.append(pill, menu, sheet);
+      pop.root.append(menu, sheet);
       document.body.appendChild(pop.el);
+
+      var st = host('birta-strip');
+      strip = st.el;
+      strip.hidden = true;
+      stripBox = document.createElement('div');
+      stripBox.className = 'strip';
+      stripBox.setAttribute('role', 'status');
+      stripWhere = document.createElement('span');
+      stripWhere.className = 'where';
+      stripWhere.setAttribute('data-part', 'where');
+      stripKeys = document.createElement('span');
+      stripKeys.className = 'keys';
+      stripKeys.setAttribute('data-part', 'keys');
+      stripBox.append(stripWhere, stripKeys);
+      st.root.appendChild(stripBox);
+      document.body.appendChild(strip);
       // Pointer only: a scripted click elsewhere (the theme menu's) leaves it open
       document.addEventListener('pointerdown', function (e) {
         var path = e.composedPath();
@@ -930,9 +1097,13 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       document.addEventListener('copy', onCopy, true);
       // Capture, so a key a host or the composer keeps to itself still disarms
       document.addEventListener('keydown', onAnyKey, true);
-      window.addEventListener('scroll', placeSoon, { passive: true });
-      window.addEventListener('resize', placeSoon);
-      document.addEventListener('input', placeSoon, true);
+      // What the strip names changes with the focus, the keys, the mode and the selection
+      window.addEventListener('resize', stripSoon);
+      document.addEventListener('input', stripSoon, true);
+      document.addEventListener('focusin', stripSoon, true);
+      document.addEventListener('focusout', stripSoon, true);
+      document.addEventListener('keyup', stripSoon, true);
+      document.addEventListener('selectionchange', stripSoon);
       render();
     },
     render: render,
@@ -958,22 +1129,26 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     /** Whether the review chrome shows on this page (design call 4). */
     shown: function () { return shown(BR.currentState()); },
     /**
-     * Shows `text` in the pill, or clears it for ''; it goes after 4 s. An armed pill passes `arm`:
-     * `{until?, keep(e), off()}`; it goes when `until` passes or on any key `keep` doesn't claim, and `off` runs then.
+     * Shows `text` in the strip in place of the keys, or clears it for ''. It goes after 4 s, or
+     * `opts.ms`; an armed one, `opts.arm` `{keep(e), off()}`, goes on the next key `keep` doesn't claim, and `off` runs then.
      */
-    pill: function (text, arm) {
-      say(text ? { text: text, until: arm ? arm.until : Date.now() + PILL_MS, arm: arm || null } : null);
+    say: function (text, opts) {
+      var o = opts || {};
+      setMessage(text ? { text: text, until: o.arm ? null : Date.now() + (o.ms || SAY_MS), arm: o.arm || null } : null);
       render();
     },
-    pillSays: function (text) { return !!message && message.text === text; },
+    says: function (text) { return !!message && message.text === text; },
     /** Shows a refused op's reason until the next acked op, a new hold, or 4 s. */
     nack: function (reason) {
-      say({ nack: reason, until: Date.now() + NACK_MS });
+      setMessage({ nack: reason, until: Date.now() + NACK_MS });
       render();
     },
     /** Whether the page shows the clean view: approved, and past the approve's hold. */
     clean: function () { return BR.pure.clean(BR.currentState(), now()); },
-    /** Moves the pill clear of a composer that just opened or moved. */
-    place: place
+    renderStrip: renderStrip,
+    /** The strip's top while it shows, else the window's bottom: the view ends there. */
+    stripTop: function () {
+      return strip && !strip.hidden && strip.getClientRects().length ? strip.getBoundingClientRect().top : innerHeight;
+    }
   };
 })();

@@ -29,6 +29,8 @@ import {
   spAt,
   stopSp,
   stops,
+  stripMessage,
+  stripPlace,
 } from "./harness";
 
 const WIDE = { width: 1280, height: 900 };
@@ -284,7 +286,7 @@ test.describe("rows on focus", () => {
     expect(rows[0]).toMatchObject({ sp: id === "20.0" ? a : b, kbd: ["y", "u", "c"] });
   });
 
-  test("n moves between two changes on one block, one open row at a time", async ({ page, birta }) => {
+  test("n on a block with two changes goes on to the next stop, not to the block's second change", async ({ page, birta }) => {
     const state = bent("flow", (s) => {
       const c = s.changes.find((c: State) => c.id === "19.0");
       s.changes.push({ ...JSON.parse(JSON.stringify(c)), id: "19.1", idx: 1, label: "1 word changed" });
@@ -293,10 +295,11 @@ test.describe("rows on focus", () => {
     await walkTo(page, "19.0");
     const keyed = async () => (await hosts(page)).filter((h) => h.text.includes("without a note") && h.kbd.length).map((h) => h.text);
     await expect.poll(keyed).toEqual([`Claude · without a note · 2 words → 3 · ${KEYS}`]);
+    // One stop, one landing: the next n leaves the block for 27.0's
     await page.keyboard.press("n");
-    await expect.poll(() => openRow(page)).toBe("19.1");
-    await expect.poll(keyed).toEqual([`Claude · without a note · 1 word changed · ${KEYS}`]);
-    expect((await hosts(page)).filter((h) => h.text.includes("2 words → 3"))).toEqual([]);
+    await expect.poll(() => openRow(page)).toBe("27.0");
+    expect(await focused(page)).toBe("16:1-16:19");
+    await expect.poll(keyed).toEqual([]);
   });
 
   test("j after n closes the row n opened", async ({ page, birta }) => {
@@ -493,7 +496,7 @@ test.describe("reverted row on a real server", () => {
     await expect.poll(() => hostWith(page, "reverted")).toMatchObject({ text: `reverted · ${c.label}`, kbd: [] });
     expect((await hostWith(page, "reverted"))!.sp).toMatch(/^5:1-/);
     expect(await focused(page)).toMatch(/^5:1-/);
-    await expect.poll(() => pillOf(page)).toBe(`reverted · ${c.label}`);
+    await expect.poll(() => stripMessage(page)).toBe(`reverted · ${c.label}`);
   });
 
   test("the reverted change stays a walk stop until the round ends, and its wash clears once seen", async ({ page, birta }) => {
@@ -506,7 +509,7 @@ test.describe("reverted row on a real server", () => {
     await page.keyboard.press("n");
     await expect.poll(() => focused(page)).toMatch(/^5:1-/);
     await expect.poll(() => hostWith(page, "reverted")).toMatchObject({ text: `reverted · ${c.label}` });
-    await expect.poll(() => pillOf(page)).toBe("1 of 1 · n next · p back");
+    await expect.poll(() => stripPlace(page)).toBe("1 of 1");
     await page.waitForTimeout(SETTLE_MS);
     expect((await marks(page)).filter((m) => m.mark === "wash" && m.width > 0)).toEqual([]);
   });
@@ -727,21 +730,21 @@ test.describe("dots", () => {
 
   test("the first dot ever pills once, and not again after a reload", async ({ page, birta }) => {
     await open(page, birta, FLOW, folded());
-    await expect.poll(() => pillOf(page)).toBe("• a settled note · ⏎ opens it");
+    await expect.poll(() => stripMessage(page)).toBe("• a settled note · ⏎ opens it");
     await page.reload();
     await booted(page);
     await expect.poll(async () => (await dots(page)).length).toBe(1);
     await page.waitForTimeout(SETTLE_MS);
-    expect(await pillOf(page)).not.toBe("• a settled note · ⏎ opens it");
+    expect(await stripMessage(page)).not.toBe("• a settled note · ⏎ opens it");
   });
 
   test("a doc with no dots leaves the first-dot pill for the first dot a push brings", async ({ page, birta }) => {
     const { mock } = await open(page, birta, FLOW, fixtureState("flow"));
     await page.waitForTimeout(SETTLE_MS);
-    expect(await pillOf(page)).toBeNull();
+    expect(await stripMessage(page)).toBeNull();
     mock.pushState(folded());
     await expect.poll(async () => (await dots(page)).length).toBe(1);
-    await expect.poll(() => pillOf(page)).toBe("• a settled note · ⏎ opens it");
+    await expect.poll(() => stripMessage(page)).toBe("• a settled note · ⏎ opens it");
   });
 
   test("storage that refuses writes still boots and draws the dot", async ({ page, birta }) => {
@@ -1168,20 +1171,6 @@ test.describe("composer", () => {
 
 // --- Pill copy (N6) and the phrase (N7, N14) --------------------------------------------------
 
-/** The pill's text while it is open in the top layer, else null. */
-function pillOf(page: Page): Promise<string | null> {
-  return page.evaluate(() => {
-    const root = document.querySelector("birta-pop")?.shadowRoot;
-    const el = root?.querySelector('[role="status"]');
-    if (!el) return null;
-    try {
-      return el.matches(":popover-open") ? (el.textContent ?? "").trim() || null : null;
-    } catch {
-      return null;
-    }
-  });
-}
-
 test.describe("copy", () => {
   test("the first note on a doc pills note saved", async ({ page, birta }) => {
     const served = await birta({ "pr.md": STOPS_DOC }, GATE_ON);
@@ -1192,7 +1181,7 @@ test.describe("copy", () => {
     await page.keyboard.type("first");
     await page.keyboard.press("Enter");
     await expect.poll(() => reviewLog(served.root)?.length ?? 0).toBeGreaterThan(0);
-    await expect.poll(() => pillOf(page)).toBe("note saved · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("note saved · z to undo");
   });
 
   test("the phrase's three counts fit the header at 1280 px, and the tooltip holds the rest", async ({ page, birta }) => {

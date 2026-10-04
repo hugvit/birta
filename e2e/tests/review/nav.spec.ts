@@ -18,6 +18,7 @@ import {
   stopSp,
   stops,
   withRev,
+  stripMessage,
 } from "./harness";
 
 // The phrase prints local times; UTC lets the spec name them from the epoch alone
@@ -60,7 +61,7 @@ async function focusOn(page: Page, sp: string) {
 interface Chrome {
   phrase: string | null;
   turn: string | null;
-  pill: string | null;
+  message: string | null;
   menu: string[] | null;
   /** The key sheet's lines, or null while it is closed. */
   sheet: string[] | null;
@@ -96,12 +97,16 @@ function chrome(page: Page): Promise<Chrome> {
     const p = document.querySelector(".file-header birta-phrase");
     const t = document.querySelector(".file-header birta-turn");
     const btn = shown(t) ? (t.shadowRoot ?? t).querySelector("button") : null;
-    let pill: string | null = null;
+    // A message shows in the strip's keys part while the host carries data-message
+    const stripHost = document.querySelector("birta-strip");
+    const keysPart = stripHost && stripHost.getClientRects().length && stripHost.hasAttribute("data-message")
+      ? (stripHost.shadowRoot?.querySelector('[data-part="keys"]') ?? stripHost.querySelector('[data-part="keys"]'))
+      : null;
+    const message: string | null = keysPart ? textOf(keysPart) || null : null;
     let menu: string[] | null = null;
     let sheet: string[] | null = null;
     for (const h of Array.from(document.querySelectorAll("birta-pop"))) {
       const root = (h.shadowRoot ?? h) as ParentNode;
-      for (const el of Array.from(root.querySelectorAll('[role="status"]'))) if (open(el) && textOf(el)) pill = textOf(el);
       for (const el of Array.from(root.querySelectorAll('[role="menu"]')))
         if (open(el)) menu = Array.from(el.querySelectorAll('[role="menuitem"]')).map((r) => textOf(r));
       for (const el of Array.from(root.querySelectorAll('[role="dialog"]')))
@@ -110,14 +115,13 @@ function chrome(page: Page): Promise<Chrome> {
     return {
       phrase: shown(p) ? textOf(p) : null,
       turn: btn ? textOf(btn) : null,
-      pill,
+      message,
       menu,
       sheet,
     };
   });
 }
 
-const pillOf = async (page: Page) => (await chrome(page)).pill;
 const sheetOf = async (page: Page) => (await chrome(page)).sheet;
 const hash = (page: Page) => page.evaluate(() => location.hash);
 const viewing = (page: Page) => decodeURIComponent(new URL(page.url()).pathname);
@@ -202,7 +206,7 @@ test.describe("links in the focused block", () => {
     await open(page, birta, LINK_DOC);
     await focusOn(page, await stopSp(page, "See alpha"));
     await page.keyboard.press("Enter");
-    await expect.poll(() => pillOf(page)).toBe("2 links · Tab to pick");
+    await expect.poll(() => stripMessage(page)).toBe("2 links · Tab to pick");
     expect(await hash(page)).toBe("");
   });
 
@@ -249,7 +253,7 @@ test.describe("links in the focused block", () => {
     await focusOn(page, await stopSp(page, "Three: one"));
     expect(await page.evaluate(() => document.activeElement?.localName)).not.toBe("a");
     await page.keyboard.press("Enter");
-    await expect.poll(() => pillOf(page)).toBe("3 links · Tab to pick");
+    await expect.poll(() => stripMessage(page)).toBe("3 links · Tab to pick");
     expect(await hash(page)).toBe("");
   });
 
@@ -283,7 +287,7 @@ test.describe("links in the focused block", () => {
     const three = await stopSp(page, "Three:");
     await focusOn(page, three);
     await page.keyboard.press("Enter");
-    await expect.poll(() => pillOf(page)).toBe("3 links · Tab to pick");
+    await expect.poll(() => stripMessage(page)).toBe("3 links · Tab to pick");
     for (const key of ["Tab", "Tab", "Shift+Tab"]) await page.keyboard.press(key);
     expect(await picked(page)).toEqual({ text: "one", ring: true });
     for (const key of ["Tab", "Tab"]) await page.keyboard.press(key);
@@ -361,7 +365,7 @@ test.describe("links in the focused block", () => {
     await page.keyboard.press("Enter");
     await page.waitForTimeout(SETTLE_MS);
     expect(await hash(page)).toBe("");
-    expect(await pillOf(page)).toBeNull();
+    expect(await stripMessage(page)).toBeNull();
     expect(await dispatchKey(page, { key: "Tab", code: "Tab" })).toBe(false);
     await focusOn(page, await stopSp(page, "Heading with delta"));
     await page.keyboard.press("Enter");
@@ -440,7 +444,7 @@ test.describe("⏎ order on a focused block", () => {
     await page.keyboard.press("Enter");
     await expect.poll(() => noteText(page)).toContain("cap it");
     await page.waitForTimeout(SETTLE_MS);
-    expect(await pillOf(page)).toBeNull();
+    expect(await stripMessage(page)).toBeNull();
     expect(await hash(page)).toBe("");
   });
 
@@ -545,18 +549,18 @@ test.describe("Shift+J and Shift+K", () => {
     const dir = dirState([listed("pr.md", summary("drafts"), true), listed("approved.md", summary("approved")), listed("quiet.md")]);
     const { mock } = await openFolder(page, birta, dir);
     await page.keyboard.press("Shift+J");
-    await expect.poll(() => pillOf(page)).toBe("no other file has notes or news");
+    await expect.poll(() => stripMessage(page)).toBe("no other file has notes or news");
     await page.keyboard.press("Shift+K");
     await page.waitForTimeout(SETTLE_MS);
     expect(viewing(page)).toBe("/view/pr.md");
-    expect(await pillOf(page)).toBe("no other file has notes or news");
+    expect(await stripMessage(page)).toBe("no other file has notes or news");
     expect(mock.ops()).toEqual([]);
   });
 
   test("serving one file they pill the same", async ({ page, birta }) => {
     await open(page, birta, STOPS_DOC, { state: bare("drafts", STOPS_DOC) });
     await page.keyboard.press("Shift+K");
-    await expect.poll(() => pillOf(page)).toBe("no other file has notes or news");
+    await expect.poll(() => stripMessage(page)).toBe("no other file has notes or news");
   });
 });
 
@@ -749,13 +753,13 @@ test.describe("the ? sheet", () => {
     await page.keyboard.press("Escape");
     await expect.poll(() => sheetOf(page)).toBeNull();
     await page.keyboard.press("y");
-    await expect.poll(() => pillOf(page)).toBe("approved · c to reopen");
+    await expect.poll(() => stripMessage(page)).toBe("approved · c to reopen");
     // A clean-view key closes an open sheet and still answers as the clean view does
     await dispatchKey(page, { key: "?", code: "Slash", shiftKey: true });
     await expect.poll(() => sheetOf(page)).not.toBeNull();
     await page.keyboard.press("x");
     await expect.poll(() => sheetOf(page)).toBeNull();
-    expect(await pillOf(page)).toBe("approved · c to reopen");
+    expect(await stripMessage(page)).toBe("approved · c to reopen");
   });
 
   test("? typed in a note is text", async ({ page, birta }) => {
@@ -773,15 +777,15 @@ test.describe("an unbound letter", () => {
   test("pills `? for keys` once per key per session", async ({ page, birta }) => {
     await open(page, birta, STOPS_DOC, { state: bare("drafts", STOPS_DOC) });
     await page.keyboard.press("h");
-    await expect.poll(() => pillOf(page)).toBe("? for keys");
+    await expect.poll(() => stripMessage(page)).toBe("? for keys");
     // Another pill in between shows whether h pills again
     await page.keyboard.press("Shift+J");
-    await expect.poll(() => pillOf(page)).toBe("no other file has notes or news");
+    await expect.poll(() => stripMessage(page)).toBe("no other file has notes or news");
     await page.keyboard.press("h");
     await page.waitForTimeout(SETTLE_MS);
-    expect(await pillOf(page)).not.toBe("? for keys");
+    expect(await stripMessage(page)).not.toBe("? for keys");
     await page.keyboard.press("g");
-    await expect.poll(() => pillOf(page)).toBe("? for keys");
+    await expect.poll(() => stripMessage(page)).toBe("? for keys");
 
     await page.reload();
     await booted(page);
@@ -789,24 +793,24 @@ test.describe("an unbound letter", () => {
     await page.keyboard.press("h");
     await page.keyboard.press("g");
     await page.waitForTimeout(SETTLE_MS);
-    expect(await pillOf(page)).toBeNull();
+    expect(await stripMessage(page)).toBeNull();
     await page.keyboard.press("f");
-    await expect.poll(() => pillOf(page)).toBe("? for keys");
+    await expect.poll(() => stripMessage(page)).toBe("? for keys");
   });
 
   test("a status pill goes by itself after 4 s", async ({ page, birta }) => {
     await open(page, birta, STOPS_DOC, { state: bare("drafts", STOPS_DOC) });
     await page.keyboard.press("h");
-    await expect.poll(() => pillOf(page)).toBe("? for keys");
+    await expect.poll(() => stripMessage(page)).toBe("? for keys");
     await page.waitForTimeout(3_000);
-    expect(await pillOf(page)).toBe("? for keys");
-    await expect.poll(() => pillOf(page), { timeout: 3_000 }).toBeNull();
+    expect(await stripMessage(page)).toBe("? for keys");
+    await expect.poll(() => stripMessage(page), { timeout: 3_000 }).toBeNull();
   });
 
   test("a new tab is a new session, so it pills again", async ({ page, context, birta }) => {
     const { served } = await open(page, birta, STOPS_DOC, { state: bare("drafts", STOPS_DOC) });
     await page.keyboard.press("h");
-    await expect.poll(() => pillOf(page)).toBe("? for keys");
+    await expect.poll(() => stripMessage(page)).toBe("? for keys");
     const other = await context.newPage();
     await other.addInitScript(OPEN_ROOTS);
     await other.setViewportSize(WIDE);
@@ -815,7 +819,7 @@ test.describe("an unbound letter", () => {
     await booted(other);
     await expect.poll(async () => (await chrome(other)).phrase).not.toBeNull();
     await other.keyboard.press("h");
-    await expect.poll(() => pillOf(other)).toBe("? for keys");
+    await expect.poll(() => stripMessage(other)).toBe("? for keys");
   });
 
   test("the bound letters are the page's own bindings, rebound or not", async ({ page, birta }) => {
@@ -823,15 +827,15 @@ test.describe("an unbound letter", () => {
     // d is the viewer's own dark-mode key
     await page.keyboard.press("d");
     await page.waitForTimeout(SETTLE_MS);
-    expect(await pillOf(page)).toBeNull();
+    expect(await stripMessage(page)).toBeNull();
     await page.evaluate(() => {
       (window as unknown as { KEYBINDINGS: Record<string, string> }).KEYBINDINGS.yes = "g";
     });
     await page.keyboard.press("g");
     await page.waitForTimeout(SETTLE_MS);
-    expect(await pillOf(page)).not.toBe("? for keys");
+    expect(await stripMessage(page)).not.toBe("? for keys");
     await page.keyboard.press("y");
-    await expect.poll(() => pillOf(page)).toBe("? for keys");
+    await expect.poll(() => stripMessage(page)).toBe("? for keys");
   });
 
   test("bound letters, Shift and Ctrl letters, and a plain reader's letters pill nothing of the kind", async ({
@@ -841,13 +845,13 @@ test.describe("an unbound letter", () => {
     await open(page, birta, STOPS_DOC, { state: bare("drafts", STOPS_DOC) });
     for (const key of ["j", "m", "m", "Shift+H", "Control+h", "Alt+h", "t"]) await page.keyboard.press(key);
     await page.waitForTimeout(SETTLE_MS);
-    expect(await pillOf(page)).toBeNull();
+    expect(await stripMessage(page)).toBeNull();
   });
 
   test("a plain reader, with no review shown, gets no pill", async ({ page, birta }) => {
     await open(page, birta, STOPS_DOC);
     await page.keyboard.press("h");
     await page.waitForTimeout(SETTLE_MS);
-    expect(await chrome(page)).toMatchObject({ phrase: null, pill: null });
+    expect(await chrome(page)).toMatchObject({ phrase: null, message: null });
   });
 });

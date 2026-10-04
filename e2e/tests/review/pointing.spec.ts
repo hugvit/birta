@@ -31,8 +31,12 @@ import {
   stops,
   watchSent,
   withRev,
+  stripKeys,
 } from "./harness";
 import { GESTURES, P_PR, P_RETRY, dragWords, mid, waitDrawn, wordRect } from "../gestures";
+
+/** What the strip's keys say while a selection outranks the stop. */
+const SELECTION_HINT = "c note · q ask · x cut these words";
 
 const WIDE = { width: 1280, height: 900 };
 const SETTLE_MS = 400;
@@ -532,13 +536,13 @@ test.describe("verdict keys", () => {
       getSelection()!.removeAllRanges();
       getSelection()!.addRange(r);
     }, para);
-    await expect(page.getByText("c note · q ask · x cut")).toBeVisible();
+    await expect.poll(() => stripKeys(page)).toBe(SELECTION_HINT);
     for (const [key, text] of [["j", "What changes"], ["k", "When the upload"]] as const) {
       await page.keyboard.press(key);
       const sp = await stopSp(page, text);
       await expect.poll(() => focused(page)).toBe(sp);
       expect(await page.evaluate(() => getSelection()!.toString())).toBe("");
-      await expect(page.getByText("c note · q ask · x cut")).toHaveCount(0);
+      await expect.poll(() => stripKeys(page)).not.toBe(SELECTION_HINT);
       // Reselect inside the focused block, since a selection elsewhere would move the focus to it
       if (key === "j") {
         await page.evaluate((sp) => {
@@ -550,7 +554,7 @@ test.describe("verdict keys", () => {
           getSelection()!.removeAllRanges();
           getSelection()!.addRange(r);
         }, sp);
-        await expect(page.getByText("c note · q ask · x cut")).toBeVisible();
+        await expect.poll(() => stripKeys(page)).toBe(SELECTION_HINT);
       }
     }
     await page.keyboard.press("x");
@@ -689,7 +693,7 @@ test.describe("verdict keys", () => {
     expect(mock.ops()[0].at).toMatchObject({ k: "quote", sp: para, q: "upload", off: 9 });
     await focusOn(page, why);
     await select(why, null);
-    await expect(page.getByText("c note · q ask · x cut")).toHaveCount(0);
+    await expect.poll(() => stripKeys(page)).not.toBe(SELECTION_HINT);
     await page.keyboard.press("x");
     await expect.poll(() => mock.ops().length).toBe(2);
     expect(mock.ops()[1].at).toStrictEqual({ k: "block", sp: why, scope: "section" });
@@ -734,10 +738,9 @@ test.describe("selection", () => {
   test("a selection shows what the keys will do, and the hint goes with the selection", async ({ page, birta }) => {
     await openAnchor(page, birta);
     await GESTURES.find((g) => g.id.startsWith("01"))!.act(page);
-    const hint = page.getByText("c note · q ask · x cut");
-    await expect(hint).toBeVisible();
+    await expect.poll(() => stripKeys(page)).toBe(SELECTION_HINT);
     await page.keyboard.press("Escape");
-    await expect(hint).toBeHidden();
+    await expect.poll(() => stripKeys(page)).not.toBe(SELECTION_HINT);
   });
 
   test("a drag into the next paragraph is clamped to the first, and says so", async ({ page, birta }) => {
@@ -750,7 +753,7 @@ test.describe("selection", () => {
     await openAnchor(page, birta);
     for (const id of ["02", "03", "04", "06"]) {
       await GESTURES.find((g) => g.id.startsWith(id))!.act(page);
-      await expect(page.getByText("c note · q ask · x cut")).toBeVisible();
+      await expect.poll(() => stripKeys(page)).toBe(SELECTION_HINT);
       await expect(page.getByText("selection clamped to this paragraph")).toHaveCount(0);
     }
   });

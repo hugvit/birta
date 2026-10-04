@@ -18,6 +18,7 @@ import {
   spAt,
   stopSp,
   stops,
+  stripMessage,
 } from "./harness";
 
 const WIDE = { width: 1280, height: 900 };
@@ -41,29 +42,13 @@ async function open(page: Page, birta: Start, doc: string, opts: { state?: State
   return { served, mock };
 }
 
-/** The pill's text while it is open in the top layer and painted, else null. */
-function pillOf(page: Page): Promise<string | null> {
-  return page.evaluate(() => {
-    for (const host of document.querySelectorAll("birta-pop")) {
-      const root = host.shadowRoot ?? host;
-      for (const el of root.querySelectorAll('[role="status"]')) {
-        let open = false;
-        try {
-          open = el.matches(":popover-open") && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
-        } catch {
-          open = false;
-        }
-        const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
-        if (open && text) return text;
-      }
-    }
-    return null;
-  });
-}
-
-/** The view a stop must sit in: below the sticky header, above the window's bottom. */
+/** The view a stop must sit in: below the sticky header, above the strip (the window's bottom while there is none). */
 function view(page: Page): Promise<{ top: number; bottom: number }> {
-  return page.evaluate(() => ({ top: document.querySelector(".file-header")!.getBoundingClientRect().bottom, bottom: innerHeight }));
+  return page.evaluate(() => {
+    const strip = document.querySelector("birta-strip");
+    const bottom = strip && strip.getClientRects().length ? strip.getBoundingClientRect().top : innerHeight;
+    return { top: document.querySelector(".file-header")!.getBoundingClientRect().bottom, bottom };
+  });
 }
 
 /** Whether the block `sp` lies wholly out of the view. */
@@ -78,18 +63,20 @@ async function firstInView(page: Page): Promise<string | null> {
   const sps = (await stops(page)).map((s) => s.sp);
   return page.evaluate((sps) => {
     const top = document.querySelector(".file-header")!.getBoundingClientRect().bottom - 1;
+    const strip = document.querySelector("birta-strip");
+    const bottom = strip && strip.getClientRects().length ? strip.getBoundingClientRect().top : innerHeight;
     // Whole doc's room above the first block, its empty line included while it is unfocused
     const doc = document.querySelector('birta-flow[data-kind="doc-stop"]');
     if (doc && doc.getClientRects().length) {
       const r = doc.getBoundingClientRect();
-      if (r.top >= top && r.top < innerHeight) return "doc";
+      if (r.top >= top && r.top < bottom) return "doc";
     }
     for (const sp of sps) {
       const all = document.querySelectorAll(`#content [data-sourcepos="${sp}"]`);
       const el = all[all.length - 1];
       if (!el || !el.getClientRects().length) continue;
       const r = el.getBoundingClientRect();
-      if (r.top >= top && r.top < innerHeight) return sp;
+      if (r.top >= top && r.top < bottom) return sp;
     }
     return null;
   }, sps);
@@ -327,7 +314,7 @@ test.describe("keys on a stop", () => {
       await page.keyboard.press("Escape");
       await page.waitForTimeout(SETTLE_MS);
       expect(await focused(page)).toBe(sp);
-      expect(await pillOf(page)).toBeNull();
+      expect(await stripMessage(page)).toBeNull();
     }
     // The next key still acts on that stop
     await page.keyboard.press("x");
@@ -388,7 +375,7 @@ test.describe("keys on a stop", () => {
     const all = await stops(page);
     await focusTo(page, all.at(-1)!.sp);
     await page.keyboard.press("j");
-    await expect.poll(() => pillOf(page)).toBe("end of the doc");
+    await expect.poll(() => stripMessage(page)).toBe("end of the doc");
     expect(await focused(page)).toBe(all.at(-1)!.sp);
     await page.keyboard.press("j");
     await page.waitForTimeout(SETTLE_MS);
@@ -404,9 +391,9 @@ test.describe("keys on a stop", () => {
     await expect.poll(() => focused(page)).toBe(all[0].sp);
     await page.keyboard.press("k");
     await expect.poll(() => focused(page)).toBe("doc");
-    expect(await pillOf(page)).not.toBe("top of the doc");
+    expect(await stripMessage(page)).not.toBe("top of the doc");
     await page.keyboard.press("k");
-    await expect.poll(() => pillOf(page)).toBe("top of the doc");
+    await expect.poll(() => stripMessage(page)).toBe("top of the doc");
     expect(await focused(page)).toBe("doc");
   });
 
@@ -421,9 +408,9 @@ test.describe("keys on a stop", () => {
     await expect.poll(() => focused(page)).toBe(all[0].sp);
     await page.keyboard.press("k");
     await expect.poll(() => focused(page)).toBe("doc");
-    expect(await pillOf(page)).not.toBe("top of the doc");
+    expect(await stripMessage(page)).not.toBe("top of the doc");
     await page.keyboard.press("k");
-    await expect.poll(() => pillOf(page)).toBe("top of the doc");
+    await expect.poll(() => stripMessage(page)).toBe("top of the doc");
     expect(await focused(page)).toBe("doc");
   });
 });
@@ -679,7 +666,7 @@ function askState(doc: string, sp: string | null): State {
 }
 
 test.describe("repair", () => {
-  test("j onto a stop the window's bottom cuts brings it fully into view, and it stays there", async ({ page, birta }) => {
+  test("j onto a stop the window's bottom cuts brings it fully into view above the strip, and it stays there", async ({ page, birta }) => {
     await open(page, birta, longDoc());
     const n = await stopSp(page, "Filler paragraph 9.");
     const next = await stopSp(page, "Filler paragraph 10.");
@@ -695,7 +682,7 @@ test.describe("repair", () => {
     await page.keyboard.press("j");
     await expect.poll(() => focused(page)).toBe(next);
     await page.waitForTimeout(SETTLE_MS);
-    expect((await blockBox(page, next))!.bottom).toBeLessThanOrEqual(WIDE.height);
+    expect((await blockBox(page, next))!.bottom).toBeLessThanOrEqual((await view(page)).bottom);
   });
 
   test("a pushed review_state that grows a note already above keeps the focus's top within 2 px", async ({ page, birta }) => {

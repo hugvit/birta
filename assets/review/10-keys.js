@@ -10,7 +10,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var NOT_KEYS = { Dead: 1, Process: 1, Unidentified: 1 };
   // Held on their way to another key, so they never close the key sheet
   var MODIFIERS = { Shift: 1, Control: 1, Alt: 1, Meta: 1, CapsLock: 1, AltGraph: 1 };
-  // Letters that already pilled `? for keys` in this tab
+  // Letters that already said `? for keys` in this tab
   var UNBOUND_KEY = 'birta-unbound-pilled';
 
   function has(parts, mod) { return parts.indexOf(mod) >= 0; }
@@ -40,9 +40,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   /** Whether a keydown matches one binding, as review's actions match theirs. */
   BR.pure.keyMatches = matches;
 
-  var NAMED = { yes: 'y', no: 'x', note: 'c', undo: 'z', focus_next: 'j', revert_change: 'u', open: 'Enter' };
+  var NAMED = { yes: 'y', no: 'x', note: 'c', ask: 'q', undo: 'z', focus_next: 'j', next_item: 'n', prev_item: 'p',
+    revert_change: 'u', open: 'Enter' };
 
-  /** How a pill names `action`'s key under `bindings`: a letter as typed, Enter as ⏎. */
+  /** How a message names `action`'s key under `bindings`: a letter as typed, Enter as ⏎. */
   BR.pure.keyName = function (action, bindings) {
     var b = (bindings && bindings[action]) || NAMED[action] || '';
     if (b === 'Enter') return '⏎';
@@ -90,7 +91,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var row = action === 'revert_change' && BR.flow.openRow();
     var shown = !row && action === 'revert_change' && BR.flow.focusedRow();
     if (shown && shown.undone_by != null) {
-      BR.chrome.pill('already reverted · ' + BR.keyName('note') + ' note to ask for it back');
+      BR.chrome.say('already reverted · ' + BR.keyName('note') + ' note to ask for it back');
       return true;
     }
     // The menu and what a key opens are never open together
@@ -98,20 +99,20 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return BR.pointing.act(action);
   }
 
+  // When the last Tab was pressed, so a control it lands on can say how back before review shows
+  var tabbedAt = -Infinity;
+  var CONTROL_SAYS = 'on page controls · esc back to the doc';
+
+  // Once review shows, the strip names the control row itself
+  function onFocusIn() {
+    if (Date.now() - tabbedAt > 500 || BR.chrome.shown() || !BR.pointing.pageControl()) return;
+    BR.chrome.say(CONTROL_SAYS);
+  }
+
   // Enter and Space on a button or link press it
   function presses(e, t) {
     return (e.key === 'Enter' || e.key === ' ') && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey &&
       !!t && !!t.closest && !!t.closest('button, a, [role="button"]');
-  }
-
-  // When the last Tab was pressed, so a control it lands on can say how back
-  var tabbedAt = -Infinity;
-  var CONTROL_SAYS = 'on page controls · esc back to the doc';
-
-  // A control reached by Tab names the way back to the doc
-  function onFocusIn() {
-    if (Date.now() - tabbedAt > 500 || !BR.pointing.pageControl()) return;
-    BR.chrome.pill(CONTROL_SAYS);
   }
 
   // A review host's keys reach its own handlers and then fromHost, never this
@@ -127,7 +128,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return e.composedPath().some(function (n) { return n.localName === 'birta-flow'; });
   }
 
-  /** Pills `? for keys` for a letter no binding uses, once per letter per tab, while review shows. */
+  /** Says `? for keys` for a letter no binding uses, once per letter per tab, while review shows. */
   function unbound(e) {
     if (!plain(e) || e.shiftKey || e.repeat || !/^[a-z]$/i.test(e.key) || !BR.chrome.shown()) return;
     var letter = e.key.toLowerCase();
@@ -139,7 +140,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     try { done = JSON.parse(sessionStorage.getItem(UNBOUND_KEY) || '[]'); } catch (err) {}
     if (done.indexOf(letter) >= 0) return;
     try { sessionStorage.setItem(UNBOUND_KEY, JSON.stringify(done.concat([letter]))); } catch (err) {}
-    BR.chrome.pill('? for keys');
+    BR.chrome.say('? for keys');
   }
 
   /**

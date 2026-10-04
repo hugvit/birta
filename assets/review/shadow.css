@@ -256,7 +256,6 @@
   color: var(--birta-fg-muted);
 }
 
-.pill,
 .menu,
 .sheet {
   margin: 0;
@@ -268,12 +267,60 @@
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
 }
 
-.pill {
-  position: fixed;
-  inset: auto auto 16px 50%;
-  transform: translateX(-50%);
-  padding: 2px 8px;
+/* The strip: one slim line fixed to the window's bottom, where focus is and what works there */
+:host(birta-strip) {
+  display: block !important;
+  position: fixed !important;
+  inset: auto 0 0 0 !important;
+  width: auto !important;
+  height: auto !important;
+  z-index: 250 !important;
+}
+
+:host(birta-strip[hidden]) {
+  display: none !important;
+}
+
+.strip {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  box-sizing: border-box;
+  height: 28px;
+  padding: 0 12px;
+  overflow: hidden;
+  font: 12px/26px ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: nowrap;
+  color: var(--birta-fg-muted);
+  background: var(--birta-bg);
+  border-top: 1px solid var(--birta-border);
+  -webkit-text-fill-color: currentColor;
+}
+
+.strip .where {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.strip .keys {
+  flex: none;
+  margin-left: auto;
+}
+
+.strip .key[hidden],
+.strip .key > [hidden] {
+  display: none;
+}
+
+:host([data-message]) .keys {
+  color: var(--birta-fg);
+}
+
+/* Reading mode keeps the strip for its way out, quietly */
+:host([data-dim]) .strip {
+  opacity: 0.5;
 }
 
 .stopped {
@@ -444,7 +491,6 @@
 .flow,
 .phrase,
 .turn,
-.pill,
 .menu,
 .sheet {
   -webkit-text-fill-color: currentColor;

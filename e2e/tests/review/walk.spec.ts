@@ -13,6 +13,12 @@ import {
   focused,
   mockReview,
   revOf,
+  say,
+  spAt,
+  strip,
+  stripMessage,
+  stripPlace,
+  stripWhere,
   withRev,
 } from "./harness";
 
@@ -21,8 +27,9 @@ const SETTLE_MS = 400;
 /** How long a first x on a many-hunk change waits for the second. */
 const CONFIRM_MS = 3_000;
 
-const END = "no more · j/k to move";
-const at = (i: number, n: number) => `${i} of ${n} · n next · p back`;
+const END = "no more · p back";
+const at = (i: number, n: number) => `${i} of ${n}`;
+
 
 type Start = (
   files: Record<string, string>,
@@ -89,47 +96,6 @@ function allSeen(s: State) {
 const seenIds = (mock: Mock) => mock.ops().filter((o) => o.op === "seen").map((o) => o.ids);
 const opsNamed = (mock: Mock, name: string) => mock.ops().filter((o) => o.op === name);
 
-/** The pill's text while it is open in the top layer and painted, else null. */
-function pillOf(page: Page): Promise<string | null> {
-  return page.evaluate(() => {
-    for (const host of document.querySelectorAll("birta-pop")) {
-      const root = host.shadowRoot ?? host;
-      for (const el of root.querySelectorAll('[role="status"]')) {
-        let open = false;
-        try {
-          open = el.matches(":popover-open") && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
-        } catch {
-          open = false;
-        }
-        const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
-        if (open && text) return text;
-      }
-    }
-    return null;
-  });
-}
-
-/** The painted pill's box, or null while none shows. */
-function pillBox(page: Page): Promise<{ left: number; top: number; right: number; bottom: number } | null> {
-  return page.evaluate(() => {
-    for (const host of document.querySelectorAll("birta-pop")) {
-      const root = host.shadowRoot ?? host;
-      for (const el of root.querySelectorAll('[role="status"]')) {
-        let open = false;
-        try {
-          open = el.matches(":popover-open") && getComputedStyle(el).visibility !== "hidden";
-        } catch {
-          open = false;
-        }
-        const r = el.getBoundingClientRect();
-        if (open && r.width > 0 && r.height > 0 && (el.textContent ?? "").trim())
-          return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
-      }
-    }
-    return null;
-  });
-}
-
 const composer = (page: Page) => page.locator('birta-flow[data-kind="composer"]');
 const receipt = (page: Page, has: string) => page.locator('birta-flow[data-kind="receipt"]', { hasText: has });
 
@@ -146,13 +112,13 @@ const UNSEEN_WALK: { id: string; focus: string | null; seen: boolean }[] = [
 // --- One pass in doc order -------------------------------------------------------------------
 
 test.describe("the n walk", () => {
-  test("n walks every stop top to bottom, every kind interleaved, and pills where it is", async ({ page, birta }) => {
+  test("n walks every stop top to bottom, every kind interleaved, and the strip says where it is", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "unseen");
     const sent: string[][] = [];
     for (const [i, stop] of UNSEEN_WALK.entries()) {
       await page.keyboard.press("n");
       if (stop.seen) sent.push([stop.id]);
-      await expect.poll(() => pillOf(page), { message: `step ${i + 1}` }).toBe(at(i + 1, UNSEEN_WALK.length));
+      await expect.poll(() => stripPlace(page), { message: `step ${i + 1}` }).toBe(at(i + 1, UNSEEN_WALK.length));
       await expect.poll(() => seenIds(mock), { message: `step ${i + 1}` }).toEqual(sent);
       expect(await focused(page), `step ${i + 1}`).toBe(stop.focus);
     }
@@ -163,7 +129,7 @@ test.describe("the n walk", () => {
     const { mock, state } = await openFixture(page, birta, "unseen");
     for (const [i, stop] of UNSEEN_WALK.entries()) {
       await page.keyboard.press("n");
-      await expect.poll(() => pillOf(page), { message: `step ${i + 1}` }).toBe(at(i + 1, UNSEEN_WALK.length));
+      await expect.poll(() => stripPlace(page), { message: `step ${i + 1}` }).toBe(at(i + 1, UNSEEN_WALK.length));
       if (stop.seen) swap(mock, state, echoSeen(state, [stop.id]));
       await page.waitForTimeout(100);
     }
@@ -173,13 +139,13 @@ test.describe("the n walk", () => {
   test("n past the last stop stays there and says so; it never wraps", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "unseen");
     for (let i = 0; i < UNSEEN_WALK.length; i++) await page.keyboard.press("n");
-    await expect.poll(() => pillOf(page)).toBe(at(5, 5));
+    await expect.poll(() => stripPlace(page)).toBe(at(5, 5));
     const before = seenIds(mock).length;
     await page.keyboard.press("n");
-    await expect.poll(() => pillOf(page)).toBe(END);
+    await expect.poll(() => stripMessage(page)).toBe(END);
     await page.keyboard.press("n");
     await page.waitForTimeout(SETTLE_MS);
-    expect(await pillOf(page)).toBe(END);
+    expect(await stripMessage(page)).toBe(END);
     expect(await focused(page)).toBe("14:1-14:13");
     expect(seenIds(mock)).toHaveLength(before);
   });
@@ -188,20 +154,21 @@ test.describe("the n walk", () => {
     await openFixture(page, birta, "unseen");
     for (let i = 0; i < UNSEEN_WALK.length; i++) await page.keyboard.press("n");
     await page.keyboard.press("n");
-    await expect.poll(() => pillOf(page)).toBe(END);
+    await expect.poll(() => stripMessage(page)).toBe(END);
     await page.keyboard.press("Escape");
     await page.waitForTimeout(SETTLE_MS);
     expect(await focused(page)).toBe("14:1-14:13");
     await focusTop(page);
     expect(await focused(page)).toBe("doc");
     await page.keyboard.press("n");
-    await expect.poll(() => pillOf(page)).toBe(at(2, 5));
+    await expect.poll(() => stripPlace(page)).toBe(at(2, 5));
     expect(await focused(page)).toBe("5:1-6:68");
   });
 
   for (const [key, want] of [
     ["n", at(5, 5)],
-    ["p", at(4, 5)],
+    // The place is the focused stop itself, as if n had landed there, so p goes to the stop before it
+    ["p", at(3, 5)],
   ] as const) {
     test(`your scroll moves the focus to the first stop in view, and ${key} goes on from it, never from the top of the doc`, async ({
       page,
@@ -221,7 +188,7 @@ test.describe("the n walk", () => {
       await expect.poll(() => focused(page)).toBe("11:1-11:44");
       await page.waitForTimeout(SETTLE_MS);
       await page.keyboard.press(key);
-      await expect.poll(() => pillOf(page)).toBe(want);
+      await expect.poll(() => stripPlace(page)).toBe(want);
     });
   }
 
@@ -232,12 +199,12 @@ test.describe("the n walk", () => {
     for (let i = 0; i < 8 && (await focused(page)) !== "10:1-10:16"; i++) await page.keyboard.press("j");
     await expect.poll(() => focused(page)).toBe("10:1-10:16");
     await page.keyboard.press("n");
-    await expect.poll(() => pillOf(page)).toBe(at(4, 5));
+    await expect.poll(() => stripPlace(page)).toBe(at(4, 5));
     expect(await focused(page)).toBe("11:1-11:44");
   });
 
-  test("a write that replaces the landed block keeps the walk's place on it: n goes on to its next stop", async ({ page, birta }) => {
-    // A reply on the paragraph too, so the block holds two stops: change 9.0, then reply #14
+  test("a write that replaces the landed block keeps the walk's place on it: n goes on to the next stop", async ({ page, birta }) => {
+    // A reply on the paragraph too, so its one stop holds two items: change 9.0, then reply #14
     const withReply = (s: State) => {
       s.items.find((i: State) => i.n === 4).replies = [
         { n: 14, id: "#14", by: { type: "agent", name: "claude" }, body: "said why", ts: s.server_now, seen: false },
@@ -251,18 +218,22 @@ test.describe("the n walk", () => {
     const second = withRev(JSON.parse(JSON.stringify(first)), revOf(doc2));
     const served = await birta({ "pr.md": doc }, GATE_ON);
     await page.setViewportSize(WIDE);
-    await mockReview(page, { states: [first, second] });
+    const mock = await mockReview(page, { states: [first, second] });
     await page.goto(`${served.url}/view/pr.md`);
     await booted(page);
     await page.keyboard.press("n");
     await page.keyboard.press("n");
-    await expect.poll(() => pillOf(page)).toBe(at(2, 6));
+    // 9.0 and #14 share the paragraph, one stop of five, landed on and seen together
+    await expect.poll(() => stripPlace(page)).toBe(at(2, 5));
     expect(await focused(page)).toBe("5:1-6:68");
+    await expect.poll(() => seenIds(mock)).toEqual([["#13"], ["9.0", "#14"]]);
     served.write("pr.md", doc2);
     await expect.poll(() => page.evaluate(() => document.getElementById("content")!.textContent!.includes("start over."))).toBe(true);
     await expect.poll(() => focused(page)).toBe("5:1-6:68");
+    // n goes on to the stop after the paragraph, not to its second item, and not from the top
     await page.keyboard.press("n");
-    await expect.poll(() => pillOf(page)).toBe(at(3, 6));
+    await expect.poll(() => focused(page)).toBe("10:1-10:16");
+    await expect.poll(() => stripPlace(page)).toBe(at(3, 5));
   });
 
   test("p walks back stop by stop, and before the first stop says so; it never wraps", async ({ page, birta }) => {
@@ -270,20 +241,20 @@ test.describe("the n walk", () => {
     for (let i = 0; i < 3; i++) await page.keyboard.press("n");
     await expect.poll(() => focused(page)).toBe("10:1-10:16");
     await page.keyboard.press("p");
-    await expect.poll(() => pillOf(page)).toBe(at(2, 5));
+    await expect.poll(() => stripPlace(page)).toBe(at(2, 5));
     expect(await focused(page)).toBe("5:1-6:68");
     await page.keyboard.press("p");
-    await expect.poll(() => pillOf(page)).toBe(at(1, 5));
+    await expect.poll(() => stripPlace(page)).toBe(at(1, 5));
     expect(await focused(page)).toBe("doc");
     await page.keyboard.press("p");
-    await expect.poll(() => pillOf(page)).toBe(END);
+    await expect.poll(() => stripMessage(page)).toBe(END);
     expect(await focused(page)).toBe("doc");
   });
 
   test("p on a fresh page has nothing behind it", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "unseen");
     await page.keyboard.press("p");
-    await expect.poll(() => pillOf(page)).toBe(END);
+    await expect.poll(() => stripMessage(page)).toBe(END);
     expect(await focused(page)).toBe("doc");
     expect(mock.ops()).toEqual([]);
   });
@@ -291,7 +262,7 @@ test.describe("the n walk", () => {
   test("with nothing to walk, n says so and moves nothing", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "fresh");
     await page.keyboard.press("n");
-    await expect.poll(() => pillOf(page)).toBe(END);
+    await expect.poll(() => stripMessage(page)).toBe(END);
     expect(await focused(page)).toBe("doc");
     expect(mock.ops()).toEqual([]);
   });
@@ -304,7 +275,7 @@ test.describe("a seen round", () => {
     const { mock } = await openFixture(page, birta, "unseen", allSeen);
     for (const [i, stop] of UNSEEN_WALK.entries()) {
       await page.keyboard.press("n");
-      await expect.poll(() => pillOf(page), { message: `step ${i + 1}` }).toBe(at(i + 1, UNSEEN_WALK.length));
+      await expect.poll(() => stripPlace(page), { message: `step ${i + 1}` }).toBe(at(i + 1, UNSEEN_WALK.length));
       expect(await focused(page), `step ${i + 1}`).toBe(stop.focus);
     }
     await page.waitForTimeout(SETTLE_MS);
@@ -314,10 +285,10 @@ test.describe("a seen round", () => {
   test("after a pass, p walks the whole way back", async ({ page, birta }) => {
     await openFixture(page, birta, "unseen", allSeen);
     for (let i = 0; i < UNSEEN_WALK.length; i++) await page.keyboard.press("n");
-    await expect.poll(() => pillOf(page)).toBe(at(5, 5));
+    await expect.poll(() => stripPlace(page)).toBe(at(5, 5));
     for (let i = UNSEEN_WALK.length - 2; i >= 0; i--) {
       await page.keyboard.press("p");
-      await expect.poll(() => pillOf(page)).toBe(at(i + 1, 5));
+      await expect.poll(() => stripPlace(page)).toBe(at(i + 1, 5));
       expect(await focused(page)).toBe(UNSEEN_WALK[i].focus);
     }
   });
@@ -334,16 +305,16 @@ test.describe("a seen round", () => {
       s.counts.attention = 1;
     });
     await page.keyboard.press("n");
-    await expect.poll(() => pillOf(page)).toBe(at(1, 1));
+    await expect.poll(() => stripPlace(page)).toBe(at(1, 1));
     expect(await focused(page)).toBe("11:1-11:44");
     await page.keyboard.press("n");
-    await expect.poll(() => pillOf(page)).toBe(END);
+    await expect.poll(() => stripMessage(page)).toBe(END);
   });
 
   test("a new round starts the walk from the top, wherever the last pass ended", async ({ page, birta }) => {
     const { mock, state } = await openFixture(page, birta, "unseen", allSeen);
     for (let i = 0; i < UNSEEN_WALK.length; i++) await page.keyboard.press("n");
-    await expect.poll(() => pillOf(page)).toBe(at(5, 5));
+    await expect.poll(() => stripPlace(page)).toBe(at(5, 5));
     // The reader hands back, and the agent's next turn rewrites the paragraph again
     const next = JSON.parse(JSON.stringify(state));
     next.rounds.push({ submit: 20, ts: next.server_now, by: "", to: "*", items: [], claim: 21, claimed_by: "claude", yield: 30, released: false });
@@ -354,7 +325,7 @@ test.describe("a seen round", () => {
     swap(mock, state, next);
     await page.waitForTimeout(SETTLE_MS);
     await page.keyboard.press("n");
-    await expect.poll(() => pillOf(page)).toBe(at(1, 1));
+    await expect.poll(() => stripPlace(page)).toBe(at(1, 1));
     expect(await focused(page)).toBe("5:1-6:68");
     await expect.poll(() => seenIds(mock).at(-1)).toEqual(["25.0"]);
   });
@@ -381,28 +352,34 @@ test.describe("killers: the walk", () => {
     swap(mock, state, next);
     await page.waitForTimeout(SETTLE_MS);
     await page.keyboard.press("n");
-    await expect.poll(() => pillOf(page)).toBe(at(1, 2));
+    await expect.poll(() => stripPlace(page)).toBe(at(1, 2));
     expect(await focused(page)).toBe("5:1-6:68");
   });
 
-  test("the lost-notes row is a stop: n lands there with no seen", async ({ page, birta }) => {
+  test("the lost-notes row is on whole doc's stop: n lands there once, and sends no seen for it", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "lost");
-    const pills: string[] = [];
     const focus: (string | null)[] = [];
-    for (let i = 0; i < 5; i++) {
+    // One n per stop: an n that landed on an item of the stop it was on would leave focus put
+    for (let i = 0; i < 3; i++) {
       await page.keyboard.press("n");
-      await expect.poll(() => pillOf(page), { message: `step ${i + 1}` }).toBe(at(i + 1, 5));
-      pills.push((await pillOf(page))!);
+      await page.waitForTimeout(SETTLE_MS);
       focus.push(await focused(page));
     }
-    // The doc-level reply, the lost row, both changes on the paragraph, the not-handled bullet
-    expect(focus).toEqual(["doc", "doc", "5:1-6:68", "5:1-6:68", "10:1-10:16"]);
+    // Whole doc (the doc-level reply and the lost row), the paragraph (both changes), the not-handled bullet
+    expect(focus).toEqual(["doc", "5:1-6:68", "10:1-10:16"]);
+    // The lost row is no news of Claude's, so the count leaves it out: four items on three stops
+    await page.keyboard.press("Home");
+    await expect.poll(() => stripPlace(page)).toMatch(/^1 of (3|4)$/);
+    // The walk ends there, and n past it says so
+    await page.keyboard.press("End");
+    await page.keyboard.press("n");
+    await expect.poll(() => stripMessage(page)).toBe(END);
     await page.waitForTimeout(SETTLE_MS);
-    expect(seenIds(mock)).toEqual([["#11"], ["9.0"], ["14.0"]]);
+    expect(seenIds(mock)).toEqual([["#11"], ["9.0", "14.0"]]);
   });
 });
 
-// --- Pill lifetime ---------------------------------------------------------------------------
+// --- Message lifetime ------------------------------------------------------------------------
 
 /** On an open change row the first x arms a second, which says no to its text. */
 const CITED = "because you said";
@@ -413,31 +390,34 @@ async function openRowOn(page: Page, sp: string) {
 }
 const ARMED = "x = no to this text · u reverts Claude's change · x again for no";
 
-test.describe("pill lifetime", () => {
-  test("an armed pill clears when its window ends", async ({ page, birta }) => {
+test.describe("message lifetime", () => {
+  test("an armed message outlasts its arm's window: it stays until the next key, and sends nothing", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow");
     await openRowOn(page, "5:1-6:68");
     await receipt(page, CITED).click();
     await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe(ARMED);
+    await expect.poll(() => stripMessage(page)).toBe(ARMED);
     await page.waitForTimeout(CONFIRM_MS + 400);
-    expect(await pillOf(page)).toBeNull();
+    expect(await stripMessage(page)).toBe(ARMED);
     expect(opsNamed(mock, "comment")).toEqual([]);
+    // The arm lives as long as its message, so x again still says no
+    await page.keyboard.press("x");
+    await expect.poll(() => opsNamed(mock, "comment").map((o) => o.verdict)).toEqual(["no"]);
   });
 
-  test("an armed pill clears on any other key, and that key disarms it", async ({ page, birta }) => {
+  test("an armed message clears on any other key, and that key disarms it", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow");
     await openRowOn(page, "5:1-6:68");
     await receipt(page, CITED).click();
     await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe(ARMED);
+    await expect.poll(() => stripMessage(page)).toBe(ARMED);
     await page.keyboard.press("j");
-    await expect.poll(() => pillOf(page), { timeout: 500 }).toBeNull();
+    await expect.poll(() => stripMessage(page), { timeout: 500 }).toBeNull();
     // Back on the receipt inside the old window, x arms again instead of saying no
     await openRowOn(page, "5:1-6:68");
     await receipt(page, CITED).click();
     await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe(ARMED);
+    await expect.poll(() => stripMessage(page)).toBe(ARMED);
     await page.waitForTimeout(SETTLE_MS);
     expect(opsNamed(mock, "comment")).toEqual([]);
   });
@@ -447,7 +427,7 @@ test.describe("pill lifetime", () => {
     await openRowOn(page, "5:1-6:68");
     await receipt(page, CITED).click();
     await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe(ARMED);
+    await expect.poll(() => stripMessage(page)).toBe(ARMED);
     await page.keyboard.press("j");
     // An x the receipt gets with no click or focus change in between
     await page.evaluate((has) => {
@@ -461,10 +441,10 @@ test.describe("pill lifetime", () => {
     // j moved the focus off the row, so that x is the focus's own and never the armed no
     await page.waitForTimeout(SETTLE_MS);
     expect(opsNamed(mock, "comment")).toEqual([]);
-    expect(await pillOf(page)).not.toBe(ARMED);
+    expect(await stripMessage(page)).not.toBe(ARMED);
   });
 
-  test("a pill that comes while the composer is open shows clear of it", async ({ page, birta }) => {
+  test("a message that comes while the composer is open shows in the strip, which keeps its place", async ({ page, birta }) => {
     await openFixture(page, birta, "unseen", undefined, { width: 1280, height: 420 });
     for (let i = 0; i < 4; i++) await page.keyboard.press("n");
     await expect.poll(() => focused(page)).toBe("11:1-11:44");
@@ -474,37 +454,243 @@ test.describe("pill lifetime", () => {
       const c = document.querySelector('birta-flow[data-kind="composer"]')!;
       window.scrollBy(0, c.getBoundingClientRect().bottom - innerHeight + 4);
     });
-    await page.evaluate(() => (window as unknown as { BR: { chrome: { pill(t: string): void } } }).BR.chrome.pill("note saved · z to undo"));
-    await expect.poll(() => pillOf(page)).toBe("note saved · z to undo");
-    const box = (await composer(page).boundingBox())!;
-    const pill = (await pillBox(page))!;
-    const apart =
-      pill.right <= box.x || pill.left >= box.x + box.width || pill.bottom <= box.y || pill.top >= box.y + box.height;
-    expect(apart, `pill ${JSON.stringify(pill)} over composer ${JSON.stringify(box)}`).toBe(true);
+    const before = (await strip(page))!;
+    expect(before, "a strip").not.toBeNull();
+    expect(before.message).toBe(false);
+    await say(page, "note saved · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("note saved · z to undo");
+    const during = (await strip(page))!;
+    expect(during.where, "the left side still names the composer").toBe(before.where);
+    expect([during.top, during.height]).toEqual([before.top, before.height]);
   });
 
-  test("a pill never covers an open composer", async ({ page, birta }) => {
+  test("a message never draws over an open composer: nothing but the strip shows it", async ({ page, birta }) => {
     await openFixture(page, birta, "unseen", undefined, { width: 1280, height: 420 });
     for (let i = 0; i < 4; i++) await page.keyboard.press("n");
     await expect.poll(() => focused(page)).toBe("11:1-11:44");
-    // Setup: a pill is up before the composer opens
-    await expect.poll(() => pillOf(page)).toBe(at(4, 5));
     await page.keyboard.press("c");
     await expect(composer(page)).toBeVisible();
-    // Bring the composer down to where the pill is drawn, bottom centre
     await page.evaluate(() => {
       const c = document.querySelector('birta-flow[data-kind="composer"]')!;
       window.scrollBy(0, c.getBoundingClientRect().bottom - innerHeight + 4);
     });
-    const box = (await composer(page).boundingBox())!;
-    expect(box.y + box.height, "the composer reaches the pill's row").toBeGreaterThan(420 - 40);
+    const before = (await strip(page))!;
     await page.keyboard.type("words");
+    await say(page, "copied · paste it to Claude");
+    await expect.poll(() => stripMessage(page)).toBe("copied · paste it to Claude");
+    const painted = await page.evaluate(() => {
+      const out: string[] = [];
+      for (const host of Array.from(document.querySelectorAll("body *"))) {
+        if (host.localName === "birta-strip" || !host.shadowRoot) continue;
+        host.shadowRoot.querySelectorAll("*").forEach((el) => {
+          const own = Array.from(el.childNodes).some((n) => n.nodeType === 3 && (n.textContent ?? "").includes("paste it to Claude"));
+          if (own && el.getClientRects().length) out.push(host.localName);
+        });
+      }
+      return out;
+    });
+    expect(painted).toEqual([]);
+    const during = (await strip(page))!;
+    expect([during.top, during.height]).toEqual([before.top, before.height]);
+    await expect(composer(page)).toBeVisible();
+  });
+});
+
+// --- The walk's place ------------------------------------------------------------------------
+
+const UNSEEN_DOC = fixtureDoc("unseen");
+const WHAT = spAt(UNSEEN_DOC, "## What changes");
+// The list's last item runs to the blank line after it
+const METRICS = "12:1-13:0";
+
+/** A draft note of yours on `sp`, or on whole doc for null, shaped as drafts.json's are. */
+function draft(n: number, sp: string | null): State {
+  const d = fixtureState("drafts");
+  const base = d.items.find((i: State) => (sp ? i.at.scope === "block" : i.at.kind === "doc"));
+  return { ...base, n, cid: `c-${n}`, body: `draft ${n}`, status: "draft", at: sp ? { ...base.at, loc: { sp } } : base.at };
+}
+
+/** unseen.json picked up for a second turn, with 10.0 left unseen from the first: the walk is that one change. */
+function pickedUp(s: State) {
+  allSeen(s);
+  s.rounds.push({ submit: 20, ts: s.server_now, by: "", to: "*", items: [], claim: 21, claimed_by: "claude", released: false });
+  for (const c of s.changes) c.settled = c.id !== "10.0";
+  const left = s.changes.find((c: State) => c.id === "10.0");
+  left.seen = false;
+  s.phrase = {
+    stage: "picked_up",
+    sent: { n: 20, ts: s.server_now, items: 0, can_withdraw: false },
+    picked_up: { n: 21, ts: s.server_now, by: "claude" },
+  };
+  s.counts.unseen = 1;
+  s.counts.attention = 1;
+}
+
+/** Claude's reply to that turn: the round gets its yield, a new reply on whole doc and a new change on the paragraph. */
+function repliedAgain(state: State): State {
+  const next = JSON.parse(JSON.stringify(state));
+  next.rounds[next.rounds.length - 1].yield = 30;
+  const was = fixtureState("unseen").phrase;
+  next.phrase = { ...was, sent: next.phrase.sent, picked_up: next.phrase.picked_up, replied: { ...was.replied, turn: 21, ts: next.server_now } };
+  next.items.find((i: State) => i.n === 6).replies.push({
+    n: 26,
+    id: "#26",
+    by: { type: "agent", name: "claude", via: "cli" },
+    kind: "answer",
+    body: "Trimmed it.",
+    ts: next.server_now,
+    seen: false,
+  });
+  next.changes.push({ ...next.changes.find((c: State) => c.id === "9.0"), id: "25.0", op: 25, turn: 21, seen: false, settled: false });
+  next.counts.unseen = 2;
+  next.counts.attention = 3;
+  return next;
+}
+
+test.describe("the walk's place", () => {
+  test("when Claude replies, the place goes back to before stop 1: the first n lands on whole doc", async ({ page, birta }) => {
+    const { mock, state } = await openFixture(page, birta, "unseen", pickedUp);
+    await page.keyboard.press("n");
+    await expect.poll(() => focused(page)).toBe("11:1-11:44");
+    await expect.poll(() => seenIds(mock)).toEqual([["10.0"]]);
+    // The reply keeps the same round (its claim is unchanged) and only adds the yield
+    swap(mock, state, repliedAgain(state));
     await page.waitForTimeout(SETTLE_MS);
-    const pill = await pillBox(page);
-    if (pill) {
-      const apart =
-        pill.right <= box.x || pill.left >= box.x + box.width || pill.bottom <= box.y || pill.top >= box.y + box.height;
-      expect(apart, `pill ${JSON.stringify(pill)} over composer ${JSON.stringify(box)}`).toBe(true);
+    expect(await focused(page), "a reply never moves the focus").toBe("11:1-11:44");
+    await page.keyboard.press("n");
+    await expect.poll(() => focused(page)).toBe("doc");
+    await expect.poll(() => seenIds(mock).at(-1)).toEqual(["#26"]);
+    await expect.poll(() => stripPlace(page)).toBe(at(1, 3));
+    await page.keyboard.press("n");
+    await expect.poll(() => focused(page)).toBe("5:1-6:68");
+  });
+
+  test("after the reply, a k puts the place at the focus, and n goes on from there, not from the top", async ({ page, birta }) => {
+    const { mock, state } = await openFixture(page, birta, "unseen", pickedUp);
+    await page.keyboard.press("n");
+    await expect.poll(() => focused(page)).toBe("11:1-11:44");
+    swap(mock, state, repliedAgain(state));
+    await page.waitForTimeout(SETTLE_MS);
+    await page.keyboard.press("k");
+    await expect.poll(() => focused(page)).toBe("10:1-10:16");
+    await page.keyboard.press("n");
+    await expect.poll(() => focused(page)).toBe("11:1-11:44");
+    await expect.poll(() => stripPlace(page)).toBe(at(3, 3));
+  });
+
+  test("on a fresh tab, p after j goes back from the focus to the walk stop above it", async ({ page, birta }) => {
+    const { mock } = await openFixture(page, birta, "unseen");
+    await focusTo(page, WHAT);
+    await page.keyboard.press("p");
+    await expect.poll(() => focused(page)).toBe("5:1-6:68");
+    await expect.poll(() => stripPlace(page)).toBe(at(2, 5));
+    // j on its way past the paragraph marks 9.0 seen too, until landing stops sending seen; then p's landing does
+    await expect.poll(() => seenIds(mock)).toEqual([["9.0"], ["9.0"]]);
+  });
+
+  test("on a fresh tab, n after j goes on from the focus, not from the top", async ({ page, birta }) => {
+    await openFixture(page, birta, "unseen");
+    await focusTo(page, WHAT);
+    await page.keyboard.press("n");
+    await expect.poll(() => focused(page)).toBe("10:1-10:16");
+    await expect.poll(() => stripPlace(page)).toBe(at(3, 5));
+  });
+
+  test("End puts the place at the last stop: p goes back from it", async ({ page, birta }) => {
+    await openFixture(page, birta, "unseen");
+    await page.keyboard.press("End");
+    await expect.poll(() => focused(page)).toBe("14:1-14:13");
+    await page.keyboard.press("p");
+    await expect.poll(() => focused(page)).toBe("11:1-11:44");
+    await expect.poll(() => stripPlace(page)).toBe(at(4, 5));
+  });
+
+  test("p before the first stop says no more · p back, as n past the last does", async ({ page, birta }) => {
+    await openFixture(page, birta, "unseen");
+    await page.keyboard.press("n");
+    await expect.poll(() => focused(page)).toBe("doc");
+    await page.keyboard.press("p");
+    await expect.poll(() => stripMessage(page)).toBe(END);
+    expect(await focused(page)).toBe("doc");
+  });
+});
+
+test.describe("your drafts in the walk", () => {
+  test("n visits your unsent notes in doc order, whole doc first; they have no place in the count", async ({ page, birta }) => {
+    const { mock } = await openFixture(page, birta, "drafts");
+    const want = ["doc", "5:1-6:54", "10:1-10:16"];
+    for (const [i, sp] of want.entries()) {
+      await page.keyboard.press("n");
+      await expect.poll(() => focused(page), { message: `n ×${i + 1}` }).toBe(sp);
+      expect(await stripPlace(page), `n ×${i + 1}`).toBeNull();
     }
+    await expect.poll(() => stripWhere(page)).toBe("## What changes › list item · your note");
+    await page.keyboard.press("n");
+    await expect.poll(() => stripMessage(page)).toBe(END);
+    await page.keyboard.press("p");
+    await expect.poll(() => focused(page)).toBe("5:1-6:54");
+    await expect.poll(() => stripWhere(page)).toBe("## Why › paragraph · your note");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(mock.ops()).toEqual([]);
+  });
+
+  test("a draft sits among Claude's news in doc order, and the news count leaves it out", async ({ page, birta }) => {
+    const { mock } = await openFixture(page, birta, "unseen", (s) => {
+      s.items.push(draft(30, METRICS));
+      s.counts.drafts = 1;
+    });
+    const want = ["doc", "5:1-6:68", "10:1-10:16", "11:1-11:44", METRICS, "14:1-14:13"];
+    for (const [i, sp] of want.entries()) {
+      await page.keyboard.press("n");
+      await expect.poll(() => focused(page), { message: `n ×${i + 1}` }).toBe(sp);
+    }
+    await expect.poll(() => stripPlace(page)).toBe(at(5, 5));
+    await page.keyboard.press("p");
+    await expect.poll(() => focused(page)).toBe(METRICS);
+    expect(await stripPlace(page)).toBeNull();
+    await page.waitForTimeout(SETTLE_MS);
+    // Landing on your own note marks nothing seen
+    expect(seenIds(mock)).toEqual([["#13"], ["9.0"], ["10.0"], ["11.0"]]);
+  });
+});
+
+// --- Adversary: the walk's place -------------------------------------------------------------
+
+test.describe("adversary: the walk's place", () => {
+  test("right after Claude's reply the place is before stop 1, so p has nothing behind it", async ({ page, birta }) => {
+    const { mock, state } = await openFixture(page, birta, "unseen", pickedUp);
+    await page.keyboard.press("n");
+    await expect.poll(() => focused(page)).toBe("11:1-11:44");
+    await expect.poll(() => seenIds(mock)).toEqual([["10.0"]]);
+    swap(mock, state, repliedAgain(state));
+    await page.waitForTimeout(SETTLE_MS);
+    await page.keyboard.press("p");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await focused(page), "p from before stop 1 moves nothing").toBe("11:1-11:44");
+    expect(seenIds(mock)).toEqual([["10.0"]]);
+    await expect.poll(() => stripMessage(page)).toBe(END);
+  });
+
+  for (const [key, want, place] of [
+    ["n", "10:1-10:16", at(3, 5)],
+    ["p", "5:1-6:68", at(2, 5)],
+  ] as const) {
+    test(`on a fresh tab, a click puts the place at the clicked block, and ${key} goes on from it`, async ({ page, birta }) => {
+      await openFixture(page, birta, "unseen");
+      await page.locator("#content h2", { hasText: "What changes" }).click();
+      await expect.poll(() => focused(page)).toBe(WHAT);
+      await page.keyboard.press(key);
+      await expect.poll(() => focused(page)).toBe(want);
+      await expect.poll(() => stripPlace(page)).toBe(place);
+    });
+  }
+
+  test("two changes on one paragraph and the lost row on whole doc: the count is of stops, 1 to 3 of 3", async ({ page, birta }) => {
+    await openFixture(page, birta, "lost");
+    await expect.poll(() => stripPlace(page)).toBe(at(1, 3));
+    await focusTo(page, "5:1-6:68");
+    await expect.poll(() => stripPlace(page)).toBe(at(2, 3));
+    await focusTo(page, "10:1-10:16");
+    await expect.poll(() => stripPlace(page)).toBe(at(3, 3));
   });
 });

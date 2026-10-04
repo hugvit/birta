@@ -19,6 +19,9 @@ import {
   reviewLog,
   seededRound,
   stops,
+  stripMessage,
+  stripPlace,
+  stripText,
 } from "./harness";
 
 test.use({ timezoneId: "UTC" });
@@ -62,26 +65,6 @@ const hhmm = (ts: number) => new Date(ts).toISOString().slice(11, 16);
 /** The key hint the turn button shows on this platform. */
 function hint(page: Page): Promise<string> {
   return page.evaluate(() => (/Mac/.test(navigator.platform) ? "⌘⏎" : "Ctrl⏎"));
-}
-
-/** The pill's text while it is open in the top layer and painted, else null. */
-function pillOf(page: Page): Promise<string | null> {
-  return page.evaluate(() => {
-    for (const host of document.querySelectorAll("birta-pop")) {
-      const root = host.shadowRoot ?? host;
-      for (const el of root.querySelectorAll('[role="status"]')) {
-        let open = false;
-        try {
-          open = el.matches(":popover-open") && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
-        } catch {
-          open = false;
-        }
-        const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
-        if (open && text) return text;
-      }
-    }
-    return null;
-  });
 }
 
 /** The turn button's label without its key hint, whether the hint shows, and whether it acts. */
@@ -188,7 +171,7 @@ test.describe("approve guard", () => {
     await press(page);
     await expect.poll(() => focused(page)).toBe("5:1-6:68");
     await expect.poll(() => seenIds(mock)).toEqual([["9.0"]]);
-    await expect.poll(() => pillOf(page)).toBe(`3 unseen · n walk · ${key} again approves anyway`);
+    await expect.poll(() => stripMessage(page)).toBe(`3 unseen · n walk · ${key} again approves anyway`);
     expect(opsNamed(mock, "approve")).toEqual([]);
   });
 
@@ -215,7 +198,7 @@ test.describe("approve guard", () => {
     expect(seenIds(mock)).toEqual([["9.0"]]);
     expect(await focused(page)).toBe("5:1-6:68");
     // An ignored press leaves the guard's pill up
-    expect(await pillOf(page)).toMatch(/^3 unseen · n walk · /);
+    expect(await stripMessage(page)).toMatch(/^3 unseen · n walk · /);
     await page.waitForTimeout(Math.max(0, t0 + DWELL_MS + 250 - Date.now()));
     await press(page);
     await expect.poll(() => opsNamed(mock, "approve")).toHaveLength(1);
@@ -238,9 +221,9 @@ test.describe("approve guard", () => {
     const { mock } = await openFixture(page, birta, "unseen", changesOnly);
     const key = await hint(page);
     await press(page);
-    await expect.poll(() => pillOf(page)).toBe(`3 unseen · n walk · ${key} again approves anyway`);
+    await expect.poll(() => stripMessage(page)).toBe(`3 unseen · n walk · ${key} again approves anyway`);
     await page.waitForTimeout(4_500);
-    expect(await pillOf(page)).toBe(`3 unseen · n walk · ${key} again approves anyway`);
+    expect(await stripMessage(page)).toBe(`3 unseen · n walk · ${key} again approves anyway`);
     await press(page);
     await expect.poll(() => opsNamed(mock, "approve")).toHaveLength(1);
   });
@@ -252,11 +235,11 @@ test.describe("approve guard", () => {
     await expect.poll(() => seenIds(mock)).toEqual([["9.0"]]);
     await page.waitForTimeout(DWELL_MS + 200);
     await page.keyboard.press("j");
-    await expect.poll(() => pillOf(page)).not.toBe(`3 unseen · n walk · ${key} again approves anyway`);
+    await expect.poll(() => stripMessage(page)).not.toBe(`3 unseen · n walk · ${key} again approves anyway`);
     await press(page);
     await page.waitForTimeout(SETTLE_MS);
     expect(opsNamed(mock, "approve")).toEqual([]);
-    expect(await pillOf(page)).toBe(`3 unseen · n walk · ${key} again approves anyway`);
+    expect(await stripMessage(page)).toBe(`3 unseen · n walk · ${key} again approves anyway`);
     // The new jump has its own dwell
     await press(page);
     await page.waitForTimeout(SETTLE_MS);
@@ -288,7 +271,7 @@ test.describe("approve guard", () => {
     await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve · 1 unseen");
     await press(page);
     await expect.poll(() => seenIds(mock)).toEqual([["#13"]]);
-    await expect.poll(() => pillOf(page)).toBe(`1 unseen · n walk · ${key} again approves anyway`);
+    await expect.poll(() => stripMessage(page)).toBe(`1 unseen · n walk · ${key} again approves anyway`);
     expect(opsNamed(mock, "approve")).toEqual([]);
   });
 
@@ -300,7 +283,7 @@ test.describe("approve guard", () => {
     await press(page);
     await expect.poll(() => seenIds(mock)).toEqual([["#13"]]);
     expect(await focused(page)).toBe("doc");
-    await expect.poll(() => pillOf(page)).toBe(`4 unseen · n walk · ${key} again approves anyway`);
+    await expect.poll(() => stripMessage(page)).toBe(`4 unseen · n walk · ${key} again approves anyway`);
     expect(opsNamed(mock, "approve")).toEqual([]);
   });
 
@@ -310,7 +293,7 @@ test.describe("approve guard", () => {
     await expect.poll(() => focused(page)).toBe("5:1-6:68");
     await page.keyboard.press("n");
     await expect.poll(() => focused(page)).toBe("10:1-10:16");
-    await expect.poll(() => pillOf(page)).toBe("3 of 5 · n next · p back");
+    await expect.poll(() => stripPlace(page)).toBe("3 of 5");
     expect(opsNamed(mock, "approve")).toEqual([]);
   });
 
@@ -336,7 +319,7 @@ test.describe("approve guard", () => {
     const key = await hint(page);
     await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve · 1 unanswered");
     await press(page);
-    await expect.poll(() => pillOf(page)).toBe(`Claude asked 1 question · n go · ${key} again approves anyway`);
+    await expect.poll(() => stripMessage(page)).toBe(`Claude asked 1 question · n go · ${key} again approves anyway`);
     // #22 above it is answered, so the first open one is #21 under ## Why; a blank is its own stop
     expect(await page.evaluate(() => {
       const a = document.activeElement;
@@ -360,7 +343,7 @@ test.describe("approve guard", () => {
       s.counts.open_asks = 1;
     });
     await press(page);
-    await expect.poll(() => pillOf(page)).toMatch(/^3 unseen · n walk · /);
+    await expect.poll(() => stripMessage(page)).toMatch(/^3 unseen · n walk · /);
     await page.waitForTimeout(DWELL_MS + 200);
     await press(page);
     await expect.poll(() => opsNamed(mock, "approve")).toHaveLength(1);
@@ -400,7 +383,7 @@ test.describe("approve guard", () => {
     await press(page);
     await expect.poll(() => seenIds(mock)).toEqual([["10.0"]]);
     expect(await focused(page)).toBe("11:1-11:44");
-    await expect.poll(() => pillOf(page)).toBe(`2 unseen · n walk · ${key} again approves anyway`);
+    await expect.poll(() => stripMessage(page)).toBe(`2 unseen · n walk · ${key} again approves anyway`);
   });
 
   for (const key of ["n", "Escape"]) {
@@ -413,7 +396,7 @@ test.describe("approve guard", () => {
       await press(page);
       await page.waitForTimeout(SETTLE_MS);
       expect(opsNamed(mock, "approve")).toEqual([]);
-      await expect.poll(() => pillOf(page)).toMatch(/^3 unseen · n walk · /);
+      await expect.poll(() => stripMessage(page)).toMatch(/^3 unseen · n walk · /);
     });
   }
 
@@ -431,12 +414,12 @@ test.describe("approve guard", () => {
 
   test("inside the approve's hold ⌘⏎ is inert, and the pill stays", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "approved", (s) => (s.hold.not_before = s.server_now + 20_000));
-    await expect.poll(() => pillOf(page)).toBe("approving · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("approving · z to undo");
     await press(page);
     await page.locator(".file-header birta-turn button").click();
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops()).toEqual([]);
-    expect(await pillOf(page)).toBe("approving · z to undo");
+    expect(await stripMessage(page)).toBe("approving · z to undo");
   });
 
   test("new unseen text pushed while armed disarms it: the next ⌘⏎ jumps again", async ({ page, birta }) => {
@@ -457,7 +440,7 @@ test.describe("approve guard", () => {
     await press(page);
     await page.waitForTimeout(SETTLE_MS);
     expect(opsNamed(mock, "approve")).toEqual([]);
-    await expect.poll(() => pillOf(page)).toBe(`4 unseen · n walk · ${key} again approves anyway`);
+    await expect.poll(() => stripMessage(page)).toBe(`4 unseen · n walk · ${key} again approves anyway`);
   });
 
   test("a pill with no stop to jump to never approves silently: it pills and arms in place", async ({ page, birta }) => {
@@ -471,7 +454,7 @@ test.describe("approve guard", () => {
     await page.waitForTimeout(SETTLE_MS);
     expect(opsNamed(mock, "approve")).toEqual([]);
     expect(seenIds(mock)).toEqual([]);
-    expect(await pillOf(page)).toBe(`3 unseen · n walk · ${key} again approves anyway`);
+    expect(await stripMessage(page)).toBe(`3 unseen · n walk · ${key} again approves anyway`);
     await page.waitForTimeout(DWELL_MS);
     await press(page);
     await expect.poll(() => opsNamed(mock, "approve")).toHaveLength(1);
@@ -489,7 +472,7 @@ test.describe("approve guard", () => {
     }
     await page.waitForTimeout(SETTLE_MS);
     expect(opsNamed(mock, "approve")).toEqual([]);
-    expect(await pillOf(page)).toBe(`3 unseen · n walk · ${key} again approves anyway`);
+    expect(await stripMessage(page)).toBe(`3 unseen · n walk · ${key} again approves anyway`);
     await press(page);
     await expect.poll(() => opsNamed(mock, "approve")).toHaveLength(1);
   });
@@ -524,7 +507,7 @@ test.describe("approve guard", () => {
     await expect.poll(() => opsNamed(mock, "hand_back")).toHaveLength(1);
     await page.waitForTimeout(SETTLE_MS);
     expect(seenIds(mock)).toEqual([]);
-    expect((await pillOf(page)) ?? "").not.toMatch(/approves anyway/);
+    expect((await stripMessage(page)) ?? "").not.toMatch(/approves anyway/);
   });
 });
 
@@ -562,12 +545,12 @@ test.describe("approve guard on a real server", () => {
     await booted(page);
     await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Approve · 2 unseen");
     await press(page);
-    await expect.poll(() => pillOf(page)).toMatch(/^2 unseen · n walk · /);
+    await expect.poll(() => stripMessage(page)).toMatch(/^2 unseen · n walk · /);
     await expect.poll(() => reviewLog(served.root)!.filter((l) => l.op === "seen").length).toBe(1);
     await page.waitForTimeout(DWELL_MS + 200);
     await press(page);
     await expect.poll(() => reviewLog(served.root)!.some((l) => l.op === "approve")).toBe(true);
-    await expect.poll(() => pillOf(page)).toBe("approving · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("approving · z to undo");
     expect(reviewLog(served.root)!.filter((l) => l.op === "seen").length).toBe(1);
   });
 });
@@ -596,7 +579,7 @@ test.describe("reopen after approve on a real server", () => {
     await expect.poll(() => turnOf(page).then((t) => t?.text)).toBe("Hand back · 1");
     await expect.poll(() => shownHosts(page)).toContain("note");
     await press(page);
-    await expect.poll(() => pillOf(page)).toBe("handing back · 1 note · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("handing back · 1 note · z to undo");
   });
 });
 
@@ -617,7 +600,7 @@ test.describe("approve guard on a real server: text that lands after the jump", 
     await press(page);
     await page.waitForTimeout(SETTLE_MS);
     expect(reviewLog(served.root)!.filter((l) => l.op === "approve")).toEqual([]);
-    await expect.poll(() => pillOf(page)).toMatch(/^1 unseen · n walk · /);
+    await expect.poll(() => stripMessage(page)).toMatch(/^1 unseen · n walk · /);
   });
 });
 
@@ -696,10 +679,10 @@ test.describe("clean view", () => {
       for (const key of ["y", "x", "l", ".", "q", "n", "p"]) {
         await page.evaluate(() => {
           // Each key must put the pill up itself
-          (window as unknown as { BR: { chrome: { pill(t: string): void } } }).BR.chrome.pill("");
+          (window as unknown as { BR: { chrome: { say(t: string): void } } }).BR.chrome.say("");
         });
         await page.keyboard.press(key);
-        await expect.poll(() => pillOf(page), { message: key }).toBe(REOPEN);
+        await expect.poll(() => stripMessage(page), { message: key }).toBe(REOPEN);
       }
       await page.waitForTimeout(SETTLE_MS);
       expect(mock.ops()).toEqual([]);
@@ -717,7 +700,7 @@ test.describe("clean view", () => {
     expect(mock.ops()).toEqual([]);
     await page.keyboard.press("Alt+KeyU");
     await expect(page.locator("#source-view")).toBeVisible();
-    await expect.poll(() => pillOf(page)).toBe("source view · esc back");
+    await expect.poll(() => stripText(page)).toBe("source view · esc back");
     await page.keyboard.press("Alt+KeyU");
     await expect(page.locator("#lane-frame")).toBeVisible();
   });
@@ -801,7 +784,7 @@ test.describe("clean view", () => {
       approved(s);
       s.hold.not_before = s.server_now + 20_000;
     });
-    await expect.poll(() => pillOf(page)).toBe("approving · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("approving · z to undo");
     expect(await phraseOf(page)).not.toMatch(/c to reopen/);
     await expect.poll(async () => (await shownHosts(page)).length).toBeGreaterThan(0);
     await expect.poll(async () => (await laneMarks(page)).length).toBeGreaterThan(0);
@@ -814,14 +797,14 @@ test.describe("clean view", () => {
       approved(s);
       s.hold.not_before = s.server_now + 3_000;
     });
-    await expect.poll(() => pillOf(page)).toBe("approving · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("approving · z to undo");
     await expect.poll(async () => (await shownHosts(page)).length).toBeGreaterThan(0);
     await expect.poll(() => phraseOf(page), { timeout: 8_000 }).toMatch(/c to reopen$/);
     await expect.poll(() => shownHosts(page)).toEqual([]);
     expect(await laneMarks(page)).toEqual([]);
     // The keys follow the hold's end too
     await page.keyboard.press("y");
-    await expect.poll(() => pillOf(page)).toBe(REOPEN);
+    await expect.poll(() => stripMessage(page)).toBe(REOPEN);
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops()).toEqual([]);
   });
@@ -831,7 +814,7 @@ test.describe("clean view", () => {
       approved(s);
       s.hold.not_before = s.server_now + 20_000;
     });
-    await expect.poll(() => pillOf(page)).toBe("approving · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("approving · z to undo");
     // The doc-level reply, then the not-handled row: both still this round's
     await page.keyboard.press("n");
     await page.keyboard.press("n");

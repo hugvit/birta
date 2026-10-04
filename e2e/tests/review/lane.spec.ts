@@ -450,7 +450,8 @@ test.describe("lane overlay", () => {
   });
 
   test("m hides every mark and m again brings them back", async ({ page, birta }) => {
-    await open(page, birta, fixtureDoc("unseen"), { state: fixtureState("unseen") });
+    // Tall enough that the last tick sits above the strip, which would cover its ink
+    await open(page, birta, fixtureDoc("unseen"), { state: fixtureState("unseen"), viewport: { width: 1280, height: 1100 } });
     await expect.poll(() => markKeys(page)).toEqual(UNSEEN_KEYS);
     const ms = await marks(page);
     const drawn = ms.filter((m) => ["bar", "glyph", "wash", "tick"].includes(m.mark));

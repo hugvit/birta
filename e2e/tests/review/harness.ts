@@ -887,6 +887,107 @@ export function hostText(page: Page, sel: string): Promise<string | null> {
 export const phraseOf = (page: Page) => hostText(page, ".file-header birta-phrase");
 export const turnOf = (page: Page) => hostText(page, ".file-header birta-turn");
 
+// --- The strip ----------------------------------------------------------------------------
+
+export interface Strip extends Box {
+  where: string | null;
+  /** The right side as it reads: the keys, or the message while one shows. */
+  keys: string | null;
+  /** The right side's items as painted, split at ` · `: those dropped at narrow widths are missing. */
+  shownKeys: string[];
+  message: boolean;
+  dim: boolean;
+  innerHeight: number;
+  innerWidth: number;
+  /** Whether a part's own content runs past its box, so the reader would see it cut. */
+  overflows: boolean;
+}
+
+/** The `birta-strip` host's parts and box, or null while it isn't there or isn't painted. */
+export function strip(page: Page): Promise<Strip | null> {
+  return page.evaluate(() => {
+    const host = document.querySelector("birta-strip");
+    if (!host || !host.getClientRects().length) return null;
+    const textOf = (n: Node | null | undefined): string | null => {
+      if (!n) return null;
+      let out = "";
+      const walk = (x: Node) => {
+        if (x.nodeType === 3) out += x.textContent;
+        else if (x.nodeType === 1) {
+          const el = x as Element;
+          if (el.localName === "style" || el.localName === "script") return;
+          (el.shadowRoot ?? el).childNodes.forEach(walk);
+        } else if (x.nodeType === 11) x.childNodes.forEach(walk);
+      };
+      walk(n);
+      return out.replace(/\s+/g, " ").trim();
+    };
+    const part = (sel: string) => host.shadowRoot?.querySelector(sel) ?? host.querySelector(sel);
+    const where = part('[data-part="where"]');
+    const keys = part('[data-part="keys"]') as HTMLElement | null;
+    const shown = keys
+      ? keys.innerText
+          .split("·")
+          .map((s) => s.replace(/\s+/g, " ").trim())
+          .filter(Boolean)
+      : [];
+    const cut = (el: Element | null) => !!el && el.scrollWidth > el.clientWidth + 1;
+    const r = host.getBoundingClientRect();
+    return {
+      where: textOf(where),
+      keys: textOf(keys),
+      shownKeys: shown,
+      message: host.hasAttribute("data-message"),
+      dim: host.hasAttribute("data-dim"),
+      innerHeight,
+      innerWidth,
+      overflows: cut(where) || cut(keys),
+      left: r.left,
+      top: r.top,
+      right: r.right,
+      bottom: r.bottom,
+      width: r.width,
+      height: r.height,
+    };
+  });
+}
+
+/** The strip's right side as it reads now: the focused stop's keys, or a message while one shows. */
+export async function stripKeys(page: Page): Promise<string | null> {
+  return (await strip(page))?.keys ?? null;
+}
+
+/** The message the strip shows in its keys part, or null while it shows keys (or there is no strip). */
+export async function stripMessage(page: Page): Promise<string | null> {
+  const s = await strip(page);
+  return s && s.message ? s.keys : null;
+}
+
+/** The strip's left side: where focus is. */
+export async function stripWhere(page: Page): Promise<string | null> {
+  return (await strip(page))?.where ?? null;
+}
+
+/** The walk position the strip's where starts with, e.g. `3 of 9`, or null off the walk. */
+export async function stripPlace(page: Page): Promise<string | null> {
+  return (await stripWhere(page))?.match(/^(\d+ of \d+) · /)?.[1] ?? null;
+}
+
+/** The whole strip as one line, `where · keys`, or null with no strip. */
+export async function stripText(page: Page): Promise<string | null> {
+  const s = await strip(page);
+  return s ? [s.where, s.keys].filter(Boolean).join(" · ") : null;
+}
+
+/** Shows `text` in the strip through the chrome's own `say`, as a page message would. */
+export function say(page: Page, text: string, opts?: { ms?: number }): Promise<void> {
+  return page.evaluate(
+    ([text, opts]) =>
+      (window as unknown as { BR: { chrome: { say(t: string, o?: { ms?: number }): void } } }).BR.chrome.say(text, opts ?? undefined),
+    [text, opts ?? null] as const,
+  );
+}
+
 /** The review file's lines named `op`, each with its line number as `n`. */
 export const linesNamed = (root: string, op: string, rel = "pr.md") =>
   (reviewLog(root, rel) ?? []).map((l, i) => ({ ...l, n: i + 1 })).filter((l) => l.op === op);

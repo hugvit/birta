@@ -33,6 +33,7 @@ import {
   revOf,
   reviewLog,
   shot,
+  strip,
   withRev,
 } from "./harness";
 
@@ -549,7 +550,7 @@ test.describe("reduced motion", () => {
           const cs = getComputedStyle(el, pseudo);
           out.push({ where, t: sum(cs.transitionDuration), a: sum(cs.animationDuration) });
         };
-        for (const tag of ["birta-under", "birta-over", "birta-flow", "birta-phrase", "birta-turn", "birta-pop"]) {
+        for (const tag of ["birta-under", "birta-over", "birta-flow", "birta-phrase", "birta-turn", "birta-pop", "birta-strip"]) {
           for (const h of Array.from(document.querySelectorAll(tag))) {
             look(tag, h);
             h.shadowRoot?.querySelectorAll("*").forEach((el) => look(`${tag} ${el.localName}.${el.className}`, el));
@@ -568,7 +569,7 @@ test.describe("reduced motion", () => {
   });
 
   // K11
-  test("with reduced motion from the start, a walk, a kept note, the pill and the menu start no animation", async ({
+  test("with reduced motion from the start, a walk, a kept note, the strip's message and the menu start no animation", async ({
     page,
     birta,
   }) => {
@@ -581,7 +582,7 @@ test.describe("reduced motion", () => {
           await page.evaluate(() => {
             const roots: (Document | ShadowRoot)[] = [document];
             document
-              .querySelectorAll("birta-under, birta-over, birta-flow, birta-phrase, birta-turn, birta-pop")
+              .querySelectorAll("birta-under, birta-over, birta-flow, birta-phrase, birta-turn, birta-pop, birta-strip")
               .forEach((h) => h.shadowRoot && roots.push(h.shadowRoot));
             return roots
               .flatMap((r) => r.getAnimations())
@@ -601,7 +602,7 @@ test.describe("reduced motion", () => {
     await page.keyboard.press("Enter");
     await sample("keep");
     await page.keyboard.press("ControlOrMeta+Enter");
-    await sample("pill");
+    await sample("message");
     await page.locator(".file-header birta-phrase").click();
     await sample("menu");
     expect(running).toEqual([]);
@@ -919,7 +920,8 @@ test.describe("the narrow lane", () => {
     await page.waitForTimeout(SETTLE_MS);
     const frame = await frameBox(page);
     const content = await contentBox(page);
-    const lane = { left: frame.left, top: frame.top, right: content.left, bottom: Math.min(frame.bottom, NARROW.height) };
+    // The view ends at the strip; what lies under it is the strip's
+    const lane = { left: frame.left, top: frame.top, right: content.left, bottom: Math.min(frame.bottom, (await strip(page))?.top ?? NARROW.height) };
     const s = await shot(page, { ...lane, width: lane.right - lane.left, height: lane.bottom - lane.top });
     const bg: Rgb = [255, 255, 255];
     // The new-text wash reaches into the lane by design; it is a background, not a mark

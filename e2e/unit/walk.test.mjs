@@ -204,9 +204,9 @@ test("only an agent's ask is a blank", () => {
   assert.ok(!walk(load(), s).some((e) => e.startsWith("blank #21")));
 });
 
-test("a state with nothing in its round has an empty walk", () => {
+test("a state with nothing in its round has an empty walk, but for your unsent notes", () => {
   assert.deepEqual(walk(load(), state("fresh")), []);
-  assert.deepEqual(walk(load(), state("drafts")), []);
+  assert.deepEqual(walk(load(), state("drafts")), ["draft #6 @doc", "draft #4 @5:1-6:54", "draft #5 @10:1-10:16"]);
 });
 
 test("the walk leaves the state as it found it", () => {

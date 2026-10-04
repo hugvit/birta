@@ -18,6 +18,7 @@ import {
   mockReview,
   revOf,
   withRev,
+  stripMessage,
 } from "./harness";
 
 // The phrase prints local times; UTC lets the spec name them from the epoch alone
@@ -163,7 +164,7 @@ interface Chrome {
   phrase: string | null;
   title: string | null;
   turn: { text: string; kbd: string | null; disabled: boolean } | null;
-  pill: string | null;
+  message: string | null;
   menu: Row[] | null;
 }
 
@@ -203,12 +204,15 @@ function chrome(page: Page): Promise<Chrome> {
       const text = kbd && all.endsWith(kbd) ? all.slice(0, -kbd.length).trim() : all;
       turn = { text, kbd, disabled: btn.disabled || btn.getAttribute("aria-disabled") === "true" };
     }
-    let pill: string | null = null;
+    // A message shows in the strip's keys part while the host carries data-message
+    const stripHost = document.querySelector("birta-strip");
+    const keysPart = stripHost && stripHost.getClientRects().length && stripHost.hasAttribute("data-message")
+      ? (stripHost.shadowRoot?.querySelector('[data-part="keys"]') ?? stripHost.querySelector('[data-part="keys"]'))
+      : null;
+    const message: string | null = keysPart ? textOf(keysPart) || null : null;
     let menu: Row[] | null = null;
     for (const h of Array.from(document.querySelectorAll("birta-pop"))) {
       const root = (h.shadowRoot ?? h) as ParentNode;
-      for (const el of Array.from(root.querySelectorAll('[role="status"]')))
-        if (open(el) && textOf(el)) pill = textOf(el);
       for (const el of Array.from(root.querySelectorAll('[role="menu"]'))) {
         if (!open(el)) continue;
         menu = Array.from(el.querySelectorAll('[role="menuitem"]')).map((r) => {
@@ -246,7 +250,7 @@ function chrome(page: Page): Promise<Chrome> {
       phrase: shown(p) ? textOf(p) : null,
       title: shown(p) ? p.getAttribute("title") : null,
       turn,
-      pill,
+      message,
       menu,
     };
   });
@@ -254,7 +258,6 @@ function chrome(page: Page): Promise<Chrome> {
 
 const phraseOf = async (page: Page) => (await chrome(page)).phrase;
 const turnOf = async (page: Page) => (await chrome(page)).turn;
-const pillOf = async (page: Page) => (await chrome(page)).pill;
 const rowTexts = async (page: Page) => (await chrome(page)).menu?.map((r) => r.text) ?? null;
 
 function hint(page: Page): Promise<string> {
@@ -672,7 +675,7 @@ test.describe("Shift+J and Shift+K", () => {
     await page.keyboard.press("Shift+K");
     await page.waitForTimeout(SETTLE_MS);
     expect(viewing(page)).toBe("/view/pr.md");
-    expect(await pillOf(page)).toBe("no other file has notes or news");
+    expect(await stripMessage(page)).toBe("no other file has notes or news");
     expect(mock.ops()).toEqual([]);
   });
 
@@ -709,7 +712,7 @@ test.describe("Shift+J and Shift+K", () => {
   });
 });
 
-// --- n and p across files ----------------------------------------------------------------------
+// --- n and p stay in the file -------------------------------------------------------------------
 
 const WALK: Record<string, string> = {
   "unseen.md": fixtureDoc("unseen"),
@@ -732,8 +735,9 @@ async function openWalk(page: Page, birta: Start, dir: State) {
 const seenOn = (mock: Mock, socket: number) =>
   mock.frames.filter((f) => f.socket === socket && f.msg.type === "op" && f.msg.op === "seen").map((f) => f.msg.ids);
 
-test.describe("n and p across files", () => {
-  test("n crosses to the next file with news only after this file's last stop, landing on its first", async ({
+test.describe("n and p stay in the file", () => {
+  // ⇧J and ⇧K change files; n and p walk this file only, so its ends say so and nothing crosses
+  test("n past this file's last stop says no more · p back, and stays, though the next file has news", async ({
     page,
     birta,
   }) => {
@@ -742,48 +746,43 @@ test.describe("n and p across files", () => {
       listed("replied.md", summary("replied"), true),
       listed("fresh.md", summary("fresh")),
     ]);
-    const { served, mock } = await openWalk(page, birta, dir);
+    const { mock } = await openWalk(page, birta, dir);
     for (let i = 0; i < 5; i++) await page.keyboard.press("n");
     await page.waitForTimeout(SETTLE_MS);
     expect(viewing(page)).toBe("/view/unseen.md");
     expect(seenOn(mock, 0)).toEqual([["#13"], ["9.0"], ["10.0"], ["11.0"]]);
 
     await page.keyboard.press("n");
-    await page.waitForURL(`${served.url}/view/replied.md`);
-    await booted(page);
-    // Its first stop is the doc-level reply, on whole doc
-    await expect.poll(() => seenOn(mock, 1)).toEqual([["#11"]]);
-    expect(await focused(page)).toBe("doc");
-    // The landing was used; a reload opens on the stop the tab had, and walks nothing
-    await page.reload();
-    await booted(page);
-    await page.waitForTimeout(SETTLE_MS);
-    expect(await focused(page)).toBe("doc");
-    expect(seenOn(mock, 2)).toEqual([]);
+    await expect.poll(() => stripMessage(page)).toBe("no more · p back");
+    await page.waitForTimeout(1_000);
+    expect(viewing(page)).toBe("/view/unseen.md");
+    expect(await focused(page)).toBe("14:1-14:13");
   });
 
-  // Both neighbours have news, so a crossing the wrong way lands on the other one
+  // Both neighbours have news, so a crossing either way would leave
   for (const [key, order] of [
     ["n", ["fresh.md", "unseen.md", "replied.md"]],
     ["p", ["replied.md", "unseen.md", "fresh.md"]],
   ] as const) {
-    test(`${key} crosses ${key === "n" ? "forward" : "back"} when both neighbours have news`, async ({ page, birta }) => {
+    test(`${key} at its end never crosses, though both neighbours have news`, async ({ page, birta }) => {
       const dir = dirState(order.map((p) => listed(p, summary(p.replace(".md", "")), true)));
-      const { served, mock } = await openWalk(page, birta, dir);
+      const { mock } = await openWalk(page, birta, dir);
       if (key === "n") for (let i = 0; i < 6; i++) await page.keyboard.press("n");
       else {
         await page.keyboard.press("n");
         await expect.poll(() => seenOn(mock, 0)).toEqual([["#13"]]);
         await page.keyboard.press("p");
       }
-      await page.waitForURL(`${served.url}/view/replied.md`);
+      await expect.poll(() => stripMessage(page)).toBe("no more · p back");
+      await page.waitForTimeout(1_000);
+      expect(viewing(page)).toBe("/view/unseen.md");
     });
   }
 
   test("a landing is used once, by the page it was for", async ({ page, birta }) => {
     const dir = dirState([listed("unseen.md", summary("unseen"), true), listed("fresh.md", summary("fresh"), true)]);
     const { served, mock } = await openWalk(page, birta, dir);
-    for (let i = 0; i < 6; i++) await page.keyboard.press("n");
+    await page.keyboard.press("Shift+J");
     await page.waitForURL(`${served.url}/view/fresh.md`);
     await booted(page);
     // fresh.md had no stop to land on; the next page must not take the landing
@@ -803,7 +802,7 @@ test.describe("n and p across files", () => {
     await page.goto(`${served.url}/view/unseen.md`);
     await booted(page);
     await expect.poll(() => phraseOf(page)).not.toBeNull();
-    for (let i = 0; i < 6; i++) await page.keyboard.press("n");
+    await page.keyboard.press("Shift+J");
     await page.waitForURL(`${served.url}/view/other.md`);
     await booted(page);
     await page.waitForTimeout(SETTLE_MS);
@@ -814,28 +813,26 @@ test.describe("n and p across files", () => {
     expect(seenOn(mock, 2)).toEqual([]);
   });
 
-  test("p before the first stop crosses back, landing on the previous file's last stop", async ({ page, birta }) => {
+  test("p before this file's first stop says no more · p back, and stays", async ({ page, birta }) => {
     const dir = dirState([
       listed("replied.md", summary("replied"), true),
       listed("unseen.md", summary("unseen"), true),
       listed("fresh.md", summary("fresh")),
     ]);
-    const { served, mock } = await openWalk(page, birta, dir);
+    const { mock } = await openWalk(page, birta, dir);
     await page.keyboard.press("n");
     await expect.poll(() => seenOn(mock, 0)).toEqual([["#13"]]);
     await page.keyboard.press("p");
-    await page.waitForURL(`${served.url}/view/replied.md`);
-    await booted(page);
-    // The last stop is a not-handled row: focus moves there and nothing is marked seen
-    await expect.poll(() => focused(page)).toBe("10:1-10:16");
-    await page.waitForTimeout(SETTLE_MS);
-    expect(seenOn(mock, 1)).toEqual([]);
+    await expect.poll(() => stripMessage(page)).toBe("no more · p back");
+    await page.waitForTimeout(1_000);
+    expect(viewing(page)).toBe("/view/unseen.md");
+    expect(await focused(page)).toBe("doc");
   });
 
-  test("crossing onto a file with nothing to walk lands on whole doc and stays", async ({ page, birta }) => {
+  test("Shift+J onto a file with nothing to walk lands on whole doc and stays", async ({ page, birta }) => {
     const dir = dirState([listed("unseen.md", summary("unseen"), true), listed("fresh.md", summary("fresh"), true)]);
     const { served, mock } = await openWalk(page, birta, dir);
-    for (let i = 0; i < 6; i++) await page.keyboard.press("n");
+    await page.keyboard.press("Shift+J");
     await page.waitForURL(`${served.url}/view/fresh.md`);
     await booted(page);
     await page.waitForTimeout(1_000);
@@ -946,11 +943,11 @@ test.describe("a listing that comes before review starts", () => {
     await page.waitForURL(`${served.url}/view/my%20notes.md`);
   });
 
-  test("n still lands on the next file's first stop", async ({ page, birta }) => {
+  test("Shift+J still lands on the next file's first stop", async ({ page, birta }) => {
     await holdReviewScript(page);
     const dir = dirState([listed("unseen.md", summary("unseen"), true), listed("replied.md", summary("replied"), true)]);
     const { served, mock } = await openWalk(page, birta, dir);
-    for (let i = 0; i < 6; i++) await page.keyboard.press("n");
+    await page.keyboard.press("Shift+J");
     await page.waitForURL(`${served.url}/view/replied.md`);
     await booted(page);
     await expect.poll(() => seenOn(mock, 1)).toEqual([["#11"]]);
@@ -1190,7 +1187,7 @@ test.describe("on a real server", () => {
     await expect.poll(async () => (await turnOf(page))?.text, { timeout: 5_000 }).toBe("Hand back · 3");
     await page.keyboard.press("ControlOrMeta+Enter");
     await expect.poll(() => [linesNamed(pr, "submit").length, linesNamed(b, "submit").length]).toEqual([1, 1]);
-    await expect.poll(() => pillOf(page)).toBe("handing back · 3 notes · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("handing back · 3 notes · z to undo");
 
     await page.keyboard.press("z");
     for (const log of [pr, b]) {
@@ -1218,7 +1215,7 @@ test.describe("on a real server", () => {
     await expect.poll(async () => (await turnOf(page))?.text, { timeout: 5_000 }).toBe("Hand back · 2");
     await page.keyboard.press("ControlOrMeta+Enter");
     await expect.poll(() => linesNamed(b, "submit").length).toBe(1);
-    await expect.poll(() => pillOf(page)).toBe("handing back · 2 notes · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("handing back · 2 notes · z to undo");
     await page.keyboard.press("z");
     const submit = linesNamed(b, "submit")[0];
     await expect.poll(() => linesNamed(b, "withdraw").map((w) => w.to)).toEqual([submit.n]);

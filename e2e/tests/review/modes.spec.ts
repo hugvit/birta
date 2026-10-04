@@ -14,11 +14,14 @@ import {
   mockReview,
   stopSp,
   stops,
+  stripMessage,
+  stripText,
 } from "./harness";
 
 const WIDE = { width: 1280, height: 900 };
 /** How long a key that should do nothing is given to do something anyway. */
 const SETTLE_MS = 400;
+// The strip's rows for each mode, `where · keys`, and no message
 const SOURCE_SAYS = "source view · esc back";
 const READING_SAYS = "reading mode · esc back";
 const CONTROL_SAYS = "on page controls · esc back to the doc";
@@ -51,26 +54,6 @@ async function open(page: Page, birta: Start, doc: string, opts: OpenOpts = {}) 
 function tabKey(browserName: string, shift = false): string {
   const tab = browserName === "webkit" ? "Alt+Tab" : "Tab";
   return shift ? `Shift+${tab}` : tab;
-}
-
-/** The pill's text while it is open in the top layer and painted, else null. */
-function pillOf(page: Page): Promise<string | null> {
-  return page.evaluate(() => {
-    for (const host of document.querySelectorAll("birta-pop")) {
-      const root = host.shadowRoot ?? host;
-      for (const el of root.querySelectorAll('[role="status"]')) {
-        let open = false;
-        try {
-          open = el.matches(":popover-open") && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
-        } catch {
-          open = false;
-        }
-        const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
-        if (open && text) return text;
-      }
-    }
-    return null;
-  });
 }
 
 /** The phrase menu's rows while it is open, and which one is current. */
@@ -182,14 +165,14 @@ test.describe("⌥u", () => {
       await page.keyboard.press("Alt+KeyU");
       await expect(page.locator("#source-view")).toBeVisible();
       await expect(page.locator("#lane-frame")).toBeHidden();
-      await expect.poll(() => pillOf(page)).toBe(SOURCE_SAYS);
+      await expect.poll(() => stripText(page)).toBe(SOURCE_SAYS);
       await page.keyboard.press("Alt+KeyU");
       await expect(page.locator("#lane-frame")).toBeVisible();
       await expect.poll(() => focused(page)).toBe(target);
       await expect.poll(() => inView(page, target)).toBe(true);
       // No word for the way back in: the doc is the answer
-      await expect.poll(() => pillOf(page)).not.toBe(SOURCE_SAYS);
-      expect(await pillOf(page)).not.toBe("rendered view");
+      await expect.poll(() => stripText(page)).not.toBe(SOURCE_SAYS);
+      expect(await stripMessage(page)).not.toBe("rendered view");
     });
   }
 
@@ -200,7 +183,7 @@ test.describe("⌥u", () => {
     const { mock } = await open(page, birta, STOPS_DOC);
     await focusTo(page, await stopSp(page, "Detail words."));
     await page.keyboard.press("u");
-    await expect.poll(() => pillOf(page)).toBe("nothing here to revert");
+    await expect.poll(() => stripMessage(page)).toBe("nothing here to revert");
     await page.waitForTimeout(SETTLE_MS);
     expect(await sourceShown(page)).toBe(false);
     expect(writes(mock.ops())).toEqual([]);
@@ -212,7 +195,7 @@ test.describe("⌥u", () => {
     await focusTo(page, target);
     await page.click('#view-toggle .view-btn[data-view="raw"]');
     await expect(page.locator("#source-view")).toBeVisible();
-    await expect.poll(() => pillOf(page)).toBe(SOURCE_SAYS);
+    await expect.poll(() => stripText(page)).toBe(SOURCE_SAYS);
     await page.click('#view-toggle .view-btn[data-view="preview"]');
     await expect(page.locator("#lane-frame")).toBeVisible();
     await expect.poll(() => focused(page)).toBe(target);
@@ -323,7 +306,7 @@ test.describe("review keys in a mode", () => {
     const to = await stopSp(page, "Filler paragraph 21.");
     await focusTo(page, from);
     await page.keyboard.press("r");
-    await expect.poll(() => pillOf(page)).toBe(READING_SAYS);
+    await expect.poll(() => stripText(page)).toBe(READING_SAYS);
     await page.keyboard.press("j");
     await expect.poll(() => readingMode(page)).toBe(false);
     await expect.poll(() => focused(page)).toBe(to);
@@ -367,7 +350,7 @@ test.describe("Esc in a mode", () => {
     await focusTo(page, sp);
     await page.keyboard.press("r");
     await expect.poll(() => readingMode(page)).toBe(true);
-    await expect.poll(() => pillOf(page)).toBe(READING_SAYS);
+    await expect.poll(() => stripText(page)).toBe(READING_SAYS);
     await page.keyboard.press("Escape");
     await expect.poll(() => readingMode(page)).toBe(false);
     expect(await focused(page)).toBe(sp);
@@ -445,7 +428,7 @@ test.describe("page controls", () => {
     await focusTo(page, sp);
     await page.keyboard.press(tabKey(browserName));
     await expect.poll(() => control(page)).not.toBeNull();
-    await expect.poll(() => pillOf(page)).toBe(CONTROL_SAYS);
+    await expect.poll(() => stripText(page)).toBe(CONTROL_SAYS);
     await page.keyboard.press("Escape");
     await expect.poll(() => control(page)).toBeNull();
     expect(await focused(page)).toBe(sp);
@@ -575,7 +558,7 @@ test.describe("adversary", () => {
     for (const key of ["¨", "Dead"]) {
       await macAltU(page, key);
       await expect(page.locator("#source-view")).toBeVisible();
-      await expect.poll(() => pillOf(page)).toBe(SOURCE_SAYS);
+      await expect.poll(() => stripText(page)).toBe(SOURCE_SAYS);
       await macAltU(page, key);
       await expect(page.locator("#lane-frame")).toBeVisible();
       await expect.poll(() => focused(page)).toBe(target);

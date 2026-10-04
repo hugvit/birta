@@ -21,6 +21,7 @@ import {
   stopSp,
   stops,
   withRev,
+  stripMessage,
 } from "./harness";
 
 const WIDE = { width: 1280, height: 900 };
@@ -119,26 +120,6 @@ function hostText(page: Page, kind: string, has: string): Promise<string | null>
 
 const receipt = (page: Page, has: string) => page.locator('birta-flow[data-kind="receipt"]', { hasText: has });
 const reply = (page: Page, has: string) => page.locator('birta-flow[data-kind="reply"]', { hasText: has });
-
-/** The pill's text while it is open in the top layer and painted, else null. */
-function pillOf(page: Page): Promise<string | null> {
-  return page.evaluate(() => {
-    for (const host of document.querySelectorAll("birta-pop")) {
-      const root = host.shadowRoot ?? host;
-      for (const el of root.querySelectorAll('[role="status"]')) {
-        let open = false;
-        try {
-          open = el.matches(":popover-open") && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
-        } catch {
-          open = false;
-        }
-        const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
-        if (open && text) return text;
-      }
-    }
-    return null;
-  });
-}
 
 /** The turn button's label without its key hint, and whether the hint shows. */
 function turnOf(page: Page): Promise<{ text: string; kbd: boolean } | null> {
@@ -503,7 +484,7 @@ test.describe("receipt keys", () => {
     await focusOn(page, "5:1-6:68");
     await receipt(page, CITED).click();
     await page.keyboard.press("u");
-    await expect.poll(() => pillOf(page)).toBe("can't undo this one · c instead");
+    await expect.poll(() => stripMessage(page)).toBe("can't undo this one · c instead");
     expect(opsNamed(mock, "undo_change")).toEqual([]);
     expect(opsNamed(mock, "comment")).toEqual([]);
   });
@@ -516,7 +497,7 @@ test.describe("receipt keys", () => {
     await expect.poll(() => hostText(page, "receipt", CITED)).toMatch(/· y keep · c note$/);
     await receipt(page, CITED).click();
     await page.keyboard.press("u");
-    await expect.poll(() => pillOf(page)).toBe("can't undo this one · c instead");
+    await expect.poll(() => stripMessage(page)).toBe("can't undo this one · c instead");
     expect(opsNamed(mock, "undo_change")).toEqual([]);
   });
 
@@ -527,7 +508,7 @@ test.describe("receipt keys", () => {
     await page.keyboard.press("u");
     await expect.poll(() => opsNamed(mock, "undo_change")).toHaveLength(1);
     mock.nack(opsNamed(mock, "undo_change")[0].cid, "changed_since");
-    await expect.poll(() => pillOf(page)).toBe("changed since · try again");
+    await expect.poll(() => stripMessage(page)).toBe("changed since · try again");
   });
 
   test("an undo refused for a read-only review file says so", async ({ page, birta }) => {
@@ -537,7 +518,7 @@ test.describe("receipt keys", () => {
     await page.keyboard.press("u");
     await expect.poll(() => opsNamed(mock, "undo_change")).toHaveLength(1);
     mock.nack(opsNamed(mock, "undo_change")[0].cid, "read_only");
-    await expect.poll(() => pillOf(page)).toBe("review file is read-only");
+    await expect.poll(() => stripMessage(page)).toBe("review file is read-only");
   });
 
   test("n onto a change makes u its revert; j onto the block opens its row too, where x asks before no", async ({ page, birta }) => {
@@ -551,7 +532,7 @@ test.describe("receipt keys", () => {
     await booted(page);
     await focusOn(page, "5:1-6:68");
     await page.keyboard.press("x");
-    await expect.poll(() => pillOf(page)).toBe("x = no to this text · u reverts Claude's change · x again for no");
+    await expect.poll(() => stripMessage(page)).toBe("x = no to this text · u reverts Claude's change · x again for no");
     await page.keyboard.press("x");
     await expect
       .poll(() => opsNamed(mock, "comment"))
@@ -647,7 +628,7 @@ test.describe("a receipt for every change", () => {
     await focusOn(page, "8:1-8:15");
     await fact(page, "(git)").click();
     await page.keyboard.press("u");
-    await expect.poll(() => pillOf(page)).toBe("can't undo this one · c instead");
+    await expect.poll(() => stripMessage(page)).toBe("can't undo this one · c instead");
     expect(opsNamed(mock, "undo_change")).toEqual([]);
     await fact(page, "(git)").click();
     await page.waitForTimeout(SETTLE_MS);
@@ -683,7 +664,7 @@ test.describe("undo of a many-hunk write", () => {
     await page.keyboard.press("u");
     await expect.poll(() => opsNamed(mock, "undo_change")).toHaveLength(1);
     expect(opFields(opsNamed(mock, "undo_change")[0])).toEqual({ ...fixtureOp("undo_change"), change: "13.0" });
-    expect((await pillOf(page)) ?? "").not.toMatch(/again/);
+    expect((await stripMessage(page)) ?? "").not.toMatch(/again/);
   });
 });
 
@@ -993,11 +974,11 @@ test.describe("real server", () => {
     // Whatever the click wrote lands before the file turns read-only
     await page.waitForTimeout(SETTLE_MS);
     const lines = reviewLog(served.root)!.length;
-    expect(await pillOf(page)).not.toBe("review file is read-only");
+    expect(await stripMessage(page)).not.toBe("review file is read-only");
     fs.chmodSync(logFile, 0o444);
     try {
       await page.keyboard.press("u");
-      await expect.poll(() => pillOf(page)).toBe("review file is read-only");
+      await expect.poll(() => stripMessage(page)).toBe("review file is read-only");
       await page.waitForTimeout(SETTLE_MS);
       expect(bytes().equals(Buffer.from(s.doc))).toBe(true);
       expect(reviewLog(served.root)!).toHaveLength(lines);
@@ -1217,7 +1198,7 @@ test.describe("killers: receipts and undo", () => {
     expect(await hostText(page, "fact", "changed outside birta (git)")).toMatch(/· y keep · c note$/);
     await row.click();
     await page.keyboard.press("u");
-    await expect.poll(() => pillOf(page)).toBe("can't undo this one · c instead");
+    await expect.poll(() => stripMessage(page)).toBe("can't undo this one · c instead");
     expect(opsNamed(mock, "undo_change")).toEqual([]);
     await page.keyboard.press("y");
     await expect.poll(() => seenIds(mock).at(-1)).toEqual(["26.0"]);
@@ -1380,7 +1361,7 @@ test.describe("killers: real server", () => {
     await expect.poll(() => hostText(page, "reply", DONE)).not.toMatch(/u revert/);
     await reply(page, DONE).click();
     await page.keyboard.press("u");
-    await expect.poll(() => pillOf(page)).toBe("can't undo this one · c instead");
+    await expect.poll(() => stripMessage(page)).toBe("can't undo this one · c instead");
     expect(bytes().toString("utf-8")).toBe(over);
     expect(reviewLog(served.root)!.filter((l) => l.op === "edit")).toEqual([]);
   });
@@ -1408,7 +1389,7 @@ test.describe("killers: real server", () => {
     served.write("pr.md", outside);
     await page.waitForTimeout(SETTLE_MS * 2);
     await page.keyboard.press("u");
-    await expect.poll(() => pillOf(page)).toBe("changed since · try again");
+    await expect.poll(() => stripMessage(page)).toBe("changed since · try again");
     expect(fs.readFileSync(path.join(served.root, "pr.md"), "utf-8")).toBe(outside);
   });
 });

@@ -59,9 +59,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   /**
    * What `n` and `p` walk: every stop until it is settled, that is seen and then covered by a
-   * hand-back, so a round stays walkable after one pass. One top-to-bottom order, the doc slot
-   * first; on one block a change, then a reply, a blank, a not-handled row, and last in the doc
-   * slot the lost-notes row. Each stop is `{kind, id, sp, unseen}`, `id` as its seen op names it.
+   * hand-back, so a round stays walkable after one pass, and your unsent notes. One top-to-bottom
+   * order, the doc slot first; on one block a change, your note, a reply, a blank, a not-handled
+   * row, and last in the doc slot the lost-notes row. Each stop is `{kind, id, sp, unseen}`, `id` as its seen op names it.
    */
   BR.pure.walk = function (s) {
     var out = [];
@@ -98,6 +98,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         }
       }
       if (i.status === 'not_handled' && (!i.seen || !covered(s, i.turn))) add('not_handled', 'nh:' + i.n, sp, 3, i.n, !i.seen);
+      // Your unsent notes are walked too, so n finds what you left before you hand it back
+      if (i.by && i.by.type === 'human' && i.status === 'draft') add('draft', '#' + i.n, sp, 0.5, i.n, false);
     });
     if ((s.lost || []).length) add('lost', 'lost', null, 4, 0, false);
     out.sort(function (a, b) { return a.line - b.line || a.rank - b.rank || a.order - b.order; });
@@ -111,8 +113,6 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var FOLDS = { handled: 1, answered: 1, later: 1 };
   // Open blanks past this many show only their question until focused
   var OPEN_BLANKS = 5;
-  // How long a first x on an open change row waits for the second
-  var CONFIRM_MS = 3000;
   var CANT_UNDO = "can't undo this one · c instead";
   var BLANK_HINT = 'type an answer · y yes · x no · . your call · l later';
   var TYPE_IT = '⏎ to type an answer';
@@ -956,8 +956,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       if (localStorage.getItem(DOT_HINT_KEY)) return;
       localStorage.setItem(DOT_HINT_KEY, '1');
     } catch (e) {}
-    // A state can be drawn before the chrome that shows pills is up
-    setTimeout(function () { BR.chrome.pill(DOT_HINT); }, 0);
+    // A state can be drawn before the chrome that shows messages is up
+    setTimeout(function () { BR.chrome.say(DOT_HINT); }, 0);
   }
 
   // --- the composer ---
@@ -1011,6 +1011,17 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (level && BR.pointing.isTitle(block)) return '# ' + block.textContent.replace(/\s+/g, ' ').trim() + ' (title)';
     if (level) return new Array(Number(level[1]) + 1).join('#') + ' ' + block.textContent.replace(/\s+/g, ' ').trim() + ' (section)';
     return '"' + BR.pure.fewWords(ownText(block)) + '"' + (kind ? ' (' + (KIND[block.localName] || 'block') + ')' : '');
+  }
+
+  /**
+   * Where `el` sits, for the strip: `{heading, kind}`, the heading over it as `## Why` and what it
+   * is; a heading is its own section, with no kind.
+   */
+  function crumb(el) {
+    var h = headingOver(el);
+    var named = h && new Array(Number(h.localName.slice(1)) + 1).join('#') + ' ' + h.textContent.replace(/\s+/g, ' ').trim();
+    if (h === el) return { heading: named, kind: null };
+    return { heading: named || null, kind: KIND[el.localName] || 'block' };
   }
 
   /** The nearest heading at or above `el`, in doc order, or null. */
@@ -1091,6 +1102,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var hint = '⏎ save · ⇧⏎ new line · ' + (mac ? '⌘⏎' : 'Ctrl⏎') + ' save & hand back · esc save & close';
     var named = el('div', 'muted label');
     named.appendChild(isolated(label || targetLabel(at, own)));
+    comp.label = named;
     h.box.append(named, target, area, el('div', 'muted hint', hint));
     tint(picked);
     comp.area = area;
@@ -1116,7 +1128,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     reconcile();
     area.focus({ preventScroll: true });
     area.setSelectionRange(area.value.length, area.value.length);
-    BR.chrome.place();
+    BR.chrome.renderStrip();
   }
 
   function composerInput() {
@@ -1240,7 +1252,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       .concat([{ key: comp.key, text: text, tie: comp.tie }]);
     // Kept on the server too, so a reload still offers it
     sendCompose(text);
-    BR.chrome.pill(MOVED);
+    BR.chrome.say(MOVED);
     close();
   }
 
@@ -1275,7 +1287,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     } else {
       var at = u.lost ? aim(t.at, null, null) : aim(t.at, u.tie, t.rev);
       if (!at) {
-        BR.chrome.pill(MOVED);
+        BR.chrome.say(MOVED);
         return;
       }
       cid = submit(at, u.text, t.kind);
@@ -1305,7 +1317,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   /** u on a change: revert it, once, when birta can. */
   function revert(c) {
     if (!canUndo(c)) {
-      BR.chrome.pill(CANT_UNDO);
+      BR.chrome.say(CANT_UNDO);
       return;
     }
     if (undoing) return;
@@ -1313,27 +1325,28 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     reverting = c;
   }
 
-  /** x on an open row is "no" to its text, so it takes a second x within the arm window. */
+  /** x on an open row is "no" to its text, so it takes a second x while the first one's message stands. */
   function rowNo(c) {
     var sp = c.range && c.range.sp;
     if (!sp) {
-      BR.chrome.pill('nothing to say no to · ' + BR.keyName('revert_change') + ' reverts');
+      BR.chrome.say('nothing to say no to · ' + BR.keyName('revert_change') + ' reverts');
       return;
     }
-    if (armed && armed.id === c.id && Date.now() < armed.until) {
+    if (armed && armed.id === c.id) {
       armed = null;
       var el = blockOf(sp);
       BR.pointing.verdictOn('no', { k: 'block', sp: sp, scope: el && /^h[1-6]$/.test(el.localName) ? 'section' : 'block' });
       return;
     }
-    var mine = armed = { id: c.id, until: Date.now() + CONFIRM_MS };
+    var mine = armed = { id: c.id };
     var x = BR.keyName('no');
     var revertible = canUndo(c) ? ' · ' + BR.keyName('revert_change') + " reverts Claude's change" : '';
-    // The pill lasts as long as the arm, and only x keeps it
-    BR.chrome.pill(x + ' = no to this text' + revertible + ' · ' + x + ' again for no', {
-      until: mine.until,
-      keep: function (e) { return action(e) === 'no'; },
-      off: function () { if (armed === mine) armed = null; }
+    // The arm lasts as long as its message, and only x keeps it
+    BR.chrome.say(x + ' = no to this text' + revertible + ' · ' + x + ' again for no', {
+      arm: {
+        keep: function (e) { return action(e) === 'no'; },
+        off: function () { if (armed === mine) armed = null; }
+      }
     });
   }
 
@@ -1400,7 +1413,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (VERDICT_OF[a]) answerWith(h, VERDICT_OF[a]);
     else if (plainEnter || a === 'note') openAnswer(h);
     else if (a === 'ask' || (!bound(e) && /^[a-z]$/i.test(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey)) {
-      BR.chrome.pill(typeIt());
+      BR.chrome.say(typeIt());
     } else return;
     e.preventDefault();
     e.stopPropagation();
@@ -1437,7 +1450,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       if (r.body) f.body = '';
       BR.pointing.remember({ cid: BR.op(f), item: r.n, undo: function () { return restore(r); } });
     }
-    BR.chrome.pill('answered ' + ANSWERED[verdict] + ' · ' + BR.keyName('undo') + ' to undo');
+    BR.chrome.say('answered ' + ANSWERED[verdict] + ' · ' + BR.keyName('undo') + ' to undo');
   }
 
   /** A blank whose written answer is open holds typed words, which reading mode must keep. */
@@ -1451,7 +1464,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var slot = h.blank.slot;
     var r = draftAnswer(n);
     // Its job is done once the field is open
-    if (BR.chrome.pillSays(typeIt())) BR.chrome.pill('');
+    if (BR.chrome.says(typeIt())) BR.chrome.say('');
     h.host.removeAttribute('data-br-hidden');
     slot.hidden = false;
     h.blank.hint.hidden = true;
@@ -1554,7 +1567,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       case 'ack':
         if (msg.cid === undoing) {
           undoing = null;
-          BR.chrome.pill('reverted · ' + labelOf(reverting));
+          BR.chrome.say('reverted · ' + labelOf(reverting));
         }
         delete pending[msg.cid];
         if (afterAck[msg.cid]) {
@@ -1653,6 +1666,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     },
     /** Draws the flow again for the state it has, as when a hold ends with no new state. */
     refresh: function () { reconcile(); },
+    /** The open composer's label, as the strip names it, or null with none open. */
+    composerLabel: function () {
+      return comp && comp.h.host.isConnected && comp.label ? comp.label.textContent.replace(/\s+/g, ' ').trim() : null;
+    },
+    crumb: crumb,
     /** The open composer's box, or null. */
     composerRect: function () {
       return comp && comp.h.host.isConnected ? comp.h.host.getBoundingClientRect() : null;

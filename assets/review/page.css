@@ -100,3 +100,15 @@ html[data-review] #content a[data-br-pick] {
     padding-left: 24px;
   }
 }
+
+/* The viewer's own toast sits above the strip rather than under it */
+html[data-review-strip] .status {
+  bottom: 40px;
+}
+
+/* Room under the doc's end, so the last block can scroll clear of the strip */
+html[data-review-strip] body::after {
+  content: "";
+  display: block;
+  height: 28px;
+}

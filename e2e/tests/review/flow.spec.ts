@@ -33,6 +33,7 @@ import {
   stops,
   watchSent,
   withRev,
+  stripMessage,
 } from "./harness";
 
 const WIDE = { width: 1280, height: 900 };
@@ -1954,7 +1955,6 @@ test.describe("a note kept after the doc moved under it", () => {
   const LIST_MOVED = LIST_GREW.replace("task bravo", "task bravo, reworded");
   const MOVED = "its block changed · c to re-point";
 
-  const pill = (page: Page) => page.locator("birta-pop .pill");
   const comments = (root: string) => (reviewLog(root) ?? []).filter((l) => l.op === "comment");
   const sentComments = (sent: State[]) => sent.filter((f) => f.type === "op" && f.op === "comment");
 
@@ -2054,7 +2054,7 @@ test.describe("a note kept after the doc moved under it", () => {
     served.write("pr.md", LIST.replace("task charl", "task bravo"));
     await expect(page.locator("#content li", { hasText: "task bravo" })).toHaveCount(2);
     await page.keyboard.press("Enter");
-    await expect(pill(page)).toHaveText(MOVED);
+    await expect.poll(() => stripMessage(page)).toBe(MOVED);
     await page.waitForTimeout(SETTLE_MS);
     expect(sentComments(sent)).toEqual([]);
   });
@@ -2070,13 +2070,13 @@ test.describe("a note kept after the doc moved under it", () => {
     served.write("pr.md", LIST_MOVED);
     await expect(page.locator("#content")).toContainText("task zerox");
     await page.keyboard.press("Enter");
-    await expect(pill(page)).toHaveText(MOVED);
+    await expect.poll(() => stripMessage(page)).toBe(MOVED);
     const row = page.locator("birta-flow", { hasText: "note meant for bravo" });
     await expect(row).toContainText(MOVED);
     for (let i = 0; i < 2; i++) {
       await row.click();
       await page.keyboard.press("Enter");
-      await expect(pill(page)).toHaveText(MOVED);
+      await expect.poll(() => stripMessage(page)).toBe(MOVED);
     }
     await page.waitForTimeout(SETTLE_MS);
     expect(sentComments(sent)).toEqual([]);
@@ -2144,7 +2144,7 @@ test.describe("a note kept after the doc moved under it", () => {
     await expect(row).toContainText(MOVED);
     await row.click();
     await page.keyboard.press("Enter");
-    await expect(pill(page)).toHaveText(MOVED);
+    await expect.poll(() => stripMessage(page)).toBe(MOVED);
     // ⏎ on what now sits at bravo's old sp is not bravo's
     await focusText(page, "task alpha");
     expect(await focused(page)).toBe(bravo);

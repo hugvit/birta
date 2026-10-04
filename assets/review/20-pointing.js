@@ -11,17 +11,16 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var ACTIVE_KEY = 'birta-review-active';
   // The stop this tab had on a path, which a reload of that path opens on
   var FOCUS_KEY = 'birta-focus:';
-  var HINT = 'c note · q ask · x cut';
   var CLAMPED = 'selection clamped to this paragraph';
+  // Before review shows, a mode's way back is a plain message, as the strip names it once review does
+  var SOURCE_SAYS = 'source view · esc back';
+  var READING_SAYS = 'reading mode · esc back';
   var CREATED = 'note saved · z to undo';
-  var END = 'no more · j/k to move';
   var TOP_OF_DOC = 'top of the doc';
   var END_OF_DOC = 'end of the doc';
   var REOPEN = 'approved · c to reopen';
   // After approve these only say how to start again
   var REOPENS = { yes: 1, no: 1, later: 1, your_call: 1, ask: 1, next_item: 1, prev_item: 1 };
-  var SOURCE_SAYS = 'source view · esc back';
-  var READING_SAYS = 'reading mode · esc back';
   // What a change row takes before the block under it does
   var ROW_KEYS = { yes: 1, no: 1, note: 1, revert_change: 1 };
   var WORD = { yes: 'yes', no: 'no', later: 'later', your_call: 'your call' };
@@ -97,12 +96,13 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   // This page's own acts, newest last; z takes back the top once its ack names its line
   var undos = [];
   var scrollQueued = false;
-  // Where n and p last landed, as `[line, rank, order]`, so a server push can't skip a stop
+  // The walk's place, `{lo, hi}` as `[line, rank, order]`: n goes on past hi and p back before lo.
+  // Null is before the first stop, where a tab opens and Claude's reply puts it back
   var cursor = null;
-  // The round the cursor walked; a new one starts the walk from the top
+  // The round and reply the place was set in; a new one puts it back before the first stop
   var cursorRound = null;
-  // The focus a landing left: once focus moves off it, the walk goes on from the focus
-  var cursorAt = null;
+  // Focus moved since the walk last landed, by anything but the page: the place is at the focus
+  var movedSince = false;
 
   // Each stop's element, or the summary of a closed details for those it hides, until the doc changes
   var placed = null;
@@ -192,11 +192,27 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return walkStops;
   }
 
-  /** The latest round as a key: a new hand-back or claim changes it. */
+  /** The latest round and reply as a key: a new hand-back, claim or reply changes it. */
   function roundOf(state) {
     var r = (state.rounds || [])[(state.rounds || []).length - 1];
-    return r ? r.submit + ':' + (r.claim || '') : '';
+    var replied = state.phrase && state.phrase.replied ? state.phrase.replied.turn : '';
+    return (r ? r.submit + ':' + (r.claim || '') : '') + '|' + replied;
   }
+
+  /** A new round or Claude's reply puts the walk's place back before its first stop. */
+  function checkRound() {
+    var state = BR.currentState();
+    if (!state) return;
+    var r = roundOf(state);
+    if (cursorRound !== null && r !== cursorRound) {
+      cursor = null;
+      movedSince = false;
+    }
+    cursorRound = r;
+  }
+
+  /** The view's bottom: the strip's top while it shows. */
+  function viewBottom() { return BR.chrome.stripTop(); }
 
   function headerBottom() {
     var h = document.querySelector('.file-header');
@@ -263,7 +279,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     a.setAttribute('data-br-pick', '');
   }
 
-  function setFocus(el, all) {
+  /** Moves the focus to `el`; `byPage` is a move the reader didn't make, which leaves the walk's place. */
+  function setFocus(el, all, byPage) {
+    if (!byPage) movedSince = true;
     unpick();
     // A doc link the browser focused would take ⏎ from the block the keys are on now
     var held = document.activeElement;
@@ -279,6 +297,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     BR.lane.focus(el);
     BR.flow.focusBlock(el === docStop ? null : el);
     keepStop(el);
+    BR.chrome.renderStrip();
   }
 
   /** Remembers the focused block for a reload of this tab on this path; whole doc and stops with no sp keep nothing. */
@@ -328,8 +347,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var r = rectOf(el);
     if (!r) return;
     var top = headerBottom();
+    var bottom = viewBottom();
     if (r.top < top) window.scrollBy(0, r.top - top - 8);
-    else if (r.bottom > innerHeight) window.scrollBy(0, Math.min(r.bottom - innerHeight + 8, r.top - top - 8));
+    else if (r.bottom > bottom) window.scrollBy(0, Math.min(r.bottom - bottom + 8, r.top - top - 8));
     // The place to keep is the revealed one, not where the stop sat before
     if (pinned && pinned.el === el) pinned.top = rectOf(el).top;
   }
@@ -363,7 +383,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       at = step > 0 ? after - 1 : after;
     }
     var r = BR.pure.focusStep(at, all.length, step);
-    if (r.says) showPill(r.says);
+    if (r.says) say(r.says);
     var next = all[r.to];
     if (next === focus) return;
     go(next, all);
@@ -395,54 +415,84 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   function keyOf(stop) { return [stop.line, stop.rank, stop.order]; }
 
+  /** The stop a walk entry sits on: a question is its own, under its block; the rest share their block, or whole doc. */
+  function stopOf(x) { return x.kind === 'blank' ? 'q:' + x.id : x.sp ? 'b:' + x.sp : 'doc'; }
+
   function before(a, b) {
     for (var i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] < b[i];
     return false;
   }
 
   /**
-   * Focuses a walk stop, marks it seen when it isn't, and pills where it is in the walk;
-   * blanks and not-handled rows wait for an answer or y.
+   * Focuses the stop walk entry `stop` sits on, the whole stop at once, and marks its changes and
+   * replies seen; blanks and not-handled rows wait for an answer or y.
    */
   function land(stop, state) {
-    var all = walkOf(state);
-    cursor = keyOf(stop);
-    cursorRound = roundOf(state);
+    checkRound();
+    var here = walkOf(state).filter(function (x) { return stopOf(x) === stopOf(stop); });
+    cursor = { lo: keyOf(here[0]), hi: keyOf(here[here.length - 1]) };
     var el = stop.sp ? blockOf(stop.sp) : docStop;
     if (el) {
-      setFocus(el);
+      setFocus(el, null, true);
       reveal(el);
     }
-    if (stop.unseen && (stop.kind === 'change' || stop.kind === 'reply')) BR.op({ op: 'seen', ids: [stop.id] });
+    var ids = here.filter(function (x) { return x.unseen && (x.kind === 'change' || x.kind === 'reply'); })
+      .map(function (x) { return x.id; });
+    if (ids.length) BR.op({ op: 'seen', ids: ids });
     var host = BR.flow.focusStop(stop);
     // A blank is the stop itself, so j and k go on from it
     if (stop.kind === 'blank' && host) {
-      setFocus(host);
+      setFocus(host, null, true);
       reveal(host);
     }
-    cursorAt = focus;
-    showPill((all.indexOf(stop) + 1) + ' of ' + all.length + ' · n next · p back');
+    movedSince = false;
   }
 
-  /** Where the walk goes on from once focus left its last stop: past the focused stop, whole doc's being line 0. */
-  function cursorFromFocus() {
-    if (focus === docStop) return [0, Infinity, Infinity];
-    var sp = focus && focus.getAttribute && focus.getAttribute('data-sourcepos');
-    // A blank or a summary has no line of its own, so the walk keeps its place
-    return sp ? [lineOf(sp), Infinity, Infinity] : cursor;
+  /**
+   * The walk's place at the focused stop, as if n had landed there: n goes on past the stop's
+   * walk entries and p back before them; a stop with none sits between its neighbours by line.
+   */
+  function placeAtFocus(all) {
+    var el = isSummary(focus) ? summaryStop(focus) || focus : focus;
+    if (!el) return cursor;
+    var mine;
+    var line;
+    var blank = el !== docStop && BR.isHost(el) ? BR.flow.blankItem(el) : null;
+    if (el === docStop) {
+      mine = all.filter(function (x) { return !x.sp; });
+      line = 0;
+    } else if (blank != null) {
+      mine = all.filter(function (x) { return x.kind === 'blank' && x.id === '#' + blank; });
+      var owner = focusWas && focusWas.owner;
+      var sp = owner && owner.getAttribute('data-sourcepos');
+      line = sp ? lineOf(sp) : 0;
+      if (!mine.length) return { lo: [line, 2, -Infinity], hi: [line, 2, Infinity] };
+    } else {
+      var at = el.getAttribute('data-sourcepos');
+      mine = all.filter(function (x) { return x.sp === at && x.kind !== 'blank'; });
+      line = at ? lineOf(at) : 0;
+    }
+    if (mine.length) return { lo: keyOf(mine[0]), hi: keyOf(mine[mine.length - 1]) };
+    // A question under the block comes after it
+    return { lo: [line, -Infinity, -Infinity], hi: [line, el === docStop ? Infinity : 1.5, Infinity] };
   }
 
+  /** n and p: the next or previous stop holding Claude's news or your unsent note, from the walk's place. */
   function walk(step) {
     var state = BR.currentState();
     if (!state || state.log_writable === false) return;
-    if (cursorRound !== roundOf(state)) cursor = null;
-    if (cursor && focus !== cursorAt) cursor = cursorFromFocus();
+    checkRound();
     var all = walkOf(state);
+    if (movedSince) {
+      cursor = placeAtFocus(all);
+      movedSince = false;
+    }
     var next = step > 0
-      ? all.filter(function (x) { return !cursor || before(cursor, keyOf(x)); })[0]
-      : all.filter(function (x) { return cursor && before(keyOf(x), cursor); }).pop();
-    if (next) land(next, state);
-    else if (!BR.dir.cross(step)) showPill(END);
+      ? all.filter(function (x) { return !cursor || before(cursor.hi, keyOf(x)); })[0]
+      : all.filter(function (x) { return cursor && before(keyOf(x), cursor.lo); }).pop();
+    // A stop is landed on as a whole, at its first entry, whichever way the walk came
+    if (next) land(all.filter(function (x) { return stopOf(x) === stopOf(next); })[0], state);
+    else say('no more · ' + BR.keyName('prev_item') + ' back');
   }
 
   /** Whether review is under way in this tab: started here, or a review file the state shows. */
@@ -545,11 +595,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   function lineOf(sp) { return parseInt(sp, 10); }
 
-  // --- the pill, which the chrome shows ---
+  // --- messages, which the strip shows ---
 
-  function showPill(text) { BR.chrome.pill(text); }
+  function say(text) { BR.chrome.say(text); }
 
-  function pillSays(text) { return BR.chrome.pillSays(text); }
+  function says(text) { return BR.chrome.says(text); }
 
   function ownerOf(node) {
     var el = node && (node.nodeType === 1 ? node : node.parentElement);
@@ -575,11 +625,15 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var range = selectedRange();
     var q = range && BR.quote.fromRange(range);
     if (!q) {
-      if (pillSays(HINT) || pillSays(CLAMPED)) showPill('');
+      if (says(CLAMPED)) say('');
+      BR.chrome.renderStrip();
       return;
     }
     var owner = q.sp ? blockOf(q.sp) : null;
-    showPill(q.crossBlock && owner && drops(range, owner) ? CLAMPED : HINT);
+    // The strip's keys say what a key does to the selection; only a clamp is news
+    if (q.crossBlock && owner && drops(range, owner)) say(CLAMPED);
+    else if (says(CLAMPED)) say('');
+    BR.chrome.renderStrip();
     // A selection outranks the stop: the block its quote is in takes the focus
     var stop = owner ? stopAt(owner) : null;
     if (stop && stop !== focus) setFocus(stop);
@@ -603,7 +657,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     undos.push(entry);
   }
 
-  /** What a verdict on `at` is on, as its pill names it. */
+  /** What a verdict on `at` is on, as its message names it. */
   function scopeLabel(at) {
     if (at.k === 'quote') return '"' + BR.pure.fewWords(at.q) + '"';
     var el = at.sp ? blockOf(at.sp) : null;
@@ -619,13 +673,13 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (at.k === 'doc') {
       // A whole-doc verdict asks the agent nothing it can act on
       var keys = { focus_next: BR.keyName('focus_next'), note: BR.keyName('note') };
-      showPill(BR.pure.wholeDocPill(name, BR.chrome.button(), /Mac/.test(navigator.platform), keys) || '');
+      say(BR.pure.wholeDocPill(name, BR.chrome.button(), /Mac/.test(navigator.platform), keys) || '');
       return;
     }
     verdictOn(name, at);
   }
 
-  /** Writes verdict `name` on `at`, or changes or clears your draft one there, and pills what it did. */
+  /** Writes verdict `name` on `at`, or changes or clears your draft one there, and says what it did. */
   function verdictOn(name, at) {
     var own = draftVerdictAt(at);
     if (!own) {
@@ -633,7 +687,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         cid: BR.op({ op: 'comment', at: at, verdict: name }),
         undo: function (n) { return { op: 'retract', to: n }; }
       });
-      showPill(WORD[name] + ' · ' + scopeLabel(at) + ' · ' + BR.keyName('undo') + ' to undo');
+      say(WORD[name] + ' · ' + scopeLabel(at) + ' · ' + BR.keyName('undo') + ' to undo');
       return;
     }
     var was = own.verdict;
@@ -643,7 +697,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         item: own.n,
         undo: function () { return { op: 'amend', to: own.n, verdict: was }; }
       });
-      showPill(WORD[name] + ' · ' + scopeLabel(at) + ' · ' + BR.keyName('undo') + ' to undo');
+      say(WORD[name] + ' · ' + scopeLabel(at) + ' · ' + BR.keyName('undo') + ' to undo');
       return;
     }
     if (own.body) {
@@ -659,7 +713,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         undo: function () { return { op: 'comment', at: at, verdict: was }; }
       });
     }
-    showPill(WORD[name] + ' removed · ' + BR.keyName('undo') + ' to undo');
+    say(WORD[name] + ' removed · ' + BR.keyName('undo') + ' to undo');
   }
 
   /** The newest of your drafts on `at`'s block, or on the doc for a doc target; null for none. */
@@ -719,9 +773,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   // Review follows the view, never the key, so the Source button and ⌥u keep focus alike
   function onView(e) {
     var d = e.detail || {};
-    if (d.reading) return showPill(READING_SAYS);
-    if (d.mode === 'raw') return showPill(SOURCE_SAYS);
-    if (pillSays(SOURCE_SAYS) || pillSays(READING_SAYS)) showPill('');
+    if (!BR.chrome.shown() && (d.reading || d.mode === 'raw')) say(d.reading ? READING_SAYS : SOURCE_SAYS);
+    else if (says(SOURCE_SAYS) || says(READING_SAYS)) say('');
+    BR.chrome.renderStrip();
+    if (d.reading || d.mode === 'raw') return;
     BR.lane.redraw();
     if (!focus || !focus.isConnected) return;
     BR.lane.focus(focus);
@@ -761,7 +816,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       return;
     }
     BR.op(entry.undo(entry.n));
-    if (pillSays(CREATED)) showPill('');
+    if (says(CREATED)) say('');
   }
 
   function undo() {
@@ -795,7 +850,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         return;
       }
       entry.n = msg.n;
-      if (entry.created) showPill(CREATED);
+      if (entry.created) say(CREATED);
       if (entry.queued) takeBack(entry);
     }
   }
@@ -804,7 +859,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
 
   function inView(el) {
     var r = rectOf(el);
-    return !!r && r.bottom > headerBottom() && r.top < innerHeight;
+    return !!r && r.bottom > headerBottom() && r.top < viewBottom();
   }
 
   /** The first of `list` whose top is in view, else the first that shows at all; null for none. */
@@ -899,15 +954,15 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   /** After a frame, a patch or a row opening: focus that went is handed on, and focus that stayed keeps its place. */
   function settle() {
     settleQueued = false;
+    checkRound();
     var was = pinned || {};
     pinned = null;
     if (focus && gone(focus)) {
       var lost = focus;
       var next = replacement();
-      setFocus(next.el);
+      // The page moved it, so the walk's place stays
+      setFocus(next.el, null, true);
       relist = false;
-      // The block n landed on, rebuilt, is still where the walk is
-      if (lost === cursorAt) cursorAt = focus;
       if (next.same && was.el === lost) keepAt(focus, was.top);
       return;
     }
@@ -974,7 +1029,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       docStop = BR.flow.docStop();
       // A tab opens on whole doc, or on the stop it had before a reload
       var back = restored();
-      setFocus(back || docStop);
+      setFocus(back || docStop, null, true);
       if (back) reveal(back);
       document.addEventListener('selectionchange', onSelection);
       document.addEventListener('click', onClick);
@@ -1009,7 +1064,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       // The clean view hides the rows, so its keys come before theirs
       if (BR.chrome.clean()) {
         if (REOPENS[action]) {
-          showPill(REOPEN);
+          say(REOPEN);
           return true;
         }
         if (action === 'note') {
@@ -1026,7 +1081,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       }
       // Its own key with no row open: a revert needs a change to revert
       if (action === 'revert_change') {
-        if (!selectedRange()) showPill(BR.pure.wholeDocPill(action));
+        if (!selectedRange()) say(BR.pure.wholeDocPill(action));
         return true;
       }
       if (action === 'focus_next' || action === 'focus_prev') {
@@ -1070,7 +1125,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         return true;
       }
       if (action === 'open') {
-        // A focused blank opens its own field first; then the picked link, a dot or half-typed words, the only link, else a pill
+        // A focused blank opens its own field first; then the picked link, a dot or half-typed words, the only link, else a message
         // Enter on a link, summary or button keeps its own meaning, so a picked link opens natively
         var held = document.activeElement;
         if (held && held !== document.body && held.closest && held.closest('a, summary, button, input, select, textarea')) return false;
@@ -1078,13 +1133,29 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         if (BR.flow.openAt(focus)) return true;
         var links = focus ? linksIn(focus) : [];
         if (links.length === 1) links[0].click();
-        else if (links.length > 1) showPill(links.length + ' links · Tab to pick');
+        else if (links.length > 1) say(links.length + ' links · Tab to pick');
         return links.length > 0;
       }
       return false;
     },
-    /** Shows `text` in the pill, or hides it for ''. */
-    pill: showPill,
+    /** The focused stop as the strip names it: `{k:"doc"}`, `{k:"blank", id}` or `{k:"block", sp, heading, kind}`. */
+    stripFocus: function () {
+      var el = isSummary(focus) ? summaryStop(focus) || focus : focus;
+      if (!el || el === docStop) return { k: 'doc' };
+      if (BR.isHost(el)) {
+        var n = BR.flow.blankItem(el);
+        return n != null ? { k: 'blank', id: '#' + n } : { k: 'doc' };
+      }
+      var c = BR.flow.crumb(el);
+      return { k: 'block', sp: el.getAttribute('data-sourcepos'), heading: c.heading, kind: c.kind };
+    },
+    /** Whether a selection outranks the stop, so c, q and x act on its words. */
+    selecting: function () {
+      var range = selectedRange();
+      return !!range && !!BR.quote.fromRange(range);
+    },
+    /** A header control that Tab, not a click, gave the keyboard; null for none. */
+    keyedControl: function () { return byKeys ? pageControl() : null; },
     /** The focused stop's element, whole doc's host included, or null once a click went elsewhere. */
     focused: function () { return pointedAway ? null : focus; },
     /** Whether `el` is the title, whose verdicts and wash are on its own line. */
@@ -1113,7 +1184,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       var all = walkOf(state);
       var stop = which === 'last' ? all[all.length - 1] : all[0];
       if (stop) land(stop, state);
-      if (says) showPill(says);
+      if (says) say(says);
     },
     /** Notes the focus's place before the page changes under it; it is put back once the change is done. */
     pin: pin,

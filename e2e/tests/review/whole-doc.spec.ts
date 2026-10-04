@@ -22,6 +22,8 @@ import {
   stopSp,
   stops,
   withRev,
+  stripMessage,
+  stripPlace,
 } from "./harness";
 
 const WIDE = { width: 1280, height: 900 };
@@ -51,26 +53,6 @@ async function open(page: Page, birta: Start, doc: string, opts: OpenOpts = {}) 
   await page.goto(`${served.url}/view/pr.md`);
   await booted(page);
   return { served, mock };
-}
-
-/** The pill's text while it is open in the top layer and painted, else null. */
-function pillOf(page: Page): Promise<string | null> {
-  return page.evaluate(() => {
-    for (const host of document.querySelectorAll("birta-pop")) {
-      const root = host.shadowRoot ?? host;
-      for (const el of root.querySelectorAll('[role="status"]')) {
-        let open = false;
-        try {
-          open = el.matches(":popover-open") && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
-        } catch {
-          open = false;
-        }
-        const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
-        if (open && text) return text;
-      }
-    }
-    return null;
-  });
 }
 
 interface DocStop {
@@ -221,9 +203,9 @@ test.describe("whole doc, the first stop", () => {
     await page.keyboard.press("k");
     await onWholeDoc(page);
     await expect.poll(async () => (await docStop(page))?.shown ?? false).toBe(true);
-    expect(await pillOf(page)).not.toBe("top of the doc");
+    expect(await stripMessage(page)).not.toBe("top of the doc");
     await page.keyboard.press("k");
-    await expect.poll(() => pillOf(page)).toBe("top of the doc");
+    await expect.poll(() => stripMessage(page)).toBe("top of the doc");
     expect(await focused(page)).toBe("doc");
     expect(await chipFocused(page)).toBe(false);
   });
@@ -287,11 +269,11 @@ test.describe("whole doc, the first stop", () => {
   test("p back onto Claude's whole-doc reply lands on whole doc, its rows below the header", async ({ page, birta }) => {
     await open(page, birta, fixtureDoc("unseen"), { state: fixtureState("unseen"), viewport: { width: 1280, height: 320 } });
     for (let i = 0; i < 5; i++) await page.keyboard.press("n");
-    await expect.poll(() => pillOf(page)).toBe("5 of 5 · n next · p back");
+    await expect.poll(() => stripPlace(page)).toBe("5 of 5");
     await scrollSettled(page);
     expect(await page.evaluate(() => scrollY)).toBeGreaterThan(0);
     for (let i = 0; i < 4; i++) await page.keyboard.press("p");
-    await expect.poll(() => pillOf(page)).toBe("1 of 5 · n next · p back");
+    await expect.poll(() => stripPlace(page)).toBe("1 of 5");
     await onWholeDoc(page);
     await scrollSettled(page);
     const v = await view(page);
@@ -310,10 +292,10 @@ test.describe("keys on whole doc", () => {
     await onWholeDoc(page);
     const said: Record<string, string | null> = {};
     for (const key of ["l", ".", "x", "y"]) {
-      await page.evaluate(() => (window as unknown as { BR: { chrome: { pill(t: string): void } } }).BR.chrome.pill(""));
+      await page.evaluate(() => (window as unknown as { BR: { chrome: { say(t: string): void } } }).BR.chrome.say(""));
       await page.keyboard.press(key);
-      await expect.poll(() => pillOf(page), { message: key }).not.toBeNull();
-      said[key] = await pillOf(page);
+      await expect.poll(() => stripMessage(page), { message: key }).not.toBeNull();
+      said[key] = await stripMessage(page);
     }
     expect(said).toEqual({
       l: "later needs a block · j",
@@ -331,7 +313,7 @@ test.describe("keys on whole doc", () => {
     await expect.poll(() => phraseOf(page)).not.toBeNull();
     await onWholeDoc(page);
     await page.keyboard.press("u");
-    await expect.poll(() => pillOf(page)).toBe("nothing here to revert");
+    await expect.poll(() => stripMessage(page)).toBe("nothing here to revert");
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops()).toEqual([]);
     expect(await focused(page)).toBe("doc");
@@ -398,8 +380,8 @@ test.describe("a title", () => {
       const n = writes(mock).length;
       await page.keyboard.press(key);
       await expect.poll(() => writes(mock).length, { message: key }).toBe(n + 1);
-      await expect.poll(() => pillOf(page), { message: key }).toMatch(/\(title\)/);
-      said.push((await pillOf(page))!);
+      await expect.poll(() => stripMessage(page), { message: key }).toMatch(/\(title\)/);
+      said.push((await stripMessage(page))!);
     }
     expect(writes(mock).map((o) => ({ at: o.at, verdict: o.verdict }))).toEqual([
       { at: { k: "block", sp: h1, scope: "block" }, verdict: "no" },
@@ -421,7 +403,7 @@ test.describe("a title", () => {
     await expect.poll(() => focused(page)).toBe(h1);
     await page.keyboard.press("x");
     await expect.poll(() => writes(mock)).toEqual([{ op: "comment", at: { k: "block", sp: h1, scope: "block" }, verdict: "no" }]);
-    await expect.poll(() => pillOf(page)).toMatch(/^no · # Add retries\b.* \(title\) · z to undo$/);
+    await expect.poll(() => stripMessage(page)).toMatch(/^no · # Add retries\b.* \(title\) · z to undo$/);
   });
 });
 
@@ -558,23 +540,23 @@ test.describe("arriving in a file", () => {
     const { served } = await openArrive(page, birta);
     await page.keyboard.press("Shift+J");
     await arrived(page, served.url, "news.md");
-    await expect.poll(() => pillOf(page)).toBe("news.md · 3 of 4 files with notes");
+    await expect.poll(() => stripMessage(page)).toBe("news.md · 3 of 4 files with notes");
     await expect.poll(() => focused(page)).toBe(NEWS_FIRST);
 
     await page.keyboard.press("Shift+J");
     await arrived(page, served.url, "sub/c.md");
-    await expect.poll(() => pillOf(page)).toBe("sub/c.md · 4 of 4 files with notes");
+    await expect.poll(() => stripMessage(page)).toBe("sub/c.md · 4 of 4 files with notes");
     await onWholeDoc(page);
 
     // The last file with notes: no wrap to a.md
     await page.keyboard.press("Shift+J");
     await page.waitForTimeout(SETTLE_MS);
     expect(viewing(page), "no wrap").toBe("/view/sub/c.md");
-    await expect.poll(() => pillOf(page)).toBe("no more files with notes · ⇧K back");
+    await expect.poll(() => stripMessage(page)).toBe("no more files with notes · ⇧K back");
 
     await page.keyboard.press("Shift+K");
     await arrived(page, served.url, "news.md");
-    await expect.poll(() => pillOf(page)).toBe("news.md · 3 of 4 files with notes");
+    await expect.poll(() => stripMessage(page)).toBe("news.md · 3 of 4 files with notes");
     await expect.poll(() => focused(page)).toBe(NEWS_FIRST);
   });
 
@@ -583,7 +565,7 @@ test.describe("arriving in a file", () => {
     await page.keyboard.press("Shift+K");
     await page.waitForTimeout(SETTLE_MS);
     expect(viewing(page), "no wrap").toBe("/view/a.md");
-    await expect.poll(() => pillOf(page)).toBe("no more files with notes · ⇧J back");
+    await expect.poll(() => stripMessage(page)).toBe("no more files with notes · ⇧J back");
   });
 
   test("arriving again lands by the arrival rule, not on the stop the file had", async ({ page, birta }) => {
@@ -639,7 +621,13 @@ test.describe("adversary: whole doc", () => {
   }) => {
     await open(page, birta, longDoc());
     await page.mouse.move(640, 500);
-    await page.mouse.wheel(0, 4000);
+    // Exactly to the bottom: Chromium's wheel animation aimed past the end outlives the stillness
+    // check and carries a later scroll on, dragging whole doc back under the header
+    const far = await page.evaluate(() => document.documentElement.scrollHeight - innerHeight - scrollY);
+    await page.mouse.wheel(0, far);
+    await expect
+      .poll(() => page.evaluate(() => Math.abs(document.documentElement.scrollHeight - innerHeight - scrollY) < 1))
+      .toBe(true);
     await scrollSettled(page);
     await expect.poll(() => focused(page)).not.toBe("doc");
     expect((await docStop(page))?.shown ?? false, "empty and unfocused: hidden").toBe(false);
@@ -754,7 +742,7 @@ test.describe("adversary guards: what is not a title", () => {
     await focusTo(page, h1);
     await page.keyboard.press("x");
     await expect.poll(() => writes(mock)).toEqual([{ op: "comment", at: { k: "block", sp: h1, scope: "section" }, verdict: "no" }]);
-    await expect.poll(() => pillOf(page)).toBe("no · # Title (section) · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("no · # Title (section) · z to undo");
   });
 });
 

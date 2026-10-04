@@ -21,6 +21,8 @@ import {
   reviewLog,
   stops,
   withRev,
+  stripKeys,
+  stripMessage,
 } from "./harness";
 
 // The phrase prints local times; UTC lets the spec name them from the epoch alone
@@ -47,8 +49,8 @@ function hint(page: Page): Promise<string> {
 interface Chrome {
   phrase: { text: string; title: string | null; box: Box } | null;
   turn: { text: string; kbd: string | null; disabled: boolean; title: string | null; box: Box } | null;
-  /** The pill's text while it is open in the top layer. */
-  pill: string | null;
+  /** The strip's message while one shows. */
+  message: string | null;
   /** The menu's rows while it is open in the top layer. */
   menu: string[] | null;
 }
@@ -100,20 +102,22 @@ function chrome(page: Page): Promise<Chrome> {
       turn = { text, kbd, disabled: btn.disabled || btn.getAttribute("aria-disabled") === "true", title: btn.getAttribute("title"), box: box(btn) };
     }
 
-    let pill: string | null = null;
+    // A message shows in the strip's keys part while the host carries data-message
+    const stripHost = document.querySelector("birta-strip");
+    const keysPart = stripHost && stripHost.getClientRects().length && stripHost.hasAttribute("data-message")
+      ? (stripHost.shadowRoot?.querySelector('[data-part="keys"]') ?? stripHost.querySelector('[data-part="keys"]'))
+      : null;
+    const message: string | null = keysPart ? textOf(keysPart) || null : null;
     let menu: string[] | null = null;
     for (const root of roots("birta-pop")) {
-      for (const el of Array.from(root.querySelectorAll('[role="status"]')))
-        if (open(el) && textOf(el)) pill = textOf(el);
       for (const el of Array.from(root.querySelectorAll('[role="menu"]')))
         if (open(el)) menu = Array.from(el.querySelectorAll('[role="menuitem"]')).map((r) => textOf(r));
     }
-    return { phrase, turn, pill, menu };
+    return { phrase, turn, message, menu };
   });
 }
 
 const phraseOf = async (page: Page) => (await chrome(page)).phrase?.text ?? null;
-const pillOf = async (page: Page) => (await chrome(page)).pill;
 const menuOf = async (page: Page) => (await chrome(page)).menu;
 const turnOf = async (page: Page) => {
   const t = (await chrome(page)).turn;
@@ -389,7 +393,7 @@ test.describe("turn", () => {
     expect(Object.keys(op).sort()).toEqual(["cid", "op", "path", "rev", "type"]);
     expect(op.op).toBe("approve");
     mock.nack(op.cid, "changed_since");
-    await expect.poll(() => pillOf(page)).toBe("changed since · try again");
+    await expect.poll(() => stripMessage(page)).toBe("changed since · try again");
   });
 
   for (const [reason, text] of [
@@ -404,7 +408,7 @@ test.describe("turn", () => {
       await page.keyboard.press("ControlOrMeta+Enter");
       await expect.poll(() => mock.ops().length).toBe(1);
       mock.nack(mock.ops()[0].cid, reason);
-      await expect.poll(() => pillOf(page)).toBe(text);
+      await expect.poll(() => stripMessage(page)).toBe(text);
     });
   }
 
@@ -419,7 +423,7 @@ test.describe("turn", () => {
     swap(mock, state, picked);
     await expect.poll(() => phraseOf(page)).toBe("Codex picked up 14:13");
     mock.nack(mock.ops()[0].cid, "claimed");
-    await expect.poll(() => pillOf(page)).toBe("Codex already picked it up");
+    await expect.poll(() => stripMessage(page)).toBe("Codex already picked it up");
   });
 
   test("the button takes every click while states keep arriving", async ({ page, birta }) => {
@@ -461,22 +465,22 @@ test.describe("hold", () => {
   test("inside a hand-back's hold the phrase and button keep their words and the pill speaks", async ({ page, birta }) => {
     // The fixture's server clock is days behind this machine's, so only the server's clock can hold this
     await openFixture(page, birta, "hold", (s) => (s.hold.not_before = s.server_now + 20_000));
-    await expect.poll(() => pillOf(page)).toBe("handing back · 3 notes · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("handing back · 3 notes · z to undo");
     const c = await chrome(page);
     expect(c.phrase?.text).toBe("your turn · 3 notes · 1 of 3 blocks decided");
     expect(c.turn).toMatchObject({ text: "Hand back · 3", kbd: await hint(page), disabled: false });
     expect(await glyphRoles(page)).toEqual(["you", "you"]);
     await page.waitForTimeout(1_000);
-    expect(await pillOf(page)).toBe("handing back · 3 notes · z to undo");
+    expect(await stripMessage(page)).toBe("handing back · 3 notes · z to undo");
   });
 
   test("when the hold passes, with no push, the hand-back has left", async ({ page, birta }) => {
     const { state } = await openFixture(page, birta, "hold", (s) => (s.hold.not_before = s.server_now + 1_500));
-    await expect.poll(() => pillOf(page)).toBe("handing back · 3 notes · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("handing back · 3 notes · z to undo");
     expect(await glyphRoles(page)).toEqual(["you", "you"]);
     await expect.poll(() => phraseOf(page), { timeout: 4_000 }).toBe(`sent ${hhmm(state.phrase.sent.ts)} · not picked up yet`);
     const c = await chrome(page);
-    expect(c.pill).toBeNull();
+    expect(c.message).toBeNull();
     expect(c.turn).toMatchObject({ text: "With Claude", kbd: null, disabled: true });
     await expect.poll(() => glyphRoles(page)).toEqual(["agent", "agent"]);
   });
@@ -486,7 +490,7 @@ test.describe("hold", () => {
     birta,
   }) => {
     await openFixture(page, birta, "approved", (s) => (s.hold.not_before = s.server_now + 20_000));
-    await expect.poll(() => pillOf(page)).toBe("approving · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("approving · z to undo");
     const c = await chrome(page);
     expect(c.phrase?.text).toBe("Claude replied 14:13 · 2 of 3 blocks decided · 1 done · 1 answered");
     expect(c.turn).toMatchObject({ text: "Approve", kbd: await hint(page), disabled: false });
@@ -494,11 +498,11 @@ test.describe("hold", () => {
 
   test("with the socket down inside the hold the pill says the hand-back stands", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "hold", (s) => (s.hold.not_before = s.server_now + 30_000));
-    await expect.poll(() => pillOf(page)).toBe("handing back · 3 notes · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("handing back · 3 notes · z to undo");
     // Later routes win: every reconnect is refused from here on
     await page.routeWebSocket(/\/ws$/, (ws) => ws.close());
     await mock.drop();
-    await expect.poll(() => pillOf(page), { timeout: 3_000 }).toBe("connection lost · hand-back stands");
+    await expect.poll(() => stripMessage(page), { timeout: 3_000 }).toBe("connection lost · hand-back stands");
   });
 
   test("on a real server a second tab shows the same hold, both flip, and its menu withdraws the hand-back", async ({
@@ -523,7 +527,7 @@ test.describe("hold", () => {
       pill: "handing back · 1 note · z to undo",
     };
     for (const p of [page, other]) {
-      await expect.poll(() => pillOf(p)).toBe(during.pill);
+      await expect.poll(() => stripMessage(p)).toBe(during.pill);
       expect(await phraseOf(p)).toBe(during.phrase);
       expect(await turnOf(p)).toEqual(during.turn);
     }
@@ -532,7 +536,7 @@ test.describe("hold", () => {
     const after = `sent ${hhmm(submit.not_before)} · not picked up yet`;
     for (const p of [page, other]) {
       await expect.poll(() => phraseOf(p), { timeout: 8_000 }).toBe(after);
-      expect(await pillOf(p)).toBeNull();
+      expect(await stripMessage(p)).toBeNull();
       expect(await turnOf(p)).toEqual({ text: "With Claude", kbd: null, disabled: true });
     }
 
@@ -548,12 +552,12 @@ test.describe("hold", () => {
     const served = await openReal(page, birta, STOPS_DOC, { BIRTA_REVIEW_HOLD_MS: "3000" }, ["pr.md", "--drafted-by", "claude"]);
     await expect.poll(async () => (await turnOf(page))?.text).toBe("Approve");
     await page.keyboard.press("ControlOrMeta+Enter");
-    await expect.poll(() => pillOf(page)).toBe("approving · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("approving · z to undo");
     const log = reviewLog(served.root)!;
     const approve = log[log.length - 1];
     expect(approve).toMatchObject({ op: "approve", rev: revOf(STOPS_DOC) });
     await expect.poll(() => phraseOf(page), { timeout: 6_000 }).toBe(`approved ${hhmm(approve.not_before)} · c to reopen`);
-    expect(await pillOf(page)).toBeNull();
+    expect(await stripMessage(page)).toBeNull();
     expect(await turnOf(page)).toEqual({ text: "Approved", kbd: null, disabled: true });
   });
 });
@@ -776,7 +780,7 @@ test.describe("menu", () => {
       await page.locator(".file-header birta-phrase").click();
       await expect.poll(() => menuOf(page)).not.toBeNull();
       const c = await chrome(page);
-      const texts = [c.phrase!.text, c.phrase!.title ?? "", c.turn!.text, c.pill ?? "", ...c.menu!];
+      const texts = [c.phrase!.text, c.phrase!.title ?? "", c.turn!.text, c.message ?? "", ...c.menu!];
       for (const t of texts) {
         expect(t).not.toMatch(/\bby\s*(·|$)/);
         expect(t).not.toMatch(/undefined|null|NaN/);
@@ -785,10 +789,10 @@ test.describe("menu", () => {
   }
 });
 
-// --- The pill ----------------------------------------------------------------------------------------------
+// --- Messages ----------------------------------------------------------------------------------------------
 
-test.describe("pill", () => {
-  test("the selection hint is a popover in the top layer", async ({ page, birta }) => {
+test.describe("messages", () => {
+  test("the selection hint shows on the strip's keys side, not as a message", async ({ page, birta }) => {
     await open(page, birta, STOPS_DOC);
     await page.evaluate(() => {
       const p = Array.from(document.querySelectorAll("#content p")).find((e) => e.textContent!.includes("When the upload"))!;
@@ -799,19 +803,21 @@ test.describe("pill", () => {
       getSelection()!.removeAllRanges();
       getSelection()!.addRange(r);
     });
-    await expect.poll(() => pillOf(page)).toBe("c note · q ask · x cut");
+    await expect.poll(() => stripKeys(page)).toBe("c note · q ask · x cut these words");
+    expect(await stripMessage(page)).toBeNull();
     await page.keyboard.press("Escape");
-    await expect.poll(() => pillOf(page)).toBeNull();
+    await expect.poll(() => stripKeys(page)).not.toBe("c note · q ask · x cut these words");
+    expect(await stripMessage(page)).toBeNull();
   });
 
-  test("the note-saved pill is a popover in the top layer", async ({ page, birta }) => {
+  test("note saved is a message in the strip", async ({ page, birta }) => {
     const served = await openReal(page, birta, STOPS_DOC);
     // A verdict pills its scope instead, so the first note is what creates the file here
     await page.keyboard.press("c");
     await page.keyboard.type("first");
     await page.keyboard.press("Enter");
     await expect.poll(() => reviewLog(served.root)?.length ?? 0).toBe(4);
-    await expect.poll(() => pillOf(page)).toBe("note saved · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("note saved · z to undo");
   });
 });
 
@@ -881,9 +887,9 @@ test.describe("killers: clock", () => {
       s.server_now = Date.now() + DAY;
       s.hold.not_before = s.server_now + 1_500;
     });
-    await expect.poll(() => pillOf(page)).toBe("handing back · 3 notes · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("handing back · 3 notes · z to undo");
     await expect.poll(() => phraseOf(page), { timeout: 4_000 }).toBe(`sent ${hhmm(state.phrase.sent.ts)} · not picked up yet`);
-    expect(await pillOf(page)).toBeNull();
+    expect(await stripMessage(page)).toBeNull();
   });
 
   test("a hold that arrives in a later push ends on time with no further push", async ({ page, birta }) => {
@@ -894,7 +900,7 @@ test.describe("killers: clock", () => {
     held.server_now = state.server_now;
     held.hold.not_before = held.server_now + 1_500;
     swap(mock, state, held);
-    await expect.poll(() => pillOf(page)).toBe("handing back · 3 notes · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("handing back · 3 notes · z to undo");
     await expect.poll(() => phraseOf(page), { timeout: 4_000 }).toBe(`sent ${hhmm(held.phrase.sent.ts)} · not picked up yet`);
   });
 
@@ -968,12 +974,12 @@ test.describe("killers: pill and socket", () => {
     await page.keyboard.press("c");
     await page.keyboard.type("first");
     await page.keyboard.press("Enter");
-    await expect.poll(() => pillOf(page)).toBe("note saved · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("note saved · z to undo");
     await page.keyboard.press("ControlOrMeta+Enter");
-    await expect.poll(() => pillOf(page)).toBe("handing back · 1 note · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("handing back · 1 note · z to undo");
     await expect.poll(() => phraseOf(page), { timeout: 4_000 }).toMatch(/^sent \d\d:\d\d · not picked up yet$/);
     await page.waitForTimeout(SETTLE_MS);
-    expect(await pillOf(page)).toBeNull();
+    expect(await stripMessage(page)).toBeNull();
     expect(reviewLog(served.root)!.some((l) => l.op === "submit")).toBe(true);
   });
 
@@ -983,15 +989,15 @@ test.describe("killers: pill and socket", () => {
     await page.routeWebSocket(/\/ws$/, (ws) => ws.close());
     await mock.drop();
     await page.waitForTimeout(2_000);
-    expect(await pillOf(page)).toBeNull();
+    expect(await stripMessage(page)).toBeNull();
   });
 
   test("when the socket comes back inside the hold the hold pill returns", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "hold", (s) => (s.hold.not_before = s.server_now + 30_000));
-    await expect.poll(() => pillOf(page)).toBe("handing back · 3 notes · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("handing back · 3 notes · z to undo");
     await mock.drop(); // no refusal route: the page reconnects after ~1 s
-    await expect.poll(() => pillOf(page)).toBe("connection lost · hand-back stands");
-    await expect.poll(() => pillOf(page), { timeout: 6_000 }).toBe("handing back · 3 notes · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("connection lost · hand-back stands");
+    await expect.poll(() => stripMessage(page), { timeout: 6_000 }).toBe("handing back · 3 notes · z to undo");
   });
 });
 
@@ -1105,10 +1111,10 @@ test.describe("rulings", () => {
     await page.keyboard.press("ControlOrMeta+Enter");
     await expect.poll(() => mock.ops().length).toBe(1);
     mock.nack(mock.ops()[0].cid, "nothing_to_send");
-    await expect.poll(() => pillOf(page)).toBe("nothing to hand back");
+    await expect.poll(() => stripMessage(page)).toBe("nothing to hand back");
     await page.waitForTimeout(2_500);
-    expect(await pillOf(page)).toBe("nothing to hand back");
-    await expect.poll(() => pillOf(page), { timeout: 3_000 }).toBeNull();
+    expect(await stripMessage(page)).toBe("nothing to hand back");
+    await expect.poll(() => stripMessage(page), { timeout: 3_000 }).toBeNull();
   });
 
   test("a refusal's pill goes when the next op is kept", async ({ page, birta }) => {
@@ -1117,7 +1123,7 @@ test.describe("rulings", () => {
     await page.keyboard.press("ControlOrMeta+Enter");
     await expect.poll(() => mock.ops().length).toBe(1);
     mock.nack(mock.ops()[0].cid, "nothing_to_send");
-    await expect.poll(() => pillOf(page)).toBe("nothing to hand back");
+    await expect.poll(() => stripMessage(page)).toBe("nothing to hand back");
     // A block, as a whole-doc y only says what to do
     await page.keyboard.press("j");
     await page.keyboard.press("j");
@@ -1125,7 +1131,7 @@ test.describe("rulings", () => {
     await expect.poll(() => mock.ops().length).toBe(2);
     mock.ack(mock.ops()[1].cid);
     // The verdict's own pill speaks over the refusal
-    await expect.poll(() => pillOf(page), { timeout: 1_500 }).toBe("yes · ## Why (section) · z to undo");
+    await expect.poll(() => stripMessage(page), { timeout: 1_500 }).toBe("yes · ## Why (section) · z to undo");
   });
 
   test("a new hold replaces a refusal's pill", async ({ page, birta }) => {
@@ -1134,12 +1140,12 @@ test.describe("rulings", () => {
     await page.keyboard.press("ControlOrMeta+Enter");
     await expect.poll(() => mock.ops().length).toBe(1);
     mock.nack(mock.ops()[0].cid, "hold_pending");
-    await expect.poll(() => pillOf(page)).toBe("already handing back");
+    await expect.poll(() => stripMessage(page)).toBe("already handing back");
     const held = withRev(fixtureState("hold"), state.rev);
     held.server_now = state.server_now;
     held.hold.not_before = held.server_now + 20_000;
     swap(mock, state, held);
-    await expect.poll(() => pillOf(page)).toBe("handing back · 3 notes · z to undo");
+    await expect.poll(() => stripMessage(page)).toBe("handing back · 3 notes · z to undo");
   });
 
   test("a claimed refusal that comes before its state names the agent once the state does", async ({ page, birta }) => {
@@ -1148,12 +1154,12 @@ test.describe("rulings", () => {
     await page.locator('birta-pop [role="menuitem"]', { hasText: WITHDRAW }).click();
     await expect.poll(() => mock.ops().length).toBe(1);
     mock.nack(mock.ops()[0].cid, "claimed");
-    await expect.poll(() => pillOf(page)).toBe("the agent already picked it up");
+    await expect.poll(() => stripMessage(page)).toBe("the agent already picked it up");
     const picked = withRev(fixtureState("picked"), state.rev);
     picked.owner.drafted_by = null;
     picked.phrase.picked_up.by = picked.rounds[0].claimed_by = "codex";
     swap(mock, state, picked);
-    await expect.poll(() => pillOf(page)).toBe("Codex already picked it up");
+    await expect.poll(() => stripMessage(page)).toBe("Codex already picked it up");
   });
 
   for (const where of ["in the menu", "on the page"]) {
@@ -1170,7 +1176,7 @@ test.describe("rulings", () => {
       if (where === "on the page") await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
       // On the doc x only says what to do, which is still the key acting
       await page.keyboard.press("x");
-      await expect.poll(() => pillOf(page)).toBe("whole doc: c to say what's wrong");
+      await expect.poll(() => stripMessage(page)).toBe("whole doc: c to say what's wrong");
       expect(mock.ops()).toEqual([]);
       expect(await menuOf(page)).toBeNull();
     });
@@ -1184,6 +1190,6 @@ test.describe("rulings", () => {
     mock.pushState(state);
     await page.waitForTimeout(SETTLE_MS);
     expect(await phraseOf(page)).toBe(after);
-    expect(await pillOf(page)).toBeNull();
+    expect(await stripMessage(page)).toBeNull();
   });
 });

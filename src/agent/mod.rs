@@ -33,11 +33,11 @@ Stdin holds one line per entry, as `birta review` prints them under next:
   #6 didnt: The table is generated, so I left it.
       why you didn't do what the note asked
   #7 covers \"Retries now use jitter\"
-      cites a whole-doc note for text you wrote; quote it exactly
+      cites note #7 for words you wrote, one per edit; quote them exactly
   ask \"Retries now use jitter\": Is jitter enough here?
       a question for the reviewer, on words in the doc
   unasked \"more items\": I fixed a typo on the way.
-      a change no note asked for, and why
+      a change no note asked for, and why; quote the words you added or removed
   @: I cut the intro and kept the table.
       one or two lines to the reviewer, in first person; no questions
 

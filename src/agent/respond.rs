@@ -22,6 +22,8 @@ const PLACEHOLDERS: &[&str] = &[
     "<new text>",
     "<new text you wrote for the whole-doc note>",
     "<two lines: what you did, didn't, ask>",
+    "<words you wrote>",
+    "<exact words you added or removed>",
 ];
 
 /// One line of the heredoc, with any lines that continue it.

@@ -435,7 +435,12 @@ test.describe("seen", () => {
     const picked = agent(served.root, ["review", "pr.md", "--as", "claude"]);
     expect(picked.status, picked.stderr).toBe(0);
     served.write("pr.md", DOC.replace("we just fail.", "we just fail, because S3 answers 503 under load."));
-    const responded = agent(served.root, ["respond", "pr.md", "--as", "claude"], `#${note.n} done\n`);
+    // respond records nothing until every change of the turn cites a note
+    const responded = agent(
+      served.root,
+      ["respond", "pr.md", "--as", "claude"],
+      `#${note.n} done\n#${note.n} covers "because S3 answers 503 under load"\n`,
+    );
     expect(responded.status, responded.stdout + responded.stderr).toBe(0);
 
     await expect.poll(() => linesNamed(served.root, "yield").length).toBe(1);

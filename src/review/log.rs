@@ -265,6 +265,35 @@ impl Held {
         &self.parsed
     }
 
+    /// The number the next appended line gets.
+    pub fn next_line(&self) -> u32 {
+        physical_lines(&self.bytes) + 1
+    }
+
+    /// The log as it would read with each batch of ops appended under its context, the
+    /// way [`Held::append_with`] writes them. Nothing is written.
+    pub fn preview(&self, batches: Vec<(AppendCtx, Vec<Op>)>) -> io::Result<Parsed> {
+        let mut bytes = self.bytes.clone();
+        for (ctx, ops) in batches {
+            let first = physical_lines(&bytes) + 1;
+            if !ops.is_empty() && !bytes.ends_with(b"\n") {
+                bytes.push(b'\n');
+            }
+            for (n, op) in (first..).zip(ops) {
+                let line = Line {
+                    n,
+                    ts: Some(ctx.now_ms),
+                    by: ctx.by.clone(),
+                    cid: ctx.cid.clone(),
+                    op,
+                };
+                serde_json::to_writer(&mut bytes, &line).map_err(io::Error::other)?;
+                bytes.push(b'\n');
+            }
+        }
+        Ok(ops::parse(&bytes))
+    }
+
     /// [`Log::append_with`] on the file this holds.
     pub fn append_with(
         &mut self,

@@ -246,8 +246,10 @@ const listsPath = (d: State, p: string) => (d.files ?? []).some((f: State) => (f
 const quoted = (p: string) => `'${p.replace(/'/g, `'\\''`)}'`;
 // The specs turn review on by env, so a restart has to carry it
 const GATE_PREFIX = "BIRTA_REVIEW=1 ";
-const restartLine = (served: string) => `${GATE_PREFIX}birta ${quoted(served)} --no-open`;
-const bannerText = (served: string) => `birta stopped · run ${GATE_PREFIX}birta ${quoted(served)} to reconnect`;
+// One exact line: the banner shows what the copy button copies
+const restartLine = (served: string, port: number) =>
+  `${GATE_PREFIX}birta ${quoted(served)} --port ${port} --no-open`;
+const bannerText = (served: string, port: number) => `birta stopped · run ${restartLine(served, port)} to reconnect`;
 const RECONNECTED = "reconnected · nothing lost";
 
 /** Times of every `whoami` probe the page makes. */
@@ -295,14 +297,14 @@ test.describe("a stopped server", () => {
     const before = await page.evaluate("BOOT.review.token");
 
     await kill(first);
-    const banner = page.getByText(bannerText(doc), { exact: true });
+    const banner = page.getByText(bannerText(doc, first.port), { exact: true });
     await expect(banner).toBeVisible({ timeout: 3_000 });
     // While stopped the phrase says so, and the button keeps its words but takes no press
     await expect.poll(() => phraseOf(page)).toBe("birta stopped · notes wait here");
     expect(await turnOf(page)).toMatch(/^Hand back · 1( |$)/);
     expect(await turnDisabled(page)).toBe(true);
     await page.getByRole("button", { name: "copy", exact: true }).click();
-    await expect.poll(() => copied(page)).toEqual([restartLine(doc)]);
+    await expect.poll(() => copied(page)).toEqual([restartLine(doc, first.port)]);
     await expect.poll(() => stripMessage(page)).toBe("copied · run it in a terminal");
     expect(first.port).toBe(derived(doc));
 
@@ -359,7 +361,7 @@ test.describe("a stopped server", () => {
     await page.goto(`${first.url}/view/${name}`);
     await booted(page);
     await kill(first);
-    const banner = page.getByText(bannerText(path.join(s.root, name)), { exact: true });
+    const banner = page.getByText(bannerText(path.join(s.root, name), first.port), { exact: true });
     await expect(banner).toBeVisible({ timeout: 3_000 });
     return { s, name, banner };
   }
@@ -398,7 +400,7 @@ test.describe("a stopped server", () => {
     await page.goto(`${first.url}/view/${name}`);
     await booted(page);
     await kill(first);
-    const banner = page.getByText(bannerText(doc), { exact: true });
+    const banner = page.getByText(bannerText(doc, first.port), { exact: true });
     await expect(banner).toBeVisible({ timeout: 3_000 });
     const before = opened.n;
 
@@ -441,10 +443,10 @@ test.describe("a stopped server", () => {
     await expect(page).toHaveURL(/\/view\/docs\/plan\.md$/);
     await booted(page);
     await kill(first);
-    const banner = page.getByText(bannerText(doc), { exact: true });
+    const banner = page.getByText(bannerText(doc, first.port), { exact: true });
     await expect(banner).toBeVisible({ timeout: 3_000 });
     await page.getByRole("button", { name: "copy", exact: true }).click();
-    await expect.poll(() => copied(page)).toEqual([restartLine(doc)]);
+    await expect.poll(() => copied(page)).toEqual([restartLine(doc, first.port)]);
     const again = await launchLine(s, (await copied(page))[0], {}, s.base);
     expect(again.port).toBe(first.port);
     await expect(banner).toBeHidden({ timeout: 3_000 });
@@ -464,11 +466,11 @@ test.describe("a stopped server", () => {
     await page.goto(`${first.url}/view/index.md`);
     await booted(page);
     await kill(first);
-    const banner = page.getByText(bannerText(dir), { exact: true });
+    const banner = page.getByText(bannerText(dir, first.port), { exact: true });
     await expect(banner).toBeVisible({ timeout: 3_000 });
     expect(first.port).toBe(derived(dir));
     await page.getByRole("button", { name: "copy", exact: true }).click();
-    await expect.poll(() => copied(page)).toEqual([restartLine(dir)]);
+    await expect.poll(() => copied(page)).toEqual([restartLine(dir, first.port)]);
     const line = (await copied(page))[0];
     expect(line.endsWith(" --no-open")).toBe(true);
     const again = await launchLine(s, line, {}, s.base);

@@ -126,6 +126,30 @@ fn rank(c: Check) -> u8 {
 }
 
 /// Whether two spans of the current text's lines share a line.
+/// Who wrote over a change a later write overlaps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Over {
+    /// Only Claude, later in the same turn: the later change stands for both.
+    Own,
+    /// Someone else, or a later turn.
+    Other,
+}
+
+/// Who wrote over change `c`, when a later write overlaps it.
+pub fn overwritten(c: &Change, changes: &[Change]) -> Option<Over> {
+    if c.range.status != RangeStatus::Superseded || c.undone_by.is_some() {
+        return None;
+    }
+    let mut writes = changes
+        .iter()
+        .filter(|x| x.op > c.op && touches(x.span, c.span))
+        .peekable();
+    writes.peek()?;
+    let own = c.attr == Attr::Agent
+        && writes.all(|x| x.attr == Attr::Agent && x.turn.is_some() && x.turn == c.turn);
+    Some(if own { Over::Own } else { Over::Other })
+}
+
 fn touches(a: Option<(u32, u32)>, b: Option<(u32, u32)>) -> bool {
     matches!((a, b), (Some(a), Some(b)) if a.0 <= b.1 && b.0 <= a.1)
 }
@@ -184,21 +208,10 @@ pub(super) fn build(input: &Input) -> Built {
             continue;
         }
         let overlapped = c.range.status == RangeStatus::Superseded && c.undone_by.is_none();
-        // A later write over it keeps it news until settled, on that write's block; Claude's own
-        // later hunk in the same turn stands for both
+        // A later write over it keeps it news until settled, on that write's block
         let over = if overlapped {
-            let writes: Vec<&Change> = input
-                .changes
-                .iter()
-                .filter(|x| x.op > c.op && touches(x.span, c.span))
-                .collect();
-            let own = |x: &&Change| {
-                x.attr == Attr::Agent
-                    && c.attr == Attr::Agent
-                    && x.turn.is_some()
-                    && x.turn == c.turn
-            };
-            if writes.iter().any(own) && writes.iter().all(own) {
+            // Claude's own later hunk in the same turn stands for both
+            if overwritten(c, input.changes) == Some(Over::Own) {
                 continue;
             }
             let Some(stop) = c.span.and_then(|s| super::span_stop(input.doc, s)) else {
@@ -354,10 +367,13 @@ pub(super) fn build(input: &Input) -> Built {
                 events,
             });
         }
-        // A bare `done` is Claude's reply too, unless a reply line of its turn says more
+        // A bare `done` is Claude's reply too, unless a reply line of its turn says more,
+        // on time or late
         if let Some(&(line, turn)) = dones.get(&i.n) {
             let close = input.turns.turn(turn).map_or(u32::MAX, |t| t.close());
-            if !agent.iter().any(|r| r.n > turn && r.n <= close) {
+            let of_turn =
+                |n: u32| (n > turn && n <= close) || input.turns.replies.get(&n) == Some(&turn);
+            if !agent.iter().any(|r| of_turn(r.n)) {
                 let id = format!("#{}", i.n);
                 let mut events = seen_after(&id, line, Check::Ok);
                 events.extend(human_replies(note, line, Check::Replied));

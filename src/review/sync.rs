@@ -8,7 +8,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use super::chain::Chain;
+use super::chain::{Chain, Recorded};
 use super::fold::{self, RoundKind};
 use super::log::{AppendCtx, AppendError, Held};
 use super::ops::{By, ByKind, Op, Parsed};
@@ -75,20 +75,7 @@ fn record_with(
     let last = last_head(held.parsed());
     // A checkout or pull moves HEAD; inside a claim the write is the claimer's anyway
     let git = !claimed && head.is_some() && last.is_some() && head != last;
-    let mut ops = vec![Op::External {
-        rev: recorded.rev,
-        to_rev: recorded.to_rev.clone(),
-        patch: recorded.patch,
-        cause: git.then(|| "git".to_string()),
-        head,
-    }];
-    if let Some(text) = recorded.checkpoint {
-        ops.push(Op::Snap {
-            rev: recorded.to_rev,
-            text,
-            checkpoint: true,
-        });
-    }
+    let ops = write_ops(recorded, git.then(|| "git".to_string()), head);
     let ctx = AppendCtx {
         now_ms,
         by: By {
@@ -98,6 +85,34 @@ fn record_with(
         cid: None,
     };
     Ok(held.append_with(ctx, |_, _| Ok(ops))?.first().copied())
+}
+
+/// The ops that record the doc's `text` as a write inside a claim, as
+/// [`try_sync_bytes`] would append them; empty when the log already has it.
+pub fn pending_write(parsed: &Parsed, text: &str) -> Vec<Op> {
+    Chain::build(parsed)
+        .record(text)
+        .map(|recorded| write_ops(recorded, None, None))
+        .unwrap_or_default()
+}
+
+/// An `external` line for a recorded write, and the checkpoint snap that may follow it.
+fn write_ops(recorded: Recorded, cause: Option<String>, head: Option<String>) -> Vec<Op> {
+    let mut ops = vec![Op::External {
+        rev: recorded.rev,
+        to_rev: recorded.to_rev.clone(),
+        patch: recorded.patch,
+        cause,
+        head,
+    }];
+    if let Some(text) = recorded.checkpoint {
+        ops.push(Op::Snap {
+            rev: recorded.to_rev,
+            text,
+            checkpoint: true,
+        });
+    }
+    ops
 }
 
 /// A doc's bytes, only from a regular file. Anything else is refused before it is opened,

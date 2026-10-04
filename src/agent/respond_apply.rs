@@ -20,8 +20,8 @@ use crate::review::doc::Doc;
 use crate::review::fold::{self, RoundKind, TurnIndex};
 use crate::review::log::{AppendCtx, AppendError, Held, Log};
 use crate::review::ops::{AnchorReq, At, By, ByKind, Line, Op, Parsed, ReplyKind, Verdict, Via};
-use crate::review::state::{AskedKind, Attr, ItemStatus, ReviewState};
-use crate::review::sync::{read_doc, try_sync_bytes};
+use crate::review::state::{AskedKind, AtKind, Attr, Change, ItemStatus, ReviewState};
+use crate::review::sync::{pending_write, read_doc, try_sync_bytes};
 use crate::review::{Reject, anchor_from_req, review_path_for};
 use crate::scan::{self, ScanBudget};
 
@@ -29,8 +29,8 @@ use crate::scan::{self, ScanBudget};
 const PLACES: usize = 5;
 /// Code points of a place's line shown beside it.
 const EXCERPT: usize = 60;
-/// Folders above the doc an old folder claim is looked for in.
-const WALK_UP: usize = 3;
+/// Folders above the doc an old folder claim, or a batch's other files, are looked for in.
+pub(super) const WALK_UP: usize = 3;
 
 pub fn run(args: &RespondArgs) -> ExitCode {
     if io::stdin().is_terminal() {
@@ -213,13 +213,70 @@ fn apply(file: &Path, entries: &[(usize, Entry)], by: &By, now: u64) -> anyhow::
         by: by.clone(),
         cid: None,
     };
+    let late = matches!(mode, Mode::Late { .. });
+    // The turn as the log would read with this respond in it, folded before anything is
+    // written; a late respond only adds lines to a turn that already ended
+    let (turn, after) = match &mode {
+        Mode::Late { claim, .. } => (*claim, state.clone()),
+        Mode::Held { .. } | Mode::Pickup { .. } => {
+            let (turn, claim) = match &mode {
+                Mode::Pickup { round } => (
+                    held.next_line(),
+                    vec![Op::Claim {
+                        round: *round,
+                        target: own_name(&doc_path),
+                    }],
+                ),
+                Mode::Held { claim } | Mode::Late { claim, .. } => (*claim, Vec::new()),
+            };
+            let write = AppendCtx {
+                now_ms: now,
+                by: By {
+                    kind: ByKind::Birta,
+                    ..By::default()
+                },
+                cid: None,
+            };
+            let would = held
+                .preview(vec![
+                    (ctx.clone(), claim),
+                    (write, pending_write(held.parsed(), text)),
+                    (ctx.clone(), to_ops(entries, &checked.anchors, turn, false)),
+                ])
+                .context("reading the review file as it would be")?;
+            (turn, fold::fold(&would, &Chain::build(&would), &doc).state)
+        }
+    };
+    let unresolved: Vec<String> = checked
+        .ambiguous
+        .iter()
+        .filter(|a| !in_turn(&after, turn, &doc, &a.quote))
+        .map(|a| format!("respond: line {}: {}", a.line, a.msg))
+        .collect();
+    if !unresolved.is_empty() {
+        return Ok(Finish::refused(ExitCode::Quote, unresolved));
+    }
+    if !late {
+        // A cut of whitespace alone can't be quoted, so it can't hold the turn up
+        let missing: Vec<&Change> = uncited(&after, turn)
+            .into_iter()
+            .filter(|c| c.what.new_lines > 0 || quote_for(c, &doc).is_some())
+            .collect();
+        if !missing.is_empty() {
+            let reminders = doc_notes(state, &valid);
+            return Ok(Finish::refused(
+                ExitCode::Quote,
+                refusal(&missing, &reminders, &doc),
+            ));
+        }
+    }
+
     // Claimed first, so the write it records is this turn's
     let turn = match mode {
         Mode::Held { claim } | Mode::Late { claim, .. } => claim,
         Mode::Pickup { round } => claim_round(&mut held, ctx.clone(), round, &doc_path)?,
     };
     try_sync_bytes(&mut held, &doc_path, &bytes, now).context("recording the doc's last write")?;
-    let late = matches!(mode, Mode::Late { .. });
     let mut ops = to_ops(entries, &checked.anchors, turn, late);
     if !late {
         ops.push(Op::Yield {
@@ -243,13 +300,12 @@ fn apply(file: &Path, entries: &[(usize, Entry)], by: &By, now: u64) -> anyhow::
     let after = held.parsed().clone();
     drop(held);
     let state = fold::fold(&after, &Chain::build(&after), &doc).state;
-    let mut err: Vec<String> = state
+    let err: Vec<String> = state
         .items
         .iter()
         .filter(|i| valid.contains(&i.n) && i.status == ItemStatus::NotHandled)
         .map(|i| format!("warning: not handled: #{}", i.n))
         .collect();
-    err.extend(uncited(&state, turn, &doc));
     let next = waits_on(&after.lines, turn, &doc_path, &name, by);
     Ok(Finish {
         code: ExitCode::Ok,
@@ -260,35 +316,128 @@ fn apply(file: &Path, entries: &[(usize, Entry)], by: &By, now: u64) -> anyhow::
     })
 }
 
-/// The warning for this turn's changes that no note asked for and no `unasked` line
-/// names, with the line that would name each. Changes that render the same never reach
-/// the fold's list.
-fn uncited(state: &ReviewState, turn: u32, doc: &Doc) -> Option<String> {
-    let (named, lines): (Vec<String>, Vec<String>) = state
+/// This turn's changes that no note asked for and no `unasked` line names. Changes that
+/// render the same never reach the fold's list. One Claude wrote over again in the same
+/// turn is the later change's, as the news list counts it; one someone else wrote over
+/// has no words of its own left to quote.
+fn uncited(state: &ReviewState, turn: u32) -> Vec<&Change> {
+    state
         .changes
         .iter()
         .filter(|c| c.turn == Some(turn) && c.attr == Attr::Agent)
         .filter(|c| c.asked.kind == AskedKind::Unasked && !c.flagged && c.undone_by.is_none())
-        .filter_map(|c| {
-            if c.what.new_lines == 0 {
-                let removed = c.removed.as_deref().unwrap_or_default();
-                return Some((format!("removed \"{}\"", excerpt(removed)), removed));
-            }
-            let text = doc.text.get(c.range.bytes.0..c.range.bytes.1)?;
-            Some((format!("\"{}\"", excerpt(text)), text))
+        .filter(|c| fold::overwritten(c, &state.changes).is_none())
+        .collect()
+}
+
+/// Words around which to cite each side of a change with none of its own.
+const AROUND: usize = 2;
+
+/// The quote a line citing `change` would carry: its first words, or for written lines
+/// with no words (a blank line in a code block), the words just before and after them,
+/// which read across it. `None` for a cut of whitespace, which no quote can name.
+fn quote_for(change: &Change, doc: &Doc) -> Option<String> {
+    let own = first_words(words_of(change, doc));
+    if !own.is_empty() {
+        return Some(own);
+    }
+    if change.what.new_lines == 0 {
+        return None;
+    }
+    let (a, b) = change.range.bytes;
+    let before: Vec<&str> = doc
+        .text
+        .get(..a)?
+        .split_whitespace()
+        .rev()
+        .take(AROUND)
+        .collect();
+    let after: Vec<&str> = doc.text.get(b..)?.split_whitespace().take(AROUND).collect();
+    if before.is_empty() || after.is_empty() {
+        return None;
+    }
+    let around: Vec<&str> = before.into_iter().rev().chain(after).collect();
+    Some(first_words(&around.join(" "))).filter(|q| !q.is_empty())
+}
+
+/// The whole-doc notes of the round that a `covers` can cite, in note order.
+fn doc_notes(state: &ReviewState, valid: &BTreeSet<u32>) -> Vec<u32> {
+    state
+        .items
+        .iter()
+        .filter(|i| valid.contains(&i.n) && i.at.kind == AtKind::Doc)
+        .filter(|i| {
+            !matches!(
+                i.verdict,
+                Some(Verdict::Ask | Verdict::Yes | Verdict::Stet | Verdict::Later)
+            )
         })
-        .map(|(named, text)| (named, format!("unasked \"{}\": <why>", first_words(text))))
-        .unzip();
-    let (count, they) = match named.len() {
-        0 => return None,
-        1 => ("1 change cites".to_string(), "it shows"),
-        n => (format!("{n} changes cite"), "they show"),
+        .map(|i| i.n)
+        .collect()
+}
+
+/// The words a change wrote, or for a cut the words it took.
+fn words_of<'a>(change: &'a Change, doc: &'a Doc) -> &'a str {
+    if change.what.new_lines == 0 {
+        return change.removed.as_deref().unwrap_or_default();
+    }
+    doc.text
+        .get(change.range.bytes.0..change.range.bytes.1)
+        .unwrap_or_default()
+}
+
+/// Why nothing was recorded, then the lines that would cite each change: a `covers` per
+/// whole-doc note of the round as a reminder, quoting the first change that wrote words,
+/// and an `unasked` per change.
+fn refusal(missing: &[&Change], notes: &[u32], doc: &Doc) -> Vec<String> {
+    let head = match missing.len() {
+        1 => "respond: 1 change cites no note, so nothing was recorded. Add a line for it and run respond again:".to_string(),
+        n => format!(
+            "respond: {n} changes cite no note, so nothing was recorded. Add a line for each and run respond again:"
+        ),
     };
-    Some(format!(
-        "warning: {count} no note: {}. Add {}, or {they} as \"without a note\".",
-        named.join(", "),
-        lines.join(" and ")
-    ))
+    let mut out = vec![head];
+    let wrote = missing
+        .iter()
+        .filter(|c| c.what.new_lines > 0)
+        .find_map(|c| quote_for(c, doc));
+    if let Some(words) = wrote {
+        out.extend(notes.iter().map(|n| format!("#{n} covers \"{words}\"")));
+    }
+    out.extend(
+        missing
+            .iter()
+            .filter_map(|c| quote_for(c, doc))
+            .map(|q| format!("unasked \"{q}\": <why>")),
+    );
+    out
+}
+
+/// Whether `quote`, found in several places, reads in a change this turn made, so the
+/// fold credits that change with it.
+fn in_turn(state: &ReviewState, turn: u32, doc: &Doc, quote: &str) -> bool {
+    let changed: Vec<(usize, usize)> = state
+        .changes
+        .iter()
+        .filter(|c| c.turn == Some(turn) && c.attr == Attr::Agent && c.what.new_lines > 0)
+        .map(|c| c.range.bytes)
+        .collect();
+    places(doc, quote, true)
+        .iter()
+        .any(|&(start, end)| changed.iter().any(|&(a, b)| start < b && a < end))
+}
+
+/// The byte ranges `quote` reads at in the doc, as the page finds them; with `cites`, in
+/// the source, whitespace aside, when the page finds none.
+fn places(doc: &Doc, quote: &str, cites: bool) -> Vec<(usize, usize)> {
+    let hits: Vec<(usize, usize)> = anchor::search_all(&doc.text, quote)
+        .iter()
+        .map(|hit| (hit.bytes.start, hit.bytes.end))
+        .collect();
+    if hits.is_empty() && cites {
+        return fold::quote_places(&doc.text, quote);
+    }
+    hits
 }
 
 /// The opening words of `text`'s first line with words on it, as a respond quote:
@@ -338,20 +487,6 @@ fn removed_by(parsed: &Parsed, state: &ReviewState, mode: &Mode, text: &str) -> 
     recorded.chain(pending).collect()
 }
 
-/// The first line of `text` with words on it, cut to 60 code points.
-fn excerpt(text: &str) -> String {
-    let line = text
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .unwrap_or_default();
-    let line = one_line(line);
-    match line.char_indices().nth(EXCERPT) {
-        Some((cut, _)) => format!("{}…", &line[..cut]),
-        None => line,
-    }
-}
-
 /// What the agent waits on next, as one shell word: the folder its claim was made on,
 /// else this doc as named.
 fn waits_on(lines: &[Line], turn: u32, doc: &Path, name: &str, by: &By) -> String {
@@ -383,7 +518,7 @@ fn waits_on(lines: &[Line], turn: u32, doc: &Path, name: &str, by: &By) -> Strin
 }
 
 /// `path` from the working folder, or absolute when they share nothing but the root.
-fn shown(path: &Path) -> PathBuf {
+pub(super) fn shown(path: &Path) -> PathBuf {
     let Ok(cwd) = std::env::current_dir().and_then(|d| d.canonicalize()) else {
         return path.to_path_buf();
     };
@@ -628,10 +763,20 @@ fn valid_ids(state: &ReviewState, claim: Option<u32>, rounds: &[u32]) -> BTreeSe
 #[derive(Default)]
 struct Checked {
     errors: Vec<String>,
+    /// `covers` and `unasked` quotes found in several places, which stand only if one of
+    /// them reads in a change of the turn.
+    ambiguous: Vec<Ambiguous>,
     /// Set by a note outside the round, which is a usage error before any quote error.
     bad_note: bool,
     /// Anchors for the `ask` lines, by input line.
     anchors: HashMap<usize, At>,
+}
+
+struct Ambiguous {
+    line: usize,
+    quote: String,
+    /// The error to give when none of its places is a change of the turn.
+    msg: String,
 }
 
 /// What a respond's `#N` may name.
@@ -690,9 +835,21 @@ fn check(
         if gone {
             continue;
         }
-        if let Err(e) = unique(doc, quote, name) {
-            out.errors.push(format!("line {line}: {e}"));
-            continue;
+        let cites = !matches!(entry, Entry::Ask { .. });
+        match unique(doc, quote, name, cites) {
+            Err(Found::Several(msg)) if !matches!(entry, Entry::Ask { .. }) => {
+                out.ambiguous.push(Ambiguous {
+                    line: *line,
+                    quote: quote.clone(),
+                    msg,
+                });
+                continue;
+            }
+            Err(Found::None(msg) | Found::Several(msg)) => {
+                out.errors.push(format!("line {line}: {msg}"));
+                continue;
+            }
+            Ok(()) => {}
         }
         if let Entry::Ask { .. } = entry {
             let req = AnchorReq::Quote {
@@ -716,19 +873,29 @@ fn check(
     out
 }
 
+/// Why a quote isn't found exactly once.
+enum Found {
+    None(String),
+    Several(String),
+}
+
 /// A quote found exactly once in the current text, the way `comment` finds one.
-fn unique(doc: &Doc, quote: &str, name: &str) -> Result<(), String> {
-    let hits = anchor::search_all(&doc.text, quote);
+/// With `cites`, a quote the page can't find still counts where it reads in the source,
+/// whitespace aside, as the fold credits a `covers` or `unasked` quote.
+fn unique(doc: &Doc, quote: &str, name: &str, cites: bool) -> Result<(), Found> {
+    let hits = places(doc, quote, cites);
     match hits.len() {
         1 => Ok(()),
-        0 => Err(format!("quote not found in the current text: {quote:?}")),
+        0 => Err(Found::None(format!(
+            "quote not found in the current text: {quote:?}"
+        ))),
         count => {
             let places: Vec<String> = hits
                 .iter()
                 .take(PLACES)
                 .enumerate()
-                .map(|(i, hit)| {
-                    let line = doc.lines.line_of(hit.bytes.start);
+                .map(|(i, &(start, _))| {
+                    let line = doc.lines.line_of(start);
                     let excerpt = doc
                         .lines
                         .range(line)
@@ -739,10 +906,10 @@ fn unique(doc: &Doc, quote: &str, name: &str) -> Result<(), String> {
                     format!("{}) line {line} {excerpt}", i + 1)
                 })
                 .collect();
-            Err(format!(
+            Err(Found::Several(format!(
                 "{quote:?} matches {count} places in {name}: {}  (quote more of it)",
                 places.join(" ")
-            ))
+            )))
         }
     }
 }

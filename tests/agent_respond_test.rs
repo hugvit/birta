@@ -69,6 +69,11 @@ fn agent_edit(s: &Scenario) -> String {
     format!("{text}\nRetries now use jitter.\n")
 }
 
+/// The agent's Edit at the quoted spot only, which the note there asked for.
+fn cited_edit(s: &Scenario) -> String {
+    s.replaced("- second item", "- second item, because S3 flakes")
+}
+
 /// A temp folder holding `home/`, `pr.md` and its review file.
 struct Tmp {
     _tmp: tempfile::TempDir,
@@ -493,8 +498,8 @@ fn the_heredoc_from_review_unfilled_is_refused_for_its_placeholders() {
     assert_eq!(code, 2, "{stderr}");
     assert_eq!(
         stderr.matches("placeholder").count(),
-        4,
-        "one error per placeholder:\n{stderr}"
+        6,
+        "one error per placeholder: done:, three covers, answer and @:\n{stderr}"
     );
 }
 
@@ -548,7 +553,7 @@ fn a_respond_with_nothing_claimed_picks_the_round_up_first() {
     let r = round(false);
     let tmp = Tmp::new(&r.s);
     let last = r.s.next() - 1;
-    tmp.edit(&agent_edit(&r.s), now_ms() - 1_000);
+    tmp.edit(&cited_edit(&r.s), now_ms() - 1_000);
     let heredoc = format!("#{} done\n@: picked up by responding\n", r.note);
     let (code, stdout, stderr) = tmp.respond(&heredoc);
     assert_eq!(code, 0, "{stdout}{stderr}");
@@ -683,7 +688,7 @@ fn a_respond_shaped_like_the_template_leaves_nothing_not_handled() {
     let tmp = Tmp::new(&r.s);
     tmp.edit(&agent_edit(&r.s), ts(r.claim.unwrap()) + 1_000);
     let heredoc = format!(
-        "#{} done\n#{} done\n#{} answer: yes\n#{} covers \"Retries now use jitter\"\n@: all four\n",
+        "#{} done\n#{} done\n#{} answer: yes\n#{} covers \"Retries now use jitter\"\nunasked \"more items\": fixed a typo\n@: all four\n",
         r.note, r.no, r.ask, r.doc_note
     );
     let (code, stdout, stderr) = tmp.respond(&heredoc);
@@ -985,7 +990,7 @@ fn a_git_that_hangs_holds_the_respond_up_only_for_its_timeout() {
     let mut path = std::ffi::OsString::from(&bin);
     path.push(":");
     path.push(std::env::var_os("PATH").unwrap_or_default());
-    tmp.edit(&agent_edit(&r.s), now_ms() - 1_000);
+    tmp.edit(&cited_edit(&r.s), now_ms() - 1_000);
 
     let started = Instant::now();
     let out = Command::cargo_bin("birta")
@@ -1233,4 +1238,518 @@ fn a_reader_that_went_away_leaves_one_landed_respond_and_exit_0() {
         .filter(|l| matches!(l.op, Op::Yield { .. }))
         .count();
     assert_eq!(yields, 1);
+}
+
+// --- checked before it is recorded ---
+
+/// The journey's doc as handed back, and its write for round 1.
+fn journey_texts() -> (String, String) {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("e2e/fixtures/review/journey");
+    let read = |name: &str| fs::read_to_string(dir.join(name)).unwrap();
+    (read("pr-draft.md"), read("round1.md"))
+}
+
+/// The journey's round 1, claimed by claude: the whole-doc note, the quote note, the
+/// section `no` and the question, as J-02 to J-05 write them.
+fn journey_round() -> (Scenario, [u32; 4], u32) {
+    let (doc, _) = journey_texts();
+    let mut s = Scenario::drafted_by(&doc, "claude");
+    let verbose = s.note("way too verbose");
+    let say_why = s.comment(s.quote("we just fail"), None, Some("say why"));
+    let stacked = s.comment(s.section("## Stacked on"), Some("no"), None);
+    let question = s.comment(
+        s.block("Ran the integration suite"),
+        Some("ask"),
+        Some("is 5 retries enough?"),
+    );
+    s.submit();
+    let claim = s.claim("claude");
+    (s, [verbose, say_why, stacked, question], claim)
+}
+
+/// The journey's J-07 heredoc, verbatim, which cites every change round 1 makes.
+#[test]
+fn the_journeys_round_one_heredoc_is_accepted_and_cites_every_change() {
+    let (s, [verbose, say_why, stacked, question], claim) = journey_round();
+    let (_, round1) = journey_texts();
+    let tmp = Tmp::new(&s);
+    tmp.edit(&round1, ts(claim) + 1_000);
+    let heredoc = format!(
+        "#{say_why} done
+#{verbose} done
+#{verbose} covers \"Most would succeed moments later.\"
+#{verbose} covers \"Retry on network errors, 429 and 502–504 with exponential backoff and jitter\"
+#{verbose} covers \"defaults: 4 attempts, 200 ms base, 5 s cap\"
+#{verbose} covers \"Unit tests for backoff timing and retryable status codes\"
+#{stacked} done
+unasked \"Respect `Retry-After` when the server sends it\": folded into the defaults bullet
+unasked \"Log each retry at `debug` with attempt number and delay\": too much detail for a PR description
+#{question} answer: The default is 4 attempts (3 retries), not 5; with a 5 s cap that rides out typical blips and short deploys, and it's configurable. The integration suite hasn't been run yet, so that's still unverified.
+@: I trimmed the whole doc to roughly half, explained that we fail because put makes a single attempt with no retry logic, and dropped the Stacked on section.
+"
+    );
+    let (code, stdout, stderr) = tmp.respond(&heredoc);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(!stderr.contains("no note"), "{stderr}");
+    assert!(matches!(tmp.lines().last().unwrap().op, Op::Yield { .. }));
+    let (state, _) = tmp.fold();
+    let uncited: Vec<_> = state
+        .changes
+        .iter()
+        .filter(|c| c.attr == Attr::Agent && c.asked.kind == AskedKind::Unasked && !c.flagged)
+        .collect();
+    assert!(uncited.is_empty(), "{uncited:#?}");
+}
+
+/// The agent changes this turn that no note asked for and no `unasked` names.
+fn uncited(state: &ReviewState) -> Vec<&birta::review::state::Change> {
+    state
+        .changes
+        .iter()
+        .filter(|c| c.attr == Attr::Agent && c.asked.kind == AskedKind::Unasked && !c.flagged)
+        .collect()
+}
+
+/// `lines` with every `<why>` filled in, one per line.
+fn filled(lines: &[&str]) -> String {
+    lines
+        .iter()
+        .map(|l| format!("{}\n", l.replace("<why>", "a reason")))
+        .collect()
+}
+
+#[test]
+fn an_uncited_change_exits_65_records_nothing_and_prefills_the_missing_lines() {
+    let r = round(true);
+    let tmp = Tmp::new(&r.s);
+    // At the quoted spot, a typo nobody asked about, and a line nothing cites
+    tmp.edit(&agent_edit(&r.s), ts(r.claim.unwrap()) + 1_000);
+    let heredoc = format!(
+        "#{} done\n#{} done\n#{} answer: yes\n#{} done: I added a line on jitter\n@: I said why.\n",
+        r.note, r.no, r.ask, r.doc_note
+    );
+    let (log, doc) = (tmp.read(LOG), tmp.read("pr.md"));
+    let (code, stdout, stderr) = tmp.respond(&heredoc);
+    assert_eq!(code, 65, "{stdout}{stderr}");
+    assert_eq!(stdout, "", "nothing recorded, so no summary and no next:");
+    assert_eq!(tmp.read(LOG), log, "no entries, no external, no yield");
+    assert_eq!(tmp.read("pr.md"), doc);
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "respond: 2 changes cite no note, so nothing was recorded. Add a line for each and run respond again:".to_string(),
+            format!("#{} covers \"- more items\"", r.doc_note),
+            "unasked \"- more items\": <why>".to_string(),
+            "unasked \"Retries now use jitter.\": <why>".to_string(),
+        ],
+        "{stderr}"
+    );
+
+    // The same heredoc with the prefilled lines added records the turn and yields
+    let again = format!("{heredoc}{}", filled(&lines[1..]));
+    let (code, stdout, stderr) = tmp.respond(&again);
+    assert_eq!(code, 0, "{again}\n{stdout}{stderr}");
+    assert!(stdout.contains("yielded"), "{stdout}");
+    assert!(!stderr.contains("no note"), "{stderr}");
+    let all = tmp.lines();
+    assert!(matches!(all.last().unwrap().op, Op::Yield { .. }));
+    let externals = all
+        .iter()
+        .filter(|l| matches!(l.op, Op::External { .. }))
+        .count();
+    assert_eq!(
+        externals, 1,
+        "the write is recorded once, by the respond that landed"
+    );
+    let (state, _) = tmp.fold();
+    assert!(uncited(&state).is_empty(), "{:#?}", state.changes);
+}
+
+#[test]
+fn an_uncited_change_refuses_a_pickup_before_it_claims() {
+    let r = round(false);
+    let tmp = Tmp::new(&r.s);
+    tmp.edit(&agent_edit(&r.s), now_ms() - 1_000);
+    let (code, stderr) = refused(&tmp, &format!("#{} done\n@: picked up\n", r.note));
+    assert_eq!(code, 65, "{stderr}");
+    assert_eq!(
+        stderr.lines().next(),
+        Some(
+            "respond: 2 changes cite no note, so nothing was recorded. Add a line for each and run respond again:"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        !tmp.lines()
+            .iter()
+            .any(|l| matches!(l.op, Op::Claim { .. } | Op::Yield { .. })),
+        "the round is still there to pick up"
+    );
+}
+
+#[test]
+fn a_removal_is_prefilled_with_the_words_it_removed() {
+    let r = round(true);
+    let tmp = Tmp::new(&r.s);
+    let text = cited_edit(&r.s).replacen("- more item\n", "", 1);
+    tmp.edit(&text, ts(r.claim.unwrap()) + 1_000);
+    let heredoc = format!(
+        "#{} done\n#{} done\n#{} answer: yes\n#{} done: nothing needed\n@: I said why.\n",
+        r.note, r.no, r.ask, r.doc_note
+    );
+    let (code, stderr) = refused(&tmp, &heredoc);
+    assert_eq!(code, 65, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert!(
+        lines[0].starts_with("respond: 1 change cites no note, so nothing was recorded."),
+        "{stderr}"
+    );
+    assert!(
+        lines.contains(&"unasked \"- more item\": <why>"),
+        "the removed words, not text still in the doc:\n{stderr}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains(" covers \"- more item\"")),
+        "a covers quote must read in the text as it is:\n{stderr}"
+    );
+
+    let (code, stdout, stderr) =
+        tmp.respond(&format!("{heredoc}unasked \"- more item\": out of scope\n"));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let (state, _) = tmp.fold();
+    let removal = state
+        .changes
+        .iter()
+        .find(|c| c.what.new_lines == 0)
+        .expect("the removal");
+    assert!(removal.flagged, "{removal:?}");
+    assert_eq!(removal.unasked_why.as_deref(), Some("out of scope"));
+}
+
+/// A `covers` sent after the yield names the change as one an on-time line would.
+#[test]
+fn a_late_covers_credits_the_row_and_its_note() {
+    let mut s = Scenario::drafted_by(DOC, "claude");
+    let first = s.note("too long overall");
+    let second = s.note("say how retries back off");
+    s.submit();
+    let claim = s.claim("claude");
+    let tmp = Tmp::new(&s);
+    tmp.edit(
+        &format!("{}\nRetries now use jitter.\n", s.text()),
+        ts(claim) + 1_000,
+    );
+    let (code, stdout, stderr) = tmp.respond(&format!(
+        "#{first} done\n#{first} covers \"Retries now use jitter\"\n#{second} done\n@: I added a line.\n"
+    ));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    let row = |state: &ReviewState| {
+        let c = state
+            .changes
+            .iter()
+            .find(|c| c.attr == Attr::Agent)
+            .expect("the change")
+            .clone();
+        (c.id, c.asked.kind, c.asked.notes)
+    };
+    let (id, kind, notes) = row(&tmp.fold().0);
+    assert_eq!(
+        (kind, notes.as_slice()),
+        (AskedKind::Cited, [first].as_slice())
+    );
+
+    let (code, stdout, stderr) =
+        tmp.respond(&format!("#{second} covers \"Retries now use jitter\"\n"));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(stdout.contains("recorded late"), "{stdout}");
+    let (state, _) = tmp.fold();
+    let (_, kind, notes) = row(&state);
+    assert_eq!(
+        (kind, notes.as_slice()),
+        (AskedKind::Cited, [first, second].as_slice()),
+        "the row names both notes"
+    );
+    let credited = state
+        .items
+        .iter()
+        .find(|i| i.n == second)
+        .and_then(|i| i.outcome.as_ref())
+        .map(|o| o.changes.clone());
+    assert_eq!(credited, Some(vec![id]), "the note names its change");
+}
+
+/// A server's watcher records the agent's Edit before `respond` runs, so the check folds
+/// writes already in the log as well as one still on disk.
+#[test]
+fn an_uncited_change_already_recorded_is_refused_too() {
+    let mut r = round(true);
+    let claim = r.claim.unwrap();
+    let edited = agent_edit(&r.s);
+    r.s.external(&edited);
+    let tmp = Tmp::new(&r.s);
+    assert!(
+        tmp.lines()
+            .iter()
+            .any(|l| l.n > claim && matches!(l.op, Op::External { .. })),
+        "setup: the write is in the log"
+    );
+    let heredoc = format!(
+        "#{} done\n#{} done\n#{} answer: yes\n#{} done: I added a line\n@: I said why.\n",
+        r.note, r.no, r.ask, r.doc_note
+    );
+    let (code, stderr) = refused(&tmp, &heredoc);
+    assert_eq!(code, 65, "{stderr}");
+    assert_eq!(
+        stderr.lines().next(),
+        Some(
+            "respond: 2 changes cite no note, so nothing was recorded. Add a line for each and run respond again:"
+        ),
+        "{stderr}"
+    );
+}
+
+// --- adversary killers ---
+
+/// Two uncited changes, one named twice by `unasked`: the check resolves each line to the
+/// change it names, so the other is still refused.
+#[test]
+fn an_unasked_line_naming_one_change_twice_leaves_the_other_refused() {
+    let r = round(true);
+    let tmp = Tmp::new(&r.s);
+    tmp.edit(&agent_edit(&r.s), ts(r.claim.unwrap()) + 1_000);
+    let heredoc = format!(
+        "#{} done\n#{} done\n#{} answer: yes\n#{} done: I added a line\nunasked \"- more items\": a typo\nunasked \"- more items\": still a typo\n@: I said why.\n",
+        r.note, r.no, r.ask, r.doc_note
+    );
+    let (code, stderr) = refused(&tmp, &heredoc);
+    assert_eq!(code, 65, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert!(
+        lines[0].starts_with("respond: 1 change cites no note, so nothing was recorded."),
+        "{stderr}"
+    );
+    assert_eq!(
+        lines[1..],
+        [
+            format!("#{} covers \"Retries now use jitter.\"", r.doc_note),
+            "unasked \"Retries now use jitter.\": <why>".to_string(),
+        ],
+        "{stderr}"
+    );
+}
+
+/// Round 1 held a whole-doc note; round 2 holds only a note on a quote. The reminder
+/// names whole-doc notes of this round only, so every prefilled line pastes.
+#[test]
+fn the_covers_reminder_names_only_this_rounds_whole_doc_notes() {
+    let mut s = Scenario::drafted_by(DOC, "claude");
+    let old = s.note("too long overall");
+    s.submit();
+    let first = s.claim("claude");
+    s.done("claude", old, first);
+    s.yield_turn("claude", first);
+    let note = s.comment(s.quote("second item"), None, Some("say why"));
+    s.submit();
+    let claim = s.claim("claude");
+    let tmp = Tmp::new(&s);
+    tmp.edit(
+        &format!("{}\nRetries now use jitter.\n", cited_edit(&s)),
+        ts(claim) + 1_000,
+    );
+    let heredoc = format!("#{note} done\n@: I said why.\n");
+    let (code, stderr) = refused(&tmp, &heredoc);
+    assert_eq!(code, 65, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(
+        lines[1..],
+        ["unasked \"Retries now use jitter.\": <why>"],
+        "no reminder for #{old}, a note of round 1:\n{stderr}"
+    );
+    let (code, stdout, stderr) = tmp.respond(&format!("{heredoc}{}", filled(&lines[1..])));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+}
+
+/// One reminder per whole-doc note of the round, in note order.
+#[test]
+fn the_covers_reminder_names_every_whole_doc_note_of_the_round() {
+    let mut s = Scenario::drafted_by(DOC, "claude");
+    let short = s.note("too long overall");
+    let retries = s.note("say how retries back off");
+    let note = s.comment(s.quote("second item"), None, Some("say why"));
+    s.submit();
+    let claim = s.claim("claude");
+    let tmp = Tmp::new(&s);
+    tmp.edit(
+        &format!("{}\nRetries now use jitter.\n", cited_edit(&s)),
+        ts(claim) + 1_000,
+    );
+    let heredoc = format!("#{note} done\n#{short} done\n#{retries} done\n@: I said why.\n");
+    let (code, stderr) = refused(&tmp, &heredoc);
+    assert_eq!(code, 65, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(
+        lines[1..],
+        [
+            format!("#{short} covers \"Retries now use jitter.\""),
+            format!("#{retries} covers \"Retries now use jitter.\""),
+            "unasked \"Retries now use jitter.\": <why>".to_string(),
+        ],
+        "{stderr}"
+    );
+}
+
+/// An agent that copies a line whole leaves no unique quote for it. The refusal still
+/// has to offer lines that, pasted, let the respond land.
+#[test]
+fn a_copied_line_is_refused_with_lines_that_paste() {
+    let r = round(true);
+    let tmp = Tmp::new(&r.s);
+    let text = cited_edit(&r.s).replacen("- more item\n", "- more item\n- detail one\n", 1);
+    tmp.edit(&text, ts(r.claim.unwrap()) + 1_000);
+    let heredoc = format!(
+        "#{} done\n#{} done\n#{} answer: yes\n#{} done: nothing needed\n@: I said why.\n",
+        r.note, r.no, r.ask, r.doc_note
+    );
+    let (code, stderr) = refused(&tmp, &heredoc);
+    assert_eq!(code, 65, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert!(
+        lines[0].starts_with("respond: 1 change cites no note, so nothing was recorded."),
+        "{stderr}"
+    );
+    let (code, stdout, stderr) = tmp.respond(&format!("{heredoc}{}", filled(&lines[1..])));
+    assert_eq!(code, 0, "the prefilled lines must land:\n{stdout}{stderr}");
+    let (state, _) = tmp.fold();
+    assert!(uncited(&state).is_empty(), "{:#?}", state.changes);
+}
+
+/// Guard: a respond after the yield is late, and the check never refuses it.
+#[test]
+fn a_late_respond_is_recorded_though_the_ended_turn_left_a_change_uncited() {
+    let mut r = round(true);
+    let claim = r.claim.unwrap();
+    let edited = agent_edit(&r.s);
+    r.s.external(&edited);
+    r.s.done("claude", r.note, claim);
+    r.s.yield_turn("claude", claim);
+    let tmp = Tmp::new(&r.s);
+    let (code, stdout, stderr) = tmp.respond(&format!("#{} answer: yes, it is\n", r.ask));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(stdout.contains("recorded late"), "{stdout}");
+    assert!(!stderr.contains("no note"), "{stderr}");
+}
+
+/// Guard: a change an earlier turn left uncited never holds up a later turn.
+#[test]
+fn an_earlier_turns_uncited_change_does_not_refuse_this_turn() {
+    let mut s = Scenario::drafted_by(DOC, "claude");
+    let first = s.note("too long overall");
+    s.submit();
+    let turn = s.claim("claude");
+    let edited = format!("{}\nRetries now use jitter.\n", s.text());
+    s.external(&edited);
+    s.done("claude", first, turn);
+    s.yield_turn("claude", turn);
+    let note = s.comment(s.quote("second item"), None, Some("say why"));
+    s.submit();
+    s.claim("claude");
+    let tmp = Tmp::new(&s);
+    let (code, stdout, stderr) = tmp.respond(&format!("#{note} didnt: it reads fine\n"));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(stdout.contains("yielded"), "{stdout}");
+}
+
+/// The same new line written in two places: both changes are prefilled with one quote,
+/// which reads in each, and the lines pasted back land.
+#[test]
+fn two_identical_new_lines_are_prefilled_alike_and_the_lines_paste() {
+    let r = round(true);
+    let tmp = Tmp::new(&r.s);
+    let text = cited_edit(&r.s)
+        .replacen("- third item\n", "- third item\n- retried with jitter\n", 1)
+        .replacen("- more item\n", "- more item\n- retried with jitter\n", 1);
+    tmp.edit(&text, ts(r.claim.unwrap()) + 1_000);
+    let heredoc = format!(
+        "#{} done\n#{} done\n#{} answer: yes\n#{} done: nothing needed\n@: I said why.\n",
+        r.note, r.no, r.ask, r.doc_note
+    );
+    let (code, stderr) = refused(&tmp, &heredoc);
+    assert_eq!(code, 65, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(
+        lines[1..],
+        [
+            format!("#{} covers \"- retried with jitter\"", r.doc_note),
+            "unasked \"- retried with jitter\": <why>".to_string(),
+            "unasked \"- retried with jitter\": <why>".to_string(),
+        ],
+        "{stderr}"
+    );
+    let (code, stdout, stderr) = tmp.respond(&format!("{heredoc}{}", filled(&lines[1..])));
+    assert_eq!(code, 0, "the prefilled lines must land:\n{stdout}{stderr}");
+    let (state, _) = tmp.fold();
+    assert!(uncited(&state).is_empty(), "{:#?}", state.changes);
+}
+
+// --- repair: changes no quote can cite alone ---
+
+/// With a server running, each Edit is its own `external`. A second Edit that rewrites
+/// the first one's line whole leaves the first with no text of its own; the later change
+/// stands for both, so citing the final text lets the turn land.
+#[test]
+fn a_change_claude_rewrote_in_the_same_turn_never_holds_the_turn_up() {
+    let mut s = Scenario::drafted_by(DOC, "claude");
+    let doc = s.note("say how retries back off");
+    s.submit();
+    let claim = s.claim("claude");
+    let first = s.replaced("- third item", "- third item\n- retries use jitter");
+    s.external(&first);
+    let second = s.replaced(
+        "- retries use jitter",
+        "- Retries back off with full jitter",
+    );
+    s.external(&second);
+    let tmp = Tmp::new(&s);
+    let (state, _) = tmp.fold();
+    assert!(
+        state.changes.iter().any(|c| c.turn == Some(claim)
+            && c.range.status == birta::review::state::RangeStatus::Superseded),
+        "setup: the first write is overlapped by the second: {:#?}",
+        state.changes
+    );
+    let (code, stdout, stderr) = tmp.respond(&format!(
+        "#{doc} done\n#{doc} covers \"Retries back off with full jitter\"\n@: I said how.\n"
+    ));
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(stdout.contains("yielded"), "{stdout}");
+}
+
+/// A change whose lines hold no words, a blank line inside a code block, is prefilled
+/// with the words on each side of it, never an empty quote, and the lines land.
+#[test]
+fn a_change_with_no_words_is_prefilled_with_the_words_around_it() {
+    let text = "# Plan\n\nIntro paragraph here.\n\n```\nfn retry() {}\nfn backoff() {}\n```\n";
+    let mut s = Scenario::drafted_by(text, "claude");
+    let doc = s.note("tidy the code");
+    s.submit();
+    let claim = s.claim("claude");
+    let tmp = Tmp::new(&s);
+    tmp.edit(
+        &text.replacen("fn retry() {}\n", "fn retry() {}\n\n", 1),
+        ts(claim) + 1_000,
+    );
+    let heredoc = format!("#{doc} done\n@: I spaced the code.\n");
+    let (code, stderr) = refused(&tmp, &heredoc);
+    assert_eq!(code, 65, "{stderr}");
+    assert!(
+        !stderr.contains("\"\""),
+        "an empty quote can't be pasted:\n{stderr}"
+    );
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert!(lines.len() > 1, "{stderr}");
+    let (code, stdout, stderr) = tmp.respond(&format!("{heredoc}{}", filled(&lines[1..])));
+    assert_eq!(code, 0, "the prefilled lines must land:\n{stdout}{stderr}");
+    let (state, _) = tmp.fold();
+    assert!(uncited(&state).is_empty(), "{:#?}", state.changes);
 }

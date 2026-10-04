@@ -13,7 +13,8 @@ use anyhow::Context;
 use serde_json::{Value, json};
 
 use super::identity::{self, Identity};
-use super::render::{self, AnswerLine, ApprovedView, ItemLine, RoundView, Stance, Target};
+use super::render::{self, AnswerLine, ApprovedView, ItemLine, RoundView, Stance, Target, You};
+use super::respond_apply::{WALK_UP, shown};
 use super::{CONTROL_PATH, ExitCode, ReviewArgs, hidden_in, relative, wait, warn};
 use crate::config::Config;
 use crate::paths::{self, Roots};
@@ -177,7 +178,7 @@ fn review(args: &ReviewArgs, config: &Config) -> anyhow::Result<ExitCode> {
                 look_file(entry, &opts, wait::now_ms(), false)?.map(|b| vec![b])
             };
             let path = Some(entry.path.as_str());
-            output(found, &opts, &entry.name, path, args.wait, false)
+            output(found, &opts, &entry.name, path, args.wait, limit, false)
         }
         Place::Dir { root, name, path } => {
             if args.drafted_by.is_some() {
@@ -194,7 +195,7 @@ fn review(args: &ReviewArgs, config: &Config) -> anyhow::Result<ExitCode> {
                     None => settled_dir(&list, &opts, now)?,
                 }
             };
-            output(found, &opts, name, path.as_deref(), args.wait, true)
+            output(found, &opts, name, path.as_deref(), args.wait, limit, true)
         }
     };
     let (code, text) = out;
@@ -210,12 +211,13 @@ fn output(
     name: &str,
     path: Option<&str>,
     waited: bool,
+    limit: Option<Duration>,
     dir: bool,
 ) -> (ExitCode, String) {
     let Some(blocks) = found else {
         let rerun = render::rerun(path);
         return match (waited, opts.json) {
-            (true, false) => (ExitCode::Timeout, format!("{rerun}\n")),
+            (true, false) => (ExitCode::Timeout, render::still_waiting(limit, &rerun)),
             (true, true) => (
                 ExitCode::Timeout,
                 json_line(&json!({"status": "timeout", "rerun": format!("{rerun} --json")})),
@@ -300,10 +302,12 @@ fn resolve(target: Option<&Path>) -> anyhow::Result<Place> {
     let canonical = target.canonicalize()?;
     let path = render::shell_quote(&typed);
     if meta.is_dir() {
+        // A waiting agent is told the folder the way its user typed it
+        let as_typed = target.to_string_lossy();
         return Ok(Place::Dir {
             root: canonical,
             name: typed,
-            path: Some(path),
+            path: Some(render::shell_quote(&as_typed)),
         });
     }
     Ok(Place::File(Entry {
@@ -847,6 +851,17 @@ fn block(entry: &Entry, pick: Pick, opts: &Opts, now: u64, inputs: &Inputs) -> B
         _ => Vec::new(),
     };
     let handed = line(round);
+    // A batch is claimed whole through its folder; a file claimed alone names the rest
+    let also = match (&stance, &entry.doc, handed.map(|l| &l.op)) {
+        (
+            Stance::Mine,
+            Some(doc),
+            Some(Op::Submit {
+                batch: Some(batch), ..
+            }),
+        ) if !opts.dir => batch_mates(doc, *batch, now),
+        _ => None,
+    };
     let view = RoundView {
         name: entry.name.clone(),
         path: entry.path.clone(),
@@ -857,6 +872,7 @@ fn block(entry: &Entry, pick: Pick, opts: &Opts, now: u64, inputs: &Inputs) -> B
         items: shown.iter().map(item_line).collect(),
         answers: answers.iter().map(Answer::line).collect(),
         you: you.clone(),
+        also,
         all: opts.all,
         next: !opts.peek,
         wait: !opts.dir,
@@ -871,7 +887,10 @@ fn block(entry: &Entry, pick: Pick, opts: &Opts, now: u64, inputs: &Inputs) -> B
         "drafted_by": drafted_by,
         "items": shown,
         "answers": answers.iter().map(Answer::json).collect::<Vec<_>>(),
-        "you": you,
+        "you": you.iter().map(|y| match y {
+            You::Edited(_) => y.text(),
+            You::Reverted { .. } => format!("REVERTED {}", y.text()),
+        }).collect::<Vec<_>>(),
     });
     Block {
         text: render::round(&view),
@@ -1137,7 +1156,7 @@ fn you_lines(
     index: &TurnIndex,
     lines: &HashMap<u32, &Line>,
     doc: &Doc,
-) -> Vec<String> {
+) -> Vec<You> {
     let last = index
         .rounds
         .iter()
@@ -1154,32 +1173,27 @@ fn you_lines(
         .iter()
         .filter(|c| c.attr == Attr::Human && c.op > since)
         .collect();
-    let mut out: Vec<String> = mine
+    let mut out: Vec<You> = mine
         .iter()
         .take(YOU_LINES)
-        .map(|c| match reverted(state, c, lines, doc) {
-            Some(line) => line,
-            None => format!("{label}: {}", what_changed(c, lines, doc)),
+        .map(|c| match reverted(c, lines, doc) {
+            Some(you) => you,
+            None => You::Edited(format!("{label}: {}", what_changed(c, lines, doc))),
         })
         .collect();
     if mine.len() > YOU_LINES {
-        out.push(format!("+{} more changes", mine.len() - YOU_LINES));
+        out.push(You::Edited(format!(
+            "+{} more changes",
+            mine.len() - YOU_LINES
+        )));
     }
     out
 }
 
 /// A revert of the agent's change, named by the text it put back (or, when it only
-/// took text out, the text it took), its section and the change's label.
-fn reverted(
-    state: &ReviewState,
-    change: &Change,
-    lines: &HashMap<u32, &Line>,
-    doc: &Doc,
-) -> Option<String> {
-    let Some(Op::Edit {
-        act: Act::Undo, of, ..
-    }) = lines.get(&change.op).map(|l| &l.op)
-    else {
+/// took text out, the text it took) and its section.
+fn reverted(change: &Change, lines: &HashMap<u32, &Line>, doc: &Doc) -> Option<You> {
+    let Some(Op::Edit { act: Act::Undo, .. }) = lines.get(&change.op).map(|l| &l.op) else {
         return None;
     };
     let (a, b) = change.range.bytes;
@@ -1188,21 +1202,63 @@ fn reverted(
         None => change.removed.as_deref().unwrap_or_default(),
     };
     let words = text.lines().map(str::trim).find(|l| !l.is_empty());
-    let mut line = format!(
-        "reverted your change to \"{}\"",
-        render::clip(words.unwrap_or_default())
-    );
-    if let Some(heading) = ladder::section_heading(doc, change.range.lines.0) {
-        line.push_str(&format!(" ({})", render::clip(&heading)));
+    Some(You::Reverted {
+        text: words.unwrap_or_default().to_string(),
+        section: ladder::section_heading(doc, change.range.lines.0),
+    })
+}
+
+/// For a file claimed alone out of hand-back `batch`: the other files of that hand-back
+/// still unclaimed, from the nearest folder above `doc` that holds any, and that folder.
+fn batch_mates(doc: &Path, batch: u64, now: u64) -> Option<(Vec<String>, String)> {
+    let home = dirs::home_dir();
+    let own = review_path_for(doc);
+    for dir in doc.parent()?.ancestors().take(WALK_UP + 1) {
+        if dir.parent().is_none() || home.as_deref() == Some(dir) {
+            break;
+        }
+        let roots = Roots::new(dir.to_path_buf(), home.clone());
+        let listed = scan::walk(dir, &roots, ScanBudget::default());
+        let mut mates: Vec<String> = listed
+            .review_files
+            .iter()
+            .filter(|rel| dir.join(rel).canonicalize().is_ok_and(|log| log != own))
+            .filter(|rel| unclaimed_in(&dir.join(rel), batch, now))
+            .filter_map(|rel| rel.strip_suffix(REVIEW_SUFFIX).map(str::to_string))
+            .filter(|rel| !rel.is_empty() && !hidden_in(Path::new(rel)))
+            .collect();
+        if mates.is_empty() {
+            continue;
+        }
+        mates.sort();
+        let folder = shown(dir).to_string_lossy().into_owned();
+        let folder = match folder.as_str() {
+            "" | "." => ".".to_string(),
+            f => format!("{}/", f.trim_end_matches('/')),
+        };
+        return Some((mates, render::shell_quote(&folder)));
     }
-    let label = of
-        .as_deref()
-        .and_then(|of| state.changes.iter().find(|c| c.id == of))
-        .and_then(|c| c.label.as_deref());
-    if let Some(label) = label {
-        line.push_str(&format!(" — {label}"));
-    }
-    Some(line)
+    None
+}
+
+/// Whether the latest standing hand-back in `log` is of `batch` and nobody claimed it.
+fn unclaimed_in(log: &Path, batch: u64, now: u64) -> bool {
+    let Ok(Some(parsed)) = Log::open(log).read() else {
+        return false;
+    };
+    let index = fold::scan(&parsed, now);
+    let Some(latest) = index
+        .rounds
+        .iter()
+        .rev()
+        .find(|r| r.kind == RoundKind::Submit && r.withdrawn.is_none())
+    else {
+        return false;
+    };
+    let same = parsed.lines.iter().any(|l| {
+        l.n == latest.n && matches!(l.op, Op::Submit { batch: Some(b), .. } if b == batch)
+    });
+    same && latest.claim.is_none()
 }
 
 fn what_changed(change: &Change, lines: &HashMap<u32, &Line>, doc: &Doc) -> String {

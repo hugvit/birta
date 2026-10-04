@@ -398,10 +398,12 @@ fn a_full_round_from_notes_to_an_approve() {
     );
     for want in [
         format!("#{note} done"),
+        format!("#{note} covers \"<words you wrote>\""),
         format!("#{no} done"),
+        format!("#{no} covers \"<words you wrote>\""),
         format!("#{ask} answer: <your answer>"),
         format!("#{doc} done: <one line: what you changed for this whole-doc note>"),
-        format!("#{doc} covers \"<a sentence you wrote for #{doc}>\""),
+        format!("#{doc} covers \"<words you wrote>\""),
     ] {
         assert!(
             lines.contains(&want.as_str()),

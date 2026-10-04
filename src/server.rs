@@ -258,6 +258,8 @@ pub(crate) struct AppInit {
     /// A folder was named, so a hand-back of "all" covers every doc under it.
     pub(crate) dir_mode: bool,
     pub(crate) served: Option<PathBuf>,
+    /// The served path as typed.
+    pub(crate) typed: Option<String>,
     pub(crate) review_by_env: bool,
 }
 
@@ -293,6 +295,7 @@ impl AppInit {
             git_exclude: opts.git_exclude,
             dir_mode: false,
             served: None,
+            typed: None,
             review_by_env: opts.review_by_env,
         })
     }
@@ -348,6 +351,7 @@ impl AppInit {
         init.initial_relpath = Some(target.entry.clone());
         init.dir_mode = target.dir;
         init.served = Some(target.served());
+        init.typed = Some(target.typed.clone());
         Ok(init)
     }
 }
@@ -362,6 +366,8 @@ pub struct Target {
     filename: String,
     /// A folder was named rather than a file.
     dir: bool,
+    /// The path as it was typed, which a hand-off line repeats.
+    typed: String,
 }
 
 impl Target {
@@ -399,6 +405,7 @@ impl Target {
                 entry,
                 filename,
                 dir: true,
+                typed: path.to_string_lossy().into_owned(),
             });
         }
         let canonical = path.canonicalize()?;
@@ -419,6 +426,7 @@ impl Target {
             entry,
             filename,
             dir: false,
+            typed: path.to_string_lossy().into_owned(),
         })
     }
 }
@@ -427,13 +435,25 @@ impl AppState {
     pub(crate) fn new(init: AppInit) -> Arc<Self> {
         let (hub, _) = broadcast::channel(HUB_CAPACITY);
         let roots = Roots::new(init.base_dir, dirs::home_dir());
+        let restart = init.served.as_deref().map(|served| {
+            restart_command(
+                &program(),
+                served,
+                init.review_by_env,
+                init.drafted_by.as_deref(),
+                init.port,
+            )
+        });
         let review = (init.review && init.mode == Mode::Serve).then(|| {
-            let hub = ReviewHub::new(
+            let mut hub = ReviewHub::new(
                 roots.root(),
                 init.drafted_by,
                 init.git_exclude,
                 init.dir_mode,
             );
+            if let (Some(served), Some(typed)) = (&init.served, &init.typed) {
+                hub.served_as = Some((served.clone(), typed.clone()));
+            }
             // One file served: only it, and the docs its pages open, are this server's
             if !init.dir_mode
                 && let Some(entry) = &init.source_file
@@ -442,10 +462,6 @@ impl AppState {
             }
             hub
         });
-        let restart = init
-            .served
-            .as_deref()
-            .map(|served| restart_command(&program(), served, init.review_by_env, init.port));
         // The entry may sit behind a link the budgeted walk never reaches.
         if let Some(entry) = &init.initial_relpath {
             roots.register_path(StdPath::new(entry));
@@ -598,19 +614,27 @@ async fn whoami(port: u16) -> Option<String> {
 }
 
 /// `birta '<path>'`, quoted for a POSIX shell, led by the env that turned review on
-/// when nothing else did, and naming `port` when the path wouldn't derive it.
-fn restart_command(program: &str, served: &StdPath, by_env: bool, port: u16) -> String {
+/// when nothing else did. It names the drafter and the port it has, and opens no second
+/// tab, so the line a page shows is the one it copies.
+fn restart_command(
+    program: &str,
+    served: &StdPath,
+    by_env: bool,
+    drafted_by: Option<&str>,
+    port: u16,
+) -> String {
     let env = if by_env { "BIRTA_REVIEW=1 " } else { "" };
-    let port = if port == derived_port(served) {
-        String::new()
-    } else {
-        format!(" --port {port}")
-    };
-    format!("{env}{program} {}{port}", shell_quote(served))
+    let drafter = drafted_by
+        .map(|name| format!(" --drafted-by {}", shell_quote(name)))
+        .unwrap_or_default();
+    format!(
+        "{env}{program} {}{drafter} --port {port} --no-open",
+        shell_quote(&served.to_string_lossy())
+    )
 }
 
-fn shell_quote(path: &StdPath) -> String {
-    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+fn shell_quote(word: &str) -> String {
+    format!("'{}'", word.replace('\'', "'\\''"))
 }
 
 /// `birta` when a shell would run this very binary by that name, else its own path.
@@ -625,7 +649,7 @@ fn program() -> String {
     });
     match first.and_then(|p| p.canonicalize().ok()) {
         Some(found) if found == me => "birta".to_string(),
-        _ => shell_quote(&me),
+        _ => shell_quote(&me.to_string_lossy()),
     }
 }
 
@@ -1730,6 +1754,7 @@ mod tests {
             git_exclude: true,
             dir_mode: false,
             served: None,
+            typed: None,
             review_by_env: false,
         };
         customize(&mut init);
@@ -1745,19 +1770,25 @@ mod tests {
         let path = StdPath::new("/tmp/a b'$(x).md");
         let port = derived_port(path);
         assert_eq!(
-            restart_command("birta", path, false, port),
-            r#"birta '/tmp/a b'\''$(x).md'"#
+            restart_command("birta", path, false, None, port),
+            format!(r#"birta '/tmp/a b'\''$(x).md' --port {port} --no-open"#)
         );
         assert_eq!(
-            restart_command("birta", path, true, port),
-            r#"BIRTA_REVIEW=1 birta '/tmp/a b'\''$(x).md'"#
+            restart_command("birta", path, true, None, port),
+            format!(r#"BIRTA_REVIEW=1 birta '/tmp/a b'\''$(x).md' --port {port} --no-open"#)
+        );
+        assert_eq!(
+            restart_command("birta", path, false, Some("o'brien $(x)"), port),
+            format!(
+                r#"birta '/tmp/a b'\''$(x).md' --drafted-by 'o'\''brien $(x)' --port {port} --no-open"#
+            )
         );
     }
 
-    /// A tab whose server wasn't on the derived port polls the port it had, so the
-    /// restart must bind that one again.
+    /// A tab polls the port its server had, so the restart binds that one again, and
+    /// the copied line is the shown one.
     #[test]
-    fn the_restart_command_names_the_port_unless_it_is_the_derived_one() {
+    fn the_restart_command_always_names_the_port_and_opens_no_tab() {
         let path = StdPath::new("/tmp/doc.md");
         let derived = derived_port(path);
         let restart = |port: u16| {
@@ -1767,17 +1798,14 @@ mod tests {
             });
             state.restart.clone().unwrap()
         };
-        assert!(
-            restart(derived).ends_with(" '/tmp/doc.md'"),
-            "{}",
-            restart(derived)
-        );
         let other = if derived == 5000 { 5001 } else { 5000 };
-        assert!(
-            restart(other).ends_with(&format!(" '/tmp/doc.md' --port {other}")),
-            "{}",
-            restart(other)
-        );
+        for port in [derived, other] {
+            assert!(
+                restart(port).ends_with(&format!(" '/tmp/doc.md' --port {port} --no-open")),
+                "{}",
+                restart(port)
+            );
+        }
     }
 
     #[tokio::test]

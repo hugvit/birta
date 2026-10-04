@@ -50,6 +50,8 @@ pub(crate) struct ReviewHub {
     /// A hand-back of "all" sends every doc under the root only when a folder is served.
     pub(crate) dir_mode: bool,
     pub(crate) dir: DirIndex,
+    /// The canonical path this server was named, and that path as typed.
+    pub(crate) served_as: Option<(PathBuf, String)>,
     folds: Mutex<HashMap<PathBuf, (FoldKey, ReviewState)>>,
     /// The pending hold each doc has a timer for, by its end.
     holds: Mutex<HashMap<PathBuf, u64>>,
@@ -90,6 +92,7 @@ impl ReviewHub {
             git_exclude,
             dir_mode,
             dir: DirIndex::new(root),
+            served_as: None,
             folds: Mutex::default(),
             holds: Mutex::default(),
             dir_push: Mutex::default(),
@@ -127,8 +130,26 @@ impl ReviewHub {
         state.server_now = now_ms();
         state.writable = folder_root && can_write(canonical);
         state.log_writable = log_writable(folder_root, canonical);
-        state.hand_off = fold::hand_off(canonical);
+        state.hand_off = fold::hand_off(&self.typed_path(canonical));
         Some(state)
+    }
+
+    /// The path an agent would type for `canonical`: the served folder as typed, or the
+    /// served doc as typed, or another doc beside it through the same typed folder.
+    fn typed_path(&self, canonical: &Path) -> PathBuf {
+        let Some((served, typed)) = &self.served_as else {
+            return canonical.to_path_buf();
+        };
+        if self.dir_mode || canonical == served {
+            return PathBuf::from(typed);
+        }
+        let beside = served
+            .parent()
+            .and_then(|dir| canonical.strip_prefix(dir).ok());
+        match (beside, Path::new(typed).parent()) {
+            (Some(rel), Some(dir)) => dir.join(rel),
+            _ => canonical.to_path_buf(),
+        }
     }
 
     /// The review file a first note on the doc would create, parsed but never written.

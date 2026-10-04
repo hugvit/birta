@@ -28,28 +28,49 @@ next: 1) Edit pr.md with your Edit tool (not Write). Change only what the notes 
       2) Record what you did, one line per note, then run:
 birta respond pr.md <<'EOF'
 #4 done
+#4 covers "<words you wrote>"
 #5 done
+#5 covers "<words you wrote>"
 #6 done
+#6 covers "<words you wrote>"
 #7 done
+#7 covers "<words you wrote>"
 #8 done
+#8 covers "<words you wrote>"
 #9 done
+#9 covers "<words you wrote>"
 #10 done
+#10 covers "<words you wrote>"
 #11 done
+#11 covers "<words you wrote>"
 #12 done
+#12 covers "<words you wrote>"
 #13 done
+#13 covers "<words you wrote>"
 #14 done
+#14 covers "<words you wrote>"
 #15 done
+#15 covers "<words you wrote>"
 #16 done
+#16 covers "<words you wrote>"
 #17 done
+#17 covers "<words you wrote>"
 #18 done
+#18 covers "<words you wrote>"
 #19 done
+#19 covers "<words you wrote>"
 #20 done
+#20 covers "<words you wrote>"
 #21 done
+#21 covers "<words you wrote>"
 #22 done
+#22 covers "<words you wrote>"
 #23 done
+#23 covers "<words you wrote>"
 @: <one or two lines to the reviewer in first person ("I cut…"); no questions here>
 EOF
       Per note you can write instead:  #N didnt: <why>   or   #N answer: <reply>
+      To cite a note or an answer:     #N covers "<words you wrote>"   one per edit
       To ask the reviewer:             ask "<exact words in the doc>": <question>
-      For a change no note asked for:  unasked "<exact new words>": <why>
+      For a change no note asked for:  unasked "<exact words you added or removed>": <why>
       3) Then wait again: birta review pr.md --wait

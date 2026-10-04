@@ -20,12 +20,15 @@ mod support {
 use support::scenario::{DOC, Scenario, human, ts};
 
 /// The template's lines for the reviewer after `EOF`, for a round holding a `no`.
-const AFTER_EOF: [&str; 4] = [
+const AFTER_EOF: [&str; 5] = [
     "      Per note you can write instead:  #N didnt: <why>   or   #N answer: <reply>",
+    "      To cite a note or an answer:     #N covers \"<words you wrote>\"   one per edit",
     "      To ask the reviewer:             ask \"<exact words in the doc>\": <question>",
-    "      For a change no note asked for:  unasked \"<exact new words>\": <why>",
+    "      For a change no note asked for:  unasked \"<exact words you added or removed>\": <why>",
     "      `no` means the reviewer wants that text gone; cut it, or say why not with didnt.",
 ];
+/// What a `covers` line leaves to fill in.
+const WROTE: &str = "<words you wrote>";
 const TURN_NOTE: &str =
     "@: <one or two lines to the reviewer in first person (\"I cut…\"); no questions here>";
 const DOC_DONE: &str = "<one line: what you changed for this whole-doc note>";
@@ -317,7 +320,9 @@ fn an_answer_has_its_own_id_and_covers_can_cite_it() {
         "{out}"
     );
     assert!(
-        lines.contains(&"      To cite an answer:               #N covers \"<new text>\""),
+        lines.contains(
+            &"      To cite a note or an answer:     #N covers \"<words you wrote>\"   one per edit"
+        ),
         "{out}"
     );
 
@@ -498,10 +503,12 @@ fn the_next_block_is_the_template_with_a_flush_left_heredoc() {
         "      2) Record what you did, one line per note, then run:".to_string(),
         "birta respond pr.md <<'EOF'".to_string(),
         format!("#{note} done"),
+        format!("#{note} covers \"{WROTE}\""),
         format!("#{no} done"),
+        format!("#{no} covers \"{WROTE}\""),
         format!("#{ask} answer: <your answer>"),
         format!("#{doc} done: {DOC_DONE}"),
-        format!("#{doc} covers \"<a sentence you wrote for #{doc}>\""),
+        format!("#{doc} covers \"{WROTE}\""),
         TURN_NOTE.to_string(),
         "EOF".to_string(),
     ];
@@ -531,8 +538,9 @@ fn the_heredoc_pasted_into_sh_records_and_ends_at_eof() {
     pasted(&tmp, &out, "pr.md", "Retries now use jitter");
 }
 
-/// Fills the first heredoc in `out` as an agent would, citing `covers` for a doc note,
-/// and runs it through `sh` with an `echo` after it. The log of `rel` must end yielded.
+/// Fills the first heredoc in `out` as an agent would, citing `covers` on every covers
+/// line, or dropping them when it is empty, and runs it through `sh` with an `echo` after
+/// it. The log of `rel` must end yielded.
 fn pasted(tmp: &Tmp, out: &str, rel: &str, covers: &str) -> String {
     let lines: Vec<&str> = out.lines().collect();
     let start = find(&lines, "birta respond ", out);
@@ -543,12 +551,14 @@ fn pasted(tmp: &Tmp, out: &str, rel: &str, covers: &str) -> String {
             .unwrap_or_else(|| panic!("no flush-left EOF:\n{out}"));
     let filled: Vec<String> = lines[start..=end]
         .iter()
-        .map(|l| match l.split_once(" covers ") {
-            Some((n, _)) => format!("{n} covers \"{covers}\""),
-            None if l.starts_with("@:") => "@: I did what the notes asked.".to_string(),
-            None => l
-                .replace("<your answer>", "yes, five is plenty")
-                .replace(DOC_DONE, "I added a line"),
+        .filter_map(|l| match l.split_once(" covers ") {
+            Some(_) if covers.is_empty() => None,
+            Some((n, _)) => Some(format!("{n} covers \"{covers}\"")),
+            None if l.starts_with("@:") => Some("@: I did what the notes asked.".to_string()),
+            None => Some(
+                l.replace("<your answer>", "yes, five is plenty")
+                    .replace(DOC_DONE, "I added a line"),
+            ),
         })
         .collect();
     assert!(
@@ -617,8 +627,8 @@ fn the_unfilled_heredoc_is_refused_once_per_placeholder() {
     assert_eq!(code, 2, "{piped}\n{stdout}{stderr}");
     assert_eq!(
         stderr.matches("placeholder").count(),
-        4,
-        "done:, covers, answer and @: each:\n{stderr}"
+        5,
+        "done:, two covers, answer and @: each:\n{stderr}"
     );
     assert_eq!(tmp.read("pr.md.birta.jsonl"), log);
 }
@@ -628,12 +638,14 @@ fn every_placeholder_the_template_prints_is_refused() {
     for line in [
         format!("#5 done: {DOC_DONE}"),
         "#5 covers \"<a sentence you wrote for #5>\"".to_string(),
+        format!("#5 covers \"{WROTE}\""),
         "#6 answer: <your answer>".to_string(),
         TURN_NOTE.to_string(),
         "#6 didnt: <why>".to_string(),
         "#6 answer: <reply>".to_string(),
         "ask \"<exact words in the doc>\": <question>".to_string(),
         "unasked \"<exact new words>\": <why>".to_string(),
+        "unasked \"<exact words you added or removed>\": <why>".to_string(),
     ] {
         match respond::parse(&line) {
             Ok(entries) => panic!("{line:?} was accepted: {entries:?}"),
@@ -734,7 +746,29 @@ fn respond_help_shows_a_parseable_example_of_every_keyword() {
     );
 }
 
-// --- N16: what `respond` says after recording ---
+/// The help says what the template says: `covers` cites any note, once per edit, and
+/// `unasked` names added or removed words.
+#[test]
+fn respond_help_matches_the_template_on_covers_and_unasked() {
+    let tmp = Tmp::new();
+    let (code, help, err) = tmp.run(&["respond", "--help"], "");
+    assert_eq!(code, 0, "{help}{err}");
+    let gloss = |example: &str| -> String {
+        let lines: Vec<&str> = help.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.trim_start().starts_with(example))
+            .unwrap_or_else(|| panic!("no {example:?} example:\n{help}"));
+        lines[at + 1].trim().to_string()
+    };
+    let covers = gloss("#7 covers ");
+    assert!(!covers.contains("whole-doc"), "{covers}");
+    assert!(covers.contains("one per edit"), "{covers}");
+    let unasked = gloss("unasked ");
+    assert!(unasked.contains("added or removed"), "{unasked}");
+}
+
+// --- N16: what `respond` refuses before recording ---
 
 /// Claude holds a round on `pr.md` with a doc note and a note on "second item".
 fn held() -> (Scenario, u32, u32, u32) {
@@ -747,7 +781,7 @@ fn held() -> (Scenario, u32, u32, u32) {
 }
 
 #[test]
-fn respond_warns_about_the_one_change_that_cites_no_note_and_points_onward() {
+fn respond_refuses_the_one_change_that_cites_no_note_and_prefills_its_lines() {
     let (s, doc, note, claim) = held();
     let tmp = Tmp::new();
     tmp.put_doc("pr.md", &s);
@@ -769,25 +803,27 @@ unasked \"more items\": fixed a typo
 @: I said why and added a line on jitter.
 "
     );
+    let log = tmp.read("pr.md.birta.jsonl");
     let (code, stdout, stderr) = tmp.respond("pr.md", &heredoc);
-    assert_eq!(code, 0, "{stdout}{stderr}");
-    let warned: Vec<&str> = stderr.lines().filter(|l| l.contains("no note")).collect();
-    assert_eq!(warned.len(), 1, "{stderr}");
-    let warning = warned[0];
+    assert_eq!(code, 65, "{stdout}{stderr}");
+    assert_eq!(stdout, "", "nothing recorded, so no next:");
+    assert_eq!(tmp.read("pr.md.birta.jsonl"), log, "nothing recorded");
+    let lines: Vec<&str> = stderr.lines().collect();
     assert!(
-        warning.starts_with("warning: 1 change cites no note"),
-        "{warning}"
+        lines[0].starts_with("respond: 1 change cites no note, so nothing was recorded."),
+        "{stderr}"
     );
-    assert!(warning.contains("detail 2"), "{warning}");
-    assert!(warning.contains("unasked \""), "{warning}");
-    for listed in ["more items", "jitter", "S3 flakes"] {
-        assert!(!warning.contains(listed), "{listed:?} in {warning}");
-    }
     assert_eq!(
-        stdout.lines().last(),
-        Some("next: birta review pr.md --wait"),
-        "{stdout}"
+        lines[1..],
+        [
+            format!("#{doc} covers \"- detail 2\""),
+            "unasked \"- detail 2\": <why>".to_string(),
+        ],
+        "{stderr}"
     );
+    for listed in ["more items", "jitter", "S3 flakes"] {
+        assert!(!stderr.contains(listed), "{listed:?} in {stderr}");
+    }
 }
 
 #[test]
@@ -845,6 +881,15 @@ fn a_change_that_renders_the_same_is_not_warned_about() {
     );
 }
 
+/// The `unasked` lines a refusal prefilled, with `<why>` filled in.
+fn prefilled(stderr: &str) -> Vec<String> {
+    stderr
+        .lines()
+        .filter(|l| l.starts_with("unasked \""))
+        .map(|l| l.replace("<why>", "a reason"))
+        .collect()
+}
+
 /// The fold of `rel`'s review file on the doc as it is now.
 fn folded(tmp: &Tmp, rel: &str) -> birta::review::state::ReviewState {
     let parsed = ops::parse(tmp.read(&format!("{rel}.birta.jsonl")));
@@ -855,13 +900,13 @@ fn folded(tmp: &Tmp, rel: &str) -> birta::review::state::ReviewState {
 
 #[test]
 fn n16_suggests_quoting_a_removal_and_the_pasted_line_records() {
-    let (_, err) = respond_with(|t| t.replacen("- detail two\n", "", 1));
-    let w = warned(&err);
-    assert_eq!(w.len(), 1, "{err}");
-    let at = w[0].find("unasked \"").expect("a suggested line");
-    let end = w[0][at..].find("<why>").expect("ends in <why>") + at + "<why>".len();
-    let suggested = &w[0][at..end];
-    assert_eq!(suggested, "unasked \"- detail two\": <why>", "{err}");
+    let (code, _, err) = respond_with(|t| t.replacen("- detail two\n", "", 1));
+    assert_eq!(code, 65, "{err}");
+    let suggested: Vec<&str> = err
+        .lines()
+        .filter(|l| l.starts_with("unasked \""))
+        .collect();
+    assert_eq!(suggested, ["unasked \"- detail two\": <why>"], "{err}");
 
     // The same round again, the agent pasting the line with its reason filled in
     let (s, doc, note, claim) = held();
@@ -871,14 +916,11 @@ fn n16_suggests_quoting_a_removal_and_the_pasted_line_records() {
         .replaced("- second item", "- second item, because S3 flakes")
         .replacen("- detail two\n", "", 1);
     tmp.edit("pr.md", &text, ts(claim) + 1_000);
-    let (code, stdout, stderr) = tmp.respond(
-        "pr.md",
-        &format!("#{note} done\n#{doc} done\n@: I said why.\n"),
-    );
-    assert_eq!(code, 0, "{stdout}{stderr}");
-    assert_eq!(warned(&stderr).len(), 1, "setup: {stderr}");
-    let pasted = suggested.replace("<why>", "a stray line");
-    let (code, stdout, stderr) = tmp.respond("pr.md", &format!("{pasted}\n"));
+    let heredoc = format!("#{note} done\n#{doc} done\n@: I said why.\n");
+    let (code, stdout, stderr) = tmp.respond("pr.md", &heredoc);
+    assert_eq!(code, 65, "setup: {stdout}{stderr}");
+    let pasted = suggested[0].replace("<why>", "a stray line");
+    let (code, stdout, stderr) = tmp.respond("pr.md", &format!("{heredoc}{pasted}\n"));
     assert_eq!(code, 0, "{stdout}{stderr}");
     let state = folded(&tmp, "pr.md");
     let removal = state
@@ -889,8 +931,8 @@ fn n16_suggests_quoting_a_removal_and_the_pasted_line_records() {
     assert!(removal.flagged, "{removal:?}");
 }
 
-/// Every line N16 suggests records once its reason is filled in, an edit's as well as
-/// a removal's.
+/// Every line N16 prefills records once its reason is filled in, an edit's as well as
+/// a removal's, and the whole-doc note's `covers` reminder too.
 #[test]
 fn every_line_n16_suggests_records_when_pasted() {
     let (s, doc, note, claim) = held();
@@ -901,22 +943,30 @@ fn every_line_n16_suggests_records_when_pasted() {
         .replacen("- detail two\n", "- detail 2\n", 1)
         .replacen("## More\n\n- more item\n", "## More\n\n", 1);
     tmp.edit("pr.md", &text, ts(claim) + 1_000);
-    let (code, stdout, stderr) = tmp.respond(
-        "pr.md",
-        &format!("#{note} done\n#{doc} done\n@: I said why.\n"),
+    let heredoc = format!("#{note} done\n#{doc} done\n@: I said why.\n");
+    let (code, stdout, stderr) = tmp.respond("pr.md", &heredoc);
+    assert_eq!(code, 65, "{stdout}{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(
+        lines[0],
+        "respond: 2 changes cite no note, so nothing was recorded. Add a line for each and run respond again:",
+        "{stderr}"
     );
-    assert_eq!(code, 0, "{stdout}{stderr}");
-    let w = warned(&stderr);
-    assert_eq!(w.len(), 1, "{stderr}");
-    let suggested: Vec<String> = w[0]
-        .match_indices("unasked \"")
-        .map(|(at, _)| {
-            let end = w[0][at..].find("<why>").unwrap() + at;
-            format!("{}a reason", &w[0][at..end])
-        })
+    assert_eq!(
+        lines[1..],
+        [
+            format!("#{doc} covers \"- detail 2\""),
+            "unasked \"- detail 2\": <why>".to_string(),
+            "unasked \"- more item\": <why>".to_string(),
+        ],
+        "{stderr}"
+    );
+    let suggested: Vec<String> = lines[1..]
+        .iter()
+        .map(|l| l.replace("<why>", "a reason"))
         .collect();
-    assert_eq!(suggested.len(), 2, "{stderr}");
-    let (code, stdout, stderr) = tmp.respond("pr.md", &format!("{}\n", suggested.join("\n")));
+    let (code, stdout, stderr) =
+        tmp.respond("pr.md", &format!("{heredoc}{}\n", suggested.join("\n")));
     assert_eq!(code, 0, "{suggested:?}: {stdout}{stderr}");
     let state = folded(&tmp, "pr.md");
     let unflagged: Vec<_> = state
@@ -965,7 +1015,7 @@ fn n16_credits_an_unasked_quote_the_way_the_fold_does() {
 }
 
 #[test]
-fn n16_warns_when_respond_picks_the_round_up_itself() {
+fn n16_refuses_when_respond_picks_the_round_up_itself() {
     let mut s = Scenario::drafted_by(DOC, "claude");
     let note = s.comment(s.quote("second item"), None, Some("say why"));
     let submit = s.submit();
@@ -975,11 +1025,17 @@ fn n16_warns_when_respond_picks_the_round_up_itself() {
         .replaced("- second item", "- second item, because S3 flakes")
         .replacen("- detail two\n", "- detail 2\n", 1);
     tmp.edit("pr.md", &text, ts(submit) + 60_000);
-    let (code, stdout, stderr) = tmp.respond("pr.md", &format!("#{note} done\n@: I said why.\n"));
+    let log = tmp.read("pr.md.birta.jsonl");
+    let heredoc = format!("#{note} done\n@: I said why.\n");
+    let (code, stdout, stderr) = tmp.respond("pr.md", &heredoc);
+    assert_eq!(code, 65, "{stdout}{stderr}");
+    assert!(stderr.contains("unasked \"- detail 2\": <why>"), "{stderr}");
+    assert_eq!(tmp.read("pr.md.birta.jsonl"), log, "no claim, no write");
+    let (code, stdout, stderr) = tmp.respond(
+        "pr.md",
+        &format!("{heredoc}{}\n", prefilled(&stderr).join("\n")),
+    );
     assert_eq!(code, 0, "{stdout}{stderr}");
-    let w = warned(&stderr);
-    assert_eq!(w.len(), 1, "{stderr}");
-    assert!(w[0].contains("detail 2"), "{stderr}");
     let ops = tmp.ops("pr.md");
     let claim = ops.iter().position(|op| matches!(op, Op::Claim { .. }));
     let write = ops.iter().position(|op| matches!(op, Op::External { .. }));
@@ -1202,9 +1258,14 @@ fn a_claimed_round_labels_later_and_yes_and_has_no_no_line() {
         );
     }
     let note_line = format!("#{note} done");
-    assert_eq!(heredoc(&out), [note_line.as_str(), TURN_NOTE], "{out}");
+    let covers_line = format!("#{note} covers \"{WROTE}\"");
+    assert_eq!(
+        heredoc(&out),
+        [note_line.as_str(), covers_line.as_str(), TURN_NOTE],
+        "{out}"
+    );
     let eof = lines.iter().position(|l| *l == "EOF").expect("a flush EOF");
-    let mut want: Vec<String> = AFTER_EOF[..3].iter().map(|l| l.to_string()).collect();
+    let mut want: Vec<String> = AFTER_EOF[..4].iter().map(|l| l.to_string()).collect();
     want.push("      3) Then wait again: birta review pr.md --wait".to_string());
     assert_eq!(lines[eof + 1..], want, "{out}");
 }
@@ -1516,19 +1577,18 @@ fn answers_read_as_their_verdict_words_and_doc_asks_name_the_doc() {
     assert!(of(doc).get("quote").is_none(), "{v}");
 }
 
-/// Claude's round on `pr.md` with `extra` applied beside the edit at the quoted spot.
-fn respond_with(extra: impl Fn(&str) -> String) -> (String, String) {
+/// Claude's round on `pr.md` with `extra` applied beside the edit at the quoted spot:
+/// exit code, stdout and stderr of its respond.
+fn respond_with(extra: impl Fn(&str) -> String) -> (i32, String, String) {
     let (s, doc, note, claim) = held();
     let tmp = Tmp::new();
     tmp.put_doc("pr.md", &s);
     let text = extra(&s.replaced("- second item", "- second item, because S3 flakes"));
     tmp.edit("pr.md", &text, ts(claim) + 1_000);
-    let (code, stdout, stderr) = tmp.respond(
+    tmp.respond(
         "pr.md",
         &format!("#{note} done\n#{doc} done\n@: I said why.\n"),
-    );
-    assert_eq!(code, 0, "{stdout}{stderr}");
-    (stdout, stderr)
+    )
 }
 
 fn warned(stderr: &str) -> Vec<&str> {
@@ -1537,44 +1597,55 @@ fn warned(stderr: &str) -> Vec<&str> {
 
 #[test]
 fn n16_follows_what_renders_and_counts_every_uncited_change() {
+    const ONE: &str = "respond: 1 change cites no note, so nothing was recorded.";
     // Whitespace alone, but it renders a line break
-    let (_, err) =
+    let (code, _, err) =
         respond_with(|t| t.replacen("Intro paragraph here,\n", "Intro paragraph here,  \n", 1));
+    assert_eq!(code, 65, "{err}");
     let w = warned(&err);
     assert_eq!(w.len(), 1, "{err}");
-    assert!(w[0].starts_with("warning: 1 change cites no note"), "{err}");
+    assert!(w[0].starts_with(ONE), "{err}");
 
     // A reflow renders the same
-    let (out, err) = respond_with(|t| {
+    let (code, out, err) = respond_with(|t| {
         t.replacen(
             "Intro paragraph here,\nwith a second line.",
             "Intro paragraph here, with a second line.",
             1,
         )
     });
+    assert_eq!(code, 0, "{out}{err}");
     assert!(warned(&err).is_empty(), "{err}");
     assert_eq!(out.lines().last(), Some("next: birta review pr.md --wait"));
 
     // A pure deletion
-    let (_, err) = respond_with(|t| t.replacen("- detail two\n", "", 1));
+    let (code, _, err) = respond_with(|t| t.replacen("- detail two\n", "", 1));
+    assert_eq!(code, 65, "{err}");
     let w = warned(&err);
     assert_eq!(w.len(), 1, "{err}");
-    assert!(w[0].starts_with("warning: 1 change cites no note"), "{err}");
-    assert!(w[0].contains("detail two"), "{err}");
+    assert!(w[0].starts_with(ONE), "{err}");
+    assert!(err.contains("unasked \"- detail two\": <why>"), "{err}");
 
     // Two
-    let (_, err) = respond_with(|t| {
+    let (code, _, err) = respond_with(|t| {
         t.replacen("- detail two\n", "- detail 2\n", 1).replacen(
             "- more item\n",
             "- more items\n",
             1,
         )
     });
+    assert_eq!(code, 65, "{err}");
     let w = warned(&err);
-    assert_eq!(w.len(), 1, "{err}");
-    assert!(w[0].starts_with("warning: 2 changes cite no note"), "{err}");
+    assert_eq!(
+        w,
+        [
+            "respond: 2 changes cite no note, so nothing was recorded. Add a line for each and run respond again:"
+        ],
+        "{err}"
+    );
     assert!(
-        w[0].contains("detail 2") && w[0].contains("more items"),
+        err.contains("unasked \"- detail 2\": <why>")
+            && err.contains("unasked \"- more items\": <why>"),
         "{err}"
     );
 }

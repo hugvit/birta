@@ -1239,11 +1239,108 @@ fn an_amended_verdict_decides_its_item() {
 // --- the hand-off line ---
 
 #[test]
-fn the_hand_off_line_names_the_absolute_doc_path() {
+fn the_hand_off_line_names_the_path_it_is_given() {
     assert_eq!(
-        hand_off(Path::new("/work/pr.md")),
-        "Take a look at my notes: `birta review /work/pr.md`"
+        hand_off(Path::new("pr-draft.md")),
+        "Take a look at my notes: `birta review pr-draft.md`"
     );
+    assert_eq!(
+        hand_off(Path::new("docs/")),
+        "Take a look at my notes: `birta review docs/`"
+    );
+}
+
+// --- late lines ---
+
+/// A round answered with `covers`, two `unasked` and a reply, either before the yield or
+/// after it, flagged late.
+fn answered(late: bool) -> Scenario {
+    let mut s = Scenario::drafted_by(DOC, CLAUDE);
+    let doc = s.note("say how retries back off");
+    let spot = s.comment(s.quote("second item"), None, Some("say why"));
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    let text = s
+        .replaced("- second item", "- second item, because S3 flakes")
+        .replacen("- detail two\n", "", 1)
+        .replacen("- more item\n", "- more items\n", 1);
+    s.external(&format!("{text}\nRetries now use jitter.\n"));
+    s.done(CLAUDE, doc, turn);
+    s.done(CLAUDE, spot, turn);
+    s.turn_note(CLAUDE, "I said why.", turn);
+    if late {
+        s.yield_turn(CLAUDE, turn);
+    }
+    for mut op in [
+        json!({"op": "covers", "to": doc, "quote": "Retries now use jitter", "turn": turn}),
+        json!({"op": "unasked", "quote": "more items", "body": "a typo", "turn": turn}),
+        json!({"op": "unasked", "quote": "- detail two", "body": "out of scope", "turn": turn}),
+        json!({"op": "reply", "to": spot, "kind": "note", "body": "S3 answers 503 under load"}),
+    ] {
+        if late {
+            op["late"] = json!(true);
+        }
+        s.push(support::scenario::agent(CLAUDE), op);
+    }
+    if !late {
+        s.yield_turn(CLAUDE, turn);
+    }
+    s
+}
+
+/// What late lines must change as on-time ones do: each row's credit, the notes'
+/// outcomes, the counts and the news, by kind and place.
+fn credited(state: &ReviewState) -> serde_json::Value {
+    let pick = |v: serde_json::Value, keys: &[&str]| {
+        json!(
+            keys.iter()
+                .map(|k| (k.to_string(), v[k].clone()))
+                .collect::<serde_json::Map<_, _>>()
+        )
+    };
+    let all = serde_json::to_value(state).unwrap();
+    let list = |name: &str, keys: &[&str]| -> Vec<serde_json::Value> {
+        all[name]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| pick(v.clone(), keys))
+            .collect()
+    };
+    // `flagged` never reaches the page, so it is read off the struct
+    let changes: Vec<serde_json::Value> = state
+        .changes
+        .iter()
+        .zip(list("changes", &["id", "asked", "unasked_why", "check"]))
+        .map(|(c, mut v)| {
+            v["flagged"] = json!(c.flagged);
+            v
+        })
+        .collect();
+    json!({
+        "changes": changes,
+        "items": list("items", &["n", "status", "outcome"]),
+        "counts": all["counts"],
+        "news": list("news", &["kind", "sp", "after_sp", "check"]),
+    })
+}
+
+#[test]
+fn late_lines_credit_rows_and_counts_as_on_time_lines_do() {
+    let on_time = credited(&answered(false).fold());
+    let late = credited(&answered(true).fold());
+    // The setup credits every change, so the comparison covers each kind of line
+    let changes = on_time["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 4, "{on_time:#}");
+    assert!(
+        changes
+            .iter()
+            .all(|c| c["asked"]["kind"] != "unasked" || c["flagged"] == true),
+        "{on_time:#}"
+    );
+    for key in ["changes", "items", "counts", "news"] {
+        assert_eq!(late[key], on_time[key], "{key}");
+    }
 }
 
 // --- adversary killers ---

@@ -463,6 +463,18 @@ pub(super) fn cited(quote: &str, step: &Step, texts: &mut Texts) -> Vec<usize> {
     out
 }
 
+/// Where `quote` reads in `text`, whitespace aside, as [`cited`] reads it: byte ranges.
+pub fn quote_places(text: &str, quote: &str) -> Vec<(usize, usize)> {
+    let q = collapse(quote);
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let (flat, from) = flatten(text);
+    flat.match_indices(q.as_str())
+        .map(|(at, _)| (from[at], from[at + q.len() - 1] + 1))
+        .collect()
+}
+
 /// Whether an `unasked` quote names text a removal took: any run of it, whitespace aside.
 pub fn quotes_removed(quote: &str, removed: &str) -> bool {
     let q = collapse(quote);

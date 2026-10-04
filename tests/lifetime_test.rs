@@ -899,10 +899,12 @@ async fn the_restart_names_birta_only_when_path_finds_this_binary() {
     ] {
         let served = site.serve(&["pr.md"], &[GATE_ON, ("PATH", path)]);
         let review = served.boot("pr.md").await["review"].clone();
-        // `--port 0` binds off the derived port, which the restart then has to name
         assert_eq!(
             review["restart"],
-            format!("BIRTA_REVIEW=1 {program} {doc} --port {}", served.port),
+            format!(
+                "BIRTA_REVIEW=1 {program} {doc} --port {} --no-open",
+                served.port
+            ),
             "PATH {path}"
         );
         assert_eq!(review["served"], site.path("pr.md").to_str().unwrap());
@@ -924,25 +926,53 @@ async fn the_restart_carries_no_env_when_config_turned_review_on() {
     assert_eq!(
         served.boot("pr.md").await["review"]["restart"],
         format!(
-            "birta {} --port {}",
+            "birta {} --port {} --no-open",
             quoted(&site.path("pr.md")),
             served.port
         )
     );
 }
 
-/// A restart binds the derived port unless it names one, so the restart names the port
-/// whenever the server fell back from the derived one.
+/// A restart serves the doc as its drafter's again, so the page still knows who drafted it.
 #[tokio::test]
-async fn the_restart_names_the_port_only_off_the_derived_one() {
+async fn the_restart_carries_the_drafter() {
+    let site = Site::new();
+    site.write("pr.md", DOC);
+    let me = assert_cmd::cargo::cargo_bin("birta")
+        .canonicalize()
+        .unwrap();
+    let own = me.parent().unwrap().to_str().unwrap().to_string();
+    let served = site.serve(
+        &["--drafted-by", "claude", "pr.md"],
+        &[GATE_ON, ("PATH", &own)],
+    );
+    assert_eq!(
+        served.boot("pr.md").await["review"]["restart"],
+        format!(
+            "BIRTA_REVIEW=1 birta {} --drafted-by 'claude' --port {} --no-open",
+            quoted(&site.path("pr.md")),
+            served.port
+        )
+    );
+}
+
+/// The restart names the port the server has, on the derived port too, so the line shown
+/// and the line copied are one exact command.
+#[tokio::test]
+async fn the_restart_always_names_the_port_and_opens_no_second_tab() {
     let site = Site::new();
     let a = free_doc(&site, "a", "# A\n");
     let b = free_doc(&site, "b", "# B\n");
     let on = site.launch(&[&a], &[GATE_ON]);
     let restart = |review: &Value| review["restart"].as_str().unwrap().to_string();
     let review = on.boot(&a).await["review"].clone();
+    assert_eq!(on.port, derived(&site.path(&a)), "setup");
     assert!(
-        restart(&review).ends_with(&quoted(&site.path(&a))),
+        restart(&review).ends_with(&format!(
+            "{} --port {} --no-open",
+            quoted(&site.path(&a)),
+            on.port
+        )),
         "{review}"
     );
     // b's derived port taken by a birta serving another path: b falls back
@@ -958,7 +988,37 @@ async fn the_restart_names_the_port_only_off_the_derived_one() {
     assert_ne!(fell.port, d);
     let review = fell.boot(&b).await["review"].clone();
     assert!(
-        restart(&review).ends_with(&format!("{} --port {}", quoted(&site.path(&b)), fell.port)),
+        restart(&review).ends_with(&format!(
+            "{} --port {} --no-open",
+            quoted(&site.path(&b)),
+            fell.port
+        )),
         "{review}"
+    );
+}
+
+// --- adversary killers ---
+
+/// The drafter is shell-quoted like the path, so a name with a quote or `$(…)` restarts
+/// as itself and runs nothing.
+#[tokio::test]
+async fn the_restart_quotes_the_drafter_and_the_path_for_a_shell() {
+    let site = Site::new();
+    site.write("my pr's.md", DOC);
+    let me = assert_cmd::cargo::cargo_bin("birta")
+        .canonicalize()
+        .unwrap();
+    let own = me.parent().unwrap().to_str().unwrap().to_string();
+    let served = site.serve(
+        &["--drafted-by", "o'brien $(x)", "my pr's.md"],
+        &[GATE_ON, ("PATH", &own)],
+    );
+    assert_eq!(
+        served.boot("my%20pr's.md").await["review"]["restart"],
+        format!(
+            r#"BIRTA_REVIEW=1 birta {} --drafted-by 'o'\''brien $(x)' --port {} --no-open"#,
+            quoted(&site.path("my pr's.md")),
+            served.port
+        )
     );
 }

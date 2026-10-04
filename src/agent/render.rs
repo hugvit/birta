@@ -14,6 +14,7 @@ const STEP: &str = "      ";
 const DOC_DONE: &str = "<one line: what you changed for this whole-doc note>";
 const TURN_NOTE: &str =
     "@: <one or two lines to the reviewer in first person (\"I cut…\"); no questions here>";
+const WROTE: &str = "<words you wrote>";
 
 /// A note as a view line shows it.
 #[derive(Clone, Debug)]
@@ -59,12 +60,43 @@ pub struct RoundView {
     pub items: Vec<ItemLine>,
     /// The reviewer's replies to the agent's own notes and asks, handed back with the round.
     pub answers: Vec<AnswerLine>,
-    pub you: Vec<String>,
+    pub you: Vec<You>,
+    /// The batch line: the other files of this hand-back and the folder that takes them.
+    pub also: Option<(Vec<String>, String)>,
     pub all: bool,
     /// Whether to print `next:`; a peek only looks.
     pub next: bool,
     /// Whether `next:` ends by waiting on this doc; a folder claim waits once, on the folder.
     pub wait: bool,
+}
+
+/// A write of the reviewer's to the doc since the agent's last turn.
+#[derive(Clone, Debug)]
+pub enum You {
+    /// An edit, described.
+    Edited(String),
+    /// The agent's change put back: the text that came back, and its section.
+    Reverted {
+        text: String,
+        section: Option<String>,
+    },
+}
+
+impl You {
+    /// The line without its label.
+    pub fn text(&self) -> String {
+        match self {
+            Self::Edited(line) => one_line(line),
+            Self::Reverted { text, section } => {
+                let mut line = format!("\"{}\"", clip(text));
+                if let Some(section) = section {
+                    line.push_str(&format!(" ({})", clip(section)));
+                }
+                line.push_str(" — your reviewer put the old text back; leave it");
+                line
+            }
+        }
+    }
 }
 
 /// A reply of the reviewer's to one of the agent's notes, or the lack of one.
@@ -313,17 +345,16 @@ fn level_line(label: &str, item: &ItemLine) -> String {
     line
 }
 
-/// The respond lines an item asks for.
+/// The respond lines an item asks for: an answer to an ask, else its outcome and a
+/// `covers` for the words written for it.
 fn asked(item: &ItemLine) -> Vec<String> {
     let n = item.n;
-    match (item.verdict, &item.target) {
-        (Some(Verdict::Ask), _) => vec![format!("#{n} answer: <your answer>")],
-        (_, Target::Doc) => vec![
-            format!("#{n} done: {DOC_DONE}"),
-            format!("#{n} covers \"<a sentence you wrote for #{n}>\""),
-        ],
-        _ => vec![format!("#{n} done")],
-    }
+    let done = match (item.verdict, &item.target) {
+        (Some(Verdict::Ask), _) => return vec![format!("#{n} answer: <your answer>")],
+        (_, Target::Doc) => format!("#{n} done: {DOC_DONE}"),
+        _ => format!("#{n} done"),
+    };
+    vec![done, format!("#{n} covers \"{WROTE}\"")]
 }
 
 pub fn round(v: &RoundView) -> String {
@@ -409,16 +440,38 @@ pub fn round(v: &RoundView) -> String {
         return lines(out);
     }
     for you in &v.you {
-        out.push(format!("{}{}", column("YOU"), one_line(you)));
+        let label = match you {
+            You::Edited(_) => column("YOU"),
+            You::Reverted { .. } => "REVERTED  ".to_string(),
+        };
+        out.push(format!("{label}{}", you.text()));
+    }
+    if let Some((others, folder)) = &v.also {
+        out.push(format!(
+            "also in this hand-back: {} · run birta review {folder} to take them all",
+            others
+                .iter()
+                .map(|o| one_line(o))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     if !v.next {
         return lines(out);
     }
 
-    out.push(format!(
-        "next: 1) Edit {} with your Edit tool (not Write). Change only what the notes ask.",
-        v.path
-    ));
+    let edits = notes
+        .iter()
+        .chain(&levels)
+        .any(|i| i.verdict != Some(Verdict::Ask));
+    if edits {
+        out.push(format!(
+            "next: 1) Edit {} with your Edit tool (not Write). Change only what the notes ask.",
+            v.path
+        ));
+    } else {
+        out.push("next: 1) Nothing to edit this round.".to_string());
+    }
     out.push(format!(
         "{STEP}2) Record what you did, one line per note, then run:"
     ));
@@ -430,16 +483,14 @@ pub fn round(v: &RoundView) -> String {
         "{STEP}Per note you can write instead:  #N didnt: <why>   or   #N answer: <reply>"
     ));
     out.push(format!(
+        "{STEP}To cite a note or an answer:     #N covers \"{WROTE}\"   one per edit"
+    ));
+    out.push(format!(
         "{STEP}To ask the reviewer:             ask \"<exact words in the doc>\": <question>"
     ));
     out.push(format!(
-        "{STEP}For a change no note asked for:  unasked \"<exact new words>\": <why>"
+        "{STEP}For a change no note asked for:  unasked \"<exact words you added or removed>\": <why>"
     ));
-    if !v.answers.is_empty() {
-        out.push(format!(
-            "{STEP}To cite an answer:               #N covers \"<new text>\""
-        ));
-    }
     if v.items.iter().any(|i| i.verdict == Some(Verdict::No)) {
         out.push(format!(
             "{STEP}`no` means the reviewer wants that text gone; cut it, or say why not with didnt."
@@ -482,8 +533,13 @@ pub fn approved(v: &ApprovedView) -> String {
         })
     }));
     if v.next {
+        let whose = if v.drafted_by.is_some() {
+            "Use exactly that text; ask your user before publishing it anywhere."
+        } else {
+            "This is your reviewer's own doc; don't publish it."
+        };
         out.push(format!(
-            "next: birta show {}@{rev} prints the approved text. Use exactly that text; ask your user before publishing it anywhere.",
+            "next: birta show {}@{rev} prints the approved text. {whose}",
             v.path
         ));
     }
@@ -504,6 +560,15 @@ pub fn folder_wait(path: Option<&str>) -> String {
     format!(
         "{STEP}3) Then wait again, once every file is recorded: {}",
         rerun(path)
+    )
+}
+
+/// What a wait that ran out prints: that this is normal, and the wait to run again.
+/// `limit` is never `None` here, since a wait with no limit never runs out.
+pub fn still_waiting(limit: Option<std::time::Duration>, rerun: &str) -> String {
+    let min = limit.map_or(0, |l| l.as_secs().div_ceil(60)).max(1);
+    format!(
+        "still waiting: no hand-back from your reviewer in {min} min. This is normal.\nnext: {rerun}\n"
     )
 }
 
@@ -549,6 +614,7 @@ mod tests {
                 .collect(),
             answers: vec![],
             you: vec![],
+            also: None,
             all: false,
             next: true,
             wait: true,

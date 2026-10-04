@@ -11,14 +11,19 @@ const ctx = vm.createContext({});
 vm.runInContext(fs.readFileSync(FILE, "utf-8"), ctx, { filename: FILE });
 const { pure } = ctx.BR;
 
-const RESTART = "BIRTA_REVIEW=1 birta '/home/u/a b.md'";
+// The server's line already names the drafter and the port and opens no second tab
+const RESTART = "BIRTA_REVIEW=1 birta '/home/u/a b.md' --drafted-by 'claude' --port 41234 --no-open";
 
 test("the banner names the restart command as the server gave it", () => {
-  assert.equal(pure.stoppedText(RESTART), "birta stopped · run BIRTA_REVIEW=1 birta '/home/u/a b.md' to reconnect");
+  assert.equal(
+    pure.stoppedText(RESTART),
+    "birta stopped · run BIRTA_REVIEW=1 birta '/home/u/a b.md' --drafted-by 'claude' --port 41234 --no-open to reconnect",
+  );
 });
 
-test("the copied command restarts without opening a second tab", () => {
-  assert.equal(pure.restartLine(RESTART), "BIRTA_REVIEW=1 birta '/home/u/a b.md' --no-open");
+test("the copied command is the shown one, unchanged", () => {
+  assert.equal(pure.restartLine(RESTART), RESTART);
+  assert.equal(pure.stoppedText(RESTART), `birta stopped · run ${pure.restartLine(RESTART)} to reconnect`);
 });
 
 // --- Back to the tab: what changed while it was away -------------------------------------------

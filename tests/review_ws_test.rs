@@ -2164,10 +2164,8 @@ async fn with_no_log_hello_sends_a_virtual_state_and_creates_nothing() {
     );
     assert_eq!(
         state["hand_off"],
-        format!(
-            "Take a look at my notes: `birta review {}`",
-            site.path(PR).display()
-        )
+        format!("Take a look at my notes: `birta review {PR}`"),
+        "the path as typed, never the absolute one"
     );
     let now = state["server_now"].as_u64().unwrap();
     assert!(now.abs_diff(now_ms()) < 60_000, "{now}");
@@ -2175,6 +2173,27 @@ async fn with_no_log_hello_sends_a_virtual_state_and_creates_nothing() {
         !review_file(&site).exists(),
         "a hello never creates the file"
     );
+}
+
+/// In folder mode every doc's hand-off line names the folder as typed, and a linked
+/// folder by its link, never its target.
+#[tokio::test]
+async fn a_folders_hand_off_names_the_folder_as_typed() {
+    let site = Site::new();
+    site.write("docs/plan.md", DOC);
+    site.write("docs/linked/checklist.md", DOC);
+    std::os::unix::fs::symlink(site.path("docs"), site.path("link")).unwrap();
+    for typed in ["docs/", "link/"] {
+        let served = site.serve(&[typed], &[GATE_ON]);
+        for doc in ["plan.md", "linked/checklist.md"] {
+            let (_ws, frames) = served.viewing(doc).await;
+            assert_eq!(
+                hello_state(&frames)["state"]["hand_off"],
+                format!("Take a look at my notes: `birta review {typed}`"),
+                "served {typed}, viewing {doc}"
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -3536,4 +3555,21 @@ async fn an_outside_write_to_a_doc_with_no_log_pushes_its_state() {
     let early = states_before_their_content(PR, &rev(DOC), &seen);
     assert!(early.is_empty(), "states before their content {early:?}");
     assert!(!review_file(&site).exists());
+}
+
+// --- adversary killers ---
+
+/// A single doc typed through a linked folder keeps the link in its hand-off line, as
+/// typed: never the target, never the bare file name.
+#[tokio::test]
+async fn a_docs_hand_off_names_it_through_the_link_it_was_typed_by() {
+    let site = Site::new();
+    site.write("real/pr.md", DOC);
+    std::os::unix::fs::symlink(site.path("real"), site.path("link")).unwrap();
+    let served = site.serve(&["link/pr.md"], &[GATE_ON]);
+    let (_ws, frames) = served.viewing(PR).await;
+    assert_eq!(
+        hello_state(&frames)["state"]["hand_off"],
+        "Take a look at my notes: `birta review link/pr.md`"
+    );
 }

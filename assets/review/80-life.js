@@ -12,8 +12,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   /** The banner while the server is down, naming the command that brings it back. */
   BR.pure.stoppedText = function (restart) { return 'birta stopped · run ' + restart + ' to reconnect'; };
 
-  /** What the banner's copy button copies: the restart, without opening a second tab. */
-  BR.pure.restartLine = function (restart) { return restart + ' --no-open'; };
+  /** What the banner's copy button copies: the server's line as shown, which opens no second tab. */
+  BR.pure.restartLine = function (restart) { return restart; };
 
   function replyTurn(s) { return s && s.phrase && s.phrase.replied ? s.phrase.replied.turn : null; }
 

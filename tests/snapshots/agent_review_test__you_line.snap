@@ -10,11 +10,13 @@ next: 1) Edit pr.md with your Edit tool (not Write). Change only what the notes 
       2) Record what you did, one line per note, then run:
 birta respond pr.md <<'EOF'
 #9 done
+#9 covers "<words you wrote>"
 #4 done: <one line: what you changed for this whole-doc note>
-#4 covers "<a sentence you wrote for #4>"
+#4 covers "<words you wrote>"
 @: <one or two lines to the reviewer in first person ("I cut…"); no questions here>
 EOF
       Per note you can write instead:  #N didnt: <why>   or   #N answer: <reply>
+      To cite a note or an answer:     #N covers "<words you wrote>"   one per edit
       To ask the reviewer:             ask "<exact words in the doc>": <question>
-      For a change no note asked for:  unasked "<exact new words>": <why>
+      For a change no note asked for:  unasked "<exact words you added or removed>": <why>
       3) Then wait again: birta review pr.md --wait

@@ -25,7 +25,10 @@ use support::scenario::{DOC, Scenario, human, ts};
 
 const LOG: &str = "pr.md.birta.jsonl";
 const NOTHING_YET: &str = "pr.md · nothing handed back yet\nnext: birta review pr.md --wait\n";
-const RERUN: &str = "birta review pr.md --wait\n";
+/// What a wait under a minute prints when nothing came.
+const RERUN: &str = "still waiting: no hand-back from your reviewer in 1 min. This is normal.\nnext: birta review pr.md --wait\n";
+/// What a `covers` line leaves to fill in.
+const WROTE: &str = "<words you wrote>";
 /// An agent shell's env, which must never make a drafter.
 const AGENT_ENV: &[(&str, &str)] = &[
     ("CLAUDECODE", "1"),
@@ -371,21 +374,20 @@ fn the_round_view_lists_what_was_handed_back_in_order() {
     let heredoc = [
         "birta respond pr.md <<'EOF'".to_string(),
         format!("#{} done", h.note),
+        format!("#{} covers \"{WROTE}\"", h.note),
         format!("#{} done", h.no),
+        format!("#{} covers \"{WROTE}\"", h.no),
         format!("#{} answer: <your answer>", h.ask),
         format!(
             "#{} done: <one line: what you changed for this whole-doc note>",
             h.doc
         ),
-        format!(
-            "#{} covers \"<a sentence you wrote for #{}>\"",
-            h.doc, h.doc
-        ),
+        format!("#{} covers \"{WROTE}\"", h.doc),
         "@: <one or two lines to the reviewer in first person (\"I cut…\"); no questions here>"
             .to_string(),
         "EOF".to_string(),
     ];
-    assert_eq!(lines[next + 2..next + 10], heredoc, "{out}");
+    assert_eq!(lines[next + 2..next + 12], heredoc, "{out}");
     assert_eq!(
         lines.last().copied(),
         Some("      3) Then wait again: birta review pr.md --wait"),
@@ -513,21 +515,109 @@ fn an_approve_from_the_page_is_by_your_reviewer() {
 }
 
 #[test]
-fn with_no_doc_note_the_heredoc_has_no_covers_line() {
+fn every_note_asking_for_an_edit_gets_a_covers_line_not_only_a_doc_note() {
     let mut s = Scenario::new(DOC);
     let note = s.comment(s.quote("second item"), None, Some("say why"));
     let no = s.verdict("- third item", "no");
+    let ask = s.comment(s.quote("detail one"), Some("ask"), Some("right?"));
     s.submit();
     let tmp = Tmp::new();
     tmp.put(&s);
     let (code, out) = tmp.run(&["review", "pr.md", "--as", "claude"], &[]);
     assert_eq!(code, 0, "{out}");
-    assert!(!out.contains("covers"), "{out}");
     assert!(!out.contains("DOC "), "{out}");
     for n in [note, no] {
-        assert!(out.contains(&format!("\n#{n} done\n")), "{out}");
+        assert!(
+            out.contains(&format!("\n#{n} done\n#{n} covers \"{WROTE}\"\n")),
+            "{out}"
+        );
     }
-    assert!(out.lines().next().unwrap().ends_with("· 2 notes"), "{out}");
+    assert!(
+        !out.contains(&format!("#{ask} covers")),
+        "an ask is answered, not edited:\n{out}"
+    );
+    let help: Vec<&str> = out
+        .lines()
+        .filter(|l| l.contains(" covers ") && !l.starts_with('#'))
+        .collect();
+    assert_eq!(
+        help,
+        [format!(
+            "      To cite a note or an answer:     #N covers \"{WROTE}\"   one per edit"
+        )],
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "      For a change no note asked for:  unasked \"<exact words you added or removed>\": <why>\n"
+        ),
+        "{out}"
+    );
+    assert!(out.lines().next().unwrap().ends_with("· 3 notes"), "{out}");
+}
+
+/// The round's `next:` when no listed item asks for an edit: an ask, or the reviewer's
+/// reply to the agent's own ask.
+#[test]
+fn a_round_that_asks_for_no_edit_says_nothing_to_edit() {
+    const NOTHING: &str = "next: 1) Nothing to edit this round.";
+    // Only a question
+    let mut s = Scenario::drafted_by(DOC, "claude");
+    let ask = s.comment(s.quote("detail one"), Some("ask"), Some("right?"));
+    s.submit();
+    let tmp = Tmp::new();
+    tmp.put(&s);
+    let (code, out) = tmp.run(&["review", "pr.md", "--as", "claude"], &[]);
+    assert_eq!(code, 0, "{out}");
+    let lines: Vec<&str> = out.lines().collect();
+    let next = lines
+        .iter()
+        .position(|l| l.starts_with("next: "))
+        .unwrap_or_else(|| panic!("{out}"));
+    assert_eq!(lines[next], NOTHING, "{out}");
+    assert_eq!(
+        lines[next + 1],
+        "      2) Record what you did, one line per note, then run:",
+        "{out}"
+    );
+    assert!(
+        lines.contains(&format!("#{ask} answer: <your answer>").as_str()),
+        "{out}"
+    );
+    assert!(!out.contains("Edit tool"), "{out}");
+
+    // Only a yes, and the reviewer's reply to the agent's ask
+    let mut s = Scenario::drafted_by(DOC, "claude");
+    let first = s.note("round one");
+    s.submit();
+    let turn = s.claim("claude");
+    s.done("claude", first, turn);
+    let asked = s.blank("claude", s.quote("detail two"), "keep this?", turn);
+    s.yield_turn("claude", turn);
+    s.human_reply(asked, Some("yes"), None);
+    s.verdict("- third item", "yes");
+    s.submit();
+    let tmp = Tmp::new();
+    tmp.put(&s);
+    let (code, out) = tmp.run(&["review", "pr.md", "--as", "claude"], &[]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.lines().any(|l| l == NOTHING), "{out}");
+    assert!(!out.contains("Edit tool"), "{out}");
+
+    // One note that asks for an edit keeps step 1
+    let mut s = Scenario::drafted_by(DOC, "claude");
+    s.comment(s.quote("detail one"), Some("ask"), Some("right?"));
+    s.comment(s.quote("second item"), None, Some("say why"));
+    s.submit();
+    let tmp = Tmp::new();
+    tmp.put(&s);
+    let (code, out) = tmp.run(&["review", "pr.md", "--as", "claude"], &[]);
+    assert_eq!(code, 0, "{out}");
+    assert!(
+        out.lines().any(|l| l
+            == "next: 1) Edit pr.md with your Edit tool (not Write). Change only what the notes ask."),
+        "{out}"
+    );
 }
 
 #[test]
@@ -915,9 +1005,10 @@ fn the_you_line_shows_only_after_the_human_wrote_to_the_doc() {
     }
 }
 
-/// The reviewer's `u` on Claude's change reads as text an agent can find, never an id.
+/// The reviewer's `u` on Claude's change reads, in the reviewer's voice, as text an agent
+/// can find, never an id.
 #[test]
-fn the_you_line_names_a_revert_by_its_text_section_and_label() {
+fn a_revert_is_named_reverted_by_its_text_and_section_in_the_reviewers_voice() {
     let mut s = Scenario::drafted_by(DOC, "claude");
     s.note("first round");
     s.submit();
@@ -933,12 +1024,19 @@ fn the_you_line_names_a_revert_by_its_text_section_and_label() {
     tmp.put(&s);
     let (code, out) = tmp.run(&["review", "pr.md", "--as", "claude"], &[]);
     assert_eq!(code, 0, "{out}");
-    let you: Vec<&str> = out.lines().filter(|l| l.starts_with("YOU   ")).collect();
-    assert_eq!(
-        you,
-        ["YOU   reverted your change to \"- detail one\" (## Details) — 2 words → 3"],
-        "{out}"
+    assert!(!out.lines().any(|l| l.starts_with("YOU ")), "{out}");
+    let reverted: Vec<&str> = out.lines().filter(|l| l.starts_with("REVERTED")).collect();
+    assert_eq!(reverted.len(), 1, "{out}");
+    let line = reverted[0];
+    // The excerpt's length is open; its start, section and words are not
+    assert!(line.starts_with("REVERTED  \"- detail one"), "{line}");
+    assert!(
+        line.ends_with("\" (## Details) — your reviewer put the old text back; leave it"),
+        "{line}"
     );
+    let next = out.lines().position(|l| l.starts_with("next: ")).unwrap();
+    let at = out.lines().position(|l| l == line).unwrap();
+    assert!(at < next, "{out}");
     assert!(!out.contains(&of), "{out}");
 }
 
@@ -2026,7 +2124,13 @@ fn a_directory_wait_times_out_with_its_own_rerun_line() {
     let tmp = Tmp::new();
     tmp.write("docs/a.md", DOC);
     let (code, out) = tmp.run(&["review", "docs", "--wait", "--timeout", "1"], AGENT_ENV);
-    assert_eq!((code, out.as_str()), (75, "birta review docs --wait\n"));
+    assert_eq!(
+        (code, out.as_str()),
+        (
+            75,
+            "still waiting: no hand-back from your reviewer in 1 min. This is normal.\nnext: birta review docs --wait\n"
+        )
+    );
     assert!(tmp.review_files().is_empty());
 }
 
@@ -2039,7 +2143,10 @@ fn paths_with_spaces_or_quotes_are_single_quoted() {
     let (code, out) = tmp.run(&["review", "my pr.md", "--wait", "--timeout", "1"], &[]);
     assert_eq!(
         (code, out.as_str()),
-        (75, "birta review 'my pr.md' --wait\n")
+        (
+            75,
+            "still waiting: no hand-back from your reviewer in 1 min. This is normal.\nnext: birta review 'my pr.md' --wait\n"
+        )
     );
     let (code, out) = tmp.run(&["review", "my pr.md"], &[]);
     assert_eq!(code, 0);
@@ -2739,4 +2846,126 @@ fn a_waiter_warns_once_per_skipped_review_file_however_often_it_relists() {
         assert_eq!(err.matches(name).count(), 1, "{name}: {err}");
     }
     assert!(!err.contains('\x1b'), "{err:?}");
+}
+
+// --- whose doc, which folder ---
+
+#[test]
+fn approving_the_reviewers_own_doc_says_whose_it_is() {
+    let mut s = Scenario::new(DOC);
+    s.note("first");
+    s.submit();
+    let turn = s.claim("claude");
+    s.yield_turn("claude", turn);
+    s.approve();
+    let tmp = Tmp::new();
+    tmp.put(&s);
+    let short = &Rev::of(DOC.as_bytes()).to_string()[..8];
+    let (code, out) = tmp.run(&["review", "pr.md", "--as", "claude"], &[]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(
+        out.lines().last(),
+        Some(
+            format!(
+                "next: birta show pr.md@{short} prints the approved text. This is your reviewer's own doc; don't publish it."
+            )
+            .as_str()
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn claiming_one_file_of_a_batch_names_the_others_and_the_folder() {
+    let tmp = Tmp::new();
+    for (name, body) in [
+        ("plan.md", "FROM-PLAN"),
+        ("linked/checklist.md", "FROM-LIST"),
+    ] {
+        let (rel, s) = batched(name, body, 7);
+        tmp.put_doc(&rel, &s);
+    }
+    let (code, out) = tmp.run(&["review", "docs/plan.md", "--as", "claude"], &[]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(tmp.claims("docs/linked/checklist.md.birta.jsonl").len(), 0);
+    let lines: Vec<&str> = out.lines().collect();
+    let also = lines
+        .iter()
+        .position(|l| {
+            *l == "also in this hand-back: linked/checklist.md · run birta review docs/ to take them all"
+        })
+        .unwrap_or_else(|| panic!("no batch line:\n{out}"));
+    let next = lines.iter().position(|l| l.starts_with("next: ")).unwrap();
+    assert!(also < next, "said before the steps:\n{out}");
+
+    // A claim of a file handed back alone says nothing of the kind
+    let tmp = Tmp::new();
+    let (rel, s) = batched("plan.md", "ALONE", 8);
+    tmp.put_doc(&rel, &s);
+    let (code, out) = tmp.run(&["review", "docs/plan.md", "--as", "claude"], &[]);
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("also in this hand-back"), "{out}");
+}
+
+#[test]
+fn a_folder_typed_with_its_slash_claims_the_whole_batch_and_waits_on_it_as_typed() {
+    let tmp = Tmp::new();
+    for (name, body) in [
+        ("plan.md", "FROM-PLAN"),
+        ("linked/checklist.md", "FROM-LIST"),
+    ] {
+        let (rel, s) = batched(name, body, 7);
+        tmp.put_doc(&rel, &s);
+    }
+    let (code, out) = tmp.run(&["review", "docs/", "--as", "claude"], &[]);
+    assert_eq!(code, 0, "{out}");
+    for rel in [
+        "docs/plan.md.birta.jsonl",
+        "docs/linked/checklist.md.birta.jsonl",
+    ] {
+        assert_eq!(tmp.claims(rel).len(), 1, "{rel}:\n{out}");
+    }
+    assert!(
+        out.contains("FROM-PLAN") && out.contains("FROM-LIST"),
+        "{out}"
+    );
+    assert!(
+        out.lines()
+            .last()
+            .is_some_and(|l| l.ends_with("birta review docs/ --wait")),
+        "{out}"
+    );
+}
+
+// --- adversary killers ---
+
+/// The batch line names only files of this hand-back still waiting: not a file of an
+/// older hand-back, nor one another agent already took.
+#[test]
+fn the_batch_line_names_only_unclaimed_files_of_the_same_hand_back() {
+    let tmp = Tmp::new();
+    for (name, body, batch) in [
+        ("plan.md", "FROM-PLAN", 7),
+        ("linked/checklist.md", "FROM-LIST", 7),
+        ("old.md", "FROM-OLD", 6),
+    ] {
+        let (rel, s) = batched(name, body, batch);
+        tmp.put_doc(&rel, &s);
+    }
+    let (rel, mut taken) = batched("taken.md", "FROM-TAKEN", 7);
+    // `batched` writes its submit by hand, so the claim names that line
+    let submit = taken.next() - 1;
+    taken.claim_round("codex", submit);
+    tmp.put_doc(&rel, &taken);
+    let (code, out) = tmp.run(&["review", "docs/plan.md", "--as", "claude"], &[]);
+    assert_eq!(code, 0, "{out}");
+    let also: Vec<&str> = out
+        .lines()
+        .filter(|l| l.starts_with("also in this hand-back"))
+        .collect();
+    assert_eq!(
+        also,
+        ["also in this hand-back: linked/checklist.md · run birta review docs/ to take them all"],
+        "{out}"
+    );
 }

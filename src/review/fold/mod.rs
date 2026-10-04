@@ -29,7 +29,8 @@ use items::{Notes, Outcome, cover};
 use texts::{Texts, span_of};
 use turns::{RoundRec, Turns};
 
-pub use changes::quotes_removed;
+pub use changes::{quote_places, quotes_removed};
+pub use news::{Over, overwritten};
 
 /// Whether a round view lists `item`: the claim `claim` holds it, or with no claim yet
 /// it was sent in one of `rounds`; and, but for a read-only view, a note an earlier turn
@@ -420,7 +421,8 @@ pub fn span_stop(doc: &Doc, (first, last): (u32, u32)) -> Option<&anchor::Stop> 
         })
 }
 
-/// The line the human copies to point an agent at the notes on `doc`.
+/// The line the human copies to point an agent at the notes on `doc`, a path as the
+/// agent would type it.
 pub fn hand_off(doc: &Path) -> String {
     format!("Take a look at my notes: `birta review {}`", doc.display())
 }

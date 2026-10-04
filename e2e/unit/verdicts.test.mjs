@@ -81,24 +81,10 @@ test("an older server's bindings, or a revert moved off u, leave u to the viewer
 
 // --- C4: the whole-doc stop -------------------------------------------------------------------
 
-const h = (sp, level, lines, section) => ({ kind: "heading", sp, level, lines, ...(section ? { section } : {}) });
-const p = (sp, lines) => ({ kind: "paragraph", sp, lines });
-
-test("the whole-doc stop is a first H1 whose section holds every later stop", () => {
+test("whole doc is a stop of its own: no H1 stands for it", () => {
   const BR = load();
-  const whole = (stops) => BR.pure.wholeDocStop(stops) ?? null;
-  const doc = [h("1:1-1:16", 1, [1, 1], [1, 9]), h("3:1-3:6", 2, [3, 3], [3, 9]), p("5:1-5:9", [5, 5]), p("9:1-9:4", [9, 9])];
-  assert.equal(whole(doc), "1:1-1:16");
-  assert.equal(whole(doc.slice(0, 1)), "1:1-1:16");
-  // A second H1 ends the first one's section
-  assert.equal(whole([h("1:1-1:3", 1, [1, 1], [1, 4]), p("3:1-3:4", [3, 3]), h("5:1-5:3", 1, [5, 5], [5, 7]), p("7:1-7:4", [7, 7])]), null);
-  // A block before the H1, or a first heading below H1, makes no whole-doc stop
-  assert.equal(whole([p("1:1-1:4", [1, 1]), h("3:1-3:3", 1, [3, 3], [3, 5]), p("5:1-5:4", [5, 5])]), null);
-  assert.equal(whole([h("1:1-1:6", 2, [1, 1], [1, 5]), p("3:1-3:4", [3, 3])]), null);
-  // A section that stops short of the last stop
-  assert.equal(whole([h("1:1-1:3", 1, [1, 1], [1, 4]), p("3:1-3:4", [3, 3]), p("9:1-9:4", [9, 9])]), null);
-  assert.equal(whole([]), null);
-  assert.equal(whole(undefined), null);
+  // A title is an ordinary block, so the H1 that spanned the doc is no stop for it any more
+  assert.equal(BR.pure.wholeDocStop, undefined);
 });
 
 test("at the whole-doc stop each verdict key says what to do instead, and y names the button's act", () => {
@@ -116,6 +102,10 @@ test("at the whole-doc stop each verdict key says what to do instead, and y name
   assert.equal(BR.pure.wholeDocPill("yes", { text: "With Claude", disabled: true }, true), "with Claude");
   assert.equal(BR.pure.wholeDocPill("yes", { text: "Approved", disabled: true }, true), "approved · c to reopen");
   assert.equal(BR.pure.wholeDocPill("yes", null, true), null);
+  // u there has nothing of Claude's to revert, whatever the button says
+  assert.equal(pill("revert_change", "Approve"), "nothing here to revert");
+  assert.equal(pill("revert_change", "Hand back · 2"), "nothing here to revert");
+  assert.equal(BR.pure.wholeDocPill("revert_change", null, true), "nothing here to revert");
   // The keys it names are the bound ones
   const keys = { focus_next: "h", note: "w" };
   assert.equal(BR.pure.wholeDocPill("later", null, true, keys), "later needs a block · h");

@@ -217,7 +217,7 @@ test.describe("seen", () => {
     const { mock } = await openFixture(page, birta, "unseen");
     await page.keyboard.press("n");
     await expect.poll(() => seenIds(mock)).toEqual([["#13"]]);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
     await page.keyboard.press("n");
     await expect.poll(() => seenIds(mock)).toEqual([["#13"], ["9.0"]]);
     expect(await focused(page)).toBe("5:1-6:68");
@@ -390,7 +390,7 @@ test.describe("approve guard", () => {
     await page.keyboard.press("ControlOrMeta+Enter");
     // The doc-level reply comes first in doc order
     await expect.poll(() => seenIds(mock)).toEqual([["#11"]]);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
     expect(opsNamed(mock, "approve")).toEqual([]);
 
     const seen = echoSeen(state, "9.0");
@@ -418,7 +418,7 @@ test.describe("approve guard", () => {
     await expect.poll(() => opsNamed(mock, "hand_back")).toHaveLength(1);
     await page.waitForTimeout(SETTLE_MS);
     expect(seenOps(mock)).toEqual([]);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
   });
 });
 
@@ -1137,7 +1137,7 @@ test.describe("killers: the walk and seen", () => {
     await page.keyboard.press("p");
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops()).toEqual([]);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
   });
 
   // K27
@@ -1177,7 +1177,7 @@ test.describe("killers: the approve guard", () => {
     await page.waitForTimeout(SETTLE_MS);
     expect(opsNamed(mock, "approve")).toEqual([]);
     expect(seenIds(mock)).toEqual([["#11"]]);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
   });
 
   // K7

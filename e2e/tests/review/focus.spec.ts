@@ -73,11 +73,17 @@ async function outOfView(page: Page, sp: string): Promise<boolean> {
   return b.bottom <= v.top || b.top >= v.bottom;
 }
 
-/** The first stop, in doc order, whose top is at or below the header and inside the window. */
+/** The first stop, in doc order, whose top is at or below the header and inside the window; `doc` for whole doc, which comes first. */
 async function firstInView(page: Page): Promise<string | null> {
   const sps = (await stops(page)).map((s) => s.sp);
   return page.evaluate((sps) => {
     const top = document.querySelector(".file-header")!.getBoundingClientRect().bottom - 1;
+    // Whole doc's room above the first block, its empty line included while it is unfocused
+    const doc = document.querySelector('birta-flow[data-kind="doc-stop"]');
+    if (doc && doc.getClientRects().length) {
+      const r = doc.getBoundingClientRect();
+      if (r.top >= top && r.top < innerHeight) return "doc";
+    }
     for (const sp of sps) {
       const all = document.querySelectorAll(`#content [data-sourcepos="${sp}"]`);
       const el = all[all.length - 1];
@@ -329,7 +335,7 @@ test.describe("keys on a stop", () => {
     expect(mock.ops()[0].at).toStrictEqual({ k: "block", sp, scope: "block" });
   });
 
-  test("End goes to the last stop and Home to the first, each brought into view", async ({ page, birta }) => {
+  test("End goes to the last stop and Home to whole doc, each brought into view", async ({ page, birta }) => {
     await open(page, birta, longDoc());
     const all = await stops(page);
     const inView = async (sp: string) => {
@@ -337,21 +343,27 @@ test.describe("keys on a stop", () => {
       const v = await view(page);
       return b.top >= v.top - 1 && b.bottom <= v.bottom + 1;
     };
+    // The whole doc line, which shows while it has focus
+    const docInView = async () => {
+      const m = (await focusMark(page))!;
+      const v = await view(page);
+      return m.top >= v.top - 1 && m.bottom <= v.bottom + 1;
+    };
     await page.keyboard.press("End");
     await expect.poll(() => focused(page)).toBe(all.at(-1)!.sp);
     await scrollSettled(page);
     expect(await inView(all.at(-1)!.sp)).toBe(true);
     await page.keyboard.press("Home");
-    await expect.poll(() => focused(page)).toBe(all[0].sp);
+    await expect.poll(() => focused(page)).toBe("doc");
     await scrollSettled(page);
-    expect(await inView(all[0].sp)).toBe(true);
+    expect(await docInView()).toBe(true);
     // From the middle too
     await focusTo(page, await stopSp(page, "Filler paragraph 5."));
     await page.keyboard.press("End");
     await expect.poll(() => focused(page)).toBe(all.at(-1)!.sp);
     await focusTo(page, await stopSp(page, "Filler paragraph 30."));
     await page.keyboard.press("Home");
-    await expect.poll(() => focused(page)).toBe(all[0].sp);
+    await expect.poll(() => focused(page)).toBe("doc");
   });
 
   test("Home and End in a text field stay the field's", async ({ page, birta }) => {
@@ -386,14 +398,16 @@ test.describe("keys on a stop", () => {
   test("k on the first stop says top of the doc and stays; nothing wraps", async ({ page, birta }) => {
     await open(page, birta, STOPS_DOC);
     const all = await stops(page);
-    // The H1 spans the doc, so it is the first stop
+    // The H1 spans the doc, and whole doc is still the stop above it
     await focusTo(page, all[1].sp);
     await page.keyboard.press("k");
     await expect.poll(() => focused(page)).toBe(all[0].sp);
+    await page.keyboard.press("k");
+    await expect.poll(() => focused(page)).toBe("doc");
     expect(await pillOf(page)).not.toBe("top of the doc");
     await page.keyboard.press("k");
     await expect.poll(() => pillOf(page)).toBe("top of the doc");
-    expect(await focused(page)).toBe(all[0].sp);
+    expect(await focused(page)).toBe("doc");
   });
 
   test("with no H1 over the doc, k from the first block goes to the doc, and k there says top of the doc", async ({
@@ -406,11 +420,11 @@ test.describe("keys on a stop", () => {
     await page.keyboard.press("k");
     await expect.poll(() => focused(page)).toBe(all[0].sp);
     await page.keyboard.press("k");
-    await expect.poll(() => focused(page)).toBeNull();
+    await expect.poll(() => focused(page)).toBe("doc");
     expect(await pillOf(page)).not.toBe("top of the doc");
     await page.keyboard.press("k");
     await expect.poll(() => pillOf(page)).toBe("top of the doc");
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
   });
 });
 
@@ -481,8 +495,8 @@ test.describe("adversary", () => {
     test(`${key} that scrolls nothing leaves no user scroll behind for a later script scroll`, async ({ page, birta }) => {
       await open(page, birta, longDoc());
       await page.keyboard.press("j");
-      const first = (await focused(page))!;
-      expect(first).not.toBeNull();
+      const first = (await stops(page))[0].sp;
+      await expect.poll(() => focused(page)).toBe(first);
       expect(await page.evaluate(() => scrollY)).toBe(0);
       await page.keyboard.press(key);
       await page.waitForTimeout(500);

@@ -287,15 +287,17 @@ test("a file row's note never leaks a value as text", () => {
 
 // --- Shift+J and Shift+K -------------------------------------------------------------------------
 
-test("the next file is the next one with news after this one, round the end", () => {
+test("the next file is the next one with news after this one, and nothing wraps", () => {
   const BR = load();
   const dir = dirState([listed("a.md", null, true), listed("b.md", null, true), listed("c.md")]);
   const next = (p, step) => BR.pure.nextFile(dir, p, step);
-  assert.equal(next("c.md", 1), "a.md");
-  assert.equal(next("c.md", -1), "b.md");
   assert.equal(next("a.md", 1), "b.md");
-  assert.equal(next("b.md", 1), "a.md");
-  assert.equal(next("a.md", -1), "b.md");
+  assert.equal(next("c.md", -1), "b.md");
+  assert.equal(next("b.md", -1), "a.md");
+  // Past the last file with news, or before the first, there is nowhere to go
+  assert.equal(next("b.md", 1), null);
+  assert.equal(next("c.md", 1), null);
+  assert.equal(next("a.md", -1), null);
   // A page the listing doesn't hold starts from the top, or the bottom going back
   assert.equal(next("zzz.md", 1), "a.md");
   assert.equal(next("zzz.md", -1), "b.md");
@@ -313,7 +315,8 @@ test("the next file goes by the path a link uses and skips this doc's other spel
   const BR = load();
   const dir = dirState([listed(["notes/plan.md", "plan.md"], null, true), listed(["b.md"], null, true)]);
   assert.equal(BR.pure.nextFile(dir, "plan.md", 1), "b.md");
-  assert.equal(BR.pure.nextFile(dir, "b.md", 1), "notes/plan.md");
+  assert.equal(BR.pure.nextFile(dir, "b.md", -1), "notes/plan.md");
+  assert.equal(BR.pure.nextFile(dir, "b.md", 1), null);
 });
 
 test("the folder code leaves its inputs alone", () => {

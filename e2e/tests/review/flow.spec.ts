@@ -152,7 +152,8 @@ function hosts(page: Page): Promise<Host[]> {
   return page.evaluate(() => {
     const content = document.getElementById("content")!;
     const isFlow = (e: Element | null) => !!e && e.localName === "birta-flow";
-    return Array.from(document.querySelectorAll("birta-flow")).map((h) => {
+    // The whole doc stop's own line is no row
+    return Array.from(document.querySelectorAll('birta-flow:not([data-kind="doc-stop"])')).map((h) => {
       const root = h.shadowRoot;
       const text = root
         ? Array.from(root.children)
@@ -344,16 +345,15 @@ test.describe("composer", () => {
     await page.keyboard.press("Enter");
     await expect(composer(page)).toHaveCount(0);
     expect(await focused(page)).toBe(para);
-    // The whole-doc H1 stands for the doc
-    const title = (await stops(page))[0].sp;
+    // Whole doc, above the title
     await focusTop(page);
-    expect(await focused(page)).toBe(title);
+    expect(await focused(page)).toBe("doc");
     await page.keyboard.press("c");
     await page.keyboard.type("on the doc");
     await page.keyboard.press("Enter");
     await expect(composer(page)).toHaveCount(0);
     await page.waitForTimeout(SETTLE_MS);
-    expect(await focused(page)).toBe(title);
+    expect(await focused(page)).toBe("doc");
   });
 
   test("q opens a one-line composer and keeps an ask", async ({ page, birta }) => {
@@ -712,7 +712,7 @@ test.describe("placement", () => {
       await expect(html).toHaveAttribute("data-theme", variant);
       await expect.poll(async () => (await docSlot(page)).length).toBeGreaterThanOrEqual(3);
       const fonts = await page.evaluate(() =>
-        Array.from(document.querySelectorAll("birta-flow")).map((h) => {
+        Array.from(document.querySelectorAll('birta-flow:not([data-kind="doc-stop"])')).map((h) => {
           const root = h.shadowRoot!;
           const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
             acceptNode: (n) =>
@@ -745,7 +745,8 @@ test.describe("placement", () => {
     const gaps = await page.evaluate(() => {
       const isHeading = (e: Element | null) => !!e && /^h[1-6]$/.test(e.localName);
       const flows = Array.from(document.querySelectorAll("birta-flow"));
-      const lastDoc = flows.filter((h) => h.parentElement!.id === "lane-frame").pop()!;
+      // The last thing drawn above the doc, the whole doc line included while it shows
+      const lastDoc = flows.filter((h) => h.parentElement!.id === "lane-frame" && h.getBoundingClientRect().height > 0).pop()!;
       const first = document.querySelector("#content > [data-sourcepos]")!;
       const beforeHeading = flows.find((h) => h.parentElement!.id === "content" && isHeading(h.nextElementSibling))!;
       return {

@@ -123,7 +123,7 @@ const opsNamed = (mock: Mock, name: string) => mock.ops().filter((o) => o.op ===
 /** Every op but seen, which moving onto a changed block sends. */
 const writes = (mock: Mock) => mock.ops().filter((o) => o.op !== "seen").map(opFields);
 
-/** Goes to the doc stop: k up to the doc, or to a whole-doc H1, which stands for it. */
+/** Goes to whole doc, the first stop. */
 async function unfocus(page: Page) {
   await focusTop(page);
 }
@@ -142,7 +142,7 @@ function blankFocus(page: Page): Promise<string | null> {
   });
 }
 
-/** Presses j from nothing until the blank asking `question` holds the keyboard. */
+/** Presses j from whole doc until the blank asking `question` holds the keyboard. */
 async function focusBlank(page: Page, question: string) {
   await unfocus(page);
   const all = await stops(page);
@@ -227,15 +227,7 @@ test.describe("u", () => {
     // Focus a block well down the page, so the source view's height change would scroll it away
     const target = await stopSp(page, "Filler paragraph 20.");
     const header = (await page.locator(".file-header").boundingBox())!;
-    await page.evaluate(
-      ({ sp, below }) => {
-        const el = document.querySelector(`#content [data-sourcepos="${sp}"]`)!;
-        window.scrollBy(0, el.getBoundingClientRect().top - below);
-      },
-      { sp: target, below: header.y + header.height + 10 },
-    );
-    await page.keyboard.press("j");
-    await expect.poll(() => focused(page)).toBe(target);
+    await focusOn(page, target);
 
     await page.keyboard.press("u");
     await expect(page.locator("#source-view")).toBeVisible();
@@ -344,12 +336,13 @@ test.describe("rows that can't take a no or a revert", () => {
 // --- C4: the whole-doc stop ----------------------------------------------------------------------
 
 test.describe("the whole-doc stop", () => {
-  test("a top H1 that spans the doc is the doc stop: k from below lands on it and goes no further", async ({
+  test("a top H1 that spans the doc is an ordinary stop: k from below lands on it, then on whole doc, and goes no further", async ({
     page,
     birta,
   }) => {
     await open(page, birta, STOPS_DOC);
     const [h1, why] = (await stops(page)).map((s) => s.sp);
+    await expect.poll(() => focused(page)).toBe("doc");
     await page.keyboard.press("j");
     await expect.poll(() => focused(page)).toBe(h1);
     await page.keyboard.press("j");
@@ -357,16 +350,18 @@ test.describe("the whole-doc stop", () => {
     await page.keyboard.press("k");
     await expect.poll(() => focused(page)).toBe(h1);
     await page.keyboard.press("k");
+    await expect.poll(() => focused(page)).toBe("doc");
+    await page.keyboard.press("k");
     await page.waitForTimeout(SETTLE_MS);
-    expect(await focused(page)).toBe(h1);
-    // The file chip is no stop of its own here
+    expect(await focused(page)).toBe("doc");
+    // The file chip is never a stop
     expect(await page.locator(".file-header-name[data-review-focus]").count()).toBe(0);
   });
 
   test("there l, ., x and y say what to do instead and write nothing", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "fresh");
-    await page.keyboard.press("j");
-    await expect.poll(() => focused(page)).toBe("1:1-1:16");
+    // The tab opens there
+    await expect.poll(() => focused(page)).toBe("doc");
     const said: Record<string, string | null> = {};
     for (const key of ["l", ".", "x", "y"]) {
       await page.keyboard.press(key);
@@ -385,8 +380,7 @@ test.describe("the whole-doc stop", () => {
 
   test("there y names what the button would do: hand back while notes wait", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "drafts");
-    await page.keyboard.press("j");
-    await expect.poll(() => focused(page)).toBe("1:1-1:16");
+    await expect.poll(() => focused(page)).toBe("doc");
     await page.keyboard.press("y");
     await expect.poll(() => pillOf(page)).toBe(`${await turnKey(page)} hands back`);
     await page.waitForTimeout(SETTLE_MS);
@@ -395,13 +389,15 @@ test.describe("the whole-doc stop", () => {
 
   test("there c and q write about the whole doc", async ({ page, birta }) => {
     const { mock } = await open(page, birta, STOPS_DOC);
-    await page.keyboard.press("j");
+    await expect.poll(() => focused(page)).toBe("doc");
     await page.keyboard.press("c");
     await expect(composer(page)).toBeFocused();
     await page.keyboard.type("overall fine");
     await page.keyboard.press("Enter");
     await expect.poll(() => opsNamed(mock, "comment")).toEqual([{ op: "comment", at: { k: "doc" }, body: "overall fine" }]);
     await focusOn(page, (await stops(page))[0].sp);
+    await page.keyboard.press("Home");
+    await expect.poll(() => focused(page)).toBe("doc");
     await page.keyboard.press("q");
     await expect(composer(page)).toBeFocused();
     await page.keyboard.type("who reads this?");
@@ -410,16 +406,16 @@ test.describe("the whole-doc stop", () => {
     expect(opsNamed(mock, "comment")[1]).toEqual({ op: "comment", at: { k: "doc" }, body: "who reads this?", verdict: "ask" });
   });
 
-  test("with no such H1 the file chip is the doc stop, and there too verdict keys only say what to do", async ({
+  test("with no such H1 whole doc is still the doc stop, never the file chip, and there too verdict keys only say what to do", async ({
     page,
     birta,
   }) => {
     const { mock } = await open(page, birta, "Intro words.\n\n# Title\n\nBody words.\n");
     await page.keyboard.press("j");
-    await expect.poll(() => focused(page)).not.toBeNull();
+    await expect.poll(() => focused(page)).toBe("1:1-1:12");
     await page.keyboard.press("k");
-    await expect.poll(() => focused(page)).toBeNull();
-    await expect(page.locator(".file-header-name[data-review-focus]")).toHaveCount(1);
+    await expect.poll(() => focused(page)).toBe("doc");
+    await expect(page.locator(".file-header-name[data-review-focus]")).toHaveCount(0);
     await page.keyboard.press("x");
     await expect.poll(() => pillOf(page)).toBe("whole doc: c to say what's wrong");
     await page.keyboard.press("l");
@@ -438,7 +434,7 @@ test.describe("the whole-doc stop", () => {
       .toEqual([{ op: "comment", at: { k: "block", sp: "1:1-1:5", scope: "section" }, verdict: "no" }]);
     await expect.poll(() => pillOf(page)).toBe("no · # One (section) · z to undo");
     await page.keyboard.press("k");
-    await expect.poll(() => focused(page)).toBeNull();
+    await expect.poll(() => focused(page)).toBe("doc");
   });
 
   test("with a change row open on the whole-doc H1, x, y, u and c act on the row", async ({ page, birta }) => {
@@ -680,6 +676,7 @@ test.describe("c", () => {
     const { mock } = await openFixture(page, birta, "drafts");
     await page.keyboard.press("j");
     await unfocus(page);
+    expect(await focused(page)).toBe("doc");
     await page.keyboard.press("c");
     await expect(composer(page)).toHaveValue("is the test ladder still needed?");
     await composer(page).fill("is the ladder needed?");
@@ -1108,7 +1105,7 @@ test.describe("killers: u and the row", () => {
       } else {
         // Off the change's block, as Esc no longer drops focus
         await focusTop(page);
-        expect(await focused(page)).toBe("1:1-1:16");
+        expect(await focused(page)).toBe("doc");
         // With no row open the revert's own key does nothing
         await page.keyboard.press("u");
         await page.waitForTimeout(SETTLE_MS);
@@ -1137,18 +1134,26 @@ test.describe("killers: the whole-doc stop", () => {
     expect(writes(mock)[0]).toMatchObject({ op: "comment", at: { k: "quote", q: "Upload" }, verdict: "no" });
   });
 
-  test("K10: c on the whole-doc H1 edits your whole-doc draft", async ({ page, birta }) => {
+  test("K10: c on whole doc edits your whole-doc draft, and c on the title is a note on the title", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "drafts");
-    await page.keyboard.press("j");
-    await expect.poll(() => focused(page)).toBe("1:1-1:16");
+    await expect.poll(() => focused(page)).toBe("doc");
     await page.keyboard.press("c");
     await expect(composer(page)).toHaveValue("is the test ladder still needed?");
     await composer(page).fill("still needed?");
     await page.keyboard.press("Enter");
     await expect.poll(() => writes(mock)).toEqual([{ op: "amend", to: 6, body: "still needed?" }]);
+    // The H1 is an ordinary block now, so its note is its own
+    await page.keyboard.press("j");
+    await expect.poll(() => focused(page)).toBe("1:1-1:16");
+    await page.keyboard.press("c");
+    await expect(composer(page)).toHaveValue("");
+    await page.keyboard.type("shorter title");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => writes(mock)).toHaveLength(2);
+    expect(writes(mock)[1]).toMatchObject({ op: "comment", at: { k: "block", sp: "1:1-1:16" }, body: "shorter title" });
   });
 
-  test("K21: k from below a blank on the H1 reaches the blank, then the H1, and stops", async ({ page, birta }) => {
+  test("K21: k from below a blank on the H1 reaches the blank, then the H1, then whole doc, and stops", async ({ page, birta }) => {
     await openFixture(page, birta, "flow");
     await focusOn(page, "3:1-3:6");
     await page.keyboard.press("k");
@@ -1156,17 +1161,21 @@ test.describe("killers: the whole-doc stop", () => {
     await page.keyboard.press("k");
     await expect.poll(() => focused(page)).toBe("1:1-1:16");
     await page.keyboard.press("k");
+    await expect.poll(() => focused(page)).toBe("doc");
+    await page.keyboard.press("k");
     await page.waitForTimeout(SETTLE_MS);
-    expect(await focused(page)).toBe("1:1-1:16");
+    expect(await focused(page)).toBe("doc");
     expect(await page.locator(".file-header-name[data-review-focus]").count()).toBe(0);
   });
 
-  test("Q3: a doc-level blank sits above the whole-doc H1 and is the topmost stop", async ({ page, birta }) => {
+  test("Q3: a doc-level blank sits under whole doc, above the H1", async ({ page, birta }) => {
     await openFixture(page, birta, "flow", (s) => {
       blanksOnly(s);
       s.items = s.items.filter((i: State) => i.n === 21);
       s.items[0].at = { kind: "doc", loc: null };
     });
+    await page.locator('birta-flow[data-kind="blank"]', { hasText: OPEN_Q }).waitFor();
+    await expect.poll(() => focused(page)).toBe("doc");
     await page.keyboard.press("j");
     await expect.poll(async () => (await blankFocus(page)) ?? "").toContain(OPEN_Q);
     await page.keyboard.press("j");
@@ -1174,14 +1183,16 @@ test.describe("killers: the whole-doc stop", () => {
     await page.keyboard.press("k");
     await expect.poll(async () => (await blankFocus(page)) ?? "").toContain(OPEN_Q);
     await page.keyboard.press("k");
+    await expect.poll(() => focused(page)).toBe("doc");
+    expect(await blankFocus(page)).toBeNull();
+    await page.keyboard.press("k");
     await page.waitForTimeout(SETTLE_MS);
-    expect(await blankFocus(page)).toContain(OPEN_Q);
+    expect(await focused(page)).toBe("doc");
   });
 
   test("Q2: after approve, y at the whole-doc stop says approved · c to reopen", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "approved");
-    await page.keyboard.press("j");
-    await expect.poll(() => focused(page)).toBe("1:1-1:16");
+    await expect.poll(() => focused(page)).toBe("doc");
     await page.keyboard.press("y");
     await expect.poll(() => pillOf(page)).toBe("approved · c to reopen");
     await page.waitForTimeout(SETTLE_MS);

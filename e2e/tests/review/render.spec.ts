@@ -102,7 +102,8 @@ interface Host {
 /** Every `birta-flow` host in document order, read through its (forced open) root. */
 function hosts(page: Page): Promise<Host[]> {
   return page.evaluate(() =>
-    Array.from(document.querySelectorAll("birta-flow")).map((h) => {
+    // The whole doc stop's own line is no row
+    Array.from(document.querySelectorAll('birta-flow:not([data-kind="doc-stop"])')).map((h) => {
       const root = h.shadowRoot!;
       const text = Array.from(root.children)
         .filter((c) => c.localName !== "style")
@@ -260,12 +261,12 @@ test.describe("rows on focus", () => {
     await page.keyboard.press("k");
     await expect.poll(() => openRow(page)).toBe("19.0");
     await expect.poll(async () => (await hostWith(page, "without a note"))?.kbd).toEqual(["y", "u", "c"]);
-    // Esc keeps the focus and its row; the title holds no change
+    // Esc keeps the focus and its row; whole doc holds no change
     await page.keyboard.press("Escape");
     await page.waitForTimeout(SETTLE_MS);
     expect(await openRow(page)).toBe("19.0");
     await focusTop(page);
-    expect(await focused(page)).toBe("1:1-1:16");
+    expect(await focused(page)).toBe("doc");
     await expect.poll(() => openRow(page)).toBeNull();
     await expect.poll(() => hostWith(page, "without a note")).toBeNull();
   });
@@ -372,7 +373,7 @@ test.describe("click", () => {
     const link = page.locator("#content a", { hasText: "the end" });
     await link.click();
     await page.waitForTimeout(SETTLE_MS);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
     expect(await page.evaluate(() => location.hash)).toBe("#end");
     const words = (await page.locator("#content p", { hasText: "Other words" }).boundingBox())!;
     await page.mouse.move(words.x + 2, words.y + words.height / 2);
@@ -389,7 +390,7 @@ test.describe("click", () => {
     await open(page, birta, STOPS_DOC);
     await clickText(page, await stopSp(page, "When the upload hits"));
     await page.waitForTimeout(SETTLE_MS);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
   });
 });
 
@@ -1005,19 +1006,21 @@ test.describe("focus", () => {
     expect(m.focus.style.background).toBe("rgba(0, 0, 0, 0)");
   });
 
-  test("the header chip takes the same outline, and no wash", async ({ page, birta }) => {
-    // With no H1 spanning the doc, the file chip is the doc stop
+  test("the header chip takes no outline and no wash, even with no H1 over the doc", async ({ page, birta }) => {
+    // With no H1 spanning the doc, the file chip once stood for the doc
     await open(page, birta, "Intro words.\n\n" + STOPS_DOC);
     const look = () =>
       page.locator(".file-header-name").evaluate((el) => {
         const cs = getComputedStyle(el);
-        return { width: cs.outlineWidth, style: cs.outlineStyle, color: cs.outlineColor, radius: cs.borderTopLeftRadius, bg: cs.backgroundColor, shadow: cs.boxShadow };
+        return { style: cs.outlineStyle, bg: cs.backgroundColor, shadow: cs.boxShadow };
       });
     const before = await look();
+    expect(before.style).toBe("none");
     await page.keyboard.press("j");
     await page.keyboard.press("k");
-    await expect(page.locator(".file-header-name[data-review-focus]")).toHaveCount(1);
-    expect(await look()).toEqual({ width: "1px", style: "solid", color: ACCENT, radius: "6px", bg: before.bg, shadow: before.shadow });
+    await expect.poll(() => focused(page)).toBe("doc");
+    await expect(page.locator(".file-header-name[data-review-focus]")).toHaveCount(0);
+    expect(await look()).toEqual(before);
   });
 
   test("an H1 at the top of the page shows its outline below the header", async ({ page, birta }) => {

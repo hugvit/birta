@@ -700,7 +700,7 @@ test.describe("the ? sheet", () => {
     await expect.poll(() => sheetOf(page)).not.toBeNull();
     await page.keyboard.press("j");
     await expect.poll(() => sheetOf(page)).toBeNull();
-    await expect.poll(() => focused(page)).not.toBeNull();
+    await expect.poll(() => focused(page)).toBe("1:1-1:16");
     await dispatchKey(page, { key: "?", code: "Slash", shiftKey: true });
     await expect.poll(() => sheetOf(page)).not.toBeNull();
     await page.locator("#content p").first().click();

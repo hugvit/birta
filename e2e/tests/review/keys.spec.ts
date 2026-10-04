@@ -100,13 +100,13 @@ test.describe("guard", () => {
       expect(typed, field).toContain("jkcqyxl.npzm");
     }
     expect(mock.ops()).toEqual([]);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
     expect(await laneShown(page)).toBe(true);
     await expect(page.locator("textarea")).toHaveCount(1);
     // Out of the field, the same key acts
     await page.evaluate(() => (document.activeElement as HTMLElement).blur());
     await page.keyboard.press("j");
-    await expect.poll(() => focused(page)).not.toBeNull();
+    await expect.poll(() => focused(page)).toBe((await stops(page))[0].sp);
   });
 
   test("no review key acts during IME composition", async ({ page, birta }) => {
@@ -119,12 +119,12 @@ test.describe("guard", () => {
     await dispatchKey(page, { key: "Process", keyCode: 229 }, "body");
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops()).toEqual([]);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
     expect(await laneShown(page)).toBe(true);
     await expect(page.locator("textarea")).toHaveCount(0);
     // The same dispatch outside composition does act, so the events do reach review
     await dispatchKey(page, { key: "j", code: "KeyJ" }, "body");
-    await expect.poll(() => focused(page)).not.toBeNull();
+    await expect.poll(() => focused(page)).toBe((await stops(page))[0].sp);
   });
 
   test("no review key acts with Option, Ctrl or Cmd held, and the browser keeps its shortcuts", async ({
@@ -145,7 +145,7 @@ test.describe("guard", () => {
     }
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops()).toEqual([]);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
     expect(await laneShown(page)).toBe(true);
     await expect(page.locator("textarea")).toHaveCount(0);
     const prevented: string[] = await page.evaluate(() => (window as any).__prevented);
@@ -153,7 +153,7 @@ test.describe("guard", () => {
     expect(prevented.filter((p) => p.endsWith(":true"))).toEqual([]);
     // Without the modifier, the same key acts
     await page.keyboard.press("j");
-    await expect.poll(() => focused(page)).not.toBeNull();
+    await expect.poll(() => focused(page)).toBe((await stops(page))[0].sp);
   });
 
   test("a held verdict key sends one verdict, but a held j keeps moving", async ({ page, birta }) => {
@@ -236,9 +236,9 @@ test.describe("keys with focus in a review host", () => {
     await open(page, birta, fixtureDoc("flow"), { state: fixtureState("flow") });
     await page.locator('birta-flow[data-kind="note"]').first().click();
     expect(await active(page)).toBe("birta-flow");
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
     await page.keyboard.press("j");
-    await expect.poll(() => focused(page)).not.toBeNull();
+    await expect.poll(() => focused(page)).toBe((await stops(page))[0].sp);
     const at = await focused(page);
     await page.keyboard.press("Escape");
     await page.waitForTimeout(SETTLE_MS);
@@ -261,7 +261,7 @@ test.describe("keys with focus in a review host", () => {
     expect(mock.ops()[0]).toMatchObject({ op: "seen", ids: ["#6"] });
     await note.click();
     await page.keyboard.press("j");
-    await expect.poll(() => focused(page)).not.toBeNull();
+    await expect.poll(async () => [null, "doc"].includes(await focused(page))).toBe(false);
   });
 
   test("after clicking the phrase open and shut, j moves the focus", async ({ page, birta }) => {
@@ -272,7 +272,7 @@ test.describe("keys with focus in a review host", () => {
     await phrase.click();
     await expect(page.locator("birta-pop .menu")).toBeHidden();
     await page.keyboard.press("j");
-    await expect.poll(() => focused(page)).not.toBeNull();
+    await expect.poll(() => focused(page)).toBe((await stops(page))[0].sp);
   });
 
   test("Enter on the focused turn button still presses it, once", async ({ page, birta }) => {
@@ -338,7 +338,7 @@ test.describe("guard, edges", () => {
     for (const key of ["x", "y", "l", ".", "c", "q", "z", "j", "m", "End"]) await page.keyboard.press(key);
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops()).toEqual([]);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
     expect(await laneShown(page)).toBe(true);
     await expect(page.locator("textarea")).toHaveCount(0);
   });
@@ -353,10 +353,10 @@ test.describe("guard, edges", () => {
     await page.keyboard.press("u");
     await expect(page.locator("#lane-frame")).toBeVisible();
     expect(mock.ops()).toEqual([]);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
     await expect.poll(() => laneShown(page)).toBe(true);
     await page.keyboard.press("j");
-    await expect.poll(() => focused(page)).not.toBeNull();
+    await expect.poll(() => focused(page)).toBe((await stops(page))[0].sp);
   });
 
   test("review keys do nothing while the theme menu button has focus", async ({ page, birta }) => {
@@ -366,12 +366,12 @@ test.describe("guard, edges", () => {
     for (const key of ["j", "k", "x", "y", "l", ".", "z", "m", "End"]) await page.keyboard.press(key);
     await page.waitForTimeout(SETTLE_MS);
     expect(mock.ops()).toEqual([]);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
     expect(await laneShown(page)).toBe(true);
     // Once the control lets go, the same key acts
     await page.evaluate(() => (document.activeElement as HTMLElement).blur());
     await page.keyboard.press("j");
-    await expect.poll(() => focused(page)).not.toBeNull();
+    await expect.poll(() => focused(page)).toBe((await stops(page))[0].sp);
   });
 
   test("a held z takes back nothing more", async ({ page, birta }) => {
@@ -567,8 +567,8 @@ test.describe("files and activation", () => {
     await page.goto(`${served.url}/view/pr.md`);
     await booted(page);
     for (const key of ["j", "j", "k", "k", "m", "m"]) await page.keyboard.press(key);
-    // k stops at the H1 that spans the doc
-    await expect.poll(() => focused(page)).toBe((await stops(page))[0].sp);
+    // k stops at whole doc, above the H1
+    await expect.poll(() => focused(page)).toBe("doc");
     await page.waitForTimeout(SETTLE_MS);
     expect(sent.filter((f) => f.type === "op" || f.type === "compose")).toEqual([]);
     expect(reviewLog(served.root)).toBeNull();
@@ -579,6 +579,8 @@ test.describe("files and activation", () => {
     await expect(page.getByText("whole doc: c to say what's wrong")).toBeVisible();
     await page.waitForTimeout(SETTLE_MS);
     expect(reviewLog(served.root)).toBeNull();
+    // Past the title to ## Why
+    await page.keyboard.press("j");
     await page.keyboard.press("j");
     await page.keyboard.press("x");
     await expect.poll(() => reviewLog(served.root)?.length ?? 0).toBe(4);

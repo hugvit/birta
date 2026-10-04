@@ -182,7 +182,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     var note = null;
     if (!el) {
       for (var d = frame.firstElementChild; d && d !== content && !note; d = d.nextElementSibling) {
-        if (d.localName === 'birta-flow' && BR.isHost(d)) note = d;
+        // Whole doc's line is out of the flow while its rows stand in for it
+        if (d.localName === 'birta-flow' && BR.isHost(d) && rendered(d)) note = d;
       }
     } else {
       for (var c = el.lastElementChild; c && BR.isHost(c); c = c.previousElementSibling) note = c;
@@ -361,14 +362,20 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   function drawFocus(F, C) {
     var scope = document.createDocumentFragment();
     var outline = document.createDocumentFragment();
-    if (focused && focused.isConnected && rendered(focused)) {
+    var doc = BR.flow.isDocStop(focused) ? BR.flow.docRect() : null;
+    if (doc) {
+      // Whole doc: its line and rows, across the doc's width
+      outline.appendChild(box({ 'data-mark': 'focus', 'data-target': 'doc' }, 'focus',
+        C.left - 8 - F.left, doc.top - 2 - F.top, C.width + 16, doc.bottom - doc.top + 4));
+    } else if (focused && focused.isConnected && rendered(focused)) {
       var own = ownRect(focused);
       var fl = Math.max(focused.localName === 'li' ? focused.parentElement.getBoundingClientRect().left : own.left, C.left) - 8;
       var fright = Math.min(own.right, C.right) + 8;
       outline.appendChild(box({ 'data-mark': 'focus', 'data-sp': focused.getAttribute('data-sourcepos'),
         'data-target': focused.localName === 'summary' ? 'summary' : BR.isHost(focused) ? 'blank' : null }, 'focus',
         fl - F.left, own.top - 2 - F.top, fright - fl, own.bottom - own.top + 4));
-      if (/^h[1-6]$/.test(focused.localName)) {
+      // A title's verdicts are on its own line, so its wash is too
+      if (/^h[1-6]$/.test(focused.localName) && !BR.pointing.isTitle(focused)) {
         var sr = sectionRect(focused, C);
         scope.appendChild(box({ 'data-mark': 'scope', 'data-sp': focused.getAttribute('data-sourcepos') }, 'scope',
           fl - F.left, sr.top - F.top, fright - fl, sr.bottom - sr.top));

@@ -56,14 +56,6 @@ html[data-review] #content .katex-display {
   overflow-y: hidden;
 }
 
-/* The doc stop: the filename takes the focus outline while focus is on the whole doc */
-html[data-review] .file-header-name[data-review-focus] {
-  outline: 1px solid var(--review-you);
-  border-radius: 6px;
-  padding: 0 8px;
-  margin: 0 -8px;
-}
-
 /* The words a composer's note is on, while it is open */
 html[data-review] ::highlight(birta-pending) {
   background-color: color-mix(in srgb, var(--review-you) 18%, transparent);

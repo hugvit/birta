@@ -692,7 +692,7 @@ test.describe("Shift+J and Shift+K", () => {
     await openFolder(page, birta);
     await expect.poll(() => phraseOf(page)).not.toBeNull();
     await dispatchKey(page, { key: "J", code: "KeyJ" }, "body");
-    await expect.poll(() => focused(page)).not.toBeNull();
+    await expect.poll(() => focused(page)).toBe("1:1-1:14");
     await page.waitForTimeout(SETTLE_MS);
     expect(viewing(page)).toBe("/view/pr.md");
   });
@@ -751,14 +751,14 @@ test.describe("n and p across files", () => {
     await page.keyboard.press("n");
     await page.waitForURL(`${served.url}/view/replied.md`);
     await booted(page);
-    // Its first stop is the doc-level reply
+    // Its first stop is the doc-level reply, on whole doc
     await expect.poll(() => seenOn(mock, 1)).toEqual([["#11"]]);
-    expect(await focused(page)).toBeNull();
-    // The landing was used; a reload lands nowhere
+    expect(await focused(page)).toBe("doc");
+    // The landing was used; a reload opens on the stop the tab had, and walks nothing
     await page.reload();
     await booted(page);
     await page.waitForTimeout(SETTLE_MS);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
     expect(seenOn(mock, 2)).toEqual([]);
   });
 
@@ -790,7 +790,7 @@ test.describe("n and p across files", () => {
     await page.goto(`${served.url}/view/unseen.md`);
     await booted(page);
     await page.waitForTimeout(SETTLE_MS);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
     expect(seenOn(mock, 2)).toEqual([]);
   });
 
@@ -810,7 +810,7 @@ test.describe("n and p across files", () => {
     await page.goto(`${served.url}/view/unseen.md`);
     await booted(page);
     await page.waitForTimeout(SETTLE_MS);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
     expect(seenOn(mock, 2)).toEqual([]);
   });
 
@@ -832,7 +832,7 @@ test.describe("n and p across files", () => {
     expect(seenOn(mock, 1)).toEqual([]);
   });
 
-  test("crossing onto a file with nothing to walk lands nowhere and stays", async ({ page, birta }) => {
+  test("crossing onto a file with nothing to walk lands on whole doc and stays", async ({ page, birta }) => {
     const dir = dirState([listed("unseen.md", summary("unseen"), true), listed("fresh.md", summary("fresh"), true)]);
     const { served, mock } = await openWalk(page, birta, dir);
     for (let i = 0; i < 6; i++) await page.keyboard.press("n");
@@ -840,7 +840,7 @@ test.describe("n and p across files", () => {
     await booted(page);
     await page.waitForTimeout(1_000);
     expect(viewing(page)).toBe("/view/fresh.md");
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
     expect(seenOn(mock, 1)).toEqual([]);
   });
 
@@ -954,7 +954,7 @@ test.describe("a listing that comes before review starts", () => {
     await page.waitForURL(`${served.url}/view/replied.md`);
     await booted(page);
     await expect.poll(() => seenOn(mock, 1)).toEqual([["#11"]]);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
   });
 });
 

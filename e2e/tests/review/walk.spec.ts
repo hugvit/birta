@@ -136,7 +136,7 @@ const receipt = (page: Page, has: string) => page.locator('birta-flow[data-kind=
 // unseen.json walks, in doc order: the doc-level reply, the paragraph's change, the not-handled
 // bullet, the next bullet's change, and the removal walked at the block above its tick
 const UNSEEN_WALK: { id: string; focus: string | null; seen: boolean }[] = [
-  { id: "#13", focus: null, seen: true },
+  { id: "#13", focus: "doc", seen: true },
   { id: "9.0", focus: "5:1-6:68", seen: true },
   { id: "nh:5", focus: "10:1-10:16", seen: false },
   { id: "10.0", focus: "11:1-11:44", seen: true },
@@ -184,7 +184,7 @@ test.describe("the n walk", () => {
     expect(seenIds(mock)).toHaveLength(before);
   });
 
-  test("after the end, Esc keeps the focus; k back to the title and n go on from there", async ({ page, birta }) => {
+  test("after the end, Esc keeps the focus; k back to whole doc and n go on from there", async ({ page, birta }) => {
     await openFixture(page, birta, "unseen");
     for (let i = 0; i < UNSEEN_WALK.length; i++) await page.keyboard.press("n");
     await page.keyboard.press("n");
@@ -193,7 +193,7 @@ test.describe("the n walk", () => {
     await page.waitForTimeout(SETTLE_MS);
     expect(await focused(page)).toBe("14:1-14:13");
     await focusTop(page);
-    expect(await focused(page)).toBe("1:1-1:16");
+    expect(await focused(page)).toBe("doc");
     await page.keyboard.press("n");
     await expect.poll(() => pillOf(page)).toBe(at(2, 5));
     expect(await focused(page)).toBe("5:1-6:68");
@@ -274,17 +274,17 @@ test.describe("the n walk", () => {
     expect(await focused(page)).toBe("5:1-6:68");
     await page.keyboard.press("p");
     await expect.poll(() => pillOf(page)).toBe(at(1, 5));
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
     await page.keyboard.press("p");
     await expect.poll(() => pillOf(page)).toBe(END);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
   });
 
   test("p on a fresh page has nothing behind it", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "unseen");
     await page.keyboard.press("p");
     await expect.poll(() => pillOf(page)).toBe(END);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
     expect(mock.ops()).toEqual([]);
   });
 
@@ -292,7 +292,7 @@ test.describe("the n walk", () => {
     const { mock } = await openFixture(page, birta, "fresh");
     await page.keyboard.press("n");
     await expect.poll(() => pillOf(page)).toBe(END);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
     expect(mock.ops()).toEqual([]);
   });
 });
@@ -396,7 +396,7 @@ test.describe("killers: the walk", () => {
       focus.push(await focused(page));
     }
     // The doc-level reply, the lost row, both changes on the paragraph, the not-handled bullet
-    expect(focus).toEqual([null, null, "5:1-6:68", "5:1-6:68", "10:1-10:16"]);
+    expect(focus).toEqual(["doc", "doc", "5:1-6:68", "5:1-6:68", "10:1-10:16"]);
     await page.waitForTimeout(SETTLE_MS);
     expect(seenIds(mock)).toEqual([["#11"], ["9.0"], ["14.0"]]);
   });

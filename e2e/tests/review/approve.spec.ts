@@ -18,6 +18,7 @@ import {
   revOf,
   reviewLog,
   seededRound,
+  stops,
 } from "./harness";
 
 test.use({ timezoneId: "UTC" });
@@ -112,10 +113,10 @@ function phraseOf(page: Page): Promise<string | null> {
   });
 }
 
-/** The kinds of flow hosts that take up room on the page. */
+/** The kinds of flow hosts that take up room on the page; the whole doc stop's own line is no row. */
 function shownHosts(page: Page): Promise<string[]> {
   return page.evaluate(() =>
-    Array.from(document.querySelectorAll("birta-flow"))
+    Array.from(document.querySelectorAll('birta-flow:not([data-kind="doc-stop"])'))
       .filter((h) => {
         const r = h.getBoundingClientRect();
         return r.height > 0 && r.width > 0 && getComputedStyle(h).visibility !== "hidden";
@@ -167,9 +168,9 @@ function changesOnly(s: State) {
 
 const press = (page: Page) => page.keyboard.press("ControlOrMeta+Enter");
 
-/** Presses j from the doc until `sp` has focus, failing after a few stops. */
+/** Presses j from whole doc until `sp` has focus, failing after a few stops. */
 async function focusOn(page: Page, sp: string) {
-  while ((await focused(page)) !== null) await page.keyboard.press("k");
+  for (let i = 0; i < 8 && (await focused(page)) !== "doc"; i++) await page.keyboard.press("k");
   for (let i = 0; i < 4 && (await focused(page)) !== sp; i++) {
     await page.keyboard.press("j");
     await page.waitForTimeout(50);
@@ -298,7 +299,7 @@ test.describe("approve guard", () => {
     await expect.poll(() => turnOf(page)).toEqual({ text: "Approve · 4 unseen", kbd: false, disabled: false });
     await press(page);
     await expect.poll(() => seenIds(mock)).toEqual([["#13"]]);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
     await expect.poll(() => pillOf(page)).toBe(`4 unseen · n walk · ${key} again approves anyway`);
     expect(opsNamed(mock, "approve")).toEqual([]);
   });
@@ -495,10 +496,10 @@ test.describe("approve guard", () => {
 
   test("a held verdict key acts once", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "fresh");
-    // Past the whole-doc H1, whose verdict keys only say what to do
+    // Past whole doc, whose verdict keys only say what to do, and the title
     await page.keyboard.press("j");
     await page.keyboard.press("j");
-    await expect.poll(() => focused(page)).not.toBeNull();
+    await expect.poll(async () => focused(page)).toBe((await stops(page))[1].sp);
     await page.keyboard.press("y");
     for (let i = 0; i < 3; i++) await dispatchKey(page, { key: "y", code: "KeyY", repeat: true }, "body");
     await page.waitForTimeout(SETTLE_MS);
@@ -689,8 +690,8 @@ test.describe("clean view", () => {
       await expect.poll(() => phraseOf(page)).toMatch(/c to reopen$/);
       if (where === "on a block") {
         for (let i = 0; i < 3; i++) await page.keyboard.press("j");
-        await expect.poll(() => focused(page)).not.toBeNull();
-      }
+        await expect.poll(async () => focused(page)).toBe((await stops(page))[2].sp);
+      } else await expect.poll(() => focused(page)).toBe("doc");
       const was = await focused(page);
       for (const key of ["y", "x", "l", ".", "q", "n", "p"]) {
         await page.evaluate(() => {
@@ -740,7 +741,7 @@ test.describe("clean view", () => {
     await openFixture(page, birta, "approved", approved);
     await expect.poll(() => phraseOf(page)).toMatch(/c to reopen$/);
     await page.keyboard.press("j");
-    await expect.poll(() => focused(page)).not.toBeNull();
+    await expect.poll(async () => focused(page)).toBe((await stops(page))[0].sp);
     const first = await focused(page);
     await page.keyboard.press("j");
     await expect.poll(() => focused(page)).not.toBe(first);

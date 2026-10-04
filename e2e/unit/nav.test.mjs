@@ -246,10 +246,11 @@ test("Shift+J's next file is the next with news, drafts or open notes; n's stays
   const shift = (p, step) => BR.pure.nextFile(dir, p, step, true);
   assert.equal(shift("pr.md", 1), "sent.md");
   assert.equal(shift("pr.md", -1), "drafts.md");
-  assert.equal(shift("sent.md", 1), "news.md");
-  assert.equal(shift("news.md", -1), "sent.md");
+  // Nothing wraps: past the last file with notes, or before the first, there is nowhere to go
+  assert.equal(shift("sent.md", 1), null);
+  assert.equal(shift("news.md", -1), null);
   // n and p cross only to news, as before
-  assert.equal(BR.pure.nextFile(dir, "pr.md", 1), "news.md");
+  assert.equal(BR.pure.nextFile(dir, "pr.md", 1), null);
   assert.equal(BR.pure.nextFile(dir, "pr.md", -1), "news.md");
 });
 

@@ -664,7 +664,7 @@ test.describe("menu", () => {
       await page.keyboard.press("j");
       await page.keyboard.press("Enter");
       await expect.poll(copied).toEqual([state.hand_off]);
-      expect(await focused(page)).toBeNull();
+      expect(await focused(page)).toBe("doc");
       expect(mock.ops()).toEqual([]);
       await expect.poll(() => menuOf(page)).toBeNull();
       await openMenu();
@@ -673,7 +673,7 @@ test.describe("menu", () => {
       await page.keyboard.press("Enter");
       await expect.poll(() => mock.ops().length).toBe(1);
       expect(mock.ops()[0]).toMatchObject({ op: "withdraw", to: state.phrase.sent.n });
-      expect(await focused(page)).toBeNull();
+      expect(await focused(page)).toBe("doc");
     });
   }
 

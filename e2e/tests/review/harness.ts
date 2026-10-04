@@ -700,8 +700,8 @@ export async function misaligned(page: Page): Promise<string[]> {
 // --- Keys, focus and the review file ------------------------------------------------------
 
 /**
- * The sp of the focused stop, `summary` on a closed details' summary, `blank` on a question, or
- * null while focus is on the doc. Read from the `focus` mark, which stays in the lane's root while it is hidden.
+ * The sp of the focused stop, `summary` on a closed details' summary, `blank` on a question, `doc`
+ * on whole doc, or null with no focus mark. Read from the `focus` mark, which stays in the lane's root while it is hidden.
  */
 export async function focused(page: Page): Promise<string | null> {
   const found = (await marks(page)).filter((m) => m.mark === "focus");
@@ -734,13 +734,13 @@ export async function focusTo(page: Page, sp: string, max = 80): Promise<void> {
   await expect.poll(() => focused(page)).toBe(sp);
 }
 
-/** What holds focus, told apart even where two stops have no sp: "doc" for the doc target. */
+/** What holds focus, told apart even where two stops have no sp; "none" with no focus mark. */
 async function focusKey(page: Page): Promise<string> {
   const m = await focusMark(page);
-  return m ? `${m.sp}|${m.target}|${Math.round(m.top)}` : "doc";
+  return m ? `${m.sp}|${m.target}|${Math.round(m.top)}` : "none";
 }
 
-/** Presses k until focus stops moving: on the doc target, or on a whole-doc H1, which stands for it. */
+/** Presses k until focus stops moving: on whole doc, the first stop. */
 export async function focusTop(page: Page, max = 80): Promise<void> {
   let was = await focusKey(page);
   for (let i = 0; i < max; i++) {

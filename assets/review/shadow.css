@@ -425,6 +425,15 @@
   display: none !important;
 }
 
+/* Whole doc's line keeps its room, so focus leaving it never shifts the doc; its rows stand in for it */
+:host(birta-flow[data-kind="doc-stop"]:not([data-shown])) {
+  visibility: hidden !important;
+}
+
+:host(birta-flow[data-kind="doc-stop"][data-rows]) {
+  display: none !important;
+}
+
 /* The doc pins its first block's top margin to 0, so the doc slot leaves a heading's gap itself */
 :host(birta-flow[data-doc-end]) {
   margin-bottom: 24px !important;

@@ -146,6 +146,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var folderNotes = 0;
   // Reading mode: every note but the open composer steps aside
   var hiddenAll = false;
+  // Whole doc's own line, above its rows; it shows only while focused with no row of its own
+  var docLine = null;
+  var docFocused = false;
   // Folded notes opened in this page, by n
   var expanded = {};
   var dotList = [];
@@ -326,6 +329,37 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   function muted(c) {
     var latest = latestTurn();
     return !!c.settled || c.undone_by != null || (c.turn != null && latest != null && c.turn < latest);
+  }
+
+  // --- whole doc ---
+
+  /** The flow hosts in the doc slot above `#content`, whole doc's line left out. */
+  function docRows() {
+    var out = [];
+    for (var el = content().previousElementSibling; el && el.localName === 'birta-flow'; el = el.previousElementSibling) {
+      if (el !== docLine) out.unshift(el);
+    }
+    return out;
+  }
+
+  function makeDocLine() {
+    var made = BR.shadowHost('birta-flow');
+    made.host.setAttribute('data-kind', 'doc-stop');
+    made.root.appendChild(el('div', 'flow muted', 'whole doc'));
+    return made.host;
+  }
+
+  /** Keeps the line at the top of the doc slot, and shows it only while it is all whole doc has. */
+  function paintDoc() {
+    if (!docLine || !content()) return;
+    var rows = docRows();
+    var top = rows[0] || content();
+    if (docLine.nextElementSibling !== top) top.parentNode.insertBefore(docLine, top);
+    var shown = rows.filter(function (h) { return h.getClientRects().length > 0; });
+    docLine.toggleAttribute('data-rows', shown.length > 0);
+    docLine.toggleAttribute('data-shown', docFocused && !shown.length);
+    docLine.toggleAttribute('data-doc-end', !rows.length);
+    docLine.toggleAttribute('data-br-hidden', hiddenAll);
   }
 
   // --- hosts ---
@@ -908,6 +942,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     hosts.forEach(function (h) {
       if (h.fold) h.fold.more.hidden = h.fold.line.scrollHeight <= h.fold.line.clientHeight + 1;
     });
+    paintDoc();
     if (comp) refocus();
     if (dotList.length) hintDots();
     if (BR.lane && BR.lane.redraw) BR.lane.redraw();
@@ -973,6 +1008,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   /** A block in words: a heading as its section, else its first words, with what it is when `kind`. */
   function blockLabel(block, kind) {
     var level = /^h([1-6])$/.exec(block.localName);
+    if (level && BR.pointing.isTitle(block)) return '# ' + block.textContent.replace(/\s+/g, ' ').trim() + ' (title)';
     if (level) return new Array(Number(level[1]) + 1).join('#') + ' ' + block.textContent.replace(/\s+/g, ' ').trim() + ' (section)';
     return '"' + BR.pure.fewWords(ownText(block)) + '"' + (kind ? ' (' + (KIND[block.localName] || 'block') + ')' : '');
   }
@@ -1585,9 +1621,16 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       }
       if (!state) return false;
       if (!sp) {
-        if (!(state.lost || []).length) return false;
-        toggleLost();
-        return true;
+        if ((state.lost || []).length) {
+          toggleLost();
+          return true;
+        }
+        // The folder's notes open where its row's ▸ does
+        if (folderNotes > 0 && BOOT.review.dir && !BR.chrome.clean()) {
+          BR.chrome.openMenu('folder');
+          return true;
+        }
+        return false;
       }
       // ⏎ again folds what ⏎ opened
       var here = (state.items || []).filter(function (i) { return slotOfItem(i).sp === sp; });
@@ -1704,6 +1747,31 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     hide: function (on) {
       hiddenAll = on;
       hosts.forEach(function (h) { h.host.toggleAttribute('data-br-hidden', on && !typing(h)); });
+      paintDoc();
+    },
+    /** Whole doc's stop: its line's host, made and placed above the doc on first ask. */
+    docStop: function () {
+      if (!docLine) docLine = makeDocLine();
+      paintDoc();
+      return docLine;
+    },
+    isDocStop: function (node) { return !!node && node === docLine; },
+    /** Whole doc took or left the focus. */
+    focusDoc: function (on) {
+      docFocused = on;
+      paintDoc();
+    },
+    /** The box around whole doc's line and rows, or null while none of them is laid out. */
+    docRect: function () {
+      var r = null;
+      (docLine ? [docLine] : []).concat(docRows()).forEach(function (h) {
+        // The empty line counts while unfocused too: its room is whole doc's place on screen
+        if (!h.getClientRects().length) return;
+        var b = h.getBoundingClientRect();
+        r = r ? { top: Math.min(r.top, b.top), bottom: Math.max(r.bottom, b.bottom), left: Math.min(r.left, b.left),
+          right: Math.max(r.right, b.right) } : { top: b.top, bottom: b.bottom, left: b.left, right: b.right };
+      });
+      return r;
     },
     /** The hand-back or approve still in its hold, by the server's clock, or null. */
     holdActive: function () {

@@ -18,7 +18,6 @@ import {
   focusTo,
   focusTop,
   focused,
-  hex,
   highlighted,
   longDoc,
   markKeys,
@@ -39,8 +38,6 @@ const WIDE = { width: 1280, height: 900 };
 const SETTLE_MS = 400;
 const ANCHOR_MD = path.join(REPO, "e2e", "fixtures", "anchor.md");
 const GESTURES_JSON = path.join(REPO, "tests", "fixtures", "anchor_gestures.json");
-/** The focus outline, `--review-you` in the light theme. */
-const ACCENT = hex("#0969da");
 
 type Start = (
   files: Record<string, string>,
@@ -119,7 +116,7 @@ const outbox = (page: Page) =>
   page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith("birta-unacked:") && localStorage.getItem(k)));
 
 test.describe("focus", () => {
-  test("j walks every stop in order, nested items included, and k walks back to the whole-doc H1", async ({
+  test("j walks every stop in order, nested items included, and k walks back past the H1 to whole doc", async ({
     page,
     birta,
   }) => {
@@ -144,7 +141,7 @@ test.describe("focus", () => {
       "heading",
       "paragraph",
     ]);
-    expect(await focused(page)).toBeNull();
+    expect(await focused(page)).toBe("doc");
     const down: (string | null)[] = [];
     for (let i = 0; i < all.length; i++) {
       await page.keyboard.press("j");
@@ -159,30 +156,38 @@ test.describe("focus", () => {
       await page.keyboard.press("k");
       await expect.poll(() => focused(page)).toBe(all[i].sp);
     }
-    // The H1 spans the doc, so it is the doc stop and nothing lies above it
+    // The H1 spans the doc, and whole doc still lies above it, with nothing above that
+    await page.keyboard.press("k");
+    await expect.poll(() => focused(page)).toBe("doc");
     await page.keyboard.press("k");
     await page.waitForTimeout(SETTLE_MS);
-    expect(await focused(page)).toBe(all[0].sp);
+    expect(await focused(page)).toBe("doc");
   });
 
-  test("the doc stop outlines the filename once review is active in the tab", async ({ page, birta, context }) => {
-    // With no H1 spanning the doc, the file chip is the doc stop
+  test("the filename is never outlined or washed: whole doc is the doc stop, whatever review has done in the tab", async ({
+    page,
+    birta,
+    context,
+  }) => {
+    // With no H1 spanning the doc, the file chip once stood for the doc
     const { served } = await open(page, birta, "Intro words.\n\n" + STOPS_DOC);
     const bg = await filenameEdge(page);
-    // Nothing shows until a review key is pressed
+    await expect.poll(() => focused(page)).toBe("doc");
     await page.waitForTimeout(SETTLE_MS);
     expect(near(await filenameOutline(page), bg)).toBe(true);
     await page.keyboard.press("j");
-    await expect.poll(() => focused(page)).not.toBeNull();
+    await expect.poll(() => focused(page)).toBe("1:1-1:12");
     expect(near(await filenameOutline(page), bg)).toBe(true);
     await page.keyboard.press("k");
-    await expect.poll(async () => near(await filenameOutline(page), ACCENT, 24)).toBe(true);
-    // An outline, not a wash
+    await expect.poll(() => focused(page)).toBe("doc");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(near(await filenameOutline(page), bg)).toBe(true);
     expect(near(await filenameEdge(page), bg)).toBe(true);
-    // Activation lasts for the tab, and a new tab starts inactive
     await page.reload();
     await booted(page);
-    await expect.poll(async () => near(await filenameOutline(page), ACCENT, 24)).toBe(true);
+    await expect.poll(() => focused(page)).toBe("doc");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(near(await filenameOutline(page), bg)).toBe(true);
     const other = await context.newPage();
     await other.setViewportSize(WIDE);
     await other.goto(`${served.url}/view/pr.md`);
@@ -202,7 +207,6 @@ test.describe("focus", () => {
     for (const [heading, last] of [
       ["What changes", detailWords],
       ["Limits", detailWords],
-      ["Upload retries", nothingYet],
     ] as const) {
       const sp = await stopSp(page, heading);
       const h = (await blockBox(page, sp))!;
@@ -213,6 +217,13 @@ test.describe("focus", () => {
         true,
       );
     }
+    // The title is an ordinary block: its wash stays on its own line, though its section runs to "Nothing yet."
+    const title = await stopSp(page, "Upload retries");
+    const t = (await blockBox(page, title))!;
+    await focusOn(page, title);
+    const tm = await scopeMark(page);
+    expect(tm === null || tm.bottom <= t.bottom + 4, `title wash ${tm?.top}-${tm?.bottom}`).toBe(true);
+    expect(nothingYet.bottom).toBeGreaterThan(t.bottom);
   });
 
   test("a list item's outline covers the whole item, its nested list and its marker", async ({ page, birta }) => {
@@ -243,19 +254,24 @@ test.describe("focus", () => {
     }
   });
 
-  test("j from the doc starts at the first stop below the headers when scrolled", async ({ page, birta }) => {
+  test("your scroll from whole doc moves the focus to the first stop below the headers, and j goes on from it", async ({
+    page,
+    birta,
+  }) => {
     await open(page, birta, longDoc());
     const target = await stopSp(page, "Filler paragraph 20.");
-    const headerBottom = (await page.locator(".file-header").boundingBox())!;
-    await page.evaluate(
-      ({ sp, below }) => {
-        const el = document.querySelector(`#content [data-sourcepos="${sp}"]`)!;
-        window.scrollBy(0, el.getBoundingClientRect().top - below);
-      },
-      { sp: target, below: headerBottom.y + headerBottom.height + 10 },
-    );
-    await page.keyboard.press("j");
+    const next = await stopSp(page, "Filler paragraph 21.");
+    await expect.poll(() => focused(page)).toBe("doc");
+    const by = await page.evaluate((sp) => {
+      const el = document.querySelector(`#content [data-sourcepos="${sp}"]`)!;
+      return el.getBoundingClientRect().top - document.querySelector(".file-header")!.getBoundingClientRect().bottom - 10;
+    }, target);
+    await page.mouse.move(640, 500);
+    await page.mouse.wheel(0, by);
     await expect.poll(() => focused(page)).toBe(target);
+    await page.waitForTimeout(SETTLE_MS);
+    await page.keyboard.press("j");
+    await expect.poll(() => focused(page)).toBe(next);
   });
 
   test("j brings the stop it focuses into view", async ({ page, birta }) => {
@@ -365,9 +381,10 @@ test.describe("focus", () => {
     await expect.poll(() => liveSp(page, "More detail.")).not.toBeNull();
     const last = (await blockBox(page, (await liveSp(page, "More detail."))!))!;
     await expect.poll(async () => near1((await scopeMark(page))!.bottom, last.bottom)).toBe(true);
-    // Up to the whole-doc H1, then down past ## Why
+    // Up to whole doc, then down past the title and ## Why
     await focusTop(page);
-    for (const _ of [0, 1]) await page.keyboard.press("j");
+    expect(await focused(page)).toBe("doc");
+    for (const _ of [0, 1, 2]) await page.keyboard.press("j");
     await expect.poll(() => focused(page)).toBe(await liveSp(page, "A new first paragraph."));
   });
 
@@ -486,9 +503,9 @@ test.describe("verdict keys", () => {
     await page.keyboard.press("Escape");
     await page.keyboard.press("l");
     await expect.poll(() => mock.ops().length).toBe(2);
-    // The whole-doc H1 stands for the doc, and Esc no longer drops focus to it
+    // Whole doc, above the title, which Esc never drops focus to
     await focusTop(page);
-    expect(await focused(page)).toBe((await stops(page))[0].sp);
+    expect(await focused(page)).toBe("doc");
     // A whole-doc verdict tells the agent nothing it can act on
     await page.keyboard.press(".");
     await expect(page.getByText("your call needs a block · j")).toBeVisible();
@@ -887,7 +904,7 @@ test.describe("a long doc", () => {
     expect(await stops(page)).toHaveLength(n + 1);
     await page.keyboard.press("j");
     await page.keyboard.press("j");
-    await expect.poll(() => focused(page)).not.toBeNull();
+    await expect.poll(async () => focused(page)).toBe((await stops(page))[1].sp);
   }
 
   /** One j, dispatched as the keyboard would: the queries it makes and how long it takes. */

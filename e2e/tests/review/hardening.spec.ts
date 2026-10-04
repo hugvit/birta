@@ -84,11 +84,11 @@ function textIn(page: Page, sel: string): Promise<string | null> {
 const phraseOf = (page: Page) => textIn(page, ".file-header birta-phrase");
 const turnOf = (page: Page) => textIn(page, ".file-header birta-turn");
 
-/** Each flow host's text and whether it is painted at all. */
+/** Each flow host's text and whether it is painted at all; the whole doc stop's own line is no row. */
 function flowHosts(page: Page): Promise<{ kind: string | null; text: string; shown: boolean; doc: boolean }[]> {
   return page.evaluate(() => {
     const content = document.getElementById("content")!;
-    return Array.from(document.querySelectorAll("birta-flow")).map((h) => {
+    return Array.from(document.querySelectorAll('birta-flow:not([data-kind="doc-stop"])')).map((h) => {
       let out = "";
       const walk = (x: Node) => {
         if (x.nodeType === 3) out += x.textContent;
@@ -119,12 +119,12 @@ function paintedDots(page: Page): Promise<string[]> {
   );
 }
 
-/** Whether the lane's marks are painted (both lane hosts, and at least one mark in them). */
+/** Whether the lane's marks are painted (both lane hosts, and at least one mark in them); the focus outline, which m keeps, is no mark. */
 function laneShown(page: Page): Promise<boolean> {
   return page.evaluate(() => {
     const root = document.querySelector("#lane-frame > birta-over")?.shadowRoot;
     if (!root) return false;
-    return Array.from(root.querySelectorAll("[data-mark]")).some((el) => {
+    return Array.from(root.querySelectorAll('[data-mark]:not([data-mark="focus"])')).some((el) => {
       const r = el.getBoundingClientRect();
       return r.width > 0 && r.height > 0;
     });
@@ -923,9 +923,13 @@ test.describe("the narrow lane", () => {
     const bg: Rgb = [255, 255, 255];
     // The new-text wash reaches into the lane by design; it is a background, not a mark
     const wash = over("#fff8c5", bg);
+    // The focus outline, on whole doc from load, runs 8px left of the text by design; it is no mark
+    const f = (await marks(page)).find((m) => m.mark === "focus");
+    const outline = (y: number) => !!f && y >= f.top - 1 && y <= f.bottom + 1;
     const columns = new Set<number>();
     for (let y = Math.ceil(lane.top); y < Math.floor(lane.bottom); y++)
       for (let x = Math.ceil(lane.left); x < Math.floor(lane.right); x++) {
+        if (outline(y)) continue;
         const px = s.at(x, y);
         if (distance(px, bg) > 24 && distance(px, wash) > 24) columns.add(x);
       }

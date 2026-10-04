@@ -243,6 +243,8 @@ pub(super) fn build(input: &Input) -> Built {
         let mut events = seen_after(&c.id, c.op, Check::Kept);
         if let Some(undo) = c.undone_by {
             events.push((undo, Check::Reverted));
+        } else if let Some(undo) = c.restored_by {
+            events.push((undo, Check::Restored));
         }
         places.insert(&c.id, place.clone());
         raws.push(Raw {

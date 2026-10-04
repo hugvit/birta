@@ -122,6 +122,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var unchecked = false;
   // z pressed before that state came
   var waitingZ = 0;
+  // The toggle entry a waiting z is for
+  var waitFor = null;
   var scrollQueued = false;
   // The walk's place, `{lo, hi}` as `[line, rank, order]`: n goes on past hi and p back before lo.
   // Null is before the first stop, where a tab opens and Claude's reply puts it back
@@ -152,6 +154,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var pinned = null;
   // The focus held in place after a page-made change while late layout settles, until any other scroll
   var kept = null;
+  // A revert or restore in flight: the changes it toggles and where focus sat on screen
+  var following = null;
   var settleQueued = false;
   // A frame changed the stops, so the list focus was found in is taken again
   var relist = false;
@@ -413,6 +417,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   }
 
   function go(next, all) {
+    following = null;
     setFocus(next, all);
     reveal(next);
     if (BR.isHost(next)) BR.flow.hold(next);
@@ -479,17 +484,17 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (!state || state.log_writable === false) return false;
     var here = newsHere(state, key);
     var changes = here.filter(function (x) { return x.kind === 'change' || x.kind === 'removal'; });
-    var ask = BR.keyName('note') + ' to ask Claude';
     if (action === 'revert_change') {
-      if (!changes.length) say('nothing here to revert');
-      else if (changes.every(function (x) { return x.check === 'reverted'; })) say('already reverted · ' + ask);
-      else BR.flow.revertAll(changes.filter(function (x) { return x.check !== 'reverted'; }).map(function (x) { return x.id; }));
+      // Until the state of the last revert or restore lands, u stays with the changes it toggled
+      if (following) BR.flow.revertAll(following.ids);
+      else if (!changes.length) say('nothing here to revert');
+      else BR.flow.revertAll(changes.map(function (x) { return x.id; }));
       return true;
     }
     if (!here.length) return false;
     var open = here.filter(function (x) { return x.check == null; });
     if (!open.length) {
-      if (changes.some(function (x) { return x.check === 'reverted'; })) say('already reverted · ' + ask);
+      if (changes.some(function (x) { return x.check === 'reverted'; })) say('already reverted · ' + BR.keyName('revert_change') + " restores Claude's text");
       else if (changes.length) say('already kept · ' + BR.keyName('revert_change') + ' reverts it');
       else say(okOf(here));
       return true;
@@ -751,8 +756,59 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
    */
   function remember(entry) {
     if (entry.n === undefined) entry.n = null;
+    // The log's length when it was made, which places an act with no line of its own
+    var now = BR.currentState();
+    if (entry.since === undefined) entry.since = now && now.log ? now.log.lines : 0;
     undos.push(entry);
     keepUndos();
+  }
+
+  function forget(entry) {
+    var at = undos.indexOf(entry);
+    if (at < 0) return;
+    undos.splice(at, 1);
+    keepUndos();
+  }
+
+  /**
+   * z on a revert or a restore takes it back through each change's latest undo, which the state
+   * names. It waits only while this tab's own write is on its way; a state that shows something
+   * else (another tab's toggle, a settled change) means it is spent.
+   */
+  function takeBackToggle(top, state) {
+    if (!state || BR.flow.toggling()) {
+      waitingZ = 1;
+      waitFor = top;
+      return;
+    }
+    waitFor = null;
+    undos.pop();
+    keepUndos();
+    var want = top.act === 'revert' ? 'reverted' : 'restored';
+    var news = state.news || [];
+    var cs = top.ids.map(function (id) { return (state.changes || []).filter(function (c) { return c.id === id; })[0]; });
+    var stands = cs.every(function (c) {
+      return c && c.check === want && c.flip && news.some(function (n) { return n.id === c.id; });
+    });
+    if (!stands) {
+      say(NOTHING);
+      return;
+    }
+    BR.flow.toggleBack(cs, top);
+  }
+
+  /** A z that waited on this tab's own revert or restore runs once the state shows it. */
+  function resume() {
+    if (!waitingZ) return;
+    waitingZ = 0;
+    if (stillWaited()) undo();
+  }
+
+  /** Whether the act a waiting z was for is still the last one; a newer act ends the wait. */
+  function stillWaited() {
+    var was = waitFor;
+    waitFor = null;
+    return !was || undos[undos.length - 1] === was;
   }
 
   function undoKey() { return UNDO_KEY + (birtaBus.tab ? birtaBus.tab() : '') + ':' + CURRENT_PATH; }
@@ -1072,6 +1128,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         if (takeBackHandBack(top, state)) return;
         continue;
       }
+      if (top.kind === 'toggle') {
+        takeBackToggle(top, state);
+        return;
+      }
       if (top.n == null && state && top.cid && !top.folder) top.n = lineOfCid(state, top.cid);
       // Before its ack the line isn't known: take it back once the ack names it
       if (top.n == null) top.queued = true;
@@ -1097,6 +1157,16 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         }
       }
     });
+    // An approve that landed is final: nothing from before it can be taken back
+    var hold = BR.flow.holdActive();
+    var approved = state.approve && !(hold && hold.n === state.approve.n) ? state.approve.n : null;
+    if (approved != null) {
+      var after = undos.filter(function (u) { return (u.n != null ? u.n : (u.since || 0) + 1) > approved; });
+      if (after.length !== undos.length) {
+        undos = after;
+        changed = true;
+      }
+    }
     for (var i = undos.length - 1; i >= 0; i--) {
       var u = undos[i];
       var round = u.kind === 'handback' ? roundFrom(state, u.n) : null;
@@ -1110,7 +1180,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     unchecked = false;
     if (waitingZ) {
       waitingZ = 0;
-      undo();
+      if (stillWaited()) undo();
     }
   }
 
@@ -1256,6 +1326,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       // Only a block found by its own words survived; one on the same line may have been cut
       if (!next.exact && line != null) cutLine = { line: line, top: was.el === lost ? was.top : null };
       if (fresh) handOff();
+      if (fresh) landToggle();
       return;
     }
     if (fresh) handOff();
@@ -1268,6 +1339,33 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     }
     relist = false;
     if (focus && was.el === focus) keepAt(focus, was.top);
+    if (fresh) landToggle();
+  }
+
+  /** Notes where focus sits before a revert or restore of changes `ids`, to keep it on them; null forgets. */
+  function follow(ids, want) {
+    var r = ids && focus ? rectOf(focus) : null;
+    following = ids ? { ids: ids, want: want, top: r ? r.top : null } : null;
+  }
+
+  /** Once the state shows the write, focus is on the stop holding the change, where it was on screen. */
+  function landToggle() {
+    var f = following;
+    var state = BR.currentState();
+    if (!f || !state) return;
+    var done = f.ids.every(function (id) {
+      return (state.changes || []).some(function (c) { return c.id === id && c.check === f.want; });
+    });
+    if (!done) return;
+    following = null;
+    var entry = walkOf(state).filter(function (x) { return x.id === f.ids[0]; })[0];
+    if (!entry) return;
+    var key = entry.stop;
+    var el = key.indexOf('r:') === 0 ? BR.flow.removalStop(key.slice(2)) : key.indexOf('b:') === 0 ? blockOf(key.slice(2)) : docStop;
+    if (!el || targets().indexOf(el) < 0) return;
+    cutLine = null;
+    if (el !== focus) setFocus(el, null, true);
+    if (f.top != null) keepAt(el, f.top);
   }
 
   /**
@@ -1426,6 +1524,15 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         BR.flow.rowKey(action, row);
         return true;
       }
+      // A reverted change's row is muted, yet c replies to it while it is news, as its strip says
+      if (action === 'note' && !mine && !selectedRange()) {
+        var st = BR.currentState();
+        var back = st ? newsHere(st).filter(function (x) { return x.kind === 'change' && x.check === 'reverted'; })[0] : null;
+        if (back) {
+          BR.flow.open('note', { k: 'change', id: back.id }, null);
+          return true;
+        }
+      }
       // Its own key with no row open: a revert needs a change to revert
       if (action === 'revert_change') {
         if (!selectedRange()) say(BR.pure.wholeDocPill(action));
@@ -1540,6 +1647,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     keyInput: keyInput,
     /** Puts an act of this tab's on the z history: `{kind, cid, undo, label, item?, n?}`, or `{marker}`. */
     remember: remember,
+    forget: forget,
+    /** Saves the z history after an entry of it changed in place. */
+    kept: keepUndos,
+    resume: resume,
+    follow: follow,
     tab: tab,
     /**
      * Drops one Esc layer: the phrase menu or key sheet, the composer, the selection, a picked

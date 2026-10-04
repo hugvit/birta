@@ -1096,10 +1096,11 @@ test.describe("killers: u and the row", () => {
     expect(mock.ops().slice(before).filter((o) => o.op === "comment")).toEqual([]);
   });
 
-  test("K17: u on a reverted row says so and writes nothing", async ({ page, birta }) => {
+  test("K17: u on a reverted row restores it: it sends the undo's own change and shows no source", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "flow", (s) => {
       onlyChange("13.0")(s);
       s.changes[0].undone_by = 40;
+      s.changes[0].flip = "40.0";
       s.changes[0].reversible = { ok: false, reason: "later_overlap" };
       // Reverted is a check: news keeps it until a hand-back, and it outranks the overlap
       s.changes[0].check = "reverted";
@@ -1108,10 +1109,9 @@ test.describe("killers: u and the row", () => {
     });
     await page.keyboard.press("n");
     await page.keyboard.press("u");
-    await expect.poll(() => stripMessage(page)).toBe("already reverted · c to ask Claude");
-    await page.waitForTimeout(SETTLE_MS);
+    await expect.poll(() => writes(mock)).toEqual([{ op: "undo_change", change: "40.0" }]);
+    await expect.poll(() => stripMessage(page)).toBe("restored Claude's text · u reverts again");
     expect(await sourceShown(page)).toBe(false);
-    expect(writes(mock)).toEqual([]);
   });
 
   test("Q7: x on a row whose change can't be reverted leaves the u part out", async ({ page, birta }) => {

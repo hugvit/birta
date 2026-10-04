@@ -42,6 +42,7 @@ pub(super) struct Input<'x> {
     pub hidden: &'x HashSet<String>,
     /// Lines of the reviewer's replies to the agent's notes, asks and turn notes.
     pub answers: &'x HashSet<u32>,
+    pub chains: &'x Chains,
 }
 
 pub(super) struct Built {
@@ -61,7 +62,7 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
     let chain = texts.chain;
     let head = texts.head;
     let html = Html::new(head);
-    let undone = undone(input, texts);
+    let mut take_backs: HashMap<u32, Option<Vec<Hunk>>> = HashMap::new();
     let mut yours: Vec<Yours> = Vec::new();
     let mut changes = Vec::new();
     let mut deletions = Vec::new();
@@ -127,9 +128,18 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
                 Vec::new()
             };
             let seen_at = input.seen.get(&id).copied();
-            let undone_by = undone.get(id.as_str()).copied();
+            let undone_by = input.chains.undone.get(id.as_str()).copied();
+            let tail = input.chains.tails.get(id.as_str()).copied();
+            let restored_by = tail.filter(|_| undone_by.is_none());
+            let checked = seen_at.into_iter().chain(restored_by).min();
             let settled =
-                undone_by.is_some() || seen_at.is_some_and(|s| input.rounds.iter().any(|&r| r > s));
+                undone_by.is_some() || checked.is_some_and(|s| input.rounds.iter().any(|&r| r > s));
+            let flip_reverse = tail.and_then(|t| {
+                take_backs
+                    .entry(t)
+                    .or_insert_with(|| take_back(texts, input.hidden, t))
+                    .clone()
+            });
             let (mut changes_your_edit, mut reverts_your_edit) = (None, false);
             if who.attr == Attr::Agent
                 && seen_at.is_none()
@@ -151,7 +161,10 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
                 ReversibleReason::None
             };
             let ok = reason == ReversibleReason::None;
-            let reverse = followed.filter(|f| ok && f.exact).map(|f| f.reverse);
+            // Once reverted, only its latest undo is taken back
+            let reverse = followed
+                .filter(|f| ok && f.exact && tail.is_none())
+                .map(|f| f.reverse);
 
             if dl > 0 && il == 0 {
                 deletions.push(Deletion {
@@ -236,6 +249,9 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
                 old_text: h.d.concat(),
                 new_text: h.i.concat(),
                 check: None,
+                flip: tail.map(|t| format!("{t}.0")),
+                restored_by,
+                flip_reverse,
                 unasked_why: quoted.unasked.get(&j).cloned().flatten(),
                 flagged: quoted.unasked.contains_key(&j),
                 span,
@@ -682,33 +698,98 @@ struct Placed {
     sp: Option<String>,
 }
 
-/// The undo that reverted each change id. An undo names one change; the rest of its
-/// write counts as undone too when the undo's patch reverted every hunk of it.
-fn undone(input: &Input, texts: &mut Texts) -> HashMap<String, u32> {
-    let mut undone = HashMap::new();
-    for line in input.lines {
-        let Op::Edit {
-            act: Act::Undo,
-            of: Some(of),
-            ..
-        } = &line.op
-        else {
-            continue;
-        };
-        undone.insert(of.clone(), line.n);
-        let Some((op, _)) = of.split_once('.') else {
-            continue;
-        };
-        let Some(op) = op.parse::<u32>().ok().filter(|n| n.to_string() == op) else {
-            continue;
-        };
-        if let Some(hunks) = reverted_whole(texts, op, line.n) {
-            for j in 0..hunks {
-                undone.insert(format!("{op}.{j}"), line.n);
+/// Your undos, followed undo by undo. An undo names one change, or an undo's own change,
+/// which takes that undo back: an odd run of them reverts the change, an even run restores it.
+#[derive(Default)]
+pub(super) struct Chains {
+    /// Each reverted change id, with the undo that reverts it now.
+    undone: HashMap<String, u32>,
+    /// Each change id you ever reverted, with the latest undo of its run.
+    tails: HashMap<String, u32>,
+    /// Undo lines a later undo took back, and the undos they took back.
+    cancelled: Vec<u32>,
+}
+
+impl Chains {
+    /// Change ids of the undos that cancel out, which the fold shows as no change.
+    pub fn cancelled_ids(&self, texts: &Texts) -> Vec<String> {
+        self.cancelled
+            .iter()
+            .filter_map(|&n| Some((n, texts.step_at(n)?.1.hunks.as_ref()?.len())))
+            .flat_map(|(n, hunks)| (0..hunks).map(move |j| format!("{n}.{j}")))
+            .collect()
+    }
+}
+
+pub(super) fn chains(lines: &[Line], texts: &mut Texts) -> Chains {
+    let undos: Vec<(u32, &str)> = lines
+        .iter()
+        .filter_map(|l| match &l.op {
+            Op::Edit {
+                act: Act::Undo,
+                of: Some(of),
+                ..
+            } => Some((l.n, of.as_str())),
+            _ => None,
+        })
+        .collect();
+    let is_undo: HashSet<u32> = undos.iter().map(|(n, _)| *n).collect();
+    let mut next: HashMap<u32, u32> = HashMap::new();
+    let mut roots = Vec::new();
+    for &(n, of) in &undos {
+        match op_of(of).filter(|op| is_undo.contains(op) && *op < n) {
+            Some(op) => {
+                next.entry(op).or_insert(n);
             }
+            None => roots.push((n, of)),
         }
     }
-    undone
+    let mut out = Chains::default();
+    for (root, of) in roots {
+        let mut run = vec![root];
+        while let Some(&n) = run.last().and_then(|last| next.get(last)) {
+            run.push(n);
+        }
+        let tail = run[run.len() - 1];
+        let restored = run.len() % 2 == 0;
+        let mut ids = vec![of.to_string()];
+        // The rest of its write counts as undone too when the undo reverted every hunk of it
+        if let Some(op) = op_of(of)
+            && let Some(hunks) = reverted_whole(texts, op, root)
+        {
+            ids.extend((0..hunks).map(|j| format!("{op}.{j}")));
+        }
+        for id in ids {
+            if !restored {
+                out.undone.insert(id.clone(), tail);
+            }
+            out.tails.insert(id, tail);
+        }
+        let standing = if restored { 0 } else { 1 };
+        out.cancelled.extend(&run[..run.len() - standing]);
+    }
+    out
+}
+
+/// The line a change id's write is on.
+fn op_of(id: &str) -> Option<u32> {
+    let (op, _) = id.split_once('.')?;
+    op.parse::<u32>().ok().filter(|n| n.to_string() == op)
+}
+
+/// The hunks that take the whole write on line `n` back, in the current text's lines,
+/// when no later write overlaps any of it.
+fn take_back(texts: &Texts, hidden: &HashSet<String>, n: u32) -> Option<Vec<Hunk>> {
+    let (k, step) = texts.step_at(n)?;
+    let later = &texts.chain.history()[k + 1..];
+    crate::review::hunk::reverse(step.hunks.as_ref()?)
+        .iter()
+        .map(|r| {
+            follow(later, hidden, r.a, r)
+                .filter(|f| f.exact)
+                .map(|f| f.reverse)
+        })
+        .collect()
 }
 
 /// How many hunks the write on line `op` has, when the undo on line `undo` reverted

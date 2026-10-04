@@ -342,10 +342,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       }
       if (first === 'change' && f.k !== 'doc') {
         var mine = items.filter(function (i) { return i.key === here && i.kind === 'change'; });
-        // Kept once each change there is; a reverted one keeps the not-checked keys until restore lands
+        // Reverted once each change there is, kept once each is kept or restored
+        var reverted = mine.every(function (i) { return i.check === 'reverted'; });
         var kept = mine.every(function (i) { return i.check === 'kept' || i.check === 'restored'; });
         return row(place + crumb + " · Claude's change",
-          [kept ? 'kept' : key('yes') + ' keep', key('revert_change') + ' revert', key('note') + ' reply', next]);
+          [reverted ? 'reverted' : kept ? 'kept' : key('yes') + ' keep', key('revert_change') + (reverted ? ' restore' : ' revert'), key('note') + ' reply', next]);
       }
       return row(place + crumb + ' · Claude replied', [key('yes') + ' ok', key('note') + ' reply', next]);
     }

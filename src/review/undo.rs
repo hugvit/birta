@@ -69,8 +69,7 @@ fn reverse_change_with(
     held.sync(&doc.canonical, &before).map_err(UndoErr::Io)?;
     let text = std::str::from_utf8(&before).map_err(|_| UndoErr::NotReversible)?;
     let reverse = reverse(held.parsed(), text, change).ok_or(UndoErr::NotReversible)?;
-    let after =
-        apply_reverse(&before, std::slice::from_ref(&reverse)).ok_or(UndoErr::NotReversible)?;
+    let after = apply_reverse(&before, &reverse).ok_or(UndoErr::NotReversible)?;
     let target = WriteTarget {
         canonical: doc.canonical.clone(),
         rel: doc.rel.clone(),
@@ -101,13 +100,20 @@ fn undone(parsed: &Parsed, cid: &str) -> Option<Rev> {
     })
 }
 
-/// The hunk that reverts change `change`, in `text`'s lines, when it can be undone.
-fn reverse(parsed: &Parsed, text: &str, change: &str) -> Option<Hunk> {
+/// The hunks that revert change `change`, in `text`'s lines, when it can be undone. Naming
+/// the change of your latest undo of a change takes that undo's whole write back.
+fn reverse(parsed: &Parsed, text: &str, change: &str) -> Option<Vec<Hunk>> {
     let chain = Chain::build(parsed);
     let doc = Doc::new(text);
-    let changes = fold::fold(parsed, &chain, &doc).state.changes;
+    let state = fold::fold(parsed, &chain, &doc).state;
+    let changes = state.changes;
+    if let Some(toggled) = changes.iter().find(|c| c.flip.as_deref() == Some(change)) {
+        // A hand-back or approve settled it: it is the text Claude was told about
+        let news = state.news.iter().any(|n| n.id == toggled.id);
+        return toggled.flip_reverse.clone().filter(|_| news);
+    }
     let pressed = changes.into_iter().find(|c| c.id == change)?;
-    // Redoing is editing again
+    // Any other piece of an undo is taken back only through the change it toggled
     let is_undo = parsed
         .lines
         .iter()
@@ -115,7 +121,7 @@ fn reverse(parsed: &Parsed, text: &str, change: &str) -> Option<Hunk> {
     if is_undo {
         return None;
     }
-    pressed.reverse
+    pressed.reverse.map(|h| vec![h])
 }
 
 /// `bytes` with `reverses` applied, each only where its lines are exactly as it expects.
@@ -366,69 +372,71 @@ mod tests {
         assert_eq!(f.change(id).undone_by, Some(last.n));
     }
 
+    /// Base and changed texts across line endings, BOMs and final EOLs; each makes one change.
+    const ENDINGS: &[(&str, &str, &str)] = &[
+        ("lf", "# T\n\nold line\n\nend\n", "# T\n\nnew line\n\nend\n"),
+        (
+            "crlf",
+            "# T\r\n\r\nold line\r\n\r\nend\r\n",
+            "# T\r\n\r\nnew line\r\n\r\nend\r\n",
+        ),
+        (
+            "mixed",
+            "# T\r\n\nold line\n\r\nend\r\n",
+            "# T\r\n\nnew line\n\r\nend\r\n",
+        ),
+        (
+            "lone cr",
+            "# T\r\rold line\r\rend\r",
+            "# T\r\rnew line\r\rend\r",
+        ),
+        (
+            "bom, line 1",
+            "\u{feff}# Title\n\nbody\n",
+            "\u{feff}# Title two\n\nbody\n",
+        ),
+        (
+            "bom and crlf, line 1",
+            "\u{feff}# Title\r\n\r\nbody\r\n",
+            "\u{feff}# Title two\r\n\r\nbody\r\n",
+        ),
+        ("no final eol", "# T\n\nold line", "# T\n\nnew line"),
+        // Line endings alone render the same and make no change to undo
+        ("final eol added", "# T\n\nold line", "# T\n\nnew line\n"),
+        ("final eol removed", "# T\n\nold line\n", "# T\n\nnew line"),
+        ("insertion", "# T\n\nend\n", "# T\n\nnew\n\nend\n"),
+        (
+            "deletion",
+            "# T\n\nkeep\n\ngone\n\nend\n",
+            "# T\n\nkeep\n\nend\n",
+        ),
+        (
+            "one eol flipped",
+            "# T\n\nold line\n",
+            "# T\n\nnew line\r\n",
+        ),
+        (
+            "bom added",
+            "# Title\n\nbody\n",
+            "\u{feff}# Title\n\nbody\n",
+        ),
+        (
+            "bom removed",
+            "\u{feff}# Title\n\nbody\n",
+            "# Title\n\nbody\n",
+        ),
+        (
+            "bom, line 3",
+            "\u{feff}# T\n\nold line\n",
+            "\u{feff}# T\n\nnew line\n",
+        ),
+        ("from empty", "", "# T\n"),
+        ("to empty", "# T\n", ""),
+    ];
+
     #[test]
     fn undo_restores_the_bytes_exactly_whatever_the_line_endings() {
-        let cases = [
-            ("lf", "# T\n\nold line\n\nend\n", "# T\n\nnew line\n\nend\n"),
-            (
-                "crlf",
-                "# T\r\n\r\nold line\r\n\r\nend\r\n",
-                "# T\r\n\r\nnew line\r\n\r\nend\r\n",
-            ),
-            (
-                "mixed",
-                "# T\r\n\nold line\n\r\nend\r\n",
-                "# T\r\n\nnew line\n\r\nend\r\n",
-            ),
-            (
-                "lone cr",
-                "# T\r\rold line\r\rend\r",
-                "# T\r\rnew line\r\rend\r",
-            ),
-            (
-                "bom, line 1",
-                "\u{feff}# Title\n\nbody\n",
-                "\u{feff}# Title two\n\nbody\n",
-            ),
-            (
-                "bom and crlf, line 1",
-                "\u{feff}# Title\r\n\r\nbody\r\n",
-                "\u{feff}# Title two\r\n\r\nbody\r\n",
-            ),
-            ("no final eol", "# T\n\nold line", "# T\n\nnew line"),
-            // Line endings alone render the same and make no change to undo
-            ("final eol added", "# T\n\nold line", "# T\n\nnew line\n"),
-            ("final eol removed", "# T\n\nold line\n", "# T\n\nnew line"),
-            ("insertion", "# T\n\nend\n", "# T\n\nnew\n\nend\n"),
-            (
-                "deletion",
-                "# T\n\nkeep\n\ngone\n\nend\n",
-                "# T\n\nkeep\n\nend\n",
-            ),
-            (
-                "one eol flipped",
-                "# T\n\nold line\n",
-                "# T\n\nnew line\r\n",
-            ),
-            (
-                "bom added",
-                "# Title\n\nbody\n",
-                "\u{feff}# Title\n\nbody\n",
-            ),
-            (
-                "bom removed",
-                "\u{feff}# Title\n\nbody\n",
-                "# Title\n\nbody\n",
-            ),
-            (
-                "bom, line 3",
-                "\u{feff}# T\n\nold line\n",
-                "\u{feff}# T\n\nnew line\n",
-            ),
-            ("from empty", "", "# T\n"),
-            ("to empty", "# T\n", ""),
-        ];
-        let built: Vec<_> = cases
+        let built: Vec<_> = ENDINGS
             .iter()
             .map(|&(name, base, changed)| (name, base, changed, agent_change(base, changed)))
             .collect();
@@ -857,8 +865,6 @@ mod tests {
         undone.undo(&undone_id, b"# T\n\nnew line\n").unwrap();
         assert!(!undone.change(&undone_id).reversible.ok, "setup");
         check("already undone", &undone, &undone_id);
-        let undo = undone.lines().last().unwrap().n;
-        check("the undo itself", &undone, &format!("{undo}.0"));
 
         assert!(bad.is_empty(), "{bad:#?}");
     }
@@ -984,6 +990,204 @@ mod tests {
             (c.reversible.ok, c.reversible.reason),
             (false, ReversibleReason::LaterOverlap)
         );
+    }
+
+    /// The last line is your undo of change `of`, turning `from` into `to`, appended
+    /// after the log as it was.
+    fn assert_flip_edit(f: &Fixture, of: &str, from: &[u8], to: &[u8], log_before: &[u8]) {
+        let bytes = f.log_bytes();
+        assert!(bytes.starts_with(log_before), "the log was rewritten");
+        let lines = f.lines();
+        let last = lines.last().unwrap();
+        let Op::Edit {
+            rev,
+            to_rev,
+            patch,
+            of: named,
+            act,
+        } = &last.op
+        else {
+            panic!("last line is not an edit: {last:?}");
+        };
+        assert_eq!((*act, named.as_deref()), (Act::Undo, Some(of)));
+        assert_eq!(last.by.kind, ByKind::Human);
+        assert_eq!((rev, to_rev), (&Rev::of(from), &Rev::of(to)));
+        let (from, to) = (std::str::from_utf8(from), std::str::from_utf8(to));
+        let patched = hunk::apply(from.unwrap(), patch.as_ref().expect("a patch"));
+        assert_eq!(patched.as_deref(), Ok(to.unwrap()));
+        assert_eq!(f.head(), Some(Rev::of(&f.disk())));
+    }
+
+    /// Undoes `of` from the disk text; the undo's own change, which flips it back.
+    fn flip(f: &Fixture, of: &str, want: &str, name: &str) -> String {
+        let (disk, log) = (f.disk(), f.log_bytes());
+        let written = f
+            .undo(of, &disk)
+            .unwrap_or_else(|e| panic!("{name}: undo of {of}: {e:?}"));
+        assert_eq!(
+            String::from_utf8(f.disk()).unwrap(),
+            want,
+            "{name}: after undoing {of}"
+        );
+        assert_eq!(written.rev, Rev::of(want.as_bytes()), "{name}");
+        assert_flip_edit(f, of, &disk, want.as_bytes(), &log);
+        format!("{}.0", f.lines().last().unwrap().n)
+    }
+
+    /// Revert, restore, revert, restore, revert: each undo names the last undo's own
+    /// change, and the bytes are exact after every one.
+    #[test]
+    fn a_revert_flips_back_and_forth_with_the_bytes_exact_whatever_the_line_endings() {
+        let built: Vec<_> = ENDINGS
+            .iter()
+            .map(|&(name, base, changed)| (name, base, changed, agent_change(base, changed)))
+            .collect();
+        for (name, base, changed, (f, id)) in built {
+            let mut next = id;
+            for (k, want) in [base, changed, base, changed, base].into_iter().enumerate() {
+                next = flip(&f, &next, want, &format!("{name}, toggle {}", k + 1));
+            }
+            assert_eq!(f.count(is_edit), 5, "{name}");
+        }
+    }
+
+    /// The journey's merged bullets: Claude's one change turns two bullets into one, so the
+    /// revert writes two blocks back, and the flip must take all of its write back.
+    #[test]
+    fn the_journeys_merged_bullets_flip_whole() {
+        let base = include_str!("../../e2e/fixtures/review/journey/pr-draft.md");
+        let changed = include_str!("../../e2e/fixtures/review/journey/round1.md");
+        let mut f = Fixture::claimed(base);
+        let n = f.writes(changed);
+        let merged = f
+            .state()
+            .changes
+            .into_iter()
+            .find(|c| c.op == n && c.what.old_lines == 2 && c.what.new_lines == 1)
+            .expect("setup: the merged bullets are one change");
+        assert!(merged.reversible.ok, "setup: {merged:?}");
+        let reverted = changed.replacen(&merged.new_text, &merged.old_text, 1);
+        let mut next = merged.id.clone();
+        for (k, want) in [&reverted, changed, &reverted, changed, &reverted]
+            .into_iter()
+            .enumerate()
+        {
+            next = flip(&f, &next, want, &format!("toggle {}", k + 1));
+        }
+    }
+
+    /// A write recorded as one hunk of two lines into one, as another writer may record it:
+    /// birta's own diff of the revert cuts it into a piece per block, and the flip, which
+    /// names the first piece, must take the whole revert back.
+    #[test]
+    fn a_revert_cut_into_pieces_flips_whole() {
+        let base = "# T\n\n## What\n\n- Wrap the put in a retry loop\n- Retry only on idempotent failures\n\n## Testing\n\n- [ ] Ran the suite\n";
+        let changed = "# T\n\n## What\n\n- Retry on network errors, 429 and 502–504\n\n## Testing\n\n- [ ] Ran the suite\n";
+        let mut f = Fixture::claimed(base);
+        fs::write(&f.doc, changed).unwrap();
+        let patch = vec![Hunk {
+            a: 4,
+            d: vec![
+                "- Wrap the put in a retry loop\n".to_string(),
+                "- Retry only on idempotent failures\n".to_string(),
+            ],
+            i: vec!["- Retry on network errors, 429 and 502–504\n".to_string()],
+        }];
+        let n = f.append(
+            By {
+                kind: ByKind::Birta,
+                name: None,
+                via: None,
+            },
+            Op::External {
+                rev: Rev::of(base.as_bytes()),
+                to_rev: Rev::of(changed.as_bytes()),
+                patch: Some(patch),
+                cause: None,
+                head: None,
+            },
+        );
+        let id = format!("{n}.0");
+        assert_eq!(f.change(&id).op_hunks, 1, "setup");
+        let mut next = flip(&f, &id, base, "toggle 1");
+        let undo: u32 = next.trim_end_matches(".0").parse().unwrap();
+        let pieces = f.state().changes.iter().filter(|c| c.op == undo).count();
+        assert!(
+            pieces > 1,
+            "setup: the revert is cut into pieces, got {pieces}"
+        );
+        for (k, want) in [changed, base, changed, base].into_iter().enumerate() {
+            next = flip(&f, &next, want, &format!("toggle {}", k + 2));
+        }
+    }
+
+    #[test]
+    fn a_spent_undo_is_not_undone_twice() {
+        let (base, changed) = ("# T\n\nold line\n", "# T\n\nnew line\n");
+        let (f, id) = agent_change(base, changed);
+        let mut bad = Vec::new();
+        let mut refused = |name: &str, f: &Fixture, stale: &str| {
+            let (disk, log) = (f.disk(), f.log_bytes());
+            let result = f.undo(stale, &disk);
+            if !matches!(result, Err(UndoErr::NotReversible))
+                || f.disk() != disk
+                || f.log_bytes() != log
+            {
+                bad.push(format!("{name}: {result:?}"));
+            }
+        };
+        let revert = flip(&f, &id, base, "revert");
+        let restore = flip(&f, &revert, changed, "restore");
+        // A tab that missed the restore still names the first revert's change
+        refused("the restored revert", &f, &revert);
+        flip(&f, &restore, base, "revert again");
+        refused("the first revert", &f, &revert);
+        refused("the restore", &f, &restore);
+        assert!(bad.is_empty(), "{bad:#?}");
+    }
+
+    #[test]
+    fn a_restore_follows_a_later_insert_above_it() {
+        let (mut f, id) = agent_change(FOUR, "# Plan\n\none\n\nTWO\n\nthree\n\nfour\n");
+        f.yield_turn();
+        let revert = flip(&f, &id, FOUR, "revert");
+        let prefaced = format!("Preface.\n\n{FOUR}");
+        f.writes(&prefaced);
+
+        let back = format!("Preface.\n\n{}", FOUR.replace("two", "TWO"));
+        let restore = flip(&f, &revert, &back, "restore");
+        flip(&f, &restore, &prefaced, "revert again");
+    }
+
+    #[test]
+    fn a_restore_a_later_write_overlaps_is_refused_and_writes_nothing() {
+        let (mut f, id) = agent_change(FOUR, "# Plan\n\none\n\nTWO\n\nthree\n\nfour\n");
+        f.yield_turn();
+        let revert = flip(&f, &id, FOUR, "revert");
+        let over = "# Plan\n\none\n\ntwo, from an editor\n\nthree\n\nfour\n";
+        f.writes(over);
+        let (disk, log) = (f.disk(), f.log_bytes());
+
+        let result = f.undo(&revert, &disk);
+
+        assert!(matches!(result, Err(UndoErr::NotReversible)), "{result:?}");
+        assert_eq!((f.disk(), f.log_bytes()), (disk, log));
+    }
+
+    /// Two changes of one write, each reverted: each revert flips back alone.
+    #[test]
+    fn each_revert_of_one_write_is_restored_on_its_own() {
+        let mut f = Fixture::claimed(FOUR);
+        let ids = three_changes(&mut f);
+        let first_back = "# Plan\n\none\n\ntwo\n\nTHREE\n\nFOUR\n";
+        let both_back = "# Plan\n\none\n\ntwo\n\nTHREE\n\nfour\n";
+        let first = flip(&f, &ids[0], first_back, "revert the first");
+        let last = flip(&f, &ids[2], both_back, "revert the last");
+        assert_ne!(first, last, "setup");
+
+        let one_restored = "# Plan\n\nONE\nONE-b\n\ntwo\n\nTHREE\n\nfour\n";
+        flip(&f, &first, one_restored, "restore the first");
+        flip(&f, &last, THREE, "restore the last");
     }
 
     #[test]

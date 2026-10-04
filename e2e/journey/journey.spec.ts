@@ -1114,9 +1114,10 @@ test("the reviewer's journey, J-01 to J-16, by keys with a real agent", async ({
     await expectInView(page, J);
     const done = await approval;
     expect(done.status, `agent review --wait after approve: ${done.stderr}`).toBe(0);
-    expect(done.stdout, `${J}: the agent's next: names the approved text`).toMatch(
-      new RegExp(`^next: birta show ${NAME.replace(".", "\\.")}@${approve.rev}\\b`, "m"),
-    );
+    // The CLI names the approved rev by a short prefix of it
+    const shown = new RegExp(`^next: birta show ${NAME.replace(".", "\\.")}@([0-9a-f]{7,})\\b`, "m").exec(done.stdout);
+    expect(shown, `${J}: the agent's next: names the approved text`).not.toBeNull();
+    expect(approve.rev.startsWith(shown![1]), `${J}: ${shown![1]} is a prefix of ${approve.rev}`).toBe(true);
   });
 
   await test.step("J-16 · one more thought", async () => {

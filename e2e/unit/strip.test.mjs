@@ -197,9 +197,7 @@ test("Kept: the where reads the same, and the keys say kept", () => {
   assert.equal(line(strip(BR, s, WHY)), "2 of 9 · ## Why › paragraph · Claude's change | kept · u revert · c reply · n next");
 });
 
-// Interim until 6.26: a reverted change shows the not-checked keys. The table's own copy,
-// `reverted · u restore · c reply · n next`, lands with restore.
-test("Reverted: the where reads the same, and the keys are the not-checked ones until 6.26", () => {
+test("Reverted: the where reads the same, and the keys say reverted and u restores", () => {
   const BR = load();
   const s = replied((s) => {
     s.changes.find((c) => c.id === "9.0").check = "reverted";
@@ -208,8 +206,18 @@ test("Reverted: the where reads the same, and the keys are the not-checked ones 
   });
   assert.equal(
     line(strip(BR, s, WHY)),
-    "2 of 9 · ## Why › paragraph · Claude's change | y keep · u revert · c reply · n next",
+    "2 of 9 · ## Why › paragraph · Claude's change | reverted · u restore · c reply · n next",
   );
+});
+
+test("Restored reads as Kept", () => {
+  const BR = load();
+  const s = replied((s) => {
+    s.changes.find((c) => c.id === "9.0").check = "restored";
+    s.news.find((n) => n.id === "9.0").check = "restored";
+    s.counts.to_check -= 1;
+  });
+  assert.equal(line(strip(BR, s, WHY)), "2 of 9 · ## Why › paragraph · Claude's change | kept · u revert · c reply · n next");
 });
 
 test("a removal", () => {

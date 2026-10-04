@@ -498,7 +498,10 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
             .flat_map(|step| [step.from.clone(), step.to.clone()])
             .collect::<Vec<_>>(),
     );
-    let hidden = changes::hidden(&parsed.lines, &mut texts);
+    let mut hidden = changes::hidden(&parsed.lines, &mut texts);
+    // Undos that cancel out make no change, so the change they toggled reads as before them
+    let chains = changes::chains(&parsed.lines, &mut texts);
+    hidden.extend(chains.cancelled_ids(&texts));
     // A bound `covers` settles its note, so the carry below must already see it
     let bound = changes::covers_bound(&parsed.lines, &turns, &mut texts, &hidden);
     let mut facts: Vec<Facts> = notes
@@ -610,6 +613,7 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
             rounds: &standing,
             hidden: &hidden,
             answers: &answers,
+            chains: &chains,
         },
         &mut texts,
     );

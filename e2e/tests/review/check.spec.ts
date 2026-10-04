@@ -105,11 +105,12 @@ function recount(s: State) {
 
 /**
  * The merged bullets reverted by your write 23, as the fold shows it: the change stays news,
- * checked `reverted`, on the block its undo put back, and your write is its own change there.
+ * checked `reverted`, on the block its undo put back, and your write is its own change there,
+ * which `u` and `z` undo to restore it.
  */
 function revertedMerged(s: State, settled = false) {
   const c = changeOf(s, "10.1");
-  Object.assign(c, { undone_by: 23, check: "reverted", settled: true, reversible: { ok: false, reason: "later_overlap" } });
+  Object.assign(c, { undone_by: 23, check: "reverted", flip: "23.0", settled: true, reversible: { ok: false, reason: "later_overlap" } });
   s.changes.push({
     ...JSON.parse(JSON.stringify(c)),
     id: "23.0",
@@ -449,31 +450,47 @@ test.describe("u on Claude's news", () => {
   });
 });
 
-// --- Interim copy until 6.26 and 6.27 -----------------------------------------------------------
+// --- Restore, and the interim keep copy until 6.27 -----------------------------------------------
 
-test.describe("interim copy", () => {
-  test("a revert says reverted, and z on it says a revert stays", async ({ page, birta }) => {
-    const { mock } = await open(page, birta, bent());
+/** The unit-test bullet reverted by your write 24, as the fold shows it once the revert lands. */
+function revertedUnit(s: State) {
+  Object.assign(changeOf(s, "10.6"), { undone_by: 24, check: "reverted", flip: "24.0", reversible: { ok: false, reason: "later_overlap" } });
+  newsOf(s, "10.6").check = "reverted";
+  return recount(s);
+}
+
+test.describe("revert copy, and the interim keep copy", () => {
+  test("a revert says how to restore, and z on it sends the undo's own change back", async ({ page, birta }) => {
+    const { mock, state } = await open(page, birta, bent());
     await focusTo(page, UNIT);
     await page.keyboard.press("u");
     await expect.poll(() => opsNamed(mock, "undo_change").map((o) => o.change)).toEqual(["10.6"]);
-    await expect.poll(() => stripMessage(page)).toBe("reverted");
+    await expect.poll(() => stripMessage(page)).toBe("reverted · u restores Claude's text");
+    mock.pushState(revertedUnit(state));
     await page.keyboard.press("z");
-    await expect.poll(() => stripMessage(page)).toBe("nothing to undo · a revert stays");
+    await expect.poll(() => opsNamed(mock, "undo_change").map((o) => o.change)).toEqual(["10.6", "24.0"]);
+    await expect.poll(() => stripMessage(page)).toBe("revert undone · Claude's text is back");
     await page.waitForTimeout(SETTLE_MS);
-    expect(writes(mock)).toEqual(["undo_change"]);
+    expect(writes(mock)).toEqual(["undo_change", "undo_change"]);
   });
 
-  for (const key of ["u", "y"]) {
-    test(`${key} on a reverted change says already reverted · c to ask Claude, and sends nothing`, async ({ page, birta }) => {
-      const { mock } = await open(page, birta, revertedMerged(bent()));
-      await focusTo(page, MERGED);
-      await page.keyboard.press(key);
-      await expect.poll(() => stripMessage(page)).toBe("already reverted · c to ask Claude");
-      await page.waitForTimeout(SETTLE_MS);
-      expect(mock.ops()).toEqual([]);
-    });
-  }
+  test("u on a reverted change restores it: it sends the undo's own change", async ({ page, birta }) => {
+    const { mock } = await open(page, birta, revertedMerged(bent()));
+    await focusTo(page, MERGED);
+    await page.keyboard.press("u");
+    await expect.poll(() => opsNamed(mock, "undo_change").map((o) => o.change)).toEqual(["23.0"]);
+    await expect.poll(() => stripMessage(page)).toBe("restored Claude's text · u reverts again");
+    expect(seenIds(mock)).toEqual([]);
+  });
+
+  test("y on a reverted change says already reverted · u restores Claude's text, and sends nothing", async ({ page, birta }) => {
+    const { mock } = await open(page, birta, revertedMerged(bent()));
+    await focusTo(page, MERGED);
+    await page.keyboard.press("y");
+    await expect.poll(() => stripMessage(page)).toBe("already reverted · u restores Claude's text");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(mock.ops()).toEqual([]);
+  });
 
   test("a keep says kept, and z on it says a keep stays kept without reaching back to your note", async ({ page, birta }) => {
     const { mock } = await open(page, birta, bent());
@@ -520,14 +537,17 @@ test.describe("what a check shows", () => {
     await expect.poll(() => stripKeys(page)).toBe("kept · u revert · c reply · n next");
   });
 
-  test("a reverted change: tail reverted by you, Claude's version and its text, and a ↺ in place of your bar", async ({ page, birta }) => {
+  test("a reverted change: Claude's text underlined, tail reverted by you, and a ↺ in place of your bar", async ({ page, birta }) => {
     await open(page, birta, revertedMerged(bent()));
     await expect.poll(async () => (await marks(page)).filter((m) => m.mark === "revert").map((m) => m.sp)).toEqual([MERGED]);
     expect((await marks(page)).filter((m) => m.mark === "bar" && m.sp === MERGED && m.role === "you")).toEqual([]);
     await focusTo(page, MERGED);
     await expect.poll(async () => (await changeRows(page)).map((r) => r.tail ?? "").find((t) => /^reverted by you/.test(t)) ?? null).not.toBeNull();
-    const tail = (await changeRows(page)).map((r) => r.tail ?? "").find((t) => /^reverted by you/.test(t))!;
-    expect(tail).toMatch(/^reverted by you\b.*Claude's version:.*Retry on network errors, 429 and 502–504/);
+    const row = (await changeRows(page)).find((r) => /^reverted by you/.test(r.tail ?? ""))!;
+    // The underlined text is Claude's version, so the tail names nothing more
+    expect(row.tail).toBe("reverted by you");
+    expect(row.ins.join(" ")).toContain("Retry on network errors, 429 and 502–504");
+    expect(row.text).not.toContain("Claude's version");
   });
 
   test("a change you replied to: tail you replied", async ({ page, birta }) => {
@@ -768,7 +788,7 @@ test.describe("adversary: u on a checked change still in news", () => {
       await focusTo(page, UNIT);
       await page.keyboard.press("u");
       await expect.poll(() => opsNamed(mock, "undo_change").map((o) => o.change)).toEqual(["10.6"]);
-      await expect.poll(() => stripMessage(page)).toBe("reverted");
+      await expect.poll(() => stripMessage(page)).toBe("reverted · u restores Claude's text");
       expect(seenIds(mock)).toEqual([]);
     });
   }
@@ -813,17 +833,19 @@ test.describe("adversary: z on a keep or a revert never reaches an older action"
     await expect.poll(() => opsNamed(mock, "retract").length).toBe(1);
   });
 
-  test("adversary: z after a revert says a revert stays, and leaves the note before it alone", async ({ page, birta }) => {
-    const { mock } = await open(page, birta, bent());
+  test("adversary: z after a revert restores it, and leaves the note before it alone", async ({ page, birta }) => {
+    const { mock, state } = await open(page, birta, bent());
     await noteFirst(page, mock);
     await focusTo(page, UNIT);
     await page.keyboard.press("u");
     await expect.poll(() => opsNamed(mock, "undo_change").map((o) => o.change)).toEqual(["10.6"]);
+    mock.pushState(revertedUnit(state));
     await page.keyboard.press("z");
-    await expect.poll(() => stripMessage(page)).toBe("nothing to undo · a revert stays");
+    await expect.poll(() => stripMessage(page)).toBe("revert undone · Claude's text is back");
     await page.waitForTimeout(SETTLE_MS);
     expect(opsNamed(mock, "retract")).toEqual([]);
-    expect(writes(mock)).toEqual(["comment", "undo_change"]);
+    expect(writes(mock)).toEqual(["comment", "undo_change", "undo_change"]);
+    expect(opsNamed(mock, "undo_change").map((o) => o.change)).toEqual(["10.6", "24.0"]);
   });
 });
 
@@ -1102,7 +1124,7 @@ test.describe("repair: on a real server", () => {
     await expect.poll(() => reviewLog(served.root)!.slice(before).filter((l) => l.op === "edit")).toHaveLength(1);
     expect(reviewLog(served.root)!.slice(before).filter((l) => l.op === "edit")[0]).toMatchObject({ act: "undo", of: "8.0" });
     await expect.poll(() => fs.readFileSync(path.join(served.root, "pr.md"), "utf-8")).toBe(s.first);
-    await expect.poll(() => stripMessage(page)).toBe("reverted");
+    await expect.poll(() => stripMessage(page)).toBe("reverted · u restores Claude's text");
     await page.waitForTimeout(SETTLE_MS);
     expect((await stripMessage(page)) ?? "").not.toContain("can't revert");
   });

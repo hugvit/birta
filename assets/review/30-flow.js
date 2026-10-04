@@ -433,6 +433,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var armed = null;
   // The undos the server hasn't answered, `{cids, why}`, so a second u can't send more
   var undoing = null;
+  // A revert or restore whose writes are acked, until the state shows them
+  var awaiting = null;
+  var AWAIT_MS = 3000;
   // The block the keys act on: every row under it is open
   var focusSp = null;
   // The removal whose stop has focus, by change id: its row opens there
@@ -501,6 +504,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (!at || at.k === 'doc') return null;
     if (at.k !== 'change') return at.sp || null;
     var c = changeOf(at.id);
+    // A reverted change sits where its revert put the old text back
+    if (c && c.undone_by != null && rowSp(c)) return rowSp(c);
     var d = ((state && state.deletions) || []).filter(function (x) { return x.change === at.id; })[0];
     return c && c.range && c.range.sp ? c.range.sp : d ? d.after_sp : null;
   }
@@ -982,9 +987,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (c.undone_by != null) {
       // Your revert put its words back, so the row keeps why, and Claude's own words after
       e.said = c.attr === 'outside' ? ['changed outside birta' + (c.cause === 'git' ? ' (git)' : '')] : [who(c.by) + ' · '].concat(whyOf(c, s));
-      e.substance = {};
-      e.tail = 'reverted by you · ' + "Claude's version: ";
-      e.version = c.new_text || '';
+      // What Claude did still reads, underlined, so u back to it is a choice made on its words
+      e.substance = substanceOf(c);
+      e.tail = 'reverted by you';
       return receiptOf(c, e);
     }
     var outside = 'changed outside birta' + (c.cause === 'git' ? ' (git)' : '');
@@ -1874,9 +1879,28 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return hit;
   }
 
-  /** u on a change: revert it, once, when birta can. */
+  /** u on a change: revert it, or restore it once reverted, when birta can. */
   function revert(c) {
+    // Once a hand-back settles a revert, it is the text Claude was told about
+    if (c.flip && !inNews(c.id)) {
+      BR.chrome.say('nothing here to revert');
+      return;
+    }
     revertAll([c.id]);
+  }
+
+  /** Whether change `id` is still in Claude's news. */
+  function inNews(id) {
+    return ((state && state.news) || []).some(function (n) { return n.id === id; });
+  }
+
+  function revertedSays() { return 'reverted · ' + BR.keyName('revert_change') + " restores Claude's text"; }
+
+  function restoredSays() { return "restored Claude's text · " + BR.keyName('revert_change') + ' reverts again'; }
+
+  /** What a refused write of a toggle says: a later change overlaps what it would put back. */
+  function overlapSays(act) {
+    return "can't " + (act === 'restore' ? 'restore' : 'revert') + ' this one: a later change overlaps · ' + BR.keyName('note') + ' to ask Claude';
   }
 
   /** Why birta can't revert `cs`: a later change over one, else the receipt's own refusal. */
@@ -1887,21 +1911,109 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return CANT_UNDO;
   }
 
-  /** u on a stop: reverts each of changes `ids` birta can, and names what it couldn't, once the reverts are back. */
+  /**
+   * u on a stop: reverts each of changes `ids` that isn't reverted, a restored one through its latest
+   * undo; once all are reverted, restores them all. Names what it couldn't once the writes are back.
+   */
   function revertAll(ids) {
+    if (undoing) return;
+    // The state of the last write decides what u does next, so u waits for it
+    if (awaiting) {
+      awaiting.next = ids;
+      return;
+    }
     var cs = ids.map(changeOf).filter(Boolean);
-    var cant = cs.filter(function (c) { return !canUndo(c); });
-    var can = cs.filter(canUndo);
+    var open = cs.filter(function (c) { return c.check !== 'reverted'; });
+    var act = open.length ? 'revert' : 'restore';
+    var sends = [];
+    var cant = [];
+    (open.length ? open : cs).forEach(function (c) {
+      var by = c.flip || (act === 'revert' && canUndo(c) ? c.id : null);
+      if (by) sends.push({ id: c.id, change: by, flip: !!c.flip });
+      else cant.push(c);
+    });
     var why = cant.length ? cantOf(cant) : null;
-    if (!can.length) {
+    if (!sends.length) {
       if (why) BR.chrome.say(why);
       return;
     }
-    if (undoing) return;
-    undoing = { cids: can.map(function (c) { return BR.op({ op: 'undo_change', change: c.id }); }), why: why };
-    // A revert can't be taken back yet, so z stops at it rather than reaching past it
-    BR.pointing.remember({ marker: 'nothing to undo · a revert stays' });
+    toggle(sends, act, act === 'revert' ? revertedSays() : restoredSays(), why);
+    var entry = { kind: 'toggle', undo: { op: 'undo_change' }, ids: sends.map(function (x) { return x.id; }), act: act };
+    BR.pointing.remember(entry);
+    undoing.entry = entry;
     if (why) BR.chrome.say(why);
+  }
+
+  /** z on a revert or a restore: takes each of changes `cs` back through its latest undo. */
+  function toggleBack(cs, entry) {
+    if (undoing) return;
+    var sends = cs.map(function (c) { return { id: c.id, change: c.flip, flip: true }; });
+    var back = entry.act === 'revert' ? 'restore' : 'revert';
+    toggle(sends, back, entry.act === 'revert' ? "revert undone · Claude's text is back" : 'restore undone · reverted again', null);
+    undoing.undid = entry;
+  }
+
+  /** Sends `sends` one at a time, each once the last is acked, and says `done` when all are. */
+  function toggle(sends, act, done, why) {
+    undoing = { ids: sends.map(function (x) { return x.id; }), queue: sends.slice(), sent: null, acked: [], act: act, done: done, why: why };
+    BR.pointing.follow(sends.map(function (x) { return x.id; }), act === 'revert' ? 'reverted' : 'restored');
+    sendNext(null);
+  }
+
+  /** Once the state shows the last revert or restore, a u pressed meanwhile runs. */
+  function shown(anyway) {
+    var a = awaiting;
+    // A new rev's content comes before its state
+    if (!a || (!state && !anyway)) return;
+    var done = a.ids.every(function (id) { var c = changeOf(id); return !c || c.check === a.want; });
+    if (!done && !anyway) return;
+    awaiting = null;
+    if (!done) BR.pointing.follow(null);
+    if (a.next) revertAll(a.next);
+    // A z that waited on this tab's own write goes on now
+    else BR.pointing.resume();
+  }
+
+  /** The toggle's writes are all acked: u and z wait for the state that shows them. */
+  function landed(t) {
+    var a = { ids: t.acked, want: t.act === 'revert' ? 'reverted' : 'restored', next: null };
+    awaiting = a;
+    undoing = null;
+    shown();
+    // A state that never shows it must not hold u for good
+    setTimeout(function () { if (awaiting === a) shown(true); }, AWAIT_MS);
+  }
+
+  /**
+   * A write of toggle `t` was refused. What it wrote before stays, on the z history as exactly that;
+   * what it didn't write is no act of yours.
+   */
+  function refuse(t, reason) {
+    var why = t.sent.flip && reason === 'not_reversible' ? overlapSays(t.act) : BR.pure.nackText(reason, state);
+    if (t.entry) {
+      if (t.acked.length) {
+        t.entry.ids = t.acked.slice();
+        BR.pointing.kept();
+      } else BR.pointing.forget(t.entry);
+    }
+    // A z whose take-back stopped part way leaves the rest of your act to take back
+    var left = t.undid ? t.undid.ids.filter(function (id) { return t.acked.indexOf(id) < 0; }) : [];
+    if (left.length) BR.pointing.remember({ kind: 'toggle', undo: { op: 'undo_change' }, ids: left, act: t.undid.act, since: t.undid.since });
+    if (t.acked.length) {
+      BR.chrome.say(t.done + ' · ' + why);
+      BR.pointing.follow(t.acked, t.act === 'revert' ? 'reverted' : 'restored');
+      landed(t);
+    } else {
+      undoing = null;
+      BR.pointing.follow(null);
+      BR.chrome.say(why);
+    }
+  }
+
+  function sendNext(rev) {
+    var next = undoing.queue.shift();
+    undoing.sent = next;
+    undoing.cid = BR.op({ op: 'undo_change', change: next.change }, rev);
   }
 
   /** x on an open row is "no" to its text, so it takes a second x while the first one's message stands. */
@@ -2166,12 +2278,13 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         reconcile();
         break;
       case 'ack':
-        if (undoing && undoing.cids.indexOf(msg.cid) >= 0) {
-          undoing.cids.splice(undoing.cids.indexOf(msg.cid), 1);
-          if (!undoing.cids.length) {
+        if (undoing && undoing.cid === msg.cid) {
+          undoing.acked.push(undoing.sent.id);
+          if (undoing.queue.length) sendNext(msg.rev || null);
+          else {
             // What it couldn't revert stays said
-            BR.chrome.say(undoing.why ? 'reverted · ' + undoing.why : 'reverted');
-            undoing = null;
+            BR.chrome.say(undoing.why ? undoing.done + ' · ' + undoing.why : undoing.done);
+            landed(undoing);
           }
         }
         delete pending[msg.cid];
@@ -2182,9 +2295,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         }
         break;
       case 'nack':
-        if (undoing && undoing.cids.indexOf(msg.cid) >= 0) undoing = null;
+        var refused = undoing && undoing.cid === msg.cid ? undoing : null;
         delete afterAck[msg.cid];
-        if (msg.reason) BR.chrome.nack(msg.reason);
+        if (refused) refuse(refused, msg.reason);
+        else if (msg.reason) BR.chrome.nack(msg.reason);
         drafts = drafts.filter(function (d) { return d.cid !== msg.cid; });
         var words = pending[msg.cid];
         delete pending[msg.cid];
@@ -2215,6 +2329,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     reconcile: function (s) {
       state = s;
       reconcile();
+      shown();
     },
     open: open,
     /** The Esc layer: keeps or closes the composer. False when none is open. */
@@ -2325,6 +2440,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     disarm: function () { armed = null; },
     rowKey: rowKey,
     revertAll: revertAll,
+    toggleBack: toggleBack,
+    /** Whether this tab's own revert or restore is still on its way to the state. */
+    toggling: function () { return !!undoing || !!awaiting; },
     /** Live notes on the served folder, which the walk visits on whole doc. */
     folderNotes: function () { return BOOT.review && BOOT.review.dir ? folderNotes : 0; },
     /** The blank hosts on the page, which j and k stop on like blocks. */

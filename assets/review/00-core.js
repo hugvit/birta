@@ -58,14 +58,15 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   }
 
   /** Sends a review op and keeps it in the outbox until the server acks or nacks its cid. */
-  BR.op = function (fields) {
+  BR.op = function (fields, rev) {
     var frame = {};
     for (var k in fields) frame[k] = fields[k];
     var cid = 'r' + session + '-' + (++seq);
     frame.type = 'op';
     frame.cid = cid;
     frame.path = CURRENT_PATH;
-    frame.rev = birtaBus.rev();
+    // A write sent after another's ack is at the rev that ack names, which the page may not show yet
+    frame.rev = rev || birtaBus.rev();
     var json = JSON.stringify(frame);
     if (new Blob([json]).size > MAX_OP_BYTES) throw new Error('review op too large to send');
     var kept = !!KEPT_OPS[frame.op];

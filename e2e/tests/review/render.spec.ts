@@ -473,7 +473,7 @@ test.describe("reverted row", () => {
   }
 
   for (const kept of [false, true]) {
-    test(`a reverted change keeps its lead, ends reverted by you then Claude's version muted, with no size and no keys${kept ? ", where it still stands" : ""}`, async ({
+    test(`a reverted change keeps its lead and its words, Claude's underlined, ends reverted by you, with no size and no keys${kept ? ", where it still stands" : ""}`, async ({
       page,
       birta,
     }) => {
@@ -482,10 +482,10 @@ test.describe("reverted row", () => {
       await expect.poll(() => hostWith(page, "reverted by you")).toMatchObject({ kbd: [], sp: "5:1-6:68" });
       const row = (await changeRows(page)).find((r) => /^reverted by you\b/.test(r.tail ?? ""))!;
       expect(row.lead).toBe('Claude · because you said "say why it fails"');
-      expect(row.tail).toMatch(/^reverted by you\b.*Claude's version:.*S3 answers 503 under load; retrying three times fixes most of these\./);
+      expect(row.tail).toBe("reverted by you");
+      expect(row.ins.join(" ")).toContain("S3 answers 503 under load; retrying three times fixes most of these.");
+      expect(row.text).not.toContain("Claude's version");
       expect(row.text).not.toMatch(SIZE_LABEL);
-      // Claude's version, which the revert took out, is muted
-      expect((await styleOf(page, "S3 answers 503 under load", ["color"]))?.color).toBe(MUTED);
       // Your own write that reverted it is no row of its own
       expect((await hosts(page)).filter((h) => h.sp === "5:1-6:68")).toHaveLength(1);
       expect(await openRow(page)).toBeNull();
@@ -537,12 +537,14 @@ test.describe("reverted row on a real server", () => {
     await expect.poll(() => reviewLog(served.root)!.filter((l) => l.op === "edit").length).toBe(1);
     await expect.poll(() => hostWith(page, "reverted by you")).toMatchObject({ kbd: [] });
     const row = (await changeRows(page)).find((r) => /^reverted by you\b/.test(r.tail ?? ""))!;
-    expect(row.tail).toMatch(/Claude's version:.*we just fail, and the user starts again\./);
+    expect(row.tail).toBe("reverted by you");
+    // Claude's words, underlined where they differ, are its version
+    expect(row.ins.join(" ")).toContain("starts");
+    expect(row.text).not.toContain("Claude's version");
     expect(row.text).not.toMatch(SIZE_LABEL);
     expect(row.sp).toMatch(/^5:1-/);
     expect(await focused(page)).toMatch(/^5:1-/);
-    // Interim until restore: the message is the bare word
-    await expect.poll(() => stripMessage(page)).toBe("reverted");
+    await expect.poll(() => stripMessage(page)).toBe("reverted · u restores Claude's text");
   });
 
   test("the reverted change stays a walk stop until the round ends, and its wash clears once reverted", async ({ page, birta }) => {

@@ -225,6 +225,9 @@ fn full_state() -> ReviewState {
             old_text: "old text\n".to_string(),
             new_text: "new text\n".to_string(),
             check: Some(Check::Reverted),
+            flip: Some("45.0".to_string()),
+            restored_by: None,
+            flip_reverse: None,
             unasked_why: Some("while I was there".to_string()),
             flagged: false,
             span: None,
@@ -455,6 +458,7 @@ fn a_full_state_serializes_to_the_frozen_shape() {
     change["old_text"] = json!("old text\n");
     change["new_text"] = json!("new text\n");
     change["check"] = json!("reverted");
+    change["flip"] = json!("45.0");
     change["unasked_why"] = json!("while I was there");
     want["deletions"][0]["head"] = json!("## Stacked on\n\n- #412");
     want["deletions"][0]["more"] = json!(1);
@@ -653,6 +657,9 @@ fn nested_optionals_are_omitted() {
         old_text: String::new(),
         new_text: String::new(),
         check: None,
+        flip: None,
+        restored_by: None,
+        flip_reverse: None,
         unasked_why: None,
         flagged: false,
         span: None,

@@ -366,6 +366,15 @@ pub struct Change {
     pub old_text: String,
     pub new_text: String,
     pub check: Option<Check>,
+    /// What `u` and `z` send to toggle it once you reverted it: the latest undo's own change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flip: Option<String>,
+    /// The undo that restored it, when your undos of it cancel out.
+    #[serde(skip)]
+    pub restored_by: Option<u32>,
+    /// The hunks that take `flip`'s write back, in the current text's lines.
+    #[serde(skip)]
+    pub flip_reverse: Option<Vec<Hunk>>,
     /// The body of the `unasked` line that names it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unasked_why: Option<String>,

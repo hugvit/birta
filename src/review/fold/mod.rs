@@ -790,6 +790,7 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
         phrase: fold.phrase(None),
         phrase_before_hold: pending.map(|r| fold.phrase(Some(r.n))),
         hold,
+        held: None,
         counts,
         items,
         changes: built.changes,
@@ -865,7 +866,19 @@ fn credit(
 }
 
 fn log_info(parsed: &Parsed, chain: &Chain) -> LogInfo {
-    let last_line = parsed
+    LogInfo {
+        lines: last_line(parsed),
+        bad: parsed.bad.len() as u32,
+        unknown_ops: parsed.unknown.len() as u32,
+        read_only: parsed.read_only,
+        baseline_available: chain.head().is_some(),
+        baseline_from: None,
+    }
+}
+
+/// The review file's last line number, whether or not it parsed.
+pub fn last_line(parsed: &Parsed) -> u32 {
+    parsed
         .lines
         .iter()
         .map(|l| l.n)
@@ -873,15 +886,7 @@ fn log_info(parsed: &Parsed, chain: &Chain) -> LogInfo {
         .chain(parsed.unknown.iter().map(|u| u.n))
         .chain(parsed.header.as_ref().map(|_| 1))
         .max()
-        .unwrap_or(0);
-    LogInfo {
-        lines: last_line,
-        bad: parsed.bad.len() as u32,
-        unknown_ops: parsed.unknown.len() as u32,
-        read_only: parsed.read_only,
-        baseline_available: chain.head().is_some(),
-        baseline_from: None,
-    }
+        .unwrap_or(0)
 }
 
 /// Folds a folder's review file, whose notes are on the folder: the same walk with no

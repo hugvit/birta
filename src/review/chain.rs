@@ -166,6 +166,11 @@ impl Chain {
         self.walked.revs.last().map(|(_, rev)| rev)
     }
 
+    /// Whether some link can rebuild the text of `rev`.
+    pub fn knows(&self, rev: &Rev) -> bool {
+        self.known.contains(rev)
+    }
+
     pub fn text(&self, rev: &Rev) -> Option<Arc<str>> {
         if !self.known.contains(rev) {
             return None;

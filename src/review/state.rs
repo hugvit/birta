@@ -26,6 +26,8 @@ pub struct ReviewState {
     /// The phrase as if the pending hold were absent, shown until `hold.not_before`.
     pub phrase_before_hold: Option<Phrase>,
     pub hold: Option<Hold>,
+    /// The hand-back the page's view is held at until its reply; the server sets it.
+    pub held: Option<HeldState>,
     pub counts: Counts,
     pub items: Vec<Item>,
     pub changes: Vec<Change>,
@@ -155,6 +157,13 @@ pub struct Replied {
     pub not_handled: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+}
+
+/// The doc as handed back: the chain head `rev` at submit line `n`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct HeldState {
+    pub rev: String,
+    pub n: u32,
 }
 
 /// A hand-back or approve written but not yet claimable.

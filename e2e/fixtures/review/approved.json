@@ -82,6 +82,7 @@
     "count": 1,
     "not_before": 1790000021000
   },
+  "held": null,
   "counts": {
     "drafts": 0,
     "sent_unclaimed": 0,

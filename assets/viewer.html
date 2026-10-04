@@ -686,6 +686,14 @@
           } catch (e) {
             return;
           }
+          // Until its hello is answered, a review page takes no text: a write that lands first
+          // may be one the doc is held back from until Claude's reply
+          if (REVIEW_ON && helloPending) {
+            if (msg.type === 'content' && !msg.hello) return;
+            if (msg.type === 'theme_update' && msg.html != null) {
+              msg = Object.assign({}, msg, { html: null, source: null });
+            }
+          }
 
           handleFrame(msg);
           birtaBus.emit(msg);
@@ -754,7 +762,10 @@
               break;
 
             case 'gone':
-              if (msg.path === CURRENT_PATH) showStatus(FILE_REMOVED);
+              if (msg.path === CURRENT_PATH) {
+                helloPending = false;
+                showStatus(FILE_REMOVED);
+              }
               break;
 
             case 'ack':
@@ -771,6 +782,8 @@
               checkQueue.forEach(revertCheck);
               checkInFlight = null;
               checkQueue = [];
+              // Review says in its strip why a held doc refused the tick
+              if (msg.reason === 'held') break;
               showStatus(CHANGED_SINCE);
               setTimeout(function() {
                 if (status.textContent === CHANGED_SINCE) hideStatus();

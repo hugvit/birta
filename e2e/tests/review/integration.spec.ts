@@ -1,4 +1,6 @@
 import { Page } from "@playwright/test";
+import * as fs from "fs";
+import * as path from "path";
 import {
   test,
   expect,
@@ -11,15 +13,18 @@ import {
   highlighted,
   hhmm,
   linesNamed,
+  marks,
   misaligned,
   phraseOf,
   record,
   revOf,
   reviewLog,
+  spAt,
+  stripMessage,
   turnOf,
 } from "./harness";
 
-// The real server end to end: no socket mock anywhere in this file.
+// The real server end to end: no socket mock here; one test passes the socket through to slip in a frame.
 
 // The phrase prints local times; UTC lets the spec name them from the epoch alone
 test.use({ timezoneId: "UTC" });
@@ -482,6 +487,261 @@ test.describe("seen", () => {
     await expect.poll(() => seenInState(1)).toBe(true);
     await expect.poll(() => phraseOf(page)).toBe(`${replied} · all checked`);
     await expect.poll(() => turnOf(page)).toMatch(/^Approve(?! ·)/);
+  });
+});
+
+// --- one writer at a time ----------------------------------------------------------------
+
+const HELD = "Claude has the doc · this works again after its reply";
+/** Claude's edit of the Why paragraph; only its words are new. */
+const WRITTEN = DOC.replace("we just fail.", "we just fail, because S3 answers 503 under load.");
+const ONLY_WRITTEN = "because S3 answers 503 under load";
+
+const docText = (page: Page) => page.evaluate(() => document.getElementById("content")!.textContent ?? "");
+const bars = async (page: Page) => (await marks(page)).filter((m) => m.mark === "bar" && m.width > 0 && m.height > 0);
+
+/** The page hands back a note on the Why paragraph and Claude picks it up. */
+async function handedBack(page: Page, birta: Start) {
+  const opened = await openReal(page, birta, { BIRTA_REVIEW_HOLD_MS: "300" });
+  for (let i = 0; i < 3; i++) await page.keyboard.press("j");
+  await keep(page, "say why");
+  await expect.poll(() => linesNamed(opened.served.root, "comment").length).toBe(1);
+  await page.keyboard.press("ControlOrMeta+Enter");
+  await expect.poll(() => phraseOf(page), { timeout: 3_000 }).toMatch(/^sent /);
+  const picked = agent(opened.served.root, ["review", "pr.md", "--as", "claude"]);
+  expect(picked.status, picked.stderr).toBe(0);
+  const claim = linesNamed(opened.served.root, "claim")[0];
+  await expect.poll(() => phraseOf(page)).toBe(`Claude picked up ${hhmm(claim.ts)}`);
+  return { ...opened, note: linesNamed(opened.served.root, "comment")[0].n as number };
+}
+
+/** Claude writes its edit, and birta records it. */
+async function claudeWrites(root: string, write: (rel: string, text: string) => void) {
+  write("pr.md", WRITTEN);
+  await expect.poll(() => linesNamed(root, "external").map((l) => l.to_rev)).toEqual([revOf(WRITTEN)]);
+}
+
+function respond(root: string, note: number) {
+  const r = agent(root, ["respond", "pr.md", "--as", "claude"], `#${note} done\n#${note} covers "${ONLY_WRITTEN}"\n`);
+  expect(r.status, r.stdout + r.stderr).toBe(0);
+  expect(linesNamed(root, "yield")).toHaveLength(1);
+}
+
+/** Polls for `ms` that the page still shows the handed-back text, with no bar of Claude's. */
+async function holdsHandedBack(page: Page, ms: number, when: string) {
+  const end = Date.now() + ms;
+  do {
+    const text = await docText(page);
+    expect(text, `the handed-back text ${when}`).toContain("we just fail.");
+    expect(text, `Claude's text ${when}`).not.toContain(ONLY_WRITTEN);
+    expect(await bars(page), `Claude's bars ${when}`).toEqual([]);
+    await page.waitForTimeout(100);
+  } while (Date.now() < end);
+}
+
+test.describe("one writer at a time", () => {
+  test("Claude's write mid-turn doesn't change the page; its text, rows and bars arrive with the reply", async ({
+    page,
+    birta,
+  }) => {
+    const { served, frames, note } = await handedBack(page, birta);
+    await claudeWrites(served.root, served.write);
+    await holdsHandedBack(page, 1_500, "after Claude's write");
+    expect(
+      frames.got.filter((f) => f.socket === 0 && f.msg.type === "content" && f.msg.rev === revOf(WRITTEN)),
+      "no content of Claude's text mid-turn",
+    ).toEqual([]);
+    await expect.poll(() => turnOf(page)).toBe("With Claude");
+    respond(served.root, note);
+    await expect.poll(() => docText(page), { timeout: 5_000 }).toContain(ONLY_WRITTEN);
+    await expect.poll(async () => (await bars(page)).some((b) => b.check === "new")).toBe(true);
+    await expect.poll(() => phraseOf(page)).toMatch(/^Claude replied \d\d:\d\d · [1-9]\d* to check$/);
+    // One frame pair: the content of Claude's text, then at once the state that shows its rows
+    const mine = frames.got.filter((f) => f.socket === 0);
+    const at = mine.findIndex((f) => f.msg.type === "content" && f.msg.rev === revOf(WRITTEN));
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(mine[at + 1]?.msg.type).toBe("review_state");
+    expect(mine[at + 1]?.msg.state?.held ?? null).toBeNull();
+    expect((mine[at + 1]?.msg.state?.changes ?? []).length).toBeGreaterThan(0);
+  });
+
+  test("a reload mid-turn shows the doc as handed back, and the reply lands without another reload", async ({
+    page,
+    birta,
+  }) => {
+    const { served, note } = await handedBack(page, birta);
+    await claudeWrites(served.root, served.write);
+    await page.reload();
+    await booted(page);
+    await page.evaluate(() => ((window as unknown as { __sameLoad: boolean }).__sameLoad = true));
+    await holdsHandedBack(page, 1_000, "after a reload mid-turn");
+    expect(await phraseOf(page)).toBe(`Claude picked up ${hhmm(linesNamed(served.root, "claim")[0].ts)}`);
+    respond(served.root, note);
+    await expect.poll(() => docText(page), { timeout: 5_000 }).toContain(ONLY_WRITTEN);
+    await expect.poll(async () => (await bars(page)).length).toBeGreaterThan(0);
+    await expect.poll(() => phraseOf(page)).toMatch(/^Claude replied /);
+    expect(
+      await page.evaluate(() => (window as unknown as { __sameLoad?: boolean }).__sameLoad === true),
+      "no reload brought the reply",
+    ).toBe(true);
+  });
+
+  test("a reload mid-turn never paints Claude's text, not even before the page boots", async ({ page, birta }) => {
+    await page.addInitScript((words) => {
+      const w = window as unknown as { __leak: boolean };
+      w.__leak = false;
+      const check = () => {
+        if ((document.getElementById("content")?.textContent ?? "").includes(words)) w.__leak = true;
+      };
+      new MutationObserver(check).observe(document, { childList: true, subtree: true, characterData: true });
+    }, ONLY_WRITTEN);
+    const { served, note } = await handedBack(page, birta);
+    await claudeWrites(served.root, served.write);
+    await page.reload();
+    await booted(page);
+    await holdsHandedBack(page, 1_000, "after a reload mid-turn");
+    expect(await page.evaluate(() => (window as unknown as { __leak: boolean }).__leak), "Claude's text painted").toBe(false);
+    respond(served.root, note);
+    await expect.poll(() => docText(page), { timeout: 5_000 }).toContain(ONLY_WRITTEN);
+  });
+
+  test("a write that reaches the socket before its hello is answered is never painted", async ({ page, birta }) => {
+    const EARLY = "Claude's words, arriving early";
+    await page.addInitScript((words) => {
+      const w = window as unknown as { __leak: boolean };
+      w.__leak = false;
+      const check = () => {
+        if ((document.getElementById("content")?.textContent ?? "").includes(words)) w.__leak = true;
+      };
+      new MutationObserver(check).observe(document, { childList: true, subtree: true, characterData: true });
+    }, EARLY);
+    const { served, note } = await handedBack(page, birta);
+    await claudeWrites(served.root, served.write);
+    // Claude's content lands between the page's hello and the server's answer to it
+    await page.routeWebSocket(/\/ws$/, (ws) => {
+      const server = ws.connectToServer();
+      ws.onMessage((raw) => {
+        const msg = JSON.parse(raw.toString());
+        if (msg.type === "hello") {
+          ws.send(
+            JSON.stringify({ type: "content", path: "pr.md", rev: revOf(WRITTEN), html: `<p>${EARLY}</p>`, source: "", file_stats: "", stops: [] }),
+          );
+        }
+        server.send(raw);
+      });
+    });
+    await page.reload();
+    await booted(page);
+    await holdsHandedBack(page, 1_000, "after a write slipped in before the hello's answer");
+    expect(await docText(page)).not.toContain(EARLY);
+    expect(await page.evaluate(() => (window as unknown as { __leak: boolean }).__leak), "the early write painted").toBe(false);
+    respond(served.root, note);
+    await expect.poll(() => docText(page), { timeout: 5_000 }).toContain(ONLY_WRITTEN);
+  });
+
+  test("when the reply brings several writes, focus goes to the block that took its place", async ({ page, birta }) => {
+    const { served, note } = await handedBack(page, birta);
+    const before = await focused(page);
+    expect(before, "setup: focus on the Why paragraph").toBe(PARA);
+    // Claude rewrites the focused paragraph, then adds a line at the top in a second save
+    const rewritten = DOC.replace("When the upload **hits** a 503 we just fail.", "An upload that hits a 503 is retried.");
+    served.write("pr.md", rewritten);
+    await expect.poll(() => linesNamed(served.root, "external").length).toBe(1);
+    const both = rewritten.replace("# Upload retries\n", "# Upload retries\n\nA summary line.\n");
+    served.write("pr.md", both);
+    await expect.poll(() => linesNamed(served.root, "external").length).toBe(2);
+    const r = agent(
+      served.root,
+      ["respond", "pr.md", "--as", "claude"],
+      `#${note} done\n#${note} covers "is retried"\nunasked "A summary line.": a summary helps\n`,
+    );
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    await expect.poll(() => docText(page), { timeout: 5_000 }).toContain("is retried");
+    const sp = spAt(both, "An upload that hits a 503 is retried.");
+    await expect.poll(() => focused(page)).toBe(sp);
+  });
+
+  test("in a folder, a theme change mid-turn keeps the doc as handed back", async ({ page, birta }) => {
+    const served = await birta({ "index.md": "# Index\n", "pr.md": DOC }, { ...GATE_ON, BIRTA_REVIEW_HOLD_MS: "300" }, ["."]);
+    await page.setViewportSize(WIDE);
+    await page.goto(`${served.url}/view/pr.md`);
+    await booted(page);
+    await keep(page, "tighten it");
+    await expect.poll(() => linesNamed(served.root, "comment").length).toBe(1);
+    await page.keyboard.press("ControlOrMeta+Enter");
+    await expect.poll(() => linesNamed(served.root, "submit").length).toBe(1);
+    await expect.poll(() => phraseOf(page), { timeout: 3_000 }).toMatch(/^sent /);
+    const picked = agent(served.root, ["review", "pr.md", "--as", "claude"]);
+    expect(picked.status, picked.stderr).toBe(0);
+    await claudeWrites(served.root, served.write);
+    await holdsHandedBack(page, 500, "after Claude's write");
+    // Another tab picks a theme; every page gets it
+    await page.evaluate(
+      () =>
+        new Promise<void>((done) => {
+          const ws = new WebSocket(`ws://${location.host}/ws`);
+          ws.onopen = () => {
+            ws.send(JSON.stringify({ type: "theme_change", theme: "dracula" }));
+            setTimeout(() => (ws.close(), done()), 300);
+          };
+        }),
+    );
+    await expect(page.locator("html")).toHaveAttribute("data-birta-theme", "dracula");
+    await holdsHandedBack(page, 1_500, "after a theme change");
+  });
+
+  test("with Claude, u says Claude has the doc and writes nothing", async ({ page, birta }) => {
+    const { served } = await handedBack(page, birta);
+    await claudeWrites(served.root, served.write);
+    const log = reviewLog(served.root)!.length;
+    await page.keyboard.press("u");
+    await expect.poll(() => stripMessage(page)).toBe(HELD);
+    await page.waitForTimeout(SETTLE_MS);
+    expect(fs.readFileSync(path.join(served.root, "pr.md"), "utf-8")).toBe(WRITTEN);
+    expect(reviewLog(served.root)!.length).toBe(log);
+  });
+
+  test("with Claude, a task checkbox says Claude has the doc, writes nothing and stays as it was", async ({
+    page,
+    birta,
+  }) => {
+    const doc = DOC + "\n- [ ] Ran the integration suite\n";
+    const served = await birta({ "pr.md": doc }, { ...GATE_ON, BIRTA_REVIEW_HOLD_MS: "300" });
+    await page.setViewportSize(WIDE);
+    await page.goto(`${served.url}/view/pr.md`);
+    await booted(page);
+    await keep(page, "tighten it");
+    await expect.poll(() => linesNamed(served.root, "comment").length).toBe(1);
+    await page.keyboard.press("ControlOrMeta+Enter");
+    await expect.poll(() => phraseOf(page), { timeout: 3_000 }).toMatch(/^sent /);
+    const picked = agent(served.root, ["review", "pr.md", "--as", "claude"]);
+    expect(picked.status, picked.stderr).toBe(0);
+    const log = reviewLog(served.root)!.length;
+    const box = page.locator('#content input[type="checkbox"]');
+    await box.click();
+    await expect.poll(() => stripMessage(page)).toBe(HELD);
+    await expect(box).not.toBeChecked();
+    await expect(page.locator("#status")).not.toHaveText("changed since · try again");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(fs.readFileSync(path.join(served.root, "pr.md"), "utf-8")).toBe(doc);
+    expect(reviewLog(served.root)!.length).toBe(log);
+  });
+
+  test("in the hand-back's hold, u already says Claude has the doc and writes nothing", async ({ page, birta }) => {
+    const { served } = await openReal(page, birta, { BIRTA_REVIEW_HOLD_MS: "8000" });
+    for (let i = 0; i < 3; i++) await page.keyboard.press("j");
+    await keep(page, "say why");
+    await expect.poll(() => linesNamed(served.root, "comment").length).toBe(1);
+    await page.keyboard.press("ControlOrMeta+Enter");
+    await expect.poll(() => linesNamed(served.root, "submit").length).toBe(1);
+    const submit = linesNamed(served.root, "submit")[0];
+    const log = reviewLog(served.root)!.length;
+    await page.keyboard.press("u");
+    await expect.poll(() => stripMessage(page)).toBe(HELD);
+    expect(Date.now(), "still inside the hold").toBeLessThan(submit.not_before);
+    await page.waitForTimeout(SETTLE_MS);
+    expect(fs.readFileSync(path.join(served.root, "pr.md"), "utf-8")).toBe(DOC);
+    expect(reviewLog(served.root)!.length).toBe(log);
   });
 });
 

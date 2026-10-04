@@ -2078,7 +2078,9 @@ async fn a_review_file_written_by_the_agent_pushes_state() {
     let lines = hello_state(&frames)["state"]["log"]["lines"]
         .as_u64()
         .unwrap();
+    // Its reply ends the turn, so the state shows the file whether or not a turn is held
     s.done("claude", note, turn);
+    s.yield_turn("claude", turn);
     site.write(LOG, &s.log());
     let (_, frame) = until(&mut ws, "a state with the agent's line", |f| {
         f["type"] == "review_state" && f["state"]["log"]["lines"].as_u64() > Some(lines)
@@ -3029,6 +3031,16 @@ async fn every_reachable_nack_reason_is_sent() {
             op("n8", &r, "release", json!({"claim": claim1})),
             "claim_moved",
         ),
+        (
+            "undo while Claude has the doc",
+            op(
+                "n9",
+                &r,
+                "undo_change",
+                json!({"change": format!("{sub3}.0")}),
+            ),
+            "held",
+        ),
     ];
     let lines = log_lines(&review_file(&site)).len();
     let mut failures = Vec::new();
@@ -3572,4 +3584,153 @@ async fn a_docs_hand_off_names_it_through_the_link_it_was_typed_by() {
         hello_state(&frames)["state"]["hand_off"],
         "Take a look at my notes: `birta review link/pr.md`"
     );
+}
+
+// --- held until the reply ---
+
+/// Appends `ops` as `claude`'s lines, under the review file's lock as the CLI writes.
+fn append_agent(review: &Path, ops: Vec<Value>) -> Vec<u32> {
+    use birta::review::log::{AppendCtx, Log};
+    use birta::review::ops::{By, ByKind, Op, Via};
+    let ops: Vec<Op> = ops
+        .into_iter()
+        .map(|op| serde_json::from_value(op).expect("a test op must parse"))
+        .collect();
+    let ctx = AppendCtx {
+        now_ms: now_ms(),
+        by: By {
+            kind: ByKind::Agent,
+            name: Some("claude".into()),
+            via: Some(Via::Cli),
+        },
+        cid: None,
+    };
+    Log::open(review)
+        .append(ctx, ops, |_, _| Ok(()))
+        .expect("the agent's lines land")
+}
+
+/// A note handed back from `ws` and claimed by `claude`, who then saves the doc twice.
+/// Returns Claude's claim line and its last text.
+async fn claude_wrote_twice(site: &Site, ws: &mut Ws) -> (u32, String) {
+    let r = rev(DOC);
+    acked(
+        ws,
+        op(
+            "c1",
+            &r,
+            "comment",
+            json!({"at": {"k": "doc"}, "body": "one"}),
+        ),
+    )
+    .await;
+    let submit = acked(ws, op("c2", &r, "hand_back", json!({"scope": "doc"}))).await["n"].clone();
+    let claim = append_agent(
+        &review_file(site),
+        vec![json!({"op": "claim", "round": submit})],
+    )[0];
+    let first = DOC.replace("detail one", "detail one, first pass");
+    let last = DOC.replace("detail one", "detail one, second pass");
+    for text in [&first, &last] {
+        site.write(PR, text);
+        eventually("Claude's save is recorded", || {
+            ops_named(&review_file(site), "external")
+                .iter()
+                .any(|l| l["to_rev"] == rev(text))
+        })
+        .await;
+    }
+    (claim, last)
+}
+
+/// Everything the socket gets from the yield through the state that ends the hold, and
+/// what follows within a moment.
+async fn frames_of_the_reply(ws: &mut Ws) -> Vec<Value> {
+    let (mut frames, end) = until(ws, "the state that ends the hold", |f| {
+        f["type"] == "review_state" && f["state"]["held"].is_null()
+    })
+    .await;
+    frames.push(end);
+    frames.extend(drain(ws, Duration::from_millis(500)).await);
+    frames
+}
+
+/// One content of `text`, from disk, then its state at once; nothing of an earlier save.
+fn content_then_state_back_to_back(frames: &[Value], text: &str, who: &str) {
+    let contents: Vec<usize> = frames
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f["type"] == "content")
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(contents.len(), 1, "{who}: one content: {frames:#?}");
+    let i = contents[0];
+    assert_eq!(frames[i]["rev"], rev(text), "{who}: the text on disk");
+    let next = frames
+        .get(i + 1)
+        .unwrap_or_else(|| panic!("{who}: no frame after the content"));
+    assert_eq!(next["type"], "review_state", "{who}: {frames:#?}");
+    assert!(next["state"]["held"].is_null(), "{who}: {next}");
+    assert_eq!(next["rev"], rev(text), "{who}");
+    assert!(
+        frames[..i]
+            .iter()
+            .all(|f| f["type"] != "review_state" || !f["state"]["held"].is_null()),
+        "{who}: a state left the hold before its content: {frames:#?}"
+    );
+}
+
+#[tokio::test]
+async fn on_the_yield_every_review_socket_gets_the_content_then_the_state_back_to_back() {
+    let site = Site::new();
+    site.write(PR, DOC);
+    let served = site.serve(&[PR], &[GATE_ON, ("BIRTA_REVIEW_HOLD_MS", "0")]);
+    let (mut ws, _) = served.viewing(PR).await;
+    let (mut other, _) = served.viewing(PR).await;
+    let (claim, last) = claude_wrote_twice(&site, &mut ws).await;
+    for socket in [&mut ws, &mut other] {
+        let mid = drain(socket, Duration::from_millis(500)).await;
+        assert!(
+            !mid.iter().any(|f| f["type"] == "content"),
+            "Claude's saves reached the page mid-turn: {mid:#?}"
+        );
+    }
+    append_agent(
+        &review_file(&site),
+        vec![json!({"op": "yield", "turn": claim})],
+    );
+    for (who, socket) in [
+        ("the hand-back's tab", &mut ws),
+        ("a second tab", &mut other),
+    ] {
+        let frames = frames_of_the_reply(socket).await;
+        content_then_state_back_to_back(&frames, &last, who);
+    }
+}
+
+#[tokio::test]
+async fn a_socket_that_said_hello_mid_turn_still_gets_the_content_then_the_state_on_the_yield() {
+    let site = Site::new();
+    site.write(PR, DOC);
+    let served = site.serve(&[PR], &[GATE_ON, ("BIRTA_REVIEW_HOLD_MS", "0")]);
+    let (mut ws, _) = served.viewing(PR).await;
+    let (claim, last) = claude_wrote_twice(&site, &mut ws).await;
+    let (mut late, frames) = served.viewing(PR).await;
+    // The hello's own content is the one its state follows; a write may reach the socket first
+    let at = frames
+        .windows(2)
+        .position(|w| w[0]["type"] == "content" && w[1]["type"] == "review_state")
+        .unwrap_or_else(|| panic!("no hello content: {frames:#?}"));
+    assert_eq!(
+        frames[at]["rev"],
+        rev(DOC),
+        "the hello mid-turn is held too"
+    );
+    drain(&mut late, Duration::from_millis(300)).await;
+    append_agent(
+        &review_file(&site),
+        vec![json!({"op": "yield", "turn": claim})],
+    );
+    let frames = frames_of_the_reply(&mut late).await;
+    content_then_state_back_to_back(&frames, &last, "the tab opened mid-turn");
 }

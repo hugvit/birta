@@ -360,3 +360,22 @@ test("in a folder the button counts the other files' drafts and this doc's own, 
   );
   assert.deepEqual(plain(BR.pure.turnButton(s, folderOpts(s, { dir: caught }))), B("Hand back · 2"));
 });
+
+test("tookPlace follows a held page's line through every write of the turn", () => {
+  const BR = load();
+  // The probe fold's turn: rewrite lines 3-4, then a line above, then cut line 10
+  const changes = [
+    { id: "7.0", op: 7, old: [3, 4], new: [3, 3] },
+    { id: "8.0", op: 8, old: [3, 2], new: [3, 4] },
+    { id: "9.0", op: 9, old: [10, 10], new: [10, 9] },
+  ];
+  const took = (ops, line) => BR.pure.tookPlace(changes, ops, line)?.id ?? null;
+  // The first write took the held text's line 4, though the last write is what a live page sees
+  assert.equal(took([7, 8, 9], 4), "7.0");
+  assert.equal(took([9], 4), null);
+  // Held line 9: -1 after the rewrite, +2 after the line above, so the last write's line 10
+  assert.equal(took([7, 8, 9], 9), "9.0");
+  assert.equal(took([7, 8, 9], 8), null);
+  // A line no write touched
+  assert.equal(took([7, 8, 9], 1), null);
+});

@@ -24,8 +24,8 @@ use crate::review::log::{self, AppendCtx, AppendError, Held, Log};
 use crate::review::ops::{
     self, AnchorReq, At, BlockScope, By, ByKind, CommentKind, Header, Line, Op, Parsed, Verdict,
 };
-use crate::review::state::{ItemStatus, ReviewState, Stage};
-use crate::review::{FOLDER_REVIEW, Reject, fold, review_path_for, sync, undo};
+use crate::review::state::{HeldState, ItemStatus, ReviewState, Stage};
+use crate::review::{FOLDER_REVIEW, Reject, fold, held, review_path_for, sync, undo};
 use crate::server::{AppState, WsEvent};
 
 const DEFAULT_HOLD_MS: u64 = 5_000;
@@ -52,7 +52,9 @@ pub(crate) struct ReviewHub {
     pub(crate) dir: DirIndex,
     /// The canonical path this server was named, and that path as typed.
     pub(crate) served_as: Option<(PathBuf, String)>,
-    folds: Mutex<HashMap<PathBuf, (FoldKey, ReviewState)>>,
+    folds: Mutex<HashMap<PathBuf, (FoldKey, Arc<Folded>)>>,
+    /// What the pages last saw of each held doc, so a write that changes none of it isn't pushed.
+    pushed: Mutex<HashMap<PathBuf, Value>>,
     /// The pending hold each doc has a timer for, by its end.
     holds: Mutex<HashMap<PathBuf, u64>>,
     dir_push: Mutex<DirPush>,
@@ -62,6 +64,12 @@ pub(crate) struct ReviewHub {
 
 /// The doc's and its review file's signatures a fold was made from.
 type FoldKey = (Option<FileSig>, Option<FileSig>);
+
+/// A doc's state for the page, and the text it shows while the doc is held.
+struct Folded {
+    state: ReviewState,
+    held: Option<Arc<str>>,
+}
 
 #[derive(Debug, Default)]
 struct DirPush {
@@ -94,6 +102,7 @@ impl ReviewHub {
             dir: DirIndex::new(root),
             served_as: None,
             folds: Mutex::default(),
+            pushed: Mutex::default(),
             holds: Mutex::default(),
             dir_push: Mutex::default(),
             rt: tokio::runtime::Handle::try_current().ok(),
@@ -103,35 +112,68 @@ impl ReviewHub {
     /// The doc's review, folded from its file or, with none yet, from the file a first
     /// note would create. `None` when the doc can't be read as text.
     pub(crate) fn state_of(&self, canonical: &Path, folder_root: bool) -> Option<ReviewState> {
-        let log_path = review_path_for(canonical);
-        let key = (FileSig::of(canonical), FileSig::of(&log_path));
-        let cached = lock(&self.folds)
-            .get(canonical)
-            .filter(|(k, _)| *k == key)
-            .map(|(_, state)| state.clone());
-        let mut state = match cached {
-            Some(state) => state,
-            None => {
-                let bytes = sync::read_doc(canonical).ok()?;
-                let text = String::from_utf8(bytes).ok()?;
-                let parsed = Log::open(&log_path).read().ok().flatten();
-                let state = match &parsed {
-                    Some(parsed) => fold_text(parsed, &text),
-                    None => {
-                        let mut state = fold_text(&self.unwritten(canonical, &text), &text);
-                        state.log.lines = 0;
-                        state
-                    }
-                };
-                lock(&self.folds).insert(canonical.to_path_buf(), (key, state.clone()));
-                state
-            }
-        };
+        let mut state = self.folded(canonical)?.state.clone();
         state.server_now = now_ms();
         state.writable = folder_root && can_write(canonical);
         state.log_writable = log_writable(folder_root, canonical);
         state.hand_off = fold::hand_off(&self.typed_path(canonical));
         Some(state)
+    }
+
+    /// The text a held doc shows the reviewer, at its held rev; `None` when not held.
+    pub(crate) fn held_text(&self, canonical: &Path) -> Option<(Rev, Arc<str>)> {
+        let folded = self.folded(canonical)?;
+        let rev = Rev::parse(&folded.state.held.as_ref()?.rev)?;
+        Some((rev, folded.held.clone()?))
+    }
+
+    /// Whether the doc is held: what the page shows and what may write it agree on this.
+    pub(crate) fn is_held(&self, canonical: &Path) -> bool {
+        self.folded(canonical).is_some_and(|f| f.held.is_some())
+    }
+
+    fn folded(&self, canonical: &Path) -> Option<Arc<Folded>> {
+        let log_path = review_path_for(canonical);
+        let key = (FileSig::of(canonical), FileSig::of(&log_path));
+        let cached = lock(&self.folds)
+            .get(canonical)
+            .filter(|(k, _)| *k == key)
+            .map(|(_, folded)| Arc::clone(folded));
+        if let Some(folded) = cached {
+            return Some(folded);
+        }
+        let bytes = sync::read_doc(canonical).ok()?;
+        let text = String::from_utf8(bytes).ok()?;
+        let parsed = Log::open(&log_path).read().ok().flatten();
+        let folded = match &parsed {
+            Some(parsed) => match held::view(parsed) {
+                Some(view) => {
+                    let mut state = fold_text(&view.log, &view.text);
+                    state.held = Some(HeldState {
+                        rev: view.at.rev.as_str().to_string(),
+                        n: view.at.n,
+                    });
+                    // The file's own bookkeeping is not held back
+                    state.log.lines = fold::last_line(parsed);
+                    Folded {
+                        state,
+                        held: Some(view.text),
+                    }
+                }
+                None => Folded {
+                    state: fold_text(parsed, &text),
+                    held: None,
+                },
+            },
+            None => {
+                let mut state = fold_text(&self.unwritten(canonical, &text), &text);
+                state.log.lines = 0;
+                Folded { state, held: None }
+            }
+        };
+        let folded = Arc::new(folded);
+        lock(&self.folds).insert(canonical.to_path_buf(), (key, Arc::clone(&folded)));
+        Some(folded)
     }
 
     /// The path an agent would type for `canonical`: the served folder as typed, or the
@@ -356,12 +398,40 @@ pub(crate) fn push_frame(push: &ReviewPush, rel: &str) -> String {
 
 /// Folds the doc again and sends its state to every page viewing it.
 pub(crate) fn push_state(app: &Arc<AppState>, canonical: &Path) {
+    push(app, canonical, false);
+}
+
+/// [`push_state`] after a write to the doc or its review file. While the doc is held,
+/// the agent's writes change nothing the pages show, so the same state isn't sent again.
+fn push_changed(app: &Arc<AppState>, canonical: &Path) {
+    push(app, canonical, true);
+}
+
+fn push(app: &Arc<AppState>, canonical: &Path, unless_same: bool) {
     let Some(hub) = &app.review else {
         return;
     };
     let Some(state) = hub.state_of(canonical, app.roots.folder_root(canonical)) else {
         return;
     };
+    let shown = state.held.as_ref().and_then(|_| {
+        let mut v = serde_json::to_value(&state).ok()?;
+        // The clock and the file's line count move with every write; the page shows neither
+        v.as_object_mut()?
+            .retain(|k, _| k != "server_now" && k != "log");
+        Some(v)
+    });
+    {
+        let mut pushed = lock(&hub.pushed);
+        let same = shown.is_some() && pushed.get(canonical) == shown.as_ref();
+        if unless_same && same {
+            return;
+        }
+        match shown {
+            Some(v) => pushed.insert(canonical.to_path_buf(), v),
+            None => pushed.remove(canonical),
+        };
+    }
     arm_hold(app, hub, canonical, &state);
     let _ = app.hub.send(WsEvent::Review(Arc::new(ReviewPush {
         canonical: canonical.to_path_buf(),
@@ -479,7 +549,7 @@ pub(crate) fn doc_event(app: &Arc<AppState>, rel: &str, canonical: &Path, remove
     }
     // A doc with no review file still has a state on its new text
     if synced || app.viewers.wants(rel) {
-        push_state(app, canonical);
+        push_changed(app, canonical);
     }
     if hub
         .dir
@@ -535,7 +605,7 @@ pub(crate) fn review_file_event(app: &Arc<AppState>, review: &Path) {
         return;
     };
     if doc.is_file() {
-        push_state(app, &doc);
+        push_changed(app, &doc);
     }
     if hub.dir.refresh(&doc) {
         push_dir(app);
@@ -636,6 +706,18 @@ enum HandBackScope {
 }
 
 impl WsOp {
+    /// Whether the op stands on the doc as handed back while the doc is held.
+    fn takes_held(&self) -> bool {
+        matches!(
+            self,
+            Self::Comment { .. }
+                | Self::Amend { .. }
+                | Self::Retract { .. }
+                | Self::Reply { .. }
+                | Self::Seen { .. }
+        )
+    }
+
     /// Whether the op means something only on the text the page saw.
     fn reads_text(&self) -> bool {
         match self {
@@ -717,6 +799,7 @@ fn apply(app: &Arc<AppState>, frame: OpFrame, beacon: bool) -> Result<Acked, Nac
             to,
             at: Some(AnchorReq::Dir),
         } => return folder_retract(app, hub, &frame, *to),
+        WsOp::UndoChange { .. } if hub.is_held(&doc.canonical) => return Err("held"),
         WsOp::UndoChange { change } => undo_change(&doc, &frame, change)?,
         WsOp::HandBack {
             scope: HandBackScope::All,
@@ -827,17 +910,35 @@ fn append(
     sync::sync_bytes(held, &doc.canonical, &bytes, now);
     let text = String::from_utf8(bytes).map_err(|_| "read_only")?;
     let disk = Rev::of(text.as_bytes());
-    if frame.op.reads_text() {
-        let rev = frame.client_rev().ok_or("changed_since")?;
-        if rev != disk {
-            return Err(if recorded(held.parsed(), &rev) {
+    let rev = frame.client_rev();
+    // While held, the page shows the doc as handed back, so notes stand on that text
+    let at_disk = rev.as_ref() == Some(&disk);
+    let view = (frame.op.takes_held() && !(frame.op.reads_text() && at_disk))
+        .then(|| held::view(held.parsed()))
+        .flatten();
+    if frame.op.reads_text() && view.is_none() {
+        let rev = rev.as_ref().ok_or("changed_since")?;
+        if *rev != disk {
+            return Err(if recorded(held.parsed(), rev) {
                 "changed_since"
             } else {
                 "stale_rev"
             });
         }
     }
-    let ops = build(hub, &frame.op, held.parsed(), &text, &disk, now, batch)?;
+    let ops = match &view {
+        Some(v) => {
+            if frame.op.reads_text() && rev.as_ref() != Some(&v.at.rev) {
+                return Err("changed_since");
+            }
+            build(hub, &frame.op, &v.log, &v.text, &v.at.rev, now, batch)?
+        }
+        None => build(hub, &frame.op, held.parsed(), &text, &disk, now, batch)?,
+    };
+    // A doc out with the agent is sent again only after its reply, never at its half-done text
+    if matches!(frame.op, WsOp::HandBack { .. }) && held::at(held.parsed()).is_some() {
+        return Err("held");
+    }
     let ctx = AppendCtx {
         now_ms: now,
         by: human(),
@@ -969,13 +1070,23 @@ fn build(
             fold::scan(parsed, now)
                 .check_submit(upto, now)
                 .map_err(|r| reject(&r))?;
-            vec![Op::Submit {
+            let mut ops = Vec::with_capacity(2);
+            // The doc stays held at this text until the reply, so the log must rebuild it
+            if Chain::build(parsed).text(disk).is_none() {
+                ops.push(Op::Snap {
+                    rev: disk.clone(),
+                    text: text.to_string(),
+                    checkpoint: true,
+                });
+            }
+            ops.push(Op::Submit {
                 upto,
                 not_before: now + hold,
                 hold_ms: hold,
                 to: None,
                 batch,
-            }]
+            });
+            ops
         }
         WsOp::Approve {} => log::approve_ops(&Chain::build(parsed), text, now + hold, hold),
         WsOp::Withdraw { to, .. } => {

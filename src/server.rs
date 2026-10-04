@@ -916,7 +916,7 @@ fn now_secs() -> u64 {
 }
 
 /// Resolves and reads a markdown file for `/view` and `/render`; stdin mode serves none.
-async fn read_doc(state: &AppState, rel: &str) -> Result<(PathBuf, Vec<u8>), Response> {
+async fn read_doc(state: &Arc<AppState>, rel: &str) -> Result<(PathBuf, Vec<u8>), Response> {
     if state.mode == Mode::Stdin {
         return Err(StatusCode::NOT_FOUND.into_response());
     }
@@ -924,6 +924,10 @@ async fn read_doc(state: &AppState, rel: &str) -> Result<(PathBuf, Vec<u8>), Res
         .roots
         .resolve_file(rel, FileKind::Markdown)
         .map_err(|e| e.status().into_response())?;
+    // A review page shows a held doc as handed back, however it loads it
+    if let Some((_, text)) = held_text(state, &canonical).await {
+        return Ok((canonical, text.as_bytes().to_vec()));
+    }
     match tokio::fs::read(&canonical).await {
         Ok(bytes) => Ok((canonical, bytes)),
         Err(_) => Err((StatusCode::NOT_FOUND, "could not read file").into_response()),
@@ -1180,6 +1184,20 @@ async fn toggle_checkbox(
         .roots
         .resolve_doc(rel, Access::Write)
         .map_err(|_| "read_only")?;
+    if state.review.is_some() {
+        let canonical = doc.canonical.clone();
+        let app = Arc::clone(state);
+        let held = tokio::task::spawn_blocking(move || {
+            app.review
+                .as_ref()
+                .is_some_and(|hub| hub.is_held(&canonical))
+        })
+        .await
+        .unwrap_or(true);
+        if held {
+            return Err("held");
+        }
+    }
     if !doc.writable {
         return Err("read_only");
     }
@@ -1339,6 +1357,8 @@ struct RevGate {
     shown: Option<String>,
     /// A state waiting for its content: its rev and frame.
     parked: Option<(String, String)>,
+    /// The held rev while the page is shown the doc as handed back.
+    held: Option<String>,
 }
 
 impl RevGate {
@@ -1408,11 +1428,33 @@ fn viewable(state: &AppState, rel: &str) -> bool {
     }
 }
 
-/// A fresh `content` frame for `rel`, rendered from one read of the disk.
-async fn doc_frame(state: &AppState, rel: &str) -> Option<String> {
+/// The text a review page sees of a held doc, at its held rev; `None` when not held.
+async fn held_text(state: &Arc<AppState>, canonical: &StdPath) -> Option<(Rev, Arc<str>)> {
+    state.review.as_ref()?;
+    let (app, canonical) = (Arc::clone(state), canonical.to_path_buf());
+    tokio::task::spawn_blocking(move || app.review.as_ref()?.held_text(&canonical))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// A `content` frame, its rev, and whether it shows a held doc as handed back.
+struct DocFrame {
+    frame: String,
+    rev: Option<String>,
+    held: bool,
+}
+
+/// A fresh `content` frame for `rel`: a held doc as handed back, else rendered from one
+/// read of the disk.
+async fn doc_frame(state: &Arc<AppState>, rel: &str) -> Option<DocFrame> {
     if state.mode == Mode::Stdin {
         return if rel.is_empty() {
-            Some(cached_content_frame(state).await)
+            Some(DocFrame {
+                frame: cached_content_frame(state).await,
+                rev: None,
+                held: false,
+            })
         } else {
             None
         };
@@ -1422,18 +1464,42 @@ async fn doc_frame(state: &AppState, rel: &str) -> Option<String> {
         reg.active().active_data().syntax.clone()
     };
     let canonical = state.roots.resolve_file(rel, FileKind::Markdown).ok()?;
-    let bytes = tokio::fs::read(&canonical).await.ok()?;
-    let rev = Rev::of(&bytes);
-    let markdown = String::from_utf8(bytes).ok()?;
+    let (rev, markdown, held) = match held_text(state, &canonical).await {
+        Some((rev, text)) => (rev, text.to_string(), true),
+        None => {
+            let bytes = tokio::fs::read(&canonical).await.ok()?;
+            let rev = Rev::of(&bytes);
+            (rev, String::from_utf8(bytes).ok()?, false)
+        }
+    };
     let (html, index) = render::render_dir_indexed(&markdown, syntax.as_ref(), StdPath::new(rel));
-    Some(content_frame(
-        rel,
-        &html,
-        &render::render_source(&markdown, syntax.as_ref()),
-        &render::format_file_stats(&markdown),
-        Some(&rev),
-        &index.stops,
-    ))
+    Some(DocFrame {
+        frame: content_frame(
+            rel,
+            &html,
+            &render::render_source(&markdown, syntax.as_ref()),
+            &render::format_file_stats(&markdown),
+            Some(&rev),
+            &index.stops,
+        ),
+        rev: Some(rev.as_str().to_string()),
+        held,
+    })
+}
+
+/// A doc-carrying `theme_update` for a held doc, rendered from the text as handed back.
+async fn held_theme(state: &Arc<AppState>, rel: &str, json: &str) -> Option<String> {
+    let mut msg: serde_json::Value = serde_json::from_str(json).ok()?;
+    let carries_doc = msg["type"] == "theme_update" && !msg["html"].is_null();
+    if !carries_doc || msg["path"].as_str() != Some(rel) {
+        return None;
+    }
+    let doc = doc_frame(state, rel).await.filter(|d| d.held)?;
+    let content: serde_json::Value = serde_json::from_str(&doc.frame).ok()?;
+    for key in ["html", "source", "rev", "stops"] {
+        msg[key] = content[key].clone();
+    }
+    Some(msg.to_string())
 }
 
 /// Points the connection at the doc it names and replies with that doc, or with `gone`
@@ -1455,7 +1521,12 @@ async fn hello(state: &Arc<AppState>, ctx: &mut ConnCtx, msg: &serde_json::Value
         Some(_) => doc_frame(state, rel).await,
         None => None,
     };
-    let Some(content) = content else {
+    let Some(DocFrame {
+        frame: content,
+        rev,
+        held,
+    }) = content
+    else {
         ctx.viewing = None;
         let mut frames = vec![gone_frame(rel)];
         if let Some(review) = &state.review {
@@ -1463,6 +1534,9 @@ async fn hello(state: &Arc<AppState>, ctx: &mut ConnCtx, msg: &serde_json::Value
         }
         return frames;
     };
+    ctx.gate.held = rev.filter(|_| held);
+    // A review page shows no content until this one, the answer to its own hello
+    let content = content.replacen('{', r#"{"hello":true,"#, 1);
     let mut frames = vec![content];
     if state.review.is_some()
         && let Ok(doc) = state.roots.resolve_doc(rel, Access::Read)
@@ -1483,7 +1557,7 @@ async fn hello(state: &Arc<AppState>, ctx: &mut ConnCtx, msg: &serde_json::Value
 }
 
 /// Frames that bring a connection that missed hub events back up to date.
-async fn resync_frames(state: &Arc<AppState>, ctx: &ConnCtx) -> Vec<String> {
+async fn resync_frames(state: &Arc<AppState>, ctx: &mut ConnCtx) -> Vec<String> {
     let theme = {
         let registry = state.registry.read().await;
         theme_update(registry.active(), state.enable_toggle).to_string()
@@ -1492,7 +1566,10 @@ async fn resync_frames(state: &Arc<AppState>, ctx: &ConnCtx) -> Vec<String> {
         None => return vec![theme],
         Some(None) => cached_content_frame(state).await,
         Some(Some(rel)) => match doc_frame(state, rel).await {
-            Some(frame) => frame,
+            Some(doc) => {
+                ctx.gate.held = doc.rev.filter(|_| doc.held);
+                doc.frame
+            }
             None => gone_frame(rel),
         },
     };
@@ -1547,15 +1624,21 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
             biased;
             result = rx.recv() => match result {
                 Ok(WsEvent::Content(update)) if sees(&update.relpath) => {
-                    let mut out = vec![content_frame(
+                    let frame = content_frame(
                         &update.relpath,
                         &update.rendered_html,
                         &update.source_html,
                         &update.file_stats,
                         Some(&update.rev),
                         &update.stops,
-                    )];
-                    if viewed.as_deref() == Some(update.relpath.as_str()) {
+                    );
+                    let mine = viewed.as_deref() == Some(update.relpath.as_str());
+                    // The doc as handed back stays until the reply, which brings the disk's text
+                    if mine && ctx.gate.held.is_some() {
+                        continue;
+                    }
+                    let mut out = vec![frame];
+                    if mine {
                         ctx.gate.shown(update.rev.as_str(), &mut out);
                     }
                     out
@@ -1568,8 +1651,23 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
                 }
                 Ok(WsEvent::Review(push)) => match (&ctx.review_doc, &ctx.viewing) {
                     (Some(doc), Some(ViewGuard { path: Some(rel), .. })) if *doc == push.canonical => {
+                        let rel = rel.clone();
                         let mut out = Vec::new();
-                        ctx.gate.state(&push.state.rev, review_ws::push_frame(&push, rel), &mut out);
+                        let held = push.state.held.as_ref().map(|h| h.rev.clone());
+                        // Into a hold the page isn't showing yet, or out of one: the doc first
+                        let entering = held.is_some() && ctx.gate.shown != held;
+                        let leaving = held.is_none() && ctx.gate.held.is_some();
+                        ctx.gate.held = held;
+                        if (entering || leaving)
+                            && let Some(doc) = doc_frame(&state, &rel).await
+                        {
+                            ctx.gate.held = doc.rev.clone().filter(|_| doc.held);
+                            out.push(doc.frame);
+                            if let Some(rev) = &doc.rev {
+                                ctx.gate.shown(rev, &mut out);
+                            }
+                        }
+                        ctx.gate.state(&push.state.rev, review_ws::push_frame(&push, &rel), &mut out);
                         if out.is_empty() {
                             continue;
                         }
@@ -1581,7 +1679,15 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
                 Ok(WsEvent::Content(_) | WsEvent::Gone(_) | WsEvent::DirState(_)) => continue,
                 Ok(WsEvent::Raw(json)) => match &viewed {
                     // A theme update can carry the doc, which the gate must see
-                    Some(rel) => ctx.gate.frames(rel, vec![json.to_string()]),
+                    Some(rel) => {
+                        let mut frame = json.to_string();
+                        if ctx.gate.held.is_some()
+                            && let Some(held) = held_theme(&state, rel, &json).await
+                        {
+                            frame = held;
+                        }
+                        ctx.gate.frames(rel, vec![frame])
+                    }
                     None => vec![json.to_string()],
                 },
                 Ok(WsEvent::Scroll(line)) => {
@@ -1589,7 +1695,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
                 }
                 // Dropped events may include content or a theme, so resync this connection.
                 Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let frames = resync_frames(&state, &ctx).await;
+                    let frames = resync_frames(&state, &mut ctx).await;
                     match &viewed {
                         Some(rel) => ctx.gate.frames(rel, frames),
                         None => frames,

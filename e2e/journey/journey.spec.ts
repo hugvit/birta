@@ -809,7 +809,12 @@ test("the reviewer's journey, J-01 to J-16, by keys with a real agent", async ({
     // The merged unit-test bullet takes the focused bullet's place, at the same height
     await expectFocusOn(page, J, "Unit tests for backoff timing");
     const after = await focusOne(page, J);
-    expect(Math.abs(after.top - before.top), `${J} focus: same screen position`).toBeLessThanOrEqual(1);
+    // Same screen position, unless the scroll that would keep it is past the page's top or bottom:
+    // then the page sits at that end and the gap is exactly what the clamp took
+    const scroll = await page.evaluate(() => ({ y: scrollY, max: document.documentElement.scrollHeight - innerHeight }));
+    const keep = scroll.y + after.top - before.top;
+    const clamped = Math.min(Math.max(keep, 0), scroll.max);
+    expect(Math.abs(scroll.y - clamped), `${J} focus: same screen position, but for the clamp`).toBeLessThanOrEqual(1);
     await expectInView(page, J);
     const text = await docText(page);
     expect(text, `${J} row: Claude's text arrives`).toContain(ONLY_ROUND1);

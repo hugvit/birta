@@ -942,6 +942,11 @@ test("a refusal reads as words, naming whoever picked the round up", () => {
   assert.equal(text("claimed", null), "the agent already picked it up");
 });
 
+test("a doc write while Claude has the doc says it works again after the reply", () => {
+  assert.equal(load().pure.nackText("held", state("sent")), "Claude has the doc · this works again after its reply");
+  assert.equal(load().pure.nackText("held", null), "Claude has the doc · this works again after its reply");
+});
+
 // --- The page's own notes, before any state shows them -----------------------------------------
 
 test("a note the page kept that no state shows yet makes the button a hand-back, never Approve", () => {

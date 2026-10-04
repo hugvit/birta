@@ -21,6 +21,7 @@
   },
   "phrase_before_hold": null,
   "hold": null,
+  "held": null,
   "counts": {
     "drafts": 0,
     "sent_unclaimed": 0,

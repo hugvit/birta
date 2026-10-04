@@ -4,6 +4,7 @@ pub mod chain;
 pub mod cut;
 pub mod doc;
 pub mod fold;
+pub mod held;
 pub mod hunk;
 pub mod ladder;
 pub mod log;
@@ -64,6 +65,11 @@ pub fn summarize(review_path: &Path, doc_path: &Path) -> anyhow::Result<Summary>
     let bytes =
         std::fs::read(doc_path).with_context(|| format!("reading {}", doc_path.display()))?;
     let text = String::from_utf8(bytes).context("the doc is not UTF-8")?;
+    // A held doc is listed as its page shows it, without the agent's turn so far
+    let (parsed, text) = match held::view(&parsed) {
+        Some(view) => (view.log, view.text.to_string()),
+        None => (parsed, text),
+    };
     let chain = Chain::build(&parsed);
     let doc = Doc::new(&text);
     Ok(Summary::of(fold::fold(&parsed, &chain, &doc).state))

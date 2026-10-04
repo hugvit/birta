@@ -68,6 +68,25 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
    * Where j, k, Home and End take the focus among `count` stops from stop `at`: `step` is 1, -1,
    * "first" or "last". Nothing wraps; `says` names the end a step ran into, else null.
    */
+  /**
+   * Claude's change that took the place of line `line` of the text the page showed, followed
+   * through `ops`, the writes since that text, oldest first; null when none touched it.
+   */
+  BR.pure.tookPlace = function (changes, ops, line) {
+    for (var i = 0; i < ops.length; i++) {
+      var hunks = (changes || []).filter(function (c) { return c.op === ops[i] && c.old && c.new; });
+      var shift = 0;
+      for (var j = 0; j < hunks.length; j++) {
+        var h = hunks[j];
+        if (h.old[0] <= line && line <= h.old[1]) return h;
+        // Lines a hunk wholly above it adds or removes move the line on
+        if (h.old[1] < line) shift += (h.new[1] - h.new[0]) - (h.old[1] - h.old[0]);
+      }
+      line += shift;
+    }
+    return null;
+  };
+
   BR.pure.focusStep = function (at, count, step) {
     if (!count) return { to: -1, says: null };
     if (step === 'first') return { to: 0, says: null };
@@ -136,10 +155,13 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   var settleQueued = false;
   // A frame changed the stops, so the list focus was found in is taken again
   var relist = false;
-  // The line a focused block Claude cut started on, until the state that names its removal comes
+  // Where a focused block Claude cut or rewrote started, `{line, top}`, until the state naming its change comes
   var cutLine = null;
   // A review state came since the last settle
   var stateCame = false;
+  // The hand-back line while the page showed the doc as handed back: Claude's writes after it
+  // all arrive at once, so a cut line is followed through each of them
+  var heldSince = null;
 
   function content() { return document.getElementById('content'); }
 
@@ -891,9 +913,13 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     BR.chrome.renderStrip();
     if (d.reading || d.mode === 'raw') return;
     BR.lane.redraw();
-    if (!focus || !focus.isConnected) return;
-    BR.lane.focus(focus);
-    reveal(focus);
+    // Leaving reading mode brings the notes back in the lane's own microtask, above the focus
+    // too, so the focus is revealed once they take their room
+    Promise.resolve().then(function () {
+      if (!focus || !focus.isConnected) return;
+      BR.lane.focus(focus);
+      reveal(focus);
+    });
   }
 
   /** A header control holding DOM focus: the page's buttons, or review's phrase and turn button. */
@@ -1099,6 +1125,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       stateCame = true;
       queueSettle();
       var state = BR.currentState();
+      if (state && state.held && msg.path === CURRENT_PATH) heldSince = state.held.n;
       if (state && msg.path === CURRENT_PATH) checkUndos(state);
     } else if (msg.type === 'ack' || msg.type === 'nack') {
       var entry = undos.filter(function (u) { return u.cid === msg.cid; })[0];
@@ -1227,11 +1254,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       relist = false;
       if (next.same && was.el === lost) keepAt(focus, was.top);
       // Only a block found by its own words survived; one on the same line may have been cut
-      if (!next.exact && line != null) cutLine = line;
+      if (!next.exact && line != null) cutLine = { line: line, top: was.el === lost ? was.top : null };
       if (fresh) handOff();
       return;
     }
     if (fresh) handOff();
+    if (fresh && !cutLine && !(BR.currentState() || {}).held) heldSince = null;
     if (relist && focus) {
       focusList = targets();
       focusWas = describe(focus, focusList);
@@ -1243,25 +1271,37 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   }
 
   /**
-   * A block Claude cut hands focus to its removal's stop once the state naming it comes: the
-   * removal of the latest write whose old lines held it.
+   * A block Claude cut hands focus to its removal's stop once the state naming it comes, and a
+   * block it rewrote to the block holding the new text, at the same height: the change that took
+   * its line, followed through the writes since the text the page showed.
    */
   function handOff() {
-    var line = cutLine;
+    var cut = cutLine;
     cutLine = null;
     var state = BR.currentState();
-    if (line == null || !state) return;
-    // Old lines are counted in the text before their own write, so only the latest write's are this page's
-    var latest = Math.max.apply(null, (state.changes || []).map(function (c) { return c.op; }).concat([-1]));
-    var hit = null;
-    (state.changes || []).forEach(function (c) {
-      if (c.op !== latest || !c.old || c.old[0] > line || line > c.old[1] || !BR.flow.removalStop(c.id)) return;
-      if (!hit || c.idx > hit.idx) hit = c;
-    });
-    if (!hit) return;
-    var to = BR.flow.removalStop(hit.id);
-    setFocus(to, null, true);
-    if (!inView(to)) reveal(to);
+    if (!cut || !state) return;
+    var changes = state.changes || [];
+    var since = heldSince;
+    if (!state.held) heldSince = null;
+    // Old lines are counted in the text before their own write: a page that saw each write is
+    // one write behind, a held page every write of the turn behind
+    var ops = [];
+    changes.forEach(function (c) { if (ops.indexOf(c.op) < 0) ops.push(c.op); });
+    ops.sort(function (a, b) { return a - b; });
+    ops = since != null ? ops.filter(function (op) { return op > since; }) : ops.slice(-1);
+    var c = BR.pure.tookPlace(changes, ops, cut.line);
+    if (!c) return;
+    var to = BR.flow.removalStop(c.id);
+    if (to) {
+      setFocus(to, null, true);
+      if (!inView(to)) reveal(to);
+      return;
+    }
+    var el = c.range && c.range.sp ? blockOf(c.range.sp) : null;
+    if (!el || targets().indexOf(el) < 0) return;
+    setFocus(el, null, true);
+    if (cut.top != null) keepAt(el, cut.top);
+    else if (!inView(el)) reveal(el);
   }
 
   /** A removal stop as the strip names it: the heading over its gap, and what went. */
@@ -1359,6 +1399,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       if (ACTIVATES[action]) activate();
       if (MOVES[action]) unpick();
       if (action !== 'no') BR.flow.disarm();
+      if (action === 'revert_change' && BR.chrome.held()) {
+        BR.chrome.nack('held');
+        return true;
+      }
       // The clean view hides the rows, so its keys come before theirs
       if (BR.chrome.clean()) {
         if (REOPENS[action]) {

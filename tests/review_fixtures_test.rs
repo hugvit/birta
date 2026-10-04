@@ -3,9 +3,10 @@ use birta::review::{
     ops::{By, ByKind, CommentKind, ReplyKind, Scope, To, Verdict},
     state::{
         AnchorStatus, ApproveState, Asked, AskedKind, AtKind, AtState, Attr, Change, ChangeRange,
-        Check, Counts, Deletion, DeletionKind, Hold, HoldKind, Item, ItemOutcome, ItemStatus, Loc,
-        LogInfo, News, NewsKind, OwnerState, Phrase, PickedUp, RangeStatus, Replied, ReplyState,
-        Reversible, ReversibleReason, ReviewState, Rewrite, Round, Sent, Silence, Stage, What,
+        Check, Counts, Deletion, DeletionKind, HeldState, Hold, HoldKind, Item, ItemOutcome,
+        ItemStatus, Loc, LogInfo, News, NewsKind, OwnerState, Phrase, PickedUp, RangeStatus,
+        Replied, ReplyState, Reversible, ReversibleReason, ReviewState, Rewrite, Round, Sent,
+        Silence, Stage, What,
     },
 };
 use serde_json::{Value, json};
@@ -116,6 +117,10 @@ fn full_state() -> ReviewState {
             kind: HoldKind::Approve,
             count: 2,
             not_before: 1_790_000_905_000,
+        }),
+        held: Some(HeldState {
+            rev: REV.to_string(),
+            n: 31,
         }),
         counts: Counts {
             drafts: 1,
@@ -318,6 +323,7 @@ fn fresh_state() -> ReviewState {
         },
         phrase_before_hold: None,
         hold: None,
+        held: None,
         counts: counts(0),
         items: vec![Item {
             n: 3,
@@ -444,6 +450,7 @@ fn a_full_state_serializes_to_the_frozen_shape() {
         "warnings": ["unknown op 'foo' x2"]
     });
     // Split out of the literal above, which is at the macro's recursion limit
+    want["held"] = json!({"rev": REV, "n": 31});
     let change = &mut want["changes"][0];
     change["old_text"] = json!("old text\n");
     change["new_text"] = json!("new text\n");
@@ -461,9 +468,10 @@ fn a_full_state_serializes_to_the_frozen_shape() {
 #[test]
 fn absent_optionals_are_omitted_but_frozen_nulls_stay() {
     let got = serde_json::to_value(fresh_state()).unwrap();
-    // `hold`, `phrase_before_hold`, `owner.drafted_by`, `at.loc` and `after_sp` are
+    // `hold`, `held`, `phrase_before_hold`, `owner.drafted_by`, `at.loc` and `after_sp` are
     // `| null` in the frozen interface; every other optional is left out.
     assert_eq!(got["hold"], Value::Null);
+    assert_eq!(got["held"], Value::Null);
     assert_eq!(got["phrase_before_hold"], Value::Null);
     assert_eq!(got["owner"], json!({"drafted_by": null}));
     assert_eq!(got["items"][0]["at"], json!({"kind": "doc", "loc": null}));
@@ -484,6 +492,7 @@ fn absent_optionals_are_omitted_but_frozen_nulls_stay() {
             "deletions",
             "doc",
             "hand_off",
+            "held",
             "hold",
             "items",
             "later",

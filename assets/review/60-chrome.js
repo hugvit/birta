@@ -27,6 +27,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     // A read-only doc can't take an undo at all, so a refusal blames the review file
     read_only: 'review file is read-only',
     not_reversible: "can't undo this one · c instead",
+    // From the hand-back to the reply only Claude writes the doc
+    held: 'Claude has the doc · this works again after its reply',
     // The socket went before the op reached it or was answered, and it is never replayed
     not_sent: 'connection lost · try again'
   };
@@ -1080,6 +1082,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         if (withdrawn && msg.cid === withdrawn.cid) withdrawn.acked = true;
         break;
       case 'nack':
+        // The viewer's own writes, such as a task tick, are refused this way too
+        if (msg.reason === 'held') setMessage({ nack: 'held', until: Date.now() + NACK_MS });
         // A refused note leaves the others: hand back what was kept, and never approve instead
         if (handBackDue && !BR.pending.unacked()) {
           handBackDue = false;
@@ -1271,6 +1275,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       return !!message && !!message.moment && (!message.until || Date.now() < message.until);
     },
     says: function (text) { return !!message && message.text === text; },
+    /** Whether Claude has the doc: from this page's hand-back, its hold included, to the reply. */
+    held: function () {
+      var s = BR.currentState();
+      return !!handing || !!(s && s.held);
+    },
     /** Shows a refused op's reason until the next acked op, a new hold, or 4 s. */
     nack: function (reason) {
       setMessage({ nack: reason, until: Date.now() + NACK_MS });

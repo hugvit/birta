@@ -692,6 +692,18 @@ fn a_removed_excerpt_is_capped() {
 
 // --- rewrite (scenario 13's threshold) ---
 
+/// The ids of the news items of `kind`, in list order.
+fn news_of(state: &ReviewState, kind: &str) -> Vec<String> {
+    let v = serde_json::to_value(state).unwrap();
+    v["news"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no news list"))
+        .iter()
+        .filter(|n| n["kind"] == kind)
+        .map(|n| n["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
 /// 90 one-line paragraphs, blank lines between.
 fn paragraphs() -> String {
     (1..=90)
@@ -736,6 +748,9 @@ fn a_turn_touching_41_percent_of_a_grown_doc_is_a_rewrite() {
     assert!((r.pct - 0.41).abs() < 1e-9, "{}", r.pct);
     assert_eq!(state.changes.len(), 32);
     assert!(state.changes.iter().all(|c| c.is_rewrite));
+    // Each change is news of its own all the same
+    let all: Vec<String> = state.changes.iter().map(|c| c.id.clone()).collect();
+    assert_eq!(news_of(&state, "change"), all);
 }
 
 #[test]
@@ -747,6 +762,10 @@ fn a_rewrite_is_over_once_its_changes_are_seen() {
     let state = s.fold();
     assert!(state.rewrite.is_none());
     assert_eq!(state.counts.unseen, 0);
+    let v = serde_json::to_value(&state).unwrap();
+    for c in v["changes"].as_array().unwrap() {
+        assert_eq!(c["check"], "kept", "{}", c["id"]);
+    }
 }
 
 // --- undo (reversible) ---
@@ -1369,6 +1388,15 @@ fn exactly_40_percent_is_no_rewrite_and_a_part_seen_rewrite_stands() {
     let state = s.fold();
     assert_eq!(state.rewrite.as_ref().map(|r| r.turn), Some(turn));
     assert_eq!(state.counts.unseen, 1);
+    let v = serde_json::to_value(&state).unwrap();
+    let left: Vec<&serde_json::Value> = v["news"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no news list"))
+        .iter()
+        .filter(|n| n["kind"] == "change" && n["check"].is_null())
+        .collect();
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!(left[0]["id"], all[31]);
 }
 
 /// Seven of ten blocks is over the share but too few to call a rewrite.
@@ -1452,6 +1480,9 @@ fn a_turn_that_cuts_most_of_the_doc_is_a_rewrite() {
         .as_ref()
         .expect("cutting 81 of 90 is a rewrite");
     assert_eq!((r.turn, r.blocks_changed, r.blocks_total), (turn, 81, 90));
+    assert_eq!(state.changes.len(), 1, "setup");
+    // A turn's one big removal is one item of news
+    assert_eq!(news_of(&state, "removal"), [state.changes[0].id.clone()]);
 }
 
 #[test]

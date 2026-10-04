@@ -79,8 +79,8 @@ pub(super) struct Turns {
     /// Turns that agent comments were written in, by the comment's line.
     pub comments: HashMap<u32, u32>,
     pub notes: HashMap<u32, String>,
-    /// Text the agent flagged as changed unasked, by turn.
-    pub unasked: HashMap<u32, Vec<String>>,
+    /// Text the agent flagged as changed unasked, with why, by turn.
+    pub unasked: HashMap<u32, Vec<(String, Option<String>)>>,
     /// The notes the agent cited for text it wrote, by turn: `(note, quote)`.
     pub covers: HashMap<u32, Vec<(u32, String)>>,
 }
@@ -158,9 +158,15 @@ impl Turns {
                 self.notes.insert(*turn, body.clone());
             }
             Op::Unasked {
-                turn, quote, late, ..
+                turn,
+                quote,
+                body,
+                late,
             } if self.counts_for(*turn, name, *late) => {
-                self.unasked.entry(*turn).or_default().push(quote.clone());
+                self.unasked
+                    .entry(*turn)
+                    .or_default()
+                    .push((quote.clone(), body.clone()));
             }
             Op::Covers {
                 to,

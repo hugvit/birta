@@ -5,6 +5,7 @@
 mod changes;
 mod items;
 mod label;
+mod news;
 mod texts;
 mod turns;
 
@@ -387,6 +388,35 @@ impl Folded<'_> {
     }
 }
 
+/// The stop a change sits on, where its row, its news and a note on it go: the innermost
+/// stop holding the first line with text of what it wrote, or of what your revert of it
+/// put back, as the text is now. `None` for a removal, or once its text is gone.
+pub fn change_stop<'d>(changes: &[Change], doc: &'d Doc, c: &Change) -> Option<&'d anchor::Stop> {
+    let spans: Vec<(u32, u32)> = match c.undone_by {
+        Some(undo) => changes
+            .iter()
+            .filter(|x| x.op == undo)
+            .filter_map(|x| x.span)
+            .collect(),
+        None if c.range.status == RangeStatus::Superseded => Vec::new(),
+        None => c.span.into_iter().collect(),
+    };
+    spans.into_iter().find_map(|(first, last)| {
+        (first..=last)
+            .filter(|&l| {
+                doc.lines
+                    .range(l)
+                    .is_some_and(|r| !doc.text[r].trim().is_empty())
+            })
+            .find_map(|l| {
+                doc.blocks
+                    .stops
+                    .iter()
+                    .rfind(|s| s.lines.0 <= l && l <= s.lines.1)
+            })
+    })
+}
+
 /// The line the human copies to point an agent at the notes on `doc`.
 pub fn hand_off(doc: &Path) -> String {
     format!("Take a look at my notes: `birta review {}`", doc.display())
@@ -641,6 +671,8 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
         .iter()
         .filter(|c| c.attr != Attr::Human && !c.seen && !c.settled)
         .count() as u32;
+    // What the page's walk can still clear by landing; it becomes `to_check` once the walk
+    // reads `news`
     let attention = items
         .iter()
         .map(|i| {
@@ -655,6 +687,23 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
         })
         .sum::<usize>() as u32
         + unseen;
+    let news = news::build(&news::Input {
+        doc,
+        lines: &parsed.lines,
+        turns: &turns,
+        notes: &notes,
+        items: &items,
+        lost: &lost,
+        changes: &built.changes,
+        deletions: &built.deletions,
+        rounds: &standing,
+    });
+    for it in &mut items {
+        if it.at.change.is_none() {
+            it.at.change = news.replied_to.get(&it.n).cloned();
+        }
+    }
+
     let counts = Counts {
         drafts: fold.drafts(None),
         sent_unclaimed: count(ItemStatus::Sent),
@@ -671,6 +720,7 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
         items: item_stops(doc).count() as u32,
         decided: decided(&notes, doc, &mut texts),
         attention,
+        to_check: news.to_check,
     };
 
     let latest = turns.rounds.iter().rev().find(|r| !r.withdrawn);
@@ -726,7 +776,7 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
             covered.entry(round).or_default().push(i);
         }
     }
-    let state = ReviewState {
+    let mut state = ReviewState {
         schema: super::SCHEMA_STATE.to_string(),
         doc: parsed
             .header
@@ -753,7 +803,11 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
         approve,
         rounds,
         warnings,
+        news: news.news,
     };
+    for c in &mut state.changes {
+        c.check = news.checks.get(&c.id).copied();
+    }
     let turn_notes = notes
         .turn_notes
         .iter()

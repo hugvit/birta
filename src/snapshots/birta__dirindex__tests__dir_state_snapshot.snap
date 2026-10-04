@@ -27,6 +27,7 @@ expression: "serde_json::to_string_pretty(&state).unwrap()"
           "not_handled": 0,
           "open_asks": 0,
           "sent_unclaimed": 0,
+          "to_check": 1,
           "unasked": 0,
           "unseen": 1
         },
@@ -54,6 +55,7 @@ expression: "serde_json::to_string_pretty(&state).unwrap()"
           "not_handled": 0,
           "open_asks": 0,
           "sent_unclaimed": 0,
+          "to_check": 0,
           "unasked": 0,
           "unseen": 0
         },
@@ -77,6 +79,7 @@ expression: "serde_json::to_string_pretty(&state).unwrap()"
         "not_handled": 0,
         "open_asks": 0,
         "sent_unclaimed": 0,
+        "to_check": 0,
         "unasked": 0,
         "unseen": 0
       },

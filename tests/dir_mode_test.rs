@@ -251,6 +251,30 @@ async fn hello_lists_only_the_docs_with_activity() {
     assert_eq!(state["totals"]["drafts"], 1);
 }
 
+/// Claude's replies are news as much as its changes are.
+#[tokio::test]
+async fn a_doc_whose_only_news_is_an_unchecked_reply_is_news() {
+    let site = review_site();
+    site.write("b.md", "# B\n");
+    let mut s = Scenario::new("# B\n");
+    let x = s.note("is this needed?");
+    s.submit();
+    let turn = s.claim("claude");
+    s.agent_reply("claude", x, "answer", "yes, the index links it");
+    s.yield_turn("claude", turn);
+    site.write("b.md.birta.jsonl", &s.log());
+    let served = site.serve(&["."], &[GATE_ON]);
+    let (mut ws, frames) = served.viewing("index.md").await;
+    let state = listing_where(&mut ws, &frames, "b.md summarized", |s| {
+        entry(s, "b.md").is_some_and(|b| !b["summary"].is_null())
+    })
+    .await;
+    let b = entry(&state, "b.md").unwrap();
+    assert_eq!(b["summary"]["counts"]["unseen"], 0, "setup: {b}");
+    assert_eq!(b["news"], true, "{b}");
+    assert_eq!(b["summary"]["counts"]["to_check"], 1, "{b}");
+}
+
 #[tokio::test]
 async fn an_unviewed_write_is_news_until_a_hello_views_it() {
     let site = review_site();

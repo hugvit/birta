@@ -32,7 +32,8 @@
     "lost": 0,
     "items": 3,
     "decided": 0,
-    "attention": 0
+    "attention": 0,
+    "to_check": 0
   },
   "items": [],
   "changes": [],
@@ -40,5 +41,6 @@
   "later": [],
   "lost": [],
   "rounds": [],
-  "warnings": []
+  "warnings": [],
+  "news": []
 }

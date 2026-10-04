@@ -1364,8 +1364,9 @@ fn a_seen_blank_still_needs_attention() {
     let blank = s.blank(CLAUDE, json!("doc"), "which order?", turn);
     s.done(CLAUDE, x, turn);
     s.yield_turn(CLAUDE, turn);
-    let id = format!("#{blank}");
-    s.seen(&[id.as_str()]);
+    // The `done` is checked by the note's own id; only an answer checks the blank
+    let ids = [format!("#{x}"), format!("#{blank}")];
+    s.seen(&[ids[0].as_str(), ids[1].as_str()]);
     let state = s.fold();
     assert_eq!(state.counts.open_asks, 1);
     assert_eq!(state.counts.attention, 1);

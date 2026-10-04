@@ -14,28 +14,75 @@ const MAX_PAIRINGS: usize = 10_000;
 /// Words of its own an unpaired block must give its neighbour's pair to join it.
 const FED_WORDS: usize = 3;
 
-/// The hunks that turn `old` into `new`, cut at block boundaries.
+/// The hunks that turn `old` into `new`, cut at block boundaries, with removals cut again
+/// before each heading they hold.
 pub fn diff(old: &str, new: &str) -> Vec<Hunk> {
     let hunks = hunk::diff_anchored(old, new);
     // Only a hunk that both removes and adds lines can pair blocks
-    if !hunks.iter().any(|h| !h.d.is_empty() && !h.i.is_empty()) {
+    let mixed = hunks.iter().any(|h| !h.d.is_empty() && !h.i.is_empty());
+    let removal = hunks.iter().any(|h| h.i.is_empty() && h.d.len() > 1);
+    if !mixed && !removal {
         return hunks;
     }
-    let (before, after) = (Doc::new(old), Doc::new(new));
-    let (was, now) = (Blocks::new(&before), Blocks::new(&after));
-    let mut out = Vec::with_capacity(hunks.len());
-    let mut shift = 0i64;
-    for h in &hunks {
-        let new_a = (i64::from(h.a) + shift) as u32;
-        shift += h.i.len() as i64 - h.d.len() as i64;
-        out.extend(cut(h, new_a, &was, &now));
-    }
+    let before = Doc::new(old);
+    let mut out = if mixed {
+        let after = Doc::new(new);
+        let (was, now) = (Blocks::new(&before), Blocks::new(&after));
+        let mut out = Vec::with_capacity(hunks.len());
+        let mut shift = 0i64;
+        for h in &hunks {
+            let new_a = (i64::from(h.a) + shift) as u32;
+            shift += h.i.len() as i64 - h.d.len() as i64;
+            out.extend(cut(h, new_a, &was, &now));
+        }
+        out
+    } else {
+        hunks.clone()
+    };
+    out = at_headings(out, &before);
     // The pieces must rebuild the text exactly; anything else keeps the plain hunks
     if hunk::apply(old, &out).ok().as_deref() == Some(new) {
         out
     } else {
         hunks
     }
+}
+
+/// Each removal cut right before every heading it holds, so a cut section is a change of
+/// its own. Blank lines above a heading stay with it.
+fn at_headings(hunks: Vec<Hunk>, before: &Doc) -> Vec<Hunk> {
+    let headings: HashSet<u32> = before
+        .blocks
+        .stops
+        .iter()
+        .filter(|s| s.kind == StopKind::Heading)
+        .map(|s| s.lines.0)
+        .collect();
+    let mut out = Vec::with_capacity(hunks.len());
+    for h in hunks {
+        if !h.i.is_empty() {
+            out.push(h);
+            continue;
+        }
+        let mut start = 0;
+        for k in 1..h.d.len() {
+            let heading = headings.contains(&(h.a + k as u32 + 1));
+            if heading && h.d[start..k].iter().any(|l| !l.trim().is_empty()) {
+                out.push(Hunk {
+                    a: h.a + start as u32,
+                    d: h.d[start..k].to_vec(),
+                    i: Vec::new(),
+                });
+                start = k;
+            }
+        }
+        out.push(Hunk {
+            a: h.a + start as u32,
+            d: h.d[start..].to_vec(),
+            i: Vec::new(),
+        });
+    }
+    out
 }
 
 /// The words of markdown source that a reader sees: list, task, quote and heading

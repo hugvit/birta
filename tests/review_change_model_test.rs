@@ -1643,3 +1643,295 @@ fn an_added_list_item_and_a_ticked_box_read_as_what_they_are() {
     }
     assert!(bad.is_empty(), "{bad:#?}");
 }
+
+// --- removals split at headings ---
+
+/// The journey's draft and Claude's first write: the `Log each retry` bullet and the
+/// `## Stacked on` section are cut together in one plain hunk.
+const JOURNEY: &str = include_str!("../e2e/fixtures/review/journey/pr-draft.md");
+const JOURNEY_ROUND1: &str = include_str!("../e2e/fixtures/review/journey/round1.md");
+
+/// The block deletions of the write on line `op`: `(label, first_line)`.
+fn removals(v: &Value, op: u32) -> Vec<(Value, Value)> {
+    of_write(v, op)
+        .iter()
+        .filter_map(|c| {
+            let d = v["deletions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|d| d["change"] == c["id"] && d["kind"] == "block")?;
+            Some((d["label"].clone(), d["first_line"].clone()))
+        })
+        .collect()
+}
+
+#[test]
+fn the_cut_bullet_and_the_cut_section_record_as_two_removals() {
+    let mut s = Scenario::drafted_by(JOURNEY, CLAUDE);
+    let stacked = s.comment(s.section("## Stacked on"), Some("no"), None);
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    let ext = s.external(JOURNEY_ROUND1);
+    s.done(CLAUDE, stacked, turn);
+    s.yield_turn(CLAUDE, turn);
+    let v = wire(&s.fold());
+    let olds: Vec<Value> = of_write(&v, ext).iter().map(|c| c["old"].clone()).collect();
+    assert_eq!(
+        olds,
+        [
+            json!([5, 9]),
+            json!([13, 14]),
+            json!([15, 15]),
+            json!([16, 16]),
+            // The cut runs right before the heading line
+            json!([17, 18]),
+            json!([19, 22]),
+            json!([26, 27]),
+        ]
+    );
+    assert_eq!(
+        removals(&v, ext),
+        [
+            (
+                json!("list item"),
+                json!("- Respect `Retry-After` when the server sends it")
+            ),
+            (
+                json!("list item"),
+                json!("- Log each retry at `debug` with attempt number and delay")
+            ),
+            (json!("section · 3 blocks"), json!("## Stacked on")),
+        ]
+    );
+    // The `no` on the section asked for the section's removal only
+    let section = id(ext, 5);
+    assert_eq!(change(&v, &section)["asked"]["notes"], json!([stacked]));
+    assert_ne!(change(&v, &id(ext, 4))["asked"]["kind"], "location");
+    assert_eq!(item(&v, stacked)["outcome"]["changes"], json!([section]));
+    assert_eq!(item(&v, stacked)["at"]["change"], section);
+    let d = deletion(&v, &section);
+    assert_eq!(
+        d["head"].as_str().map(str::trim_end),
+        Some("## Stacked on\n\n- #482 — extract `UploadClient` from the sync worker")
+    );
+    assert_eq!(d["more"], 1);
+    let bullet = deletion(&v, &id(ext, 4));
+    assert_eq!(
+        bullet["head"].as_str().map(str::trim_end),
+        Some("- Log each retry at `debug` with attempt number and delay")
+    );
+    assert_eq!(bullet["more"], 0);
+}
+
+/// A write whose only hunk is a pure removal is cut too, not only a hunk that also adds.
+#[test]
+fn a_pure_removal_across_a_heading_records_as_one_hunk_per_section() {
+    let cases = [
+        (
+            "a list item, then a section",
+            "# T\n\n- keep\n- gone item\n\n## Gone\n\nGone para.\n\n## Kept\n\nText.\n",
+            "# T\n\n- keep\n\n## Kept\n\nText.\n",
+            vec![
+                (json!("list item"), json!("- gone item")),
+                (json!("section · 2 blocks"), json!("## Gone")),
+            ],
+        ),
+        (
+            "a paragraph, then a setext section",
+            "# T\n\nKeep.\n\nGone para.\n\nSection\n-------\n\nGone too.\n\n# End\n",
+            "# T\n\nKeep.\n\n# End\n",
+            vec![
+                (json!("paragraph"), json!("Gone para.")),
+                (json!("section · 2 blocks"), json!("Section")),
+            ],
+        ),
+        (
+            "two sections side by side",
+            "# T\n\nKeep.\n\n## A\n\nPara a.\n\n## B\n\nPara b.\n\n## C\n\nText.\n",
+            "# T\n\nKeep.\n\n## C\n\nText.\n",
+            vec![
+                (json!("section · 2 blocks"), json!("## A")),
+                (json!("section · 2 blocks"), json!("## B")),
+            ],
+        ),
+    ];
+    let mut bad = Vec::new();
+    for (name, base, new, want) in cases {
+        let (s, ext) = agent_writes(base, new);
+        assert!(
+            hunk::diff(base, new)
+                .iter()
+                .all(|h| h.d.is_empty() || h.i.is_empty()),
+            "setup: {name} is pure"
+        );
+        let got = removals(&wire(&s.fold()), ext);
+        if got != want || patch_on(&s, ext).len() != want.len() {
+            bad.push(format!("{name}: {got:?} {:?}", patch_on(&s, ext)));
+        }
+    }
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
+/// Blank lines above a cut heading never make a piece of their own.
+#[test]
+fn a_section_cut_with_the_blank_line_above_it_stays_one_hunk() {
+    let base = "# T\n\nKeep.\n\n## Gone\n\nGone text.\n";
+    let new = "# T\n\nKeep.\n";
+    assert_eq!(
+        hunk::diff(base, new)[0].d[0],
+        "\n",
+        "setup: the hunk opens on a blank"
+    );
+    let (s, ext) = agent_writes(base, new);
+    assert_eq!(patch_on(&s, ext).len(), 1, "{:?}", patch_on(&s, ext));
+    assert_eq!(
+        removals(&wire(&s.fold()), ext),
+        [(json!("section · 2 blocks"), json!("## Gone"))]
+    );
+
+    // The ux-b write cuts `## Stacked on` from under a blank line too
+    let (before, after) = real_first_write();
+    let s = Scenario::new(&before);
+    let patch = Chain::build(&s.parsed())
+        .record(&after)
+        .and_then(|r| r.patch)
+        .unwrap();
+    let blank_only = |h: &&Hunk| h.d.iter().chain(&h.i).all(|l| l.trim().is_empty());
+    assert!(
+        !patch.iter().any(|h| blank_only(&h)),
+        "{:?}",
+        patch.iter().filter(blank_only).collect::<Vec<_>>()
+    );
+}
+
+/// Passes on the tree before the split: a pure removal already in a log keeps its id,
+/// its seen state and its range, whatever headings it holds.
+#[test]
+fn a_stored_removal_across_a_heading_keeps_its_id() {
+    let base = "# T\n\n- keep\n- gone item\n\n## Gone\n\nGone para.\n\n## Kept\n\nText.\n";
+    let new = "# T\n\n- keep\n\n## Kept\n\nText.\n";
+    let mut s = Scenario::new(base);
+    let turn = claimed(&mut s);
+    let ext = s.external_diffed(new);
+    s.yield_turn(CLAUDE, turn);
+    assert_eq!(patch_on(&s, ext).len(), 1, "setup");
+    s.seen(&[&id(ext, 0)]);
+    let v = wire(&s.fold());
+    assert_eq!(ids(&v), [id(ext, 0)]);
+    let c = change(&v, &id(ext, 0));
+    assert_eq!(c["seen"], true);
+    assert_eq!(c["old"], json!([4, 8]));
+
+    // The journey's merged hunk, stored whole, keeps its id too
+    let mut s = Scenario::drafted_by(JOURNEY, CLAUDE);
+    let turn = claimed(&mut s);
+    let ext = s.external_diffed(JOURNEY_ROUND1);
+    s.yield_turn(CLAUDE, turn);
+    s.seen(&[&id(ext, 1)]);
+    let v = wire(&s.fold());
+    assert_eq!(ids(&v), [id(ext, 0), id(ext, 1), id(ext, 2)]);
+    let c = change(&v, &id(ext, 1));
+    assert_eq!(c["seen"], true);
+    assert_eq!(c["old"], json!([13, 22]));
+}
+
+#[test]
+fn a_removed_section_heads_its_row_and_counts_the_blocks_after() {
+    let (s, ext) = agent_writes(
+        "# T\n\n## Gone\n\n- a\n- b\n- c\n\n## Kept\n\nText.\n",
+        "# T\n\n## Kept\n\nText.\n",
+    );
+    let v = wire(&s.fold());
+    let d = deletion(&v, &id(ext, 0));
+    assert_eq!(d["label"], "section · 4 blocks", "setup");
+    assert_eq!(
+        d["head"].as_str().map(str::trim_end),
+        Some("## Gone\n\n- a")
+    );
+    assert_eq!(d["more"], 2);
+
+    let (s, ext) = agent_writes("# T\n\nGone para.\n\nEnd.\n", "# T\n\nEnd.\n");
+    let d = deletion(&wire(&s.fold()), &id(ext, 0));
+    assert_eq!(d["head"].as_str().map(str::trim_end), Some("Gone para."));
+    assert_eq!(d["more"], 0);
+}
+
+// --- adversary ---
+
+/// A setext heading splits a removal that also sits in a hunk that adds, as `#` does.
+#[test]
+fn a_setext_heading_splits_a_removal_beside_an_edit() {
+    let base = "# T\n\nThe old paragraph says what the client does today.\n\n- gone item\n\nSection\n=======\n\nGone text.\n\n# End\n";
+    let new = "# T\n\nThe new paragraph says what the client does today.\n\n# End\n";
+    let plain = hunk::diff(base, new);
+    assert!(
+        plain.len() == 1 && !plain[0].d.is_empty() && !plain[0].i.is_empty(),
+        "setup: one mixed hunk"
+    );
+    let (s, ext) = agent_writes(base, new);
+    assert_eq!(
+        removals(&wire(&s.fold()), ext),
+        [
+            (json!("list item"), json!("- gone item")),
+            (json!("section · 2 blocks"), json!("Section")),
+        ],
+        "{:?}",
+        patch_on(&s, ext)
+    );
+}
+
+/// Guard, passes now: a `#` line in a code block and a thematic break are not headings.
+#[test]
+fn a_removed_code_block_or_rule_is_not_cut_as_a_heading() {
+    let cases = [
+        (
+            "a fenced `# install` line",
+            "# T\n\nKeep.\n\nGone para.\n\n```sh\n# install\nmake\n```\n\n## Kept\n\nText.\n",
+            "# T\n\nKeep.\n\n## Kept\n\nText.\n",
+        ),
+        (
+            "a rule under a blank line",
+            "# T\n\nKeep.\n\nGone para.\n\n---\n\nMore gone.\n\n## Kept\n\nText.\n",
+            "# T\n\nKeep.\n\n## Kept\n\nText.\n",
+        ),
+    ];
+    let mut bad = Vec::new();
+    for (name, base, new) in cases {
+        let (s, ext) = agent_writes(base, new);
+        if patch_on(&s, ext).len() != 1 {
+            bad.push(format!("{name}: {:?}", patch_on(&s, ext)));
+        }
+    }
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
+/// Interpretation of `head`/`more`: with no heading, the head is the first removed
+/// block and `more` counts the rest.
+#[test]
+fn a_removal_of_two_paragraphs_heads_with_the_first() {
+    let (s, ext) = agent_writes("# T\n\nGone one.\n\nGone two.\n\nEnd.\n", "# T\n\nEnd.\n");
+    let d = deletion(&wire(&s.fold()), &id(ext, 0));
+    assert_eq!(
+        d["head"].as_str().map(str::trim_end),
+        Some("Gone one."),
+        "{d}"
+    );
+    assert_eq!(d["more"], 1, "{d}");
+}
+
+/// A nested list item is part of its parent block, in the head and in `more` alike.
+#[test]
+fn a_removed_section_counts_a_nested_item_as_part_of_its_parent() {
+    let (s, ext) = agent_writes(
+        "# T\n\n## S\n\n- a\n  - a1\n- b\n\n## Kept\n\nText.\n",
+        "# T\n\n## Kept\n\nText.\n",
+    );
+    let d = deletion(&wire(&s.fold()), &id(ext, 0));
+    assert_eq!(
+        d["head"].as_str().map(str::trim_end),
+        Some("## S\n\n- a\n  - a1"),
+        "{d}"
+    );
+    assert_eq!(d["more"], 1, "{d}");
+}

@@ -59,7 +59,8 @@
     "lost": 0,
     "items": 3,
     "decided": 1,
-    "attention": 9
+    "attention": 9,
+    "to_check": 9
   },
   "items": [
     {
@@ -245,6 +246,9 @@
       },
       "label": "6 words changed",
       "is_rewrite": true,
+      "old_text": "Retrying three times with backoff fixes most of these.\n",
+      "new_text": "S3 answers 503 under load; retrying three times fixes most of these.\n",
+      "check": null,
       "reversible": {
         "ok": true,
         "reason": "none"
@@ -299,6 +303,9 @@
       },
       "label": "3 words → 6",
       "is_rewrite": true,
+      "old_text": "- retries on 503\n",
+      "new_text": "- retries on 502, 503 and 504\n",
+      "check": null,
       "reversible": {
         "ok": true,
         "reason": "none"
@@ -350,6 +357,9 @@
       },
       "label": "7 words → 2",
       "is_rewrite": true,
+      "old_text": "- backoff of 1, 2 and 4 seconds\n",
+      "new_text": "- jittered backoff\n",
+      "check": null,
       "reversible": {
         "ok": true,
         "reason": "none"
@@ -402,6 +412,9 @@
       },
       "label": "2 words → 3",
       "is_rewrite": true,
+      "old_text": "- metrics dashboard\n",
+      "new_text": "- a retry counter\n",
+      "check": null,
       "reversible": {
         "ok": true,
         "reason": "none"
@@ -453,6 +466,9 @@
       },
       "label": "2 words → 4",
       "is_rewrite": true,
+      "old_text": "Nothing yet.\n",
+      "new_text": "The S3 client bump.\n",
+      "check": null,
       "reversible": {
         "ok": true,
         "reason": "none"
@@ -505,6 +521,9 @@
       },
       "label": "2 words → 3",
       "is_rewrite": true,
+      "old_text": "## What changes\n",
+      "new_text": "## What this changes\n",
+      "check": null,
       "reversible": {
         "ok": true,
         "reason": "none"
@@ -557,6 +576,9 @@
       },
       "label": "2 words → 4",
       "is_rewrite": true,
+      "old_text": "## Stacked on\n",
+      "new_text": "## Stacked on top of\n",
+      "check": null,
       "reversible": {
         "ok": true,
         "reason": "none"
@@ -607,6 +629,9 @@
       },
       "label": "paragraph added",
       "is_rewrite": true,
+      "old_text": "",
+      "new_text": "\nShips behind a flag.\n",
+      "check": null,
       "reversible": {
         "ok": true,
         "reason": "none"
@@ -649,5 +674,73 @@
       "released": false
     }
   ],
-  "warnings": []
+  "warnings": [],
+  "news": [
+    {
+      "id": "#13",
+      "kind": "reply",
+      "sp": null,
+      "check": null
+    },
+    {
+      "id": "#14",
+      "kind": "turn_note",
+      "sp": null,
+      "check": null
+    },
+    {
+      "id": "9.0",
+      "kind": "change",
+      "sp": "5:1-6:68",
+      "check": null
+    },
+    {
+      "id": "#4",
+      "kind": "reply",
+      "sp": "5:1-6:68",
+      "check": null
+    },
+    {
+      "id": "11.0",
+      "kind": "change",
+      "sp": "8:1-8:20",
+      "check": null
+    },
+    {
+      "id": "10.0",
+      "kind": "change",
+      "sp": "10:1-10:29",
+      "check": null
+    },
+    {
+      "id": "10.1",
+      "kind": "change",
+      "sp": "11:1-11:18",
+      "check": null
+    },
+    {
+      "id": "10.2",
+      "kind": "change",
+      "sp": "12:1-13:0",
+      "check": null
+    },
+    {
+      "id": "11.1",
+      "kind": "change",
+      "sp": "14:1-14:20",
+      "check": null
+    },
+    {
+      "id": "10.3",
+      "kind": "change",
+      "sp": "16:1-16:19",
+      "check": null
+    },
+    {
+      "id": "11.2",
+      "kind": "change",
+      "sp": "18:1-18:20",
+      "check": null
+    }
+  ]
 }

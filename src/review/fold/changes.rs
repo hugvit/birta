@@ -125,6 +125,7 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
             let kind = write.as_ref().and_then(|w| w.label(hunks, j));
             let whole = kind.as_ref().is_some_and(|k| k.whole_removal());
             let followed = follow(later, input.hidden, new_a, &reverses[j]);
+            let span = span_now(later, input.hidden, new_a, &reverses[j]);
             let placed = place(followed.as_ref(), new, whole, head);
             let gone = placed.status == RangeStatus::Superseded;
 
@@ -179,6 +180,8 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
                     },
                     first_line: first_line(&h.d),
                     label: kind.as_ref().and_then(|k| k.removed.clone()),
+                    head: kind.as_ref().and_then(|k| k.head.clone()),
+                    more: kind.as_ref().and_then(|k| k.more),
                 });
             }
             for (offset, removed) in gaps {
@@ -201,6 +204,8 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
                     after_sp: now.and_then(|l| stop_holding(head, l)),
                     first_line: None,
                     label: None,
+                    head: None,
+                    more: None,
                 });
             }
 
@@ -263,7 +268,12 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
                 label: kind.map(|k| k.text),
                 removed: (dl > 0 && il < dl).then(|| capped(&h.d.concat())),
                 is_rewrite: false,
-                flagged: quoted.unasked.contains(&j),
+                old_text: h.d.concat(),
+                new_text: h.i.concat(),
+                check: None,
+                unasked_why: quoted.unasked.get(&j).cloned().flatten(),
+                flagged: quoted.unasked.contains_key(&j),
+                span,
                 reverse,
                 reversible: Reversible { ok, reason },
                 op_hunks: hunks.len() as u32,
@@ -382,8 +392,8 @@ fn asked(kind: AskedKind, notes: Vec<u32>) -> Asked {
 /// Where in one agent write the turn's `unasked` and `covers` quotes read.
 #[derive(Default)]
 struct Quoted {
-    /// Hunks the agent flagged as changed unasked.
-    unasked: HashSet<usize>,
+    /// Hunks the agent flagged as changed unasked, with the first reason given.
+    unasked: HashMap<usize, Option<String>>,
     /// Each covered note, with the hunks its quotes read in.
     covers: Vec<(u32, Vec<usize>)>,
 }
@@ -401,19 +411,19 @@ impl Quoted {
             .filter(|(_, h)| h.i.is_empty())
             .map(|(j, h)| (j, h.d.concat()))
             .collect();
-        let unasked = input
-            .turns
-            .unasked
-            .get(&turn)
-            .into_iter()
-            .flatten()
-            .flat_map(|q| {
-                let gone = removals.iter().filter(|(_, d)| quotes_removed(q, d));
-                cited(q, step, texts)
-                    .into_iter()
-                    .chain(gone.map(|(j, _)| *j))
-            })
-            .collect();
+        let mut unasked: HashMap<usize, Option<String>> = HashMap::new();
+        for (q, why) in input.turns.unasked.get(&turn).into_iter().flatten() {
+            let gone = removals.iter().filter(|(_, d)| quotes_removed(q, d));
+            for j in cited(q, step, texts)
+                .into_iter()
+                .chain(gone.map(|(j, _)| *j))
+            {
+                let slot = unasked.entry(j).or_default();
+                if slot.is_none() {
+                    slot.clone_from(why);
+                }
+            }
+        }
         let covers = input
             .turns
             .covers
@@ -441,7 +451,7 @@ fn asked_for(
     let Some(turn) = turn else {
         return unasked();
     };
-    if quoted.unasked.contains(&j) {
+    if quoted.unasked.contains_key(&j) {
         return unasked();
     }
     let held: &[u32] = input.held.get(&turn).map_or(&[], Vec::as_slice);
@@ -792,6 +802,30 @@ struct Followed {
 /// one is taken into the span, and the undo puts back its old lines around the change's.
 /// A removal's gap is written over only by a hunk taking lines on both sides of it.
 fn follow(later: &[Step], hidden: &HashSet<String>, a: u32, reverse: &Hunk) -> Option<Followed> {
+    follow_through(later, hidden, a, reverse, false)
+}
+
+/// The lines that hold a change's written text now, taking in whatever later writes put
+/// over it; `None` once nothing of it is left.
+fn span_now(
+    later: &[Step],
+    hidden: &HashSet<String>,
+    a: u32,
+    reverse: &Hunk,
+) -> Option<(u32, u32)> {
+    let f = follow_through(later, hidden, a, reverse, true)?;
+    let len = f.reverse.d.len() as u32;
+    (len > 0).then(|| (f.reverse.a + 1, f.reverse.a + len))
+}
+
+/// [`follow`], or with `loose` a span a later write overlaps takes that write's lines in.
+fn follow_through(
+    later: &[Step],
+    hidden: &HashSet<String>,
+    a: u32,
+    reverse: &Hunk,
+    loose: bool,
+) -> Option<Followed> {
     let (mut s, mut d, mut i) = (a, reverse.d.clone(), reverse.i.clone());
     let mut exact = true;
     for step in later {
@@ -820,7 +854,7 @@ fn follow(later: &[Step], hidden: &HashSet<String>, a: u32, reverse: &Hunk) -> O
         // From the last, so the lines before each hunk are still the text it was made on
         for &(j, h) in taken.iter().rev() {
             let shown = hidden.contains(&format!("{}.{j}", step.n));
-            if !shown && !h.d.is_empty() {
+            if !shown && !h.d.is_empty() && !loose {
                 return None;
             }
             // A line put inside the span is the writer's, and an undo would drop it

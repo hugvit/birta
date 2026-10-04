@@ -59,7 +59,8 @@
     "lost": 1,
     "items": 3,
     "decided": 1,
-    "attention": 4
+    "attention": 4,
+    "to_check": 3
   },
   "items": [
     {
@@ -220,6 +221,9 @@
       },
       "label": "6 words changed",
       "is_rewrite": false,
+      "old_text": "Retrying three times with backoff fixes most of these.\n",
+      "new_text": "S3 answers 503 under load; retrying three times fixes most of these.\n",
+      "check": null,
       "reversible": {
         "ok": true,
         "reason": "none"
@@ -269,6 +273,9 @@
       },
       "label": "4 words changed",
       "is_rewrite": false,
+      "old_text": "When the upload hits a 503 we just fail and the user has to start again.\n",
+      "new_text": "When the upload hits a 503 the user has to start again.\n",
+      "check": null,
       "reversible": {
         "ok": false,
         "reason": "outside"
@@ -315,5 +322,43 @@
       "released": false
     }
   ],
-  "warnings": []
+  "warnings": [],
+  "news": [
+    {
+      "id": "#4",
+      "kind": "reply",
+      "sp": null,
+      "check": null
+    },
+    {
+      "id": "#11",
+      "kind": "reply",
+      "sp": null,
+      "check": null
+    },
+    {
+      "id": "#12",
+      "kind": "turn_note",
+      "sp": null,
+      "check": null
+    },
+    {
+      "id": "9.0",
+      "kind": "change",
+      "sp": "5:1-6:68",
+      "check": null
+    },
+    {
+      "id": "14.0",
+      "kind": "change",
+      "sp": "5:1-6:68",
+      "check": null
+    },
+    {
+      "id": "nh:5",
+      "kind": "not_handled",
+      "sp": "10:1-10:16",
+      "check": null
+    }
+  ]
 }

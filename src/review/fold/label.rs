@@ -16,6 +16,10 @@ pub(super) struct Label {
     pub text: String,
     /// What a removal of whole blocks took, for its tombstone.
     pub removed: Option<String>,
+    /// A removal's heading and first block, or its first block, as raw markdown.
+    pub head: Option<String>,
+    /// The removed stops after the head.
+    pub more: Option<u32>,
 }
 
 impl Label {
@@ -115,9 +119,17 @@ fn code_lines(dl: usize, il: usize) -> Label {
         (d, i) if d == i => format!("{} changed", count(d, "line", "lines")),
         (d, i) => format!("{} → {i}", count(d, "line", "lines")),
     };
-    Label {
-        text,
-        removed: None,
+    Label::plain(text)
+}
+
+impl Label {
+    fn plain(text: String) -> Self {
+        Self {
+            text,
+            removed: None,
+            head: None,
+            more: None,
+        }
     }
 }
 
@@ -126,19 +138,19 @@ fn of(h: &Hunk, new_a: u32, from: &Doc, to: &Doc) -> Label {
     let (dl, il) = (h.d.len() as u32, h.i.len() as u32);
     let old = Side::new(from, (h.a + 1, h.a + dl));
     let new = Side::new(to, (new_a + 1, new_a + il));
-    let plain = |text: String| Label {
-        text,
-        removed: None,
-    };
+    let plain = Label::plain;
     let code = |s: &Side| s.stops.iter().all(|s| s.kind == StopKind::CodeBlock);
     if !(old.stops.is_empty() && new.stops.is_empty()) && code(&old) && code(&new) {
         return code_lines(dl as usize, il as usize);
     }
     if new.stops.is_empty() && old.whole() {
         let what = blocks(&old.stops);
+        let (head, more) = head(&old);
         return Label {
             text: removed_or_added(&what, "removed"),
             removed: Some(what),
+            head: Some(head),
+            more: Some(more),
         };
     }
     if old.stops.is_empty() && new.whole() {
@@ -227,9 +239,38 @@ fn by_words(h: &Hunk, new_a: u32, old: &Side, new: &Side) -> String {
     }
 }
 
+/// A removal's head, a heading with its first block or else the first block, and how
+/// many of its stops come after it.
+fn head(side: &Side) -> (String, u32) {
+    let n = stop_count(&side.stops);
+    let first = side.stops[0];
+    let second = side
+        .stops
+        .get(1)
+        .filter(|_| first.kind == StopKind::Heading);
+    let last = second.unwrap_or(&first);
+    let taken = 1 + usize::from(second.is_some());
+    let text = side.text(first.lines.0, last.lines.1).to_string();
+    (text, n.saturating_sub(taken) as u32)
+}
+
+/// How many blocks a removal or an addition holds; a block nested in another is its part.
+fn stop_count(stops: &[&Stop]) -> usize {
+    // Stops come parent first, so a nested one follows the block holding it
+    stops
+        .iter()
+        .enumerate()
+        .filter(|(k, s)| {
+            !stops[..*k]
+                .iter()
+                .any(|p| p.lines.0 <= s.lines.0 && s.lines.1 <= p.lines.1)
+        })
+        .count()
+}
+
 /// The blocks `stops` are, as a removal or an addition names them.
 fn blocks(stops: &[&Stop]) -> String {
-    let n = stops.len();
+    let n = stop_count(stops);
     if n > 1 && stops.iter().any(|s| s.kind == StopKind::Heading) {
         return format!("section · {}", count(n, "block", "blocks"));
     }

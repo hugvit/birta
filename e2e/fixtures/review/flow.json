@@ -59,7 +59,8 @@
     "lost": 2,
     "items": 3,
     "decided": 2,
-    "attention": 10
+    "attention": 10,
+    "to_check": 9
   },
   "items": [
     {
@@ -452,6 +453,9 @@
       },
       "label": "6 words changed",
       "is_rewrite": false,
+      "old_text": "Retrying three times with backoff fixes most of these.\n",
+      "new_text": "S3 answers 503 under load; retrying three times fixes most of these.\n",
+      "check": null,
       "reversible": {
         "ok": true,
         "reason": "none"
@@ -505,6 +509,9 @@
       },
       "label": "7 words → 10",
       "is_rewrite": false,
+      "old_text": "- backoff of 1, 2 and 4 seconds\n",
+      "new_text": "- backoff of 1, 2 and 4 seconds, capped at 8\n",
+      "check": null,
       "reversible": {
         "ok": true,
         "reason": "none"
@@ -557,6 +564,10 @@
       },
       "label": "2 words → 3",
       "is_rewrite": false,
+      "old_text": "## Stacked on\n",
+      "new_text": "## Stacked on nothing\n",
+      "check": null,
+      "unasked_why": "while I was there",
       "reversible": {
         "ok": true,
         "reason": "none"
@@ -608,6 +619,9 @@
       },
       "label": "1 word changed",
       "is_rewrite": false,
+      "old_text": "## What changes\n",
+      "new_text": "## What changed\n",
+      "check": null,
       "reversible": {
         "ok": false,
         "reason": "outside"
@@ -658,6 +672,9 @@
       },
       "label": "2 words → 3",
       "is_rewrite": false,
+      "old_text": "Nothing yet.\n",
+      "new_text": "Something else now.\n",
+      "check": null,
       "reversible": {
         "ok": false,
         "reason": "outside"
@@ -701,5 +718,91 @@
       "released": false
     }
   ],
-  "warnings": []
+  "warnings": [],
+  "news": [
+    {
+      "id": "nh:4",
+      "kind": "not_handled",
+      "sp": null,
+      "check": null
+    },
+    {
+      "id": "nh:5",
+      "kind": "not_handled",
+      "sp": null,
+      "check": null
+    },
+    {
+      "id": "#18",
+      "kind": "reply",
+      "sp": null,
+      "check": null
+    },
+    {
+      "id": "#23",
+      "kind": "turn_note",
+      "sp": null,
+      "check": null
+    },
+    {
+      "id": "#22",
+      "kind": "question",
+      "sp": "1:1-1:16",
+      "check": "answered"
+    },
+    {
+      "id": "#21",
+      "kind": "question",
+      "sp": "3:1-3:6",
+      "check": null
+    },
+    {
+      "id": "13.0",
+      "kind": "change",
+      "sp": "5:1-6:68",
+      "check": null
+    },
+    {
+      "id": "26.0",
+      "kind": "change",
+      "sp": "8:1-8:15",
+      "check": null
+    },
+    {
+      "id": "nh:7",
+      "kind": "not_handled",
+      "sp": "10:1-10:16",
+      "check": null
+    },
+    {
+      "id": "15.0",
+      "kind": "change",
+      "sp": "11:1-11:44",
+      "check": null
+    },
+    {
+      "id": "#6",
+      "kind": "reply",
+      "sp": "11:1-11:44",
+      "check": null
+    },
+    {
+      "id": "#9",
+      "kind": "reply",
+      "sp": "12:1-13:0",
+      "check": null
+    },
+    {
+      "id": "19.0",
+      "kind": "change",
+      "sp": "14:1-14:21",
+      "check": null
+    },
+    {
+      "id": "27.0",
+      "kind": "change",
+      "sp": "16:1-16:19",
+      "check": null
+    }
+  ]
 }

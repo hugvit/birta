@@ -762,6 +762,131 @@ async fn a_note_on_a_change_anchors_to_its_block_or_to_the_doc_once_deleted() {
     }
 }
 
+/// `c` on a change you reverted is a reply to it, on the block holding the restored text,
+/// not a whole-doc note.
+#[tokio::test]
+async fn a_note_on_a_reverted_change_stays_on_the_change() {
+    let (mut s, n) = agent_changed(|s| s.replaced("- detail one", "- detail one, with retries"));
+    let id = format!("{n}.0");
+    let back = s.replaced("- detail one, with retries", "- detail one");
+    s.undo(&id, &back);
+    let site = Site::new();
+    site.write(PR, s.text());
+    site.write(LOG, &s.log());
+    let served = site.serve(&[PR], &[GATE_ON]);
+    let (mut ws, _) = served.viewing(PR).await;
+    let frame = op(
+        "c1",
+        &rev(s.text()),
+        "comment",
+        json!({"at": {"k": "change", "id": id}, "body": "keep the old wording"}),
+    );
+    let ack = acked(&mut ws, frame).await;
+    let note = ack["n"].as_u64().unwrap();
+    let lines = log_lines(&review_file(&site));
+    let line = &lines[note as usize - 1];
+    assert_eq!(line["at"]["scope"], "block", "{line}");
+    assert_eq!(
+        line["at"]["lines"][0],
+        line_of(s.text(), "- detail one"),
+        "{line}"
+    );
+
+    let log = std::fs::read_to_string(review_file(&site)).unwrap();
+    let parsed = birta::review::ops::parse(log);
+    let chain = birta::review::chain::Chain::build(&parsed);
+    let doc = Doc::new(s.text());
+    let state =
+        serde_json::to_value(birta::review::fold::fold(&parsed, &chain, &doc).state).unwrap();
+    let item = state["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["n"] == note)
+        .unwrap();
+    assert_eq!(item["at"]["change"], id.as_str(), "{item}");
+    let change = state["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == id.as_str())
+        .unwrap();
+    assert_eq!(
+        change["check"], "reverted",
+        "a reply never clears a revert: {change}"
+    );
+    let news = state["news"].as_array().expect("a news list");
+    let entry = news.iter().find(|i| i["id"] == id.as_str()).unwrap();
+    assert_eq!(entry["check"], "reverted", "{entry}");
+}
+
+/// Serves `s`, writes `c` on change `id` from the page, and gives the log line and the
+/// item the fold makes of it.
+async fn note_on_change(s: &Scenario, id: &str) -> (Value, Value) {
+    let site = Site::new();
+    site.write(PR, s.text());
+    site.write(LOG, &s.log());
+    let served = site.serve(&[PR], &[GATE_ON]);
+    let (mut ws, _) = served.viewing(PR).await;
+    let frame = op(
+        "c1",
+        &rev(s.text()),
+        "comment",
+        json!({"at": {"k": "change", "id": id}, "body": "Why?"}),
+    );
+    let note = acked(&mut ws, frame).await["n"].as_u64().unwrap();
+    let line = log_lines(&review_file(&site))[note as usize - 1].clone();
+    let log = std::fs::read_to_string(review_file(&site)).unwrap();
+    let parsed = birta::review::ops::parse(log);
+    let chain = birta::review::chain::Chain::build(&parsed);
+    let doc = Doc::new(s.text());
+    let state =
+        serde_json::to_value(birta::review::fold::fold(&parsed, &chain, &doc).state).unwrap();
+    let item = state["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["n"] == note)
+        .cloned()
+        .unwrap();
+    (line, item)
+}
+
+/// Your revert's text, edited afterwards, still holds the reverted change.
+#[tokio::test]
+async fn a_note_on_a_reverted_change_whose_text_you_edited_stays_on_the_change() {
+    let (mut s, n) = agent_changed(|s| s.replaced("- detail one", "- detail one, with retries"));
+    let id = format!("{n}.0");
+    let back = s.replaced("- detail one, with retries", "- detail one");
+    s.undo(&id, &back);
+    let edited = s.replaced("- detail one", "- detail one, tweaked");
+    s.edit(&edited);
+    let (line, item) = note_on_change(&s, &id).await;
+    assert_eq!(line["at"]["scope"], "block", "{line}");
+    assert_eq!(
+        line["at"]["lines"][0],
+        line_of(s.text(), "- detail one, tweaked"),
+        "{line}"
+    );
+    assert_eq!(item["at"]["change"], id.as_str(), "{item}");
+}
+
+/// Text added after a blank line sits on the block it holds, for a note as for its news.
+#[tokio::test]
+async fn a_note_on_an_addition_that_starts_on_a_blank_line_is_on_its_block() {
+    let (s, n) = agent_changed(|s| format!("{}\nNew para.\n", s.text()));
+    let id = format!("{n}.0");
+    let state = serde_json::to_value(s.fold()).unwrap();
+    let news = state["news"].as_array().unwrap();
+    let entry = news.iter().find(|i| i["id"] == id.as_str()).unwrap();
+    let want = line_of(s.text(), "New para.");
+    let (line, item) = note_on_change(&s, &id).await;
+    assert_eq!(line["at"]["scope"], "block", "{line}");
+    assert_eq!(line["at"]["lines"][0], want, "{line}");
+    assert_eq!(item["at"]["loc"]["sp"], entry["sp"], "{item} {entry}");
+    assert_eq!(item["at"]["change"], id.as_str(), "{item}");
+}
+
 // --- hello ---
 
 #[tokio::test]

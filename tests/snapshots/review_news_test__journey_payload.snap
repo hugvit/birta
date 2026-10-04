@@ -1,0 +1,60 @@
+---
+source: tests/review_news_test.rs
+expression: "serde_json::to_string_pretty(&payload).unwrap()"
+---
+{
+  "changes": [
+    {
+      "id": "10.0",
+      "new_text": "`UploadClient.put` makes a single attempt with no retry logic, so on transient\nerrors (connection resets, 502/503s, deploy timeouts) we just fail and the user\nrestarts the upload. Most would succeed moments later.\n",
+      "old_text": "Uploads to the storage service occasionally fail with transient errors —\nconnection resets, 502/503s from the load balancer, and the odd timeout during\ndeploys. Today, when that happens, we just fail: the error bubbles up to the\ncaller and the user has to start the upload over. Most of these failures would\nsucceed on a second attempt a few hundred milliseconds later.\n"
+    },
+    {
+      "id": "10.1",
+      "new_text": "- Retry on network errors, 429 and 502–504 with exponential backoff and jitter\n",
+      "old_text": "- Wrap `UploadClient.put` in a retry loop with exponential backoff and full jitter\n- Retry only on idempotent failure modes: network errors, 502, 503, 504, and 429\n"
+    },
+    {
+      "id": "10.2",
+      "new_text": "",
+      "old_text": "- Respect `Retry-After` when the server sends it\n"
+    },
+    {
+      "id": "10.3",
+      "new_text": "- Honor `Retry-After`; defaults: 4 attempts, 200 ms base, 5 s cap\n",
+      "old_text": "- Defaults: 4 attempts, 200 ms base delay, 5 s max delay (all configurable)\n"
+    },
+    {
+      "id": "10.4",
+      "new_text": "",
+      "old_text": "- Log each retry at `debug` with attempt number and delay\n\n"
+    },
+    {
+      "id": "10.5",
+      "new_text": "",
+      "old_text": "## Stacked on\n\n- #482 — extract `UploadClient` from the sync worker\n- #479 — add a storage proxy for local runs\n"
+    },
+    {
+      "id": "10.6",
+      "new_text": "- [x] Unit tests for backoff timing and retryable status codes\n",
+      "old_text": "- [x] Unit tests for backoff timing and jitter bounds\n- [x] Unit tests for retryable vs. non-retryable status codes\n"
+    }
+  ],
+  "deletions": [
+    {
+      "change": "10.2",
+      "head": "- Respect `Retry-After` when the server sends it",
+      "more": 0
+    },
+    {
+      "change": "10.4",
+      "head": "- Log each retry at `debug` with attempt number and delay",
+      "more": 0
+    },
+    {
+      "change": "10.5",
+      "head": "## Stacked on\n\n- #482 — extract `UploadClient` from the sync worker",
+      "more": 1
+    }
+  ]
+}

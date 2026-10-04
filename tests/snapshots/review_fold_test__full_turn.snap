@@ -63,7 +63,8 @@ expression: json
     "lost": 0,
     "items": 10,
     "decided": 4,
-    "attention": 2
+    "attention": 2,
+    "to_check": 3
   },
   "items": [
     {
@@ -347,5 +348,31 @@ expression: json
       "released": false
     }
   ],
-  "warnings": []
+  "warnings": [],
+  "news": [
+    {
+      "id": "#14",
+      "kind": "reply",
+      "sp": null,
+      "check": null
+    },
+    {
+      "id": "#15",
+      "kind": "turn_note",
+      "sp": null,
+      "check": null
+    },
+    {
+      "id": "#4",
+      "kind": "reply",
+      "sp": "6:1-6:12",
+      "check": null
+    },
+    {
+      "id": "#13",
+      "kind": "answer",
+      "sp": "7:1-8:15",
+      "check": null
+    }
+  ]
 }

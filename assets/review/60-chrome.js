@@ -582,7 +582,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     strip.hidden = !on;
     document.documentElement.toggleAttribute('data-review-strip', on);
     if (!on) return;
-    var r = BR.pure.stripText(s, BR.pointing.stripFocus(), {
+    // n and p still step by the walk, so the strip counts the walk's stops, not `news`
+    var walked = s && s.news ? Object.assign({}, s, { news: undefined }) : s;
+    var r = BR.pure.stripText(walked, BR.pointing.stripFocus(), {
       now: t,
       mode: mode,
       composer: BR.flow.composerLabel(),

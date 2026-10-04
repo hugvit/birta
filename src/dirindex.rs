@@ -58,7 +58,7 @@ pub(crate) fn dir_state_json(
     folder: Option<&Summary>,
     mut files: Vec<Listed>,
 ) -> serde_json::Value {
-    let fresh = |f: &Listed| f.news || f.summary.as_ref().is_some_and(|s| s.counts.unseen > 0);
+    let fresh = |f: &Listed| f.news || f.summary.as_ref().is_some_and(|s| s.counts.attention > 0);
     let (mut drafts, mut unseen_files, mut decided, mut items) = (0u64, 0u64, 0u64, 0u64);
     for summary in files
         .iter()
@@ -400,6 +400,7 @@ mod tests {
                 items,
                 decided,
                 attention: unseen,
+                to_check: unseen,
             },
             notes: drafts,
         }
@@ -454,7 +455,13 @@ mod tests {
     }
 
     #[test]
-    fn news_is_the_memory_flag_or_an_unseen_count() {
+    fn news_is_the_memory_flag_or_something_needing_attention() {
+        // Only unseen replies, and no unseen change
+        let mut replies = summary(Stage::Replied, 0, 0, 0, 0);
+        replies.counts.attention = 2;
+        // Left to check but walked past: `to_check` drives the listing only once the walk reads it
+        let mut checked = summary(Stage::Replied, 0, 0, 0, 0);
+        checked.counts.to_check = 2;
         let state = dir_state_json(
             "",
             false,
@@ -467,6 +474,8 @@ mod tests {
                     false,
                     1,
                 ),
+                listed("replies.md", Some(replies), false, 1),
+                listed("checked.md", Some(checked), false, 1),
                 listed(
                     "quiet.md",
                     Some(summary(Stage::Drafts, 1, 0, 0, 0)),
@@ -488,6 +497,11 @@ mod tests {
             .collect();
         assert!(news.contains(&("flag.md".to_string(), true)), "{news:?}");
         assert!(news.contains(&("unseen.md".to_string(), true)), "{news:?}");
+        assert!(news.contains(&("replies.md".to_string(), true)), "{news:?}");
+        assert!(
+            news.contains(&("checked.md".to_string(), false)),
+            "{news:?}"
+        );
         assert!(news.contains(&("quiet.md".to_string(), false)), "{news:?}");
     }
 

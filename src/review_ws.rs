@@ -1084,8 +1084,8 @@ fn place(req: &AnchorReq, doc: &Doc, rev: &Rev, parsed: Option<&Parsed>) -> Resu
     }
 }
 
-/// A note on a change sits on the block holding the start of the change's text, or on
-/// the doc once that text is gone.
+/// A note on a change sits on the block holding the start of the change's text, or of the
+/// text your revert put back; on the doc once that text is gone.
 fn change_anchor(parsed: &Parsed, doc: &Doc, id: &str) -> Result<At, Nack> {
     let state = fold_text(parsed, &doc.text);
     let change = state
@@ -1093,18 +1093,7 @@ fn change_anchor(parsed: &Parsed, doc: &Doc, id: &str) -> Result<At, Nack> {
         .iter()
         .find(|c| c.id == id)
         .ok_or("bad_anchor")?;
-    let range = &change.range;
-    if range.bytes.0 >= range.bytes.1 {
-        return Ok(At::Doc);
-    }
-    let line = range.lines.0;
-    let Some(stop) = doc
-        .blocks
-        .stops
-        .iter()
-        .filter(|s| s.lines.0 <= line && line <= s.lines.1)
-        .max_by_key(|s| s.lines.0)
-    else {
+    let Some(stop) = fold::change_stop(&state.changes, doc, change) else {
         return Ok(At::Doc);
     };
     let req = AnchorReq::Block {

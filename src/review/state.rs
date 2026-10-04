@@ -38,6 +38,46 @@ pub struct ReviewState {
     pub approve: Option<ApproveState>,
     pub rounds: Vec<Round>,
     pub warnings: Vec<String>,
+    /// Claude's news, in walk order, until each item is settled.
+    pub news: Vec<News>,
+}
+
+/// One item of Claude's news: a change, a reply, a question or a row the reviewer checks.
+#[derive(Clone, Debug, Serialize)]
+pub struct News {
+    /// As a `seen` op names it: `12.0`, `#15`, `nh:12`.
+    pub id: String,
+    pub kind: NewsKind,
+    /// The stop it sits on, `null` for the whole doc and for a removal.
+    pub sp: Option<String>,
+    /// A removal's gap: the stop above it, `null` at the top. Only removals carry it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_sp: Option<Option<String>>,
+    pub check: Option<Check>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NewsKind {
+    Change,
+    Removal,
+    Reply,
+    Answer,
+    Question,
+    NotHandled,
+    TurnNote,
+}
+
+/// How the reviewer checked an item of news.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Check {
+    Kept,
+    Ok,
+    Reverted,
+    Restored,
+    Replied,
+    Answered,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -146,6 +186,8 @@ pub struct Counts {
     pub items: u32,
     pub decided: u32,
     pub attention: u32,
+    /// Stops holding news the reviewer hasn't checked.
+    pub to_check: u32,
 }
 
 /// A note (human or agent) and what became of it.
@@ -311,9 +353,19 @@ pub struct Change {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub removed: Option<String>,
     pub is_rewrite: bool,
+    /// The recorded hunk's removed and written lines, as raw markdown.
+    pub old_text: String,
+    pub new_text: String,
+    pub check: Option<Check>,
+    /// The body of the `unasked` line that names it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unasked_why: Option<String>,
     /// An `unasked` line of its turn names it, so it was flagged rather than forgotten.
     #[serde(skip)]
     pub flagged: bool,
+    /// The current text's lines holding what it wrote, or what later writes put over it.
+    #[serde(skip)]
+    pub span: Option<(u32, u32)>,
     /// The hunk that undoes this one, in the current text's lines; set only when reversible.
     #[serde(skip)]
     pub reverse: Option<Hunk>,
@@ -407,6 +459,12 @@ pub struct Deletion {
     /// What whole blocks went, e.g. `section · 2 blocks`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// The removed heading and its first block, or the first removed block.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head: Option<String>,
+    /// Removed stops after the head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub more: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

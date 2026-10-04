@@ -320,7 +320,8 @@ test("a selection's hint", () => {
 test("with no news list, a stop on the walk takes its place from the walk, and drafts don't count", () => {
   const BR = load();
   const s = state("unseen");
-  assert.equal(s.news, undefined);
+  // The page hands the strip the state without `news` until the walk reads it
+  delete s.news;
   // unseen.json walks #13 on whole doc, 9.0, nh:5, 10.0, then 11.0 at the block above its tick
   assert.equal(strip(BR, s, DOC).where, "1 of 5 · whole doc · Claude replied");
   assert.equal(strip(BR, s, WHY).where, "2 of 5 · ## Why › paragraph · Claude's change");
@@ -440,7 +441,7 @@ test("adversary: two removals in one gap are two stops, not one", () => {
 test("adversary: interim, two changes on one paragraph and the lost row on whole doc count as stops", () => {
   const BR = load();
   const s = state("lost");
-  assert.equal(s.news, undefined);
+  delete s.news;
   // #11 and the lost row on whole doc, 9.0 and 14.0 on the paragraph, nh:5 on the bullet: three stops of news
   assert.match(strip(BR, s, DOC).where, /^1 of 3 · whole doc/);
   const para = { k: "block", sp: "5:1-6:68", heading: "## Why", kind: "paragraph" };

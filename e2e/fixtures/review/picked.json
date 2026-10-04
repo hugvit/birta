@@ -47,7 +47,8 @@
     "lost": 0,
     "items": 3,
     "decided": 1,
-    "attention": 0
+    "attention": 0,
+    "to_check": 0
   },
   "items": [
     {
@@ -177,5 +178,6 @@
       "released": false
     }
   ],
-  "warnings": []
+  "warnings": [],
+  "news": []
 }

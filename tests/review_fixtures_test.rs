@@ -3,9 +3,9 @@ use birta::review::{
     ops::{By, ByKind, CommentKind, ReplyKind, Scope, To, Verdict},
     state::{
         AnchorStatus, ApproveState, Asked, AskedKind, AtKind, AtState, Attr, Change, ChangeRange,
-        Counts, Deletion, DeletionKind, Hold, HoldKind, Item, ItemOutcome, ItemStatus, Loc,
-        LogInfo, OwnerState, Phrase, PickedUp, RangeStatus, Replied, ReplyState, Reversible,
-        ReversibleReason, ReviewState, Rewrite, Round, Sent, Silence, Stage, What,
+        Check, Counts, Deletion, DeletionKind, Hold, HoldKind, Item, ItemOutcome, ItemStatus, Loc,
+        LogInfo, News, NewsKind, OwnerState, Phrase, PickedUp, RangeStatus, Replied, ReplyState,
+        Reversible, ReversibleReason, ReviewState, Rewrite, Round, Sent, Silence, Stage, What,
     },
 };
 use serde_json::{Value, json};
@@ -46,6 +46,7 @@ fn counts(all: u32) -> Counts {
         items: all,
         decided: all,
         attention: all,
+        to_check: all,
     }
 }
 
@@ -128,6 +129,7 @@ fn full_state() -> ReviewState {
             items: 9,
             decided: 10,
             attention: 11,
+            to_check: 12,
         },
         items: vec![Item {
             n: 12,
@@ -215,7 +217,12 @@ fn full_state() -> ReviewState {
             label: Some("2 words changed".to_string()),
             removed: Some("old text".to_string()),
             is_rewrite: false,
+            old_text: "old text\n".to_string(),
+            new_text: "new text\n".to_string(),
+            check: Some(Check::Reverted),
+            unasked_why: Some("while I was there".to_string()),
             flagged: false,
+            span: None,
             reverse: None,
             reversible: Reversible {
                 ok: false,
@@ -232,6 +239,8 @@ fn full_state() -> ReviewState {
             after_sp: Some("39:1-40:12".to_string()),
             first_line: Some("## Stacked on".to_string()),
             label: Some("section · 2 blocks".to_string()),
+            head: Some("## Stacked on\n\n- #412".to_string()),
+            more: Some(1),
         }],
         rewrite: Some(Rewrite {
             turn: 33,
@@ -263,6 +272,22 @@ fn full_state() -> ReviewState {
             released: false,
         }],
         warnings: vec!["unknown op 'foo' x2".to_string()],
+        news: vec![
+            News {
+                id: "37.0".to_string(),
+                kind: NewsKind::Change,
+                sp: Some("9:1-12:40".to_string()),
+                after_sp: None,
+                check: Some(Check::Reverted),
+            },
+            News {
+                id: "37.1".to_string(),
+                kind: NewsKind::Removal,
+                sp: None,
+                after_sp: Some(Some("39:1-40:12".to_string())),
+                check: None,
+            },
+        ],
     }
 }
 
@@ -337,6 +362,8 @@ fn fresh_state() -> ReviewState {
             after_sp: None,
             first_line: None,
             label: None,
+            head: None,
+            more: None,
         }],
         rewrite: None,
         later: vec![],
@@ -344,6 +371,7 @@ fn fresh_state() -> ReviewState {
         approve: None,
         rounds: vec![],
         warnings: vec![],
+        news: vec![],
     }
 }
 
@@ -363,7 +391,7 @@ fn keys(v: &Value) -> Vec<&str> {
 
 #[test]
 fn a_full_state_serializes_to_the_frozen_shape() {
-    let want = json!({
+    let mut want = json!({
         "schema": "review-state/1",
         "doc": "pr-draft.md",
         "rev": REV,
@@ -381,7 +409,7 @@ fn a_full_state_serializes_to_the_frozen_shape() {
         },
         "phrase_before_hold": {"stage": "drafts"},
         "hold": {"n": 44, "kind": "approve", "count": 2, "not_before": 1_790_000_905_000u64},
-        "counts": {"drafts": 1, "sent_unclaimed": 2, "unseen": 3, "unasked": 4, "not_handled": 5, "open_asks": 6, "later": 7, "lost": 8, "items": 9, "decided": 10, "attention": 11},
+        "counts": {"drafts": 1, "sent_unclaimed": 2, "unseen": 3, "unasked": 4, "not_handled": 5, "open_asks": 6, "later": 7, "lost": 8, "items": 9, "decided": 10, "attention": 11, "to_check": 12},
         "items": [{
             "n": 12, "op": "comment", "by": {"type": "human", "name": "andres"}, "cid": "c-9f", "ts": 1_790_000_000_000u64,
             "at": {"kind": "anchor", "status": "moved", "scope": "quote", "quote": "we just fail", "shown": "we just fail",
@@ -415,6 +443,18 @@ fn a_full_state_serializes_to_the_frozen_shape() {
                     "claim": 33, "claimed_by": "claude", "yield": 38, "released": false}],
         "warnings": ["unknown op 'foo' x2"]
     });
+    // Split out of the literal above, which is at the macro's recursion limit
+    let change = &mut want["changes"][0];
+    change["old_text"] = json!("old text\n");
+    change["new_text"] = json!("new text\n");
+    change["check"] = json!("reverted");
+    change["unasked_why"] = json!("while I was there");
+    want["deletions"][0]["head"] = json!("## Stacked on\n\n- #412");
+    want["deletions"][0]["more"] = json!(1);
+    want["news"] = json!([
+        {"id": "37.0", "kind": "change", "sp": "9:1-12:40", "check": "reverted"},
+        {"id": "37.1", "kind": "removal", "sp": null, "after_sp": "39:1-40:12", "check": null}
+    ]);
     assert_eq!(serde_json::to_value(full_state()).unwrap(), want);
 }
 
@@ -450,6 +490,7 @@ fn absent_optionals_are_omitted_but_frozen_nulls_stay() {
             "log",
             "log_writable",
             "lost",
+            "news",
             "owner",
             "phrase",
             "phrase_before_hold",
@@ -600,7 +641,12 @@ fn nested_optionals_are_omitted() {
         label: None,
         removed: None,
         is_rewrite: false,
+        old_text: String::new(),
+        new_text: String::new(),
+        check: None,
+        unasked_why: None,
         flagged: false,
+        span: None,
         reverse: None,
         reversible: Reversible {
             ok: true,
@@ -616,11 +662,14 @@ fn nested_optionals_are_omitted() {
             "attr",
             "breaks_stet",
             "by",
+            "check",
             "id",
             "idx",
             "is_rewrite",
             "new",
+            "new_text",
             "old",
+            "old_text",
             "op",
             "op_hunks",
             "range",
@@ -1038,6 +1087,22 @@ fn each_contract_fixture_shows_its_case() {
     let r = rewrite.rewrite.as_ref().unwrap();
     assert_eq!((r.blocks_changed, r.blocks_total), (8, 10));
     assert_eq!(Some(r.turn), rewrite.rounds[0].claim);
+    let rewrite = serde_json::to_value(get("rewrite")).unwrap();
+    let news: BTreeSet<&str> = rewrite["news"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no news list"))
+        .iter()
+        .filter_map(|n| n["id"].as_str())
+        .collect();
+    for c in &get("rewrite").changes {
+        if c.range.status != RangeStatus::Superseded {
+            assert!(
+                news.contains(c.id.as_str()),
+                "{} is not news: {news:?}",
+                c.id
+            );
+        }
+    }
     let lost = get("lost");
     let q = lost
         .items

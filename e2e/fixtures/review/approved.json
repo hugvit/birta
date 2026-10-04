@@ -93,7 +93,8 @@
     "lost": 0,
     "items": 3,
     "decided": 2,
-    "attention": 1
+    "attention": 1,
+    "to_check": 3
   },
   "items": [
     {
@@ -310,6 +311,9 @@
       },
       "label": "6 words changed",
       "is_rewrite": false,
+      "old_text": "Retrying three times with backoff fixes most of these.\n",
+      "new_text": "S3 answers 503 under load; retrying three times fixes most of these.\n",
+      "check": "kept",
       "reversible": {
         "ok": true,
         "reason": "none"
@@ -357,5 +361,25 @@
       "released": false
     }
   ],
-  "warnings": []
+  "warnings": [],
+  "news": [
+    {
+      "id": "#12",
+      "kind": "turn_note",
+      "sp": null,
+      "check": null
+    },
+    {
+      "id": "#4",
+      "kind": "reply",
+      "sp": "5:1-6:68",
+      "check": null
+    },
+    {
+      "id": "nh:5",
+      "kind": "not_handled",
+      "sp": "10:1-10:16",
+      "check": null
+    }
+  ]
 }

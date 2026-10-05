@@ -676,6 +676,9 @@ enum WsOp {
     Seen {
         ids: Vec<String>,
     },
+    Unkeep {
+        ids: Vec<String>,
+    },
     HandBack {
         scope: HandBackScope,
     },
@@ -715,6 +718,7 @@ impl WsOp {
                 | Self::Retract { .. }
                 | Self::Reply { .. }
                 | Self::Seen { .. }
+                | Self::Unkeep { .. }
         )
     }
 
@@ -824,6 +828,7 @@ impl OpFrame {
             WsOp::Retract { .. } => "retract",
             WsOp::Reply { .. } => "reply",
             WsOp::Seen { .. } => "seen",
+            WsOp::Unkeep { .. } => "unkeep",
             WsOp::HandBack { .. } => "hand_back",
             WsOp::Approve {} => "approve",
             WsOp::Withdraw { .. } => "withdraw",
@@ -1059,6 +1064,17 @@ fn build(
             }]
         }
         WsOp::Seen { ids } => vec![Op::Seen { ids: ids.clone() }],
+        WsOp::Unkeep { ids } => {
+            // A hand-back or approve settled what it checked, for good
+            let news = fold_text(parsed, text).news;
+            if ids.is_empty() {
+                return Err("bad_op");
+            }
+            if !ids.iter().all(|id| news.iter().any(|n| &n.id == id)) {
+                return Err("not_editable");
+            }
+            vec![Op::Unkeep { ids: ids.clone() }]
+        }
         WsOp::HandBack { .. } => {
             let upto = parsed
                 .lines

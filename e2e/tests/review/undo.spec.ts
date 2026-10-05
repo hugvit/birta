@@ -1,21 +1,27 @@
 import { BrowserContext, Page } from "@playwright/test";
+import * as fs from "fs";
+import * as path from "path";
 import {
   test,
   expect,
   GATE_ON,
   OPEN_ROOTS,
+  REPO,
   STOPS_DOC,
   State,
   agent,
   booted,
   cacheCdn,
+  changeRows,
   fixtureDoc,
   fixtureState,
   focusTo,
   linesNamed,
+  marks,
   mockReview,
   phraseOf,
   reviewLog,
+  seededRound,
   spAt,
   stopSp,
   stripMessage,
@@ -33,6 +39,8 @@ const SHORT_HOLD = { BIRTA_REVIEW_HOLD_MS: "300" };
 const WITHDRAWN = "hand-back withdrawn · your notes are back";
 const WITH_CLAUDE = "already with Claude · c adds a note";
 const NOTHING = "nothing to undo";
+const KEPT = "kept · z to undo";
+const UNKEPT = "kept mark removed";
 
 type Start = (
   files: Record<string, string>,
@@ -491,9 +499,19 @@ test.describe("a restored history and a hand-back made while the tab was away", 
   });
 });
 
-// --- A keep's marker is part of the history too ------------------------------------------------
+// --- A keep is part of the history too: z takes it back with an unkeep -------------------------
 
-test("a keep's marker survives the reload: z says a keep stays kept and leaves the note before it", async ({ page, birta }) => {
+/** `state` with Claude's change `id` kept, as the fold shows it after a seen. */
+function keptIn(state: State, id: string): State {
+  const news = state.news.find((n: State) => n.id === id);
+  news.check = "kept";
+  const c = state.changes.find((x: State) => x.id === id);
+  Object.assign(c, { check: "kept", seen: true });
+  return state;
+}
+
+/** Writes a note on `## Why` and the state shows it as line 101, your draft; then y on the unit-test bullet. */
+async function noteThenKeep(page: Page, birta: Start) {
   const NAME = "journey/round1";
   const served = await birta({ "pr.md": fixtureDoc(NAME) }, GATE_ON);
   await page.setViewportSize(WIDE);
@@ -525,17 +543,182 @@ test("a keep's marker survives the reload: z says a keep stays kept and leaves t
   await expect.poll(() => page.evaluate(() => (window as unknown as W).BR.currentState().items.some((i: State) => i.n === 101))).toBe(true);
   await focusTo(page, "16:1-16:62");
   await page.keyboard.press("y");
-  await expect.poll(() => stripMessage(page)).toBe("kept");
+  await expect.poll(() => mock.ops().filter((o) => o.op === "seen").map((o) => o.ids)).toEqual([["10.6"]]);
+  await expect.poll(() => stripMessage(page)).toBe(KEPT);
+  await expect.poll(() => page.evaluate(() => (window as unknown as W).BR.pending.unacked())).toBe(false);
+  return { mock, withNote };
+}
+
+const unkeeps = (ops: State[]) => ops.filter((o) => o.op === "unkeep").map((o) => [...o.ids].sort());
+
+test("a keep survives the reload: z unkeeps it, kept mark removed, and the next z takes back the note before it", async ({ page, birta }) => {
+  const { mock, withNote } = await noteThenKeep(page, birta);
+  // The keep landed, so the state the reload gets shows it
+  keptIn(withNote, "10.6");
   await page.reload();
   await ready(page);
   mock.pushState(withNote);
   await expect.poll(() => page.evaluate(() => (window as unknown as W).BR.currentState().items.some((i: State) => i.n === 101))).toBe(true);
-  await z(page, "nothing to undo · a keep stays kept");
+  await z(page, UNKEPT);
+  await expect.poll(() => unkeeps(mock.ops())).toEqual([["10.6"]]);
   await page.waitForTimeout(SETTLE_MS);
   expect(mock.ops().filter((o) => o.op === "retract")).toEqual([]);
   await z(page, "note removed");
   // The mock acked the note first, as line 101
   await expect.poll(() => mock.ops().filter((o) => o.op === "retract").map((o) => o.to)).toEqual([101]);
+  expect(unkeeps(mock.ops())).toEqual([["10.6"]]);
+});
+
+test("a restored keep the state no longer shows as kept is dropped: z sends no unkeep and reaches the note", async ({ page, birta }) => {
+  const { mock, withNote } = await noteThenKeep(page, birta);
+  // Another tab took the keep back, or the log was reset: the state shows 10.6 unchecked
+  await page.reload();
+  await ready(page);
+  mock.pushState(withNote);
+  await expect.poll(() => page.evaluate(() => (window as unknown as W).BR.currentState().items.some((i: State) => i.n === 101))).toBe(true);
+  await z(page, "note removed");
+  await page.waitForTimeout(SETTLE_MS);
+  expect(unkeeps(mock.ops())).toEqual([]);
+  expect(mock.ops().filter((o) => o.op === "retract").map((o) => o.to)).toEqual([101]);
+});
+
+/** The seeded round on a real server: Claude's change 7.0 on the paragraph, and its done on your note. */
+async function openSeeded(page: Page, birta: Start, env: Record<string, string> = {}) {
+  const s = seededRound(1);
+  const served = await birta({ "pr.md": s.doc, "pr.md.birta.jsonl": s.log }, { ...GATE_ON, ...env });
+  await page.setViewportSize(WIDE);
+  await page.goto(`${served.url}/view/pr.md`);
+  await ready(page);
+  await expect.poll(() => toCheck(page)).toBe(2);
+  return { served, seeded: lines(served.root).length };
+}
+
+const CHANGED = "we just fail, and the user";
+const toCheck = (page: Page) => page.evaluate(() => (window as unknown as W).BR.currentState()?.counts.to_check);
+const checkOf = (page: Page, id: string) =>
+  page.evaluate((id) => (window as unknown as W).BR.currentState()?.changes.find((c: State) => c.id === id)?.check ?? null, id);
+/** The keeps and unkeeps written since the seeded lines, with their ids. */
+const keeps = (root: string, seeded: number) =>
+  lines(root)
+    .slice(seeded)
+    .filter((l) => l.op === "seen" || l.op === "unkeep")
+    .map((l) => [l.op, l.ids]);
+
+test.describe("z on a keep, on a real server", () => {
+  test("y then z: kept mark removed, the row loses its kept tail, the bar is new again, and the file is review/2", async ({ page, birta }) => {
+    const { served, seeded } = await openSeeded(page, birta);
+    await onBlock(page, CHANGED);
+    await page.keyboard.press("y");
+    await expect.poll(() => stripMessage(page)).toBe(KEPT);
+    await expect.poll(() => checkOf(page, "7.0")).toBe("kept");
+    await expect.poll(async () => (await changeRows(page)).map((r) => r.tail)).toContain("kept");
+    expect(lines(served.root)[0].birta).toBe("review/1");
+    await z(page, UNKEPT);
+    await expect.poll(() => keeps(served.root, seeded)).toEqual([
+      ["seen", ["7.0"]],
+      ["unkeep", ["7.0"]],
+    ]);
+    expect(lines(served.root)[0].birta).toBe("review/2");
+    await expect.poll(() => checkOf(page, "7.0")).toBe(null);
+    await expect.poll(() => toCheck(page)).toBe(2);
+    await expect.poll(async () => (await changeRows(page)).map((r) => r.tail)).not.toContain("kept");
+    const sp = await stopSp(page, CHANGED);
+    await expect.poll(async () => (await marks(page)).find((m) => m.mark === "bar" && m.sp === sp)?.check).toBe("new");
+    // The unkeep is spent
+    await z(page, NOTHING);
+    await page.waitForTimeout(SETTLE_MS);
+    expect(keeps(served.root, seeded)).toHaveLength(2);
+  });
+
+  test("y, z, y keeps it again, and a second z takes that keep back too", async ({ page, birta }) => {
+    const { served, seeded } = await openSeeded(page, birta);
+    await onBlock(page, CHANGED);
+    await page.keyboard.press("y");
+    await expect.poll(() => stripMessage(page)).toBe(KEPT);
+    await z(page, UNKEPT);
+    await expect.poll(() => checkOf(page, "7.0")).toBe(null);
+    await page.keyboard.press("y");
+    await expect.poll(() => stripMessage(page)).toBe(KEPT);
+    await expect.poll(() => checkOf(page, "7.0")).toBe("kept");
+    await z(page, UNKEPT);
+    await expect.poll(() => keeps(served.root, seeded)).toEqual([
+      ["seen", ["7.0"]],
+      ["unkeep", ["7.0"]],
+      ["seen", ["7.0"]],
+      ["unkeep", ["7.0"]],
+    ]);
+    await expect.poll(() => checkOf(page, "7.0")).toBe(null);
+  });
+
+  test("in the hand-back hold z withdraws it first; the next z takes the keep back", async ({ page, birta }) => {
+    const { served, seeded } = await openSeeded(page, birta, LONG_HOLD);
+    await onBlock(page, "metrics dashboard");
+    await keep(page, "shorter");
+    await onBlock(page, CHANGED);
+    await page.keyboard.press("y");
+    await expect.poll(() => stripMessage(page)).toBe(KEPT);
+    await expect.poll(() => page.evaluate(() => (window as unknown as W).BR.pending.unacked())).toBe(false);
+    await turn(page);
+    const since = (op: string) => lines(served.root).slice(seeded).filter((l) => l.op === op).length;
+    await expect.poll(() => since("submit")).toBe(1);
+    await expect.poll(() => stripMessage(page)).toMatch(/^handing back · /);
+    await page.keyboard.press("z");
+    await expect.poll(() => since("withdraw")).toBe(1);
+    await expect.poll(async () => !/^handing back/.test((await stripMessage(page)) ?? "")).toBe(true);
+    expect(since("unkeep")).toBe(0);
+    await z(page, UNKEPT);
+    await expect.poll(() => keeps(served.root, seeded)).toEqual([
+      ["seen", ["7.0"]],
+      ["unkeep", ["7.0"]],
+    ]);
+    // The note is still yours to take back
+    await z(page, "note removed");
+  });
+
+  test("once Claude picked up and replied, z takes no keep back", async ({ page, birta }) => {
+    const { served, seeded } = await openSeeded(page, birta, SHORT_HOLD);
+    await onBlock(page, CHANGED);
+    await page.keyboard.press("y");
+    await expect.poll(() => stripMessage(page)).toBe(KEPT);
+    await onBlock(page, "metrics dashboard");
+    await keep(page, "say why");
+    await handBack(page);
+    const sent = notes(served.root).at(-1)!;
+    expect(agent(served.root, ["review", "pr.md", "--as", "claude"]).status).toBe(0);
+    const responded = agent(served.root, ["respond", "pr.md", "--as", "claude"], `#${sent.n} done\n`);
+    expect(responded.status, responded.stdout + responded.stderr).toBe(0);
+    await expect.poll(() => phraseOf(page), { timeout: 5_000 }).toMatch(/^Claude replied /);
+    await z(page, NOTHING);
+    await z(page, NOTHING);
+    await page.waitForTimeout(SETTLE_MS);
+    expect(keeps(served.root, seeded)).toEqual([["seen", ["7.0"]]]);
+  });
+
+  test("once an approve lands, z takes no keep back", async ({ page, birta }) => {
+    const { served, seeded } = await openSeeded(page, birta, SHORT_HOLD);
+    await onBlock(page, CHANGED);
+    await page.keyboard.press("y");
+    await expect.poll(() => stripMessage(page)).toBe(KEPT);
+    // whole doc's reply too, so nothing is left to check and ⌘⏎ approves at once
+    await page.keyboard.press("Home");
+    await page.keyboard.press("y");
+    await expect.poll(() => toCheck(page)).toBe(0);
+    await turn(page);
+    await expect.poll(() => lines(served.root).slice(seeded).filter((l) => l.op === "approve").length).toBe(1);
+    await expect.poll(() => phraseOf(page), { timeout: 8_000 }).toMatch(/^approved /);
+    await z(page, NOTHING);
+    await page.waitForTimeout(SETTLE_MS);
+    expect(keeps(served.root, seeded).filter(([op]) => op === "unkeep")).toEqual([]);
+  });
+});
+
+test("no review script keeps the interim copy a keep stays kept", () => {
+  const dir = path.join(REPO, "assets", "review");
+  const hits = fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith(".js"))
+    .filter((f) => fs.readFileSync(path.join(dir, f), "utf-8").includes("a keep stays kept"));
+  expect(hits).toEqual([]);
 });
 
 // --- Repairs: notes while Claude works, folder notes, z before the state, a changed log ----------

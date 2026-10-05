@@ -1381,13 +1381,13 @@ mod tests {
         fs::set_permissions(locked.log.path(), fs::Permissions::from_mode(0o444)).unwrap();
         let (newer, newer_id) = agent_change(base, changed);
         let text = String::from_utf8(newer.log_bytes()).unwrap();
-        fs::write(newer.log.path(), text.replacen("review/1", "review/2", 1)).unwrap();
+        fs::write(newer.log.path(), text.replacen("review/1", "review/3", 1)).unwrap();
         assert!(newer.log.read().unwrap().unwrap().read_only, "setup");
 
         let mut bad = Vec::new();
         for (name, f, id) in [
             ("0444", &locked, &locked_id),
-            ("review/2", &newer, &newer_id),
+            ("review/3", &newer, &newer_id),
         ] {
             let log = f.log_bytes();
             let result = f.undo(id, changed.as_bytes());

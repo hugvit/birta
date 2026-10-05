@@ -107,6 +107,7 @@ impl Log {
         }
         let parsed = ops::parse(&bytes);
         Ok(Held {
+            path: self.path.clone(),
             file,
             bytes,
             parsed,
@@ -253,6 +254,7 @@ impl Recording for Held {
 /// A review file under its exclusive lock, read as it was when locked.
 #[derive(Debug)]
 pub struct Held {
+    path: PathBuf,
     file: File,
     bytes: Vec<u8>,
     parsed: Parsed,
@@ -309,6 +311,12 @@ impl Held {
             )));
         }
         let ops = build(&self.parsed, ctx.now_ms).map_err(AppendError::Rejected)?;
+        // An older birta would read an unkeep as an op it can skip, and the keep as standing
+        if ops.iter().any(|op| matches!(op, Op::Unkeep { .. }))
+            && self.parsed.header.as_ref().and_then(Header::major) == Some(1)
+        {
+            self.bump()?;
+        }
         let first = physical_lines(&self.bytes) + 1;
         let mut out = Vec::new();
         // Close a line left without its newline, so ours starts on a line of its own.
@@ -352,6 +360,67 @@ impl Held {
         self.parsed = ops::parse(&self.bytes);
         Ok(landed)
     }
+}
+
+impl Held {
+    /// Rewrites line 1 to `review/2` through a temp file renamed over the path, so a reader
+    /// sees the old file or the new one, whole. The header keeps its length, so every line
+    /// keeps its number and offset. The new file is locked before it takes the path, and
+    /// writers waiting on the old one reopen when they get its lock.
+    fn bump(&mut self) -> io::Result<()> {
+        let bumped = bumped_header(&self.bytes)
+            .ok_or_else(|| io::Error::other("review file header can't be bumped"))?;
+        let dir = self
+            .path
+            .parent()
+            .ok_or_else(|| io::Error::other("review file has no parent directory"))?;
+        let mut tmp = tempfile::Builder::new()
+            .prefix(".birta-review-")
+            .tempfile_in(dir)?;
+        let mode = self.file.metadata()?.permissions().mode() & 0o7777;
+        tmp.as_file()
+            .set_permissions(fs::Permissions::from_mode(mode))?;
+        tmp.write_all(&bumped)?;
+        tmp.as_file().sync_data()?;
+        let file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(tmp.path())?;
+        file.lock()?;
+        // A sync tool may have put another file at the path; this one's bytes must not cover it
+        let (now, held) = (fs::metadata(&self.path)?, self.file.metadata()?);
+        if (now.dev(), now.ino()) != (held.dev(), held.ino()) {
+            return Err(io::Error::other("review file was replaced while held"));
+        }
+        tmp.persist(&self.path).map_err(|e| e.error)?;
+        // Dropping the old file lets its waiters in, to find the path names another file
+        self.file = file;
+        self.bytes = bumped;
+        self.parsed = ops::parse(&self.bytes);
+        Ok(())
+    }
+}
+
+/// `bytes` with line 1's `review/1` turned into `review/2`, every other byte as it was.
+fn bumped_header(bytes: &[u8]) -> Option<Vec<u8>> {
+    let end = bytes
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(bytes.len());
+    let needle = b"\"review/1";
+    (0..end.saturating_sub(needle.len())).find_map(|at| {
+        if &bytes[at..at + needle.len()] != needle
+            || !matches!(bytes.get(at + needle.len()), Some(b'"' | b'.'))
+        {
+            return None;
+        }
+        let mut out = bytes.to_vec();
+        out[at + needle.len() - 1] = b'2';
+        // Only the version itself, never words in the doc's name or the about line
+        let parsed = ops::parse(&out[..end]);
+        let header = parsed.header?;
+        (header.major() == Some(2)).then_some(out)
+    })
 }
 
 /// The doc's permission bits without exec, so a private doc gets a private review file.

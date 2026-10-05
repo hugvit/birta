@@ -733,7 +733,7 @@ mod tests {
                 }
                 "newer" => {
                     let text = std::fs::read_to_string(log.path()).unwrap();
-                    std::fs::write(log.path(), text.replacen("review/1", "review/2", 1)).unwrap();
+                    std::fs::write(log.path(), text.replacen("review/1", "review/3", 1)).unwrap();
                 }
                 _ => {
                     let text = std::fs::read_to_string(log.path()).unwrap();

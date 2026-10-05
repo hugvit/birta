@@ -421,6 +421,37 @@ pub fn span_stop(doc: &Doc, (first, last): (u32, u32)) -> Option<&anchor::Stop> 
         })
 }
 
+/// The human `seen` lines naming each id that still stand. An `unkeep` takes back the ones
+/// before it, unless a hand-back or approve since then settled them.
+fn kept_lines(lines: &[Line], standing: &[u32]) -> HashMap<String, Vec<u32>> {
+    let mut kept: HashMap<String, Vec<u32>> = HashMap::new();
+    for line in lines.iter().filter(|l| l.by.kind == ByKind::Human) {
+        match &line.op {
+            Op::Seen { ids } => {
+                for id in ids {
+                    kept.entry(id.clone()).or_default().push(line.n);
+                }
+            }
+            Op::Unkeep { ids } => {
+                for id in ids {
+                    let Some(seen) = kept.get_mut(id) else {
+                        continue;
+                    };
+                    let settled = seen
+                        .iter()
+                        .any(|&s| standing.iter().any(|&r| s < r && r < line.n));
+                    if !settled {
+                        seen.clear();
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    kept.retain(|_, ns| !ns.is_empty());
+    kept
+}
+
 /// The line the human copies to point an agent at the notes on `doc`, a path as the
 /// agent would type it.
 pub fn hand_off(doc: &Path) -> String {
@@ -439,9 +470,6 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
     let mut turns = Turns::default();
     let mut notes = Notes::default();
     let mut drafted_by = None;
-    let mut seen = HashSet::new();
-    let mut seen_at: HashMap<String, u32> = HashMap::new();
-    let mut seen_last: HashMap<String, u32> = HashMap::new();
     // The last agent line about each note, which a note's own seen must come after
     let mut news_at: HashMap<u32, u32> = HashMap::new();
     for line in &parsed.lines {
@@ -457,13 +485,6 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
                         "line {}: owner ignored: only the human changes it",
                         line.n
                     ));
-                }
-            }
-            Op::Seen { ids } if line.by.kind == ByKind::Human => {
-                for id in ids {
-                    seen.insert(id.clone());
-                    seen_at.entry(id.clone()).or_insert(line.n);
-                    seen_last.insert(id.clone(), line.n);
                 }
             }
             Op::Done { to, .. } | Op::Covers { to, .. } | Op::Reply { to, .. }
@@ -582,6 +603,13 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
         .filter(|r| !r.withdrawn)
         .map(|r| r.n)
         .collect();
+    let kept = kept_lines(&parsed.lines, &standing);
+    let seen: HashSet<String> = kept.keys().cloned().collect();
+    let seen_at: HashMap<String, u32> = kept.iter().map(|(id, ns)| (id.clone(), ns[0])).collect();
+    let seen_last: HashMap<String, u32> = kept
+        .iter()
+        .filter_map(|(id, ns)| Some((id.clone(), *ns.last()?)))
+        .collect();
     let approves: Vec<u32> = turns
         .rounds
         .iter()
@@ -695,6 +723,7 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
         lost: &lost,
         changes: &built.changes,
         deletions: &built.deletions,
+        seen: &kept,
         rounds: &standing,
         approves: &approves,
     });

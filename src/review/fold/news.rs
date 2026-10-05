@@ -22,6 +22,8 @@ pub(super) struct Input<'x> {
     pub lost: &'x [u32],
     pub changes: &'x [Change],
     pub deletions: &'x [Deletion],
+    /// The human `seen` lines still standing for each id, after any `unkeep`.
+    pub seen: &'x HashMap<String, Vec<u32>>,
     /// Lines of hand-backs and approves that stand.
     pub rounds: &'x [u32],
     /// Lines of approves that stand: each settles all news before it, checked or not.
@@ -159,15 +161,9 @@ fn group(c: &Change) -> u64 {
 }
 
 pub(super) fn build(input: &Input) -> Built {
-    let mut seen: HashMap<&str, Vec<u32>> = HashMap::new();
     let mut dones: HashMap<u32, (u32, u32)> = HashMap::new();
     for line in input.lines {
         match &line.op {
-            Op::Seen { ids } if line.by.kind == ByKind::Human => {
-                for id in ids {
-                    seen.entry(id.as_str()).or_default().push(line.n);
-                }
-            }
             Op::Done { to, turn, .. } if line.by.kind == ByKind::Agent => {
                 let counted = input.turns.dones.get(to).is_some_and(|t| t.contains(turn));
                 if counted {
@@ -178,7 +174,9 @@ pub(super) fn build(input: &Input) -> Built {
         }
     }
     let seen_after = |id: &str, born: u32, check: Check| -> Vec<(u32, Check)> {
-        seen.get(id)
+        input
+            .seen
+            .get(id)
             .into_iter()
             .flatten()
             .filter(|&&n| n > born)

@@ -921,7 +921,7 @@ fn an_empty_review_file_is_replaced_and_a_newer_one_is_left_alone() {
     );
 
     // A whole header: a lone line missing `about` is garbled, and garbled is replaced
-    let newer = "{\"birta\":\"review/2\",\"doc\":\"pr.md\",\"about\":\"later\"}\n";
+    let newer = "{\"birta\":\"review/3\",\"doc\":\"pr.md\",\"about\":\"later\"}\n";
     let (code, _) = refused(&Tmp::new(DOC, Some(newer)), &["--doc", "hi"], "");
     assert_ne!(code, 0);
 }

@@ -2048,10 +2048,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (a === 'revert_change') revert(c);
     else if (a === 'no') rowNo(c);
     else if (a === 'yes' && !BR.pointing.checkStop('yes', 'b:' + rowSp(c))) {
-      BR.op({ op: 'seen', ids: [c.id] });
-      // As y on a stop: a keep can't be taken back yet, so z stops at it
-      BR.pointing.remember({ marker: 'nothing to undo · a keep stays kept' });
-      BR.chrome.say('kept');
+      BR.pointing.keepMade(BR.op({ op: 'seen', ids: [c.id] }), [c.id]);
     }
     else if (a === 'note') open('note', { k: 'change', id: c.id }, null);
   }
@@ -2298,7 +2295,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         var refused = undoing && undoing.cid === msg.cid ? undoing : null;
         delete afterAck[msg.cid];
         if (refused) refuse(refused, msg.reason);
-        else if (msg.reason) BR.chrome.nack(msg.reason);
+        else if (msg.reason && !BR.pointing.unkeepRefused(msg)) BR.chrome.nack(msg.reason);
         drafts = drafts.filter(function (d) { return d.cid !== msg.cid; });
         var words = pending[msg.cid];
         delete pending[msg.cid];

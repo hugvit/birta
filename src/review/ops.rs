@@ -1,4 +1,4 @@
-//! The `review/1` log schema: one JSON op per line after a header line.
+//! The review log schema, `review/1` and `review/2`: one JSON op per line after a header line.
 //!
 //! Lines are parsed in two steps (strict JSON value, then the named op) so one bad
 //! or future line never hides the rest of the log.
@@ -13,6 +13,8 @@ use super::SCHEMA_LOG;
 use crate::rev::Rev;
 
 const ABOUT: &str = "ops after the last hand-back are drafts; don't act on them";
+/// The newest major this build reads and writes; a later one opens read-only.
+const MAJOR: u32 = 2;
 
 /// Every op name this schema knows. Anything else is a future op, counted and skipped.
 const OPS: &[&str] = &[
@@ -34,6 +36,7 @@ const OPS: &[&str] = &[
     "apply",
     "reject",
     "seen",
+    "unkeep",
     "owner",
     "approve",
     "edit",
@@ -66,7 +69,7 @@ impl Header {
     }
 
     /// `review/<major>` or `review/<major>.<minor>`, plain digits without leading zeros.
-    fn major(&self) -> Option<u32> {
+    pub(crate) fn major(&self) -> Option<u32> {
         let number = |s: &str| {
             let plain = !s.is_empty()
                 && s.bytes().all(|b| b.is_ascii_digit())
@@ -265,6 +268,10 @@ pub enum Op {
     },
     /// Ids: `"12.0"` a change, `"#15"` a reply or blank, `"nh:12"` a not-handled row.
     Seen {
+        ids: Vec<String>,
+    },
+    /// Takes back the keeps a `seen` made, in its id grammar. Needs `review/2`.
+    Unkeep {
         ids: Vec<String>,
     },
     /// `null` means the doc is the human's own.
@@ -603,7 +610,11 @@ pub fn parse(bytes: impl AsRef<[u8]>) -> Parsed {
             }
         }
     }
-    parsed.read_only = parsed.header.as_ref().and_then(Header::major) != Some(1);
+    parsed.read_only = !parsed
+        .header
+        .as_ref()
+        .and_then(Header::major)
+        .is_some_and(|m| (1..=MAJOR).contains(&m));
     parsed.torn_tail =
         !bytes.ends_with(b"\n") && parsed.bad.last().is_some_and(|bad| bad.n == last);
     parsed

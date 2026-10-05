@@ -524,6 +524,50 @@ async fn with_claude_an_undo_and_a_checkbox_get_held_and_write_nothing() {
 }
 
 #[tokio::test]
+async fn with_claude_a_keep_and_its_unkeep_are_taken_at_the_held_rev() {
+    let (mut s, change) = handed_back_after_a_change();
+    s.submit();
+    let site = Site::new();
+    site.write(PR, s.text());
+    site.write(LOG, &s.log());
+    let served = site.serve(&[PR], &[GATE_ON, HOLD_0]);
+    let (mut ws, frames) = served.viewing(PR).await;
+    let r = rev(s.text());
+    assert_eq!(
+        hello_state(&frames)["state"]["held"]["rev"],
+        r,
+        "setup: held"
+    );
+    acked(&mut ws, op("y1", &r, "seen", json!({"ids": [change]}))).await;
+    let n = acked(&mut ws, op("z1", &r, "unkeep", json!({"ids": [change]}))).await["n"].clone();
+    let lines = log_lines(&site.path(LOG));
+    assert_eq!(lines[0]["birta"], "review/2");
+    let line = &lines[n.as_u64().unwrap() as usize - 1];
+    assert_eq!(line["op"], "unkeep");
+    assert_eq!(line["ids"], json!([change]));
+    assert_eq!(site.read(PR).unwrap(), s.text(), "the doc is untouched");
+}
+
+#[tokio::test]
+async fn after_an_unkeep_the_review_2_file_still_takes_a_hand_back_that_claude_claims() {
+    let (s, change) = handed_back_after_a_change();
+    let site = Site::new();
+    site.write(PR, s.text());
+    site.write(LOG, &s.log());
+    let served = site.serve(&[PR], &[GATE_ON, HOLD_0]);
+    let (mut ws, _) = served.viewing(PR).await;
+    let r = rev(s.text());
+    acked(&mut ws, op("y1", &r, "seen", json!({"ids": [change]}))).await;
+    acked(&mut ws, op("z1", &r, "unkeep", json!({"ids": [change]}))).await;
+    assert_eq!(log_lines(&site.path(LOG))[0]["birta"], "review/2", "setup");
+    let submit =
+        acked(&mut ws, op("h1", &r, "hand_back", json!({"scope": "doc"}))).await["n"].clone();
+    let (code, out, err) = agent(&site, &["review", PR, "--as", "claude"], "");
+    assert_eq!(code, 0, "{out}{err}");
+    assert_eq!(last_named(&site, LOG, "claim")["round"], submit);
+}
+
+#[tokio::test]
 async fn in_the_hand_back_hold_doc_writes_already_wait() {
     let (s, change) = handed_back_after_a_change();
     let site = Site::new();

@@ -232,6 +232,43 @@ fn seen_takes_ids_in_all_three_grammars() {
 }
 
 #[test]
+fn unkeep_takes_ids_in_the_seen_grammar() {
+    let raw = r##"{"n":9,"ts":1790000000000,"by":{"type":"human","via":"browser"},"cid":"c-9","op":"unkeep","ids":["12.0","#15","nh:12"]}"##;
+    let parsed = ops::parse_line(9, raw);
+    let ParsedLine::Ok(line) = parsed else {
+        panic!("unkeep is a known op of this build: {parsed:?}");
+    };
+    assert_eq!(line.cid.as_deref(), Some("c-9"));
+    assert_eq!(line.by.kind, ByKind::Human);
+    let want: Value = serde_json::from_str(raw).unwrap();
+    assert_eq!(serde_json::to_value(&line).unwrap(), want);
+    // Same field as `seen`, and it is required
+    assert!(is_bad(3, r#"{"op":"unkeep","changes":["12.0"]}"#));
+    assert!(is_bad(3, r#"{"op":"unkeep"}"#));
+    assert!(is_bad(3, r#"{"op":"unkeep","ids":"12.0"}"#));
+    assert!(is_bad(3, r#"{"op":"unkeep","ids":[12]}"#));
+    assert!(!is_unknown(3, r#"{"op":"unkeep","ids":[]}"#, "unkeep"));
+}
+
+#[test]
+fn an_unkeep_line_parses_in_a_review_2_log() {
+    let header = HEADER.replacen("review/1", "review/2", 1);
+    let parsed = ops::parse(log(&[
+        &header,
+        r#"{"op":"seen","ids":["4.0"]}"#,
+        r#"{"op":"unkeep","ids":["4.0"]}"#,
+    ]));
+    assert!(!parsed.read_only, "this build reads review/2");
+    assert_eq!(parsed.header.as_ref().unwrap().birta, "review/2");
+    assert_eq!(
+        (parsed.bad.len(), parsed.unknown.len()),
+        (0, 0),
+        "{parsed:?}"
+    );
+    assert_eq!(parsed.lines.iter().map(|l| l.n).collect::<Vec<_>>(), [2, 3]);
+}
+
+#[test]
 fn owner_keeps_an_explicit_null_drafter() {
     assert!(matches!(
         ok(3, r#"{"op":"owner","drafted_by":"claude"}"#).op,
@@ -450,6 +487,7 @@ fn every_op_reserializes_to_its_literal_line() {
         format!(r#"{by_human},"op":"apply","to":41"#),
         format!(r#"{by_human},"op":"reject","to":41,"body":"no""#),
         format!(r##"{by_human},"op":"seen","ids":["37.0","#36","nh:12"]"##),
+        format!(r#"{by_human},"cid":"c-2","op":"unkeep","ids":["37.0"]"#),
         format!(r#"{by_human},"op":"owner","drafted_by":null"#),
         format!(
             r#"{by_human},"op":"approve","rev":"{REV_A}","not_before":1790000905000,"hold_ms":5000"#
@@ -635,7 +673,7 @@ fn the_header_is_the_exact_frozen_first_line() {
 }
 
 #[test]
-fn a_header_with_a_major_above_one_makes_the_log_read_only() {
+fn a_header_with_a_major_above_two_makes_the_log_read_only() {
     let with = |schema: &str| {
         let header = format!(r#"{{"birta":"{schema}","doc":"pr.md","about":"x"}}"#);
         ops::parse(log(&[
@@ -644,10 +682,10 @@ fn a_header_with_a_major_above_one_makes_the_log_read_only() {
             r#"{"op":"later_op"}"#,
         ]))
     };
-    for schema in ["review/1", "review/1.4"] {
+    for schema in ["review/1", "review/1.4", "review/2", "review/2.0"] {
         assert!(!with(schema).read_only, "{schema}");
     }
-    for schema in ["review/2", "review/10", "review/2.0"] {
+    for schema in ["review/3", "review/10", "review/3.0"] {
         let parsed = with(schema);
         assert!(parsed.read_only, "{schema}");
         // Read-only still reads: lines parse and unknown ops are counted.
@@ -1005,12 +1043,18 @@ fn a_bom_before_the_header_is_tolerated() {
 }
 
 #[test]
-fn the_header_version_must_be_plain_digits_with_major_one() {
+fn the_header_version_must_be_plain_digits_with_major_one_or_two() {
     let parse = |schema: &str| {
         let header = format!(r#"{{"birta":"{schema}","doc":"pr.md","about":"x"}}"#);
         ops::parse(log(&[&header, r#"{"op":"claim","round":2}"#]))
     };
-    for schema in ["review/1", "review/1.0", "review/1.12"] {
+    for schema in [
+        "review/1",
+        "review/1.0",
+        "review/1.12",
+        "review/2",
+        "review/2.1",
+    ] {
         assert!(!parse(schema).read_only, "{schema}");
     }
     for schema in [
@@ -1019,6 +1063,9 @@ fn the_header_version_must_be_plain_digits_with_major_one() {
         "review/+1",
         "review/-1",
         "review/01",
+        "review/02",
+        "review/2.01",
+        "review/3",
         "review/1.",
         "review/.1",
         "review/1.+2",

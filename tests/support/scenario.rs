@@ -343,6 +343,11 @@ impl Scenario {
         self.push(self.human.clone(), json!({"op": "seen", "ids": ids}))
     }
 
+    /// Takes back keeps. Line 1 stays as written, so a fold test reads only the fold's rule.
+    pub fn unkeep(&mut self, ids: &[&str]) -> u32 {
+        self.push(self.human.clone(), json!({"op": "unkeep", "ids": ids}))
+    }
+
     pub fn owner(&mut self, by: Value, drafted_by: Option<&str>) -> u32 {
         self.push(by, json!({"op": "owner", "drafted_by": drafted_by}))
     }

@@ -365,6 +365,23 @@ fn op_fixtures() -> Vec<(&'static str, Value)> {
             "ack",
         ),
     ));
+    let (mut kept, n) = agent_changed(|s| s.replaced("- detail one", "- detail one, with retries"));
+    kept.seen(&[&format!("{n}.0")]);
+    out.push((
+        "unkeep",
+        fixture(
+            kept.text(),
+            Some(&kept),
+            vec![],
+            op(
+                "c1",
+                &rev(kept.text()),
+                "unkeep",
+                json!({"ids": [format!("{n}.0")]}),
+            ),
+            "ack",
+        ),
+    ));
     for (name, scope) in [("hand_back-doc", "doc"), ("hand_back-all", "all")] {
         out.push((
             name,
@@ -538,6 +555,7 @@ fn op_fixtures_cover_every_frozen_frame() {
         "retract",
         "reply",
         "seen",
+        "unkeep",
         "hand_back",
         "approve",
         "withdraw",
@@ -1429,6 +1447,129 @@ async fn a_replayed_cid_is_acked_again_and_written_once() {
         .filter(|l| l["cid"] == "dup-1")
         .collect();
     assert_eq!(written.len(), 1, "{written:#?}");
+}
+
+// --- unkeep ---
+
+/// A served doc whose Claude change `id` the page kept with `y`.
+async fn kept_on_the_page() -> (Site, Served, Ws, String, String) {
+    let (mut s, n) = agent_changed(|s| s.replaced("- detail one", "- detail one, with retries"));
+    let id = format!("{n}.0");
+    s.seen(&[&id]);
+    let site = Site::new();
+    site.write(PR, s.text());
+    site.write(LOG, &s.log());
+    let served = site.serve(&[PR], &[GATE_ON]);
+    let (ws, _) = served.viewing(PR).await;
+    (site, served, ws, id, rev(s.text()))
+}
+
+#[tokio::test]
+async fn an_unkeep_is_acked_like_seen_and_bumps_the_review_file_to_review_2() {
+    let (site, _served, mut ws, id, r) = kept_on_the_page().await;
+    let lines_before = log_lines(&review_file(&site)).len() as u64;
+    let ack = acked(&mut ws, op("z1", &r, "unkeep", json!({"ids": [id]}))).await;
+    assert_eq!(ack["n"], lines_before + 1);
+    let lines = log_lines(&review_file(&site));
+    assert_eq!(lines[0]["birta"], "review/2");
+    let line = lines.last().unwrap();
+    assert_eq!(line["op"], "unkeep");
+    assert_eq!(line["ids"], json!([id]));
+    assert_eq!(line["cid"], "z1");
+    assert_eq!(line["by"]["type"], "human");
+    let (_, state) = until(&mut ws, "the unkeep's state", |f| {
+        f["type"] == "review_state"
+            && f["state"]["changes"]
+                .as_array()
+                .is_some_and(|cs| cs.iter().any(|c| c["id"] == id && c["check"].is_null()))
+    })
+    .await;
+    let news = state["state"]["news"].as_array().unwrap();
+    assert!(
+        news.iter().any(|x| x["id"] == id && x["check"].is_null()),
+        "back in the news, unchecked: {news:?}"
+    );
+}
+
+#[tokio::test]
+async fn in_a_folder_an_unkeep_lands_in_the_docs_own_file() {
+    let (mut s, n) = agent_changed(|s| s.replaced("- detail one", "- detail one, with retries"));
+    let id = format!("{n}.0");
+    s.seen(&[&id]);
+    let site = Site::new();
+    site.write(PR, s.text());
+    site.write(LOG, &s.log());
+    let served = site.serve(&["."], &[GATE_ON]);
+    let (mut ws, _) = served.viewing(PR).await;
+    acked(
+        &mut ws,
+        op("z1", &rev(s.text()), "unkeep", json!({"ids": [id]})),
+    )
+    .await;
+    let lines = log_lines(&review_file(&site));
+    assert_eq!(lines[0]["birta"], "review/2");
+    assert_eq!(lines.last().unwrap()["op"], "unkeep");
+    assert!(
+        site.read(".birta.jsonl").is_none(),
+        "the folder's file is neither made nor bumped"
+    );
+}
+
+#[tokio::test]
+async fn an_unkeep_of_a_keep_a_hand_back_settled_is_refused_and_writes_nothing() {
+    let (mut s, n) = agent_changed(|s| s.replaced("- detail one", "- detail one, with retries"));
+    let id = format!("{n}.0");
+    s.seen(&[&id]);
+    s.note("one more");
+    s.submit();
+    let site = Site::new();
+    site.write(PR, s.text());
+    site.write(LOG, &s.log());
+    let served = site.serve(&[PR], &[GATE_ON]);
+    let (mut ws, _) = served.viewing(PR).await;
+    let before = site.read(LOG);
+    let refused = nacked(
+        &mut ws,
+        op("z1", &rev(s.text()), "unkeep", json!({"ids": [id]})),
+    )
+    .await;
+    assert_eq!(refused, "not_editable");
+    assert_eq!(site.read(LOG), before, "no unkeep, and no bump");
+}
+
+#[tokio::test]
+async fn a_replayed_unkeep_is_acked_again_and_written_once() {
+    let (site, served, mut ws, id, r) = kept_on_the_page().await;
+    let frame = op("z-dup", &r, "unkeep", json!({"ids": [id]}));
+    let first = acked(&mut ws, frame.clone()).await;
+    drop(ws);
+    let (mut ws, _) = served.viewing(PR).await;
+    let again = acked(&mut ws, frame).await;
+    assert_eq!(first["n"], again["n"]);
+    let written: Vec<Value> = log_lines(&review_file(&site))
+        .into_iter()
+        .filter(|l| l["cid"] == "z-dup")
+        .collect();
+    assert_eq!(written.len(), 1, "{written:#?}");
+}
+
+#[tokio::test]
+async fn an_unkeep_with_no_ids_or_the_seen_field_name_is_not_written() {
+    let (site, _served, mut ws, id, r) = kept_on_the_page().await;
+    let before = site.read(LOG);
+    let bad = op("z2", &r, "unkeep", json!({"changes": [id]}));
+    assert!(
+        !matches!(reply(&mut ws, bad).await, Some(f) if f["type"] == "ack"),
+        "a frame without ids is no unkeep"
+    );
+    // An empty list takes back nothing, so it must not bump the file either
+    let empty = op("z3", &r, "unkeep", json!({"ids": []}));
+    assert!(
+        !matches!(reply(&mut ws, empty).await, Some(f) if f["type"] == "ack"),
+        "an unkeep of no ids is refused"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(site.read(LOG), before);
 }
 
 // --- approve ---
@@ -3134,7 +3275,7 @@ async fn a_log_from_a_later_schema_is_read_only() {
     site.write(PR, DOC);
     site.write(
         LOG,
-        &Scenario::new(DOC).log().replacen("review/1", "review/2", 1),
+        &Scenario::new(DOC).log().replacen("review/1", "review/3", 1),
     );
     let served = site.serve(&[PR], &[GATE_ON]);
     let (mut ws, _) = served.viewing(PR).await;

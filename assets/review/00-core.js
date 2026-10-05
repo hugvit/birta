@@ -12,7 +12,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   // What a closing page may still send: never a doc write, a hand-back or an approve
   var BEACON_OPS = { comment: 1, amend: 1, retract: 1, reply: 1 };
   // What outlives a dropped socket or the page; an approve, hand-back or undo replayed later acts unasked
-  var KEPT_OPS = { comment: 1, amend: 1, retract: 1, reply: 1, seen: 1 };
+  var KEPT_OPS = { comment: 1, amend: 1, retract: 1, reply: 1, seen: 1, unkeep: 1 };
   var OUTBOX = 'birta-unacked:';
   // Held every op, shared by every tab of a doc; boot drops it unreplayed
   var OLD_OUTBOX = 'birta-outbox:';

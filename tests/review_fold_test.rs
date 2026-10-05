@@ -2033,3 +2033,172 @@ fn only_the_human_acknowledges_a_not_handled_note() {
     assert!(!note_seen(&state, x));
     assert_eq!(state.counts.attention, 1);
 }
+
+// --- unkeep: z on a keep ---
+
+/// An agent's turn rewording `- third item` and answering a whole-doc note: two stops of news.
+fn reworded() -> (Scenario, String, String) {
+    let mut s = Scenario::new(DOC);
+    let x = s.note("tighten it");
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    let ext = s.replace_line("- third item", "- third item, reworded");
+    let reply = s.agent_reply(CLAUDE, x, "answer", "tightened the list");
+    s.yield_turn(CLAUDE, turn);
+    (s, change_id(ext), format!("#{reply}"))
+}
+
+/// What the page reads about one of Claude's changes, by wire name.
+#[derive(Debug, PartialEq)]
+struct Checked {
+    /// `news[].check`, or `None` when the change has left the list.
+    news: Option<serde_json::Value>,
+    check: serde_json::Value,
+    seen: serde_json::Value,
+    to_check: serde_json::Value,
+    attention: serde_json::Value,
+}
+
+fn checked(s: &Scenario, id: &str) -> Checked {
+    let v = serde_json::to_value(s.fold()).unwrap();
+    let change = v["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == id)
+        .unwrap_or_else(|| panic!("no change {id}"))
+        .clone();
+    Checked {
+        news: v["news"]
+            .as_array()
+            .expect("a news list")
+            .iter()
+            .find(|n| n["id"] == id)
+            .map(|n| n["check"].clone()),
+        check: change["check"].clone(),
+        seen: change["seen"].clone(),
+        to_check: v["counts"]["to_check"].clone(),
+        attention: v["counts"]["attention"].clone(),
+    }
+}
+
+fn unchecked(to_check: u32) -> Checked {
+    Checked {
+        news: Some(json!(null)),
+        check: json!(null),
+        seen: json!(false),
+        to_check: json!(to_check),
+        attention: json!(to_check),
+    }
+}
+
+fn kept_change(to_check: u32) -> Checked {
+    Checked {
+        news: Some(json!("kept")),
+        check: json!("kept"),
+        seen: json!(true),
+        to_check: json!(to_check),
+        attention: json!(to_check),
+    }
+}
+
+#[test]
+fn an_unkeep_unchecks_a_kept_change_and_puts_its_stop_back_in_to_check() {
+    let (mut s, ext, _) = reworded();
+    assert_eq!(checked(&s, &ext), unchecked(2), "setup");
+    let unseen = s.fold().counts.unseen;
+    s.seen(&[&ext]);
+    assert_eq!(checked(&s, &ext), kept_change(1), "setup");
+
+    s.unkeep(&[&ext]);
+    assert_eq!(checked(&s, &ext), unchecked(2));
+    assert_eq!(s.fold().counts.unseen, unseen);
+    assert_eq!(s.fold().log.unknown_ops, 0, "unkeep is an op of this build");
+}
+
+#[test]
+fn a_keep_after_an_unkeep_keeps_it_again() {
+    // y, z, y
+    let (mut s, ext, _) = reworded();
+    s.seen(&[&ext]);
+    s.unkeep(&[&ext]);
+    s.seen(&[&ext]);
+    assert_eq!(checked(&s, &ext), kept_change(1));
+    // and z again
+    s.unkeep(&[&ext]);
+    assert_eq!(checked(&s, &ext), unchecked(2));
+}
+
+#[test]
+fn an_unkeep_takes_back_only_a_keep_before_it() {
+    let (mut s, ext, _) = reworded();
+    s.unkeep(&[&ext]);
+    assert_eq!(checked(&s, &ext), unchecked(2));
+    s.seen(&[&ext]);
+    assert_eq!(checked(&s, &ext), kept_change(1));
+}
+
+#[test]
+fn an_unkeep_takes_back_only_the_ids_it_names() {
+    // y on a stop checked the change and the reply in one seen; the unkeep names the change
+    let (mut s, ext, reply) = reworded();
+    s.seen(&[&ext, &reply]);
+    assert_eq!(checked(&s, &ext), kept_change(0), "setup");
+    s.unkeep(&[&ext]);
+    assert_eq!(checked(&s, &ext), unchecked(1));
+    let v = serde_json::to_value(s.fold()).unwrap();
+    let reply_check = v["news"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == reply.as_str())
+        .map(|n| n["check"].clone());
+    assert_eq!(reply_check, Some(json!("ok")));
+}
+
+#[test]
+fn only_the_human_unkeeps() {
+    let (mut s, ext, _) = reworded();
+    s.seen(&[&ext]);
+    s.push(
+        support::scenario::agent(CLAUDE),
+        json!({"op": "unkeep", "ids": [ext]}),
+    );
+    assert_eq!(checked(&s, &ext), kept_change(1));
+}
+
+#[test]
+fn a_revert_outranks_an_unkeep() {
+    let (mut s, ext, _) = reworded();
+    s.seen(&[&ext]);
+    s.undo(&ext, DOC);
+    s.unkeep(&[&ext]);
+    let got = checked(&s, &ext);
+    assert_eq!(got.news, Some(json!("reverted")));
+    assert_eq!(got.check, json!("reverted"));
+}
+
+#[test]
+fn an_unkeep_after_a_hand_back_settled_the_keep_leaves_it_settled() {
+    let (mut s, ext, reply) = reworded();
+    s.seen(&[&ext, &reply]);
+    s.note("one more thing");
+    s.submit();
+    assert_eq!(checked(&s, &ext).news, None, "setup: settled");
+    s.unkeep(&[&ext]);
+    let got = checked(&s, &ext);
+    assert_eq!(got.news, None, "a settled keep stays out of the news");
+    assert_eq!(got.check, json!("kept"));
+    assert_eq!(got.to_check, json!(0));
+}
+
+#[test]
+fn after_a_withdrawn_hand_back_an_unkeep_counts() {
+    let (mut s, ext, reply) = reworded();
+    s.seen(&[&ext, &reply]);
+    s.note("one more thing");
+    let sub = s.submit_held();
+    s.withdraw(sub);
+    s.unkeep(&[&ext]);
+    assert_eq!(checked(&s, &ext), unchecked(1));
+}

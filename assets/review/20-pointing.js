@@ -499,13 +499,25 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       else say(okOf(here));
       return true;
     }
-    BR.op({ op: 'seen', ids: open.map(function (x) { return x.id; }) });
-    if (open.some(function (x) { return x.kind === 'change' || x.kind === 'removal'; })) {
-      // A keep can't be taken back yet, so z stops at it rather than reaching past it
-      remember({ marker: 'nothing to undo · a keep stays kept' });
-      say('kept');
-    } else say(okOf(here));
+    var ids = open.map(function (x) { return x.id; });
+    var cid = BR.op({ op: 'seen', ids: ids });
+    if (open.some(function (x) { return x.kind === 'change' || x.kind === 'removal'; })) keepMade(cid, ids);
+    else say(okOf(here));
     return true;
+  }
+
+  /** A keep on the z history: z takes back everything its seen checked. */
+  function keepMade(cid, ids) {
+    remember({ kind: 'keep', cid: cid, ids: ids, undo: { op: 'unkeep', ids: ids }, label: 'kept mark removed' });
+    say('kept · ' + BR.keyName('undo') + ' to undo');
+  }
+
+  /** Whether the state still shows every id a keep checked as checked, so z has a keep to take back. */
+  function keepStands(state, u) {
+    var news = state.news || [];
+    return (u.ids || []).every(function (id) {
+      return news.some(function (n) { return n.id === id && n.check != null; });
+    });
   }
 
   /** What y on Claude's replies says: whole doc's are its replies, an answer to your question is its answer. */
@@ -1021,9 +1033,22 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       say(nothingLeft());
       return;
     }
-    BR.op(undoOp(entry));
+    var cid = BR.op(undoOp(entry));
+    if (entry.kind === 'keep') unkeeping[cid] = true;
     keepUndos();
     say(entry.label || NOTHING);
+  }
+
+  // Unkeeps on their way, by cid: a refusal must say the keep stayed, not blame the file
+  var unkeeping = {};
+
+  /** Says why an unkeep was refused; false for a frame that is no refused unkeep, or a lost one. */
+  function unkeepRefused(msg) {
+    if (!unkeeping[msg.cid]) return false;
+    delete unkeeping[msg.cid];
+    if (msg.type !== 'nack' || msg.reason === 'not_sent') return false;
+    say(msg.reason === 'not_editable' ? 'already settled · the keep stays' : "couldn't take the keep back · the keep stays");
+    return true;
   }
 
   /** What z says with nothing of yours left to take back: while Claude works, that the hand-back is with it. */
@@ -1045,6 +1070,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
    * cid, and the note it edits is the one it had, so a log reset in between never takes back another line.
    */
   function stillOurs(state, u) {
+    if (u.kind === 'keep') return keepStands(state, u);
     if (u.marker || u.kind === 'handback' || u.folder || u.n == null) return true;
     if (u.undo && u.undo.to === null) return u.kind === 'answer' ? replyAt(state, u.n) : lineOfCid(state, u.cid) === u.n;
     if (u.item == null) return true;
@@ -1198,6 +1224,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       if (state && state.held && msg.path === CURRENT_PATH) heldSince = state.held.n;
       if (state && msg.path === CURRENT_PATH) checkUndos(state);
     } else if (msg.type === 'ack' || msg.type === 'nack') {
+      if (msg.type === 'ack') delete unkeeping[msg.cid];
       var entry = undos.filter(function (u) { return u.cid === msg.cid; })[0];
       if (!entry) return;
       if (msg.type === 'nack') {
@@ -1647,6 +1674,9 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     keyInput: keyInput,
     /** Puts an act of this tab's on the z history: `{kind, cid, undo, label, item?, n?}`, or `{marker}`. */
     remember: remember,
+    /** Puts a keep's seen on the z history, and says so. */
+    keepMade: keepMade,
+    unkeepRefused: unkeepRefused,
     forget: forget,
     /** Saves the z history after an entry of it changed in place. */
     kept: keepUndos,

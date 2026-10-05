@@ -33,6 +33,8 @@ const NAME = "journey/round1";
 const DOC = fixtureDoc(NAME);
 const WIDE = { width: 1280, height: 900 };
 const SETTLE_MS = 400;
+const KEPT = "kept · z to undo";
+const UNKEPT = "kept mark removed";
 /** How long after the guard's jump a ⌘⏎ is still ignored. */
 const DWELL_MS = 1_000;
 
@@ -134,6 +136,8 @@ function revertedMerged(s: State, settled = false) {
 const opsNamed = (mock: Mock, name: string) => mock.ops().filter((o) => o.op === name);
 /** Each seen op's ids, sorted, so the order a stop lists them in is free. */
 const seenIds = (mock: Mock) => opsNamed(mock, "seen").map((o) => [...o.ids].sort());
+/** Each unkeep op's ids, sorted. */
+const unkeepIds = (mock: Mock) => opsNamed(mock, "unkeep").map((o) => [...o.ids].sort());
 
 /** The key hint the turn button shows on this platform. */
 function hint(page: Page): Promise<string> {
@@ -246,7 +250,7 @@ test.describe("y on Claude's news", () => {
     await focusTo(page, WHY);
     await page.keyboard.press("y");
     await expect.poll(() => seenIds(mock)).toEqual([["#5", "10.0"]]);
-    await expect.poll(() => stripMessage(page)).toBe("kept");
+    await expect.poll(() => stripMessage(page)).toBe(KEPT);
     await page.waitForTimeout(SETTLE_MS);
     expect(writes(mock)).toEqual([]);
   });
@@ -256,7 +260,7 @@ test.describe("y on Claude's news", () => {
     await focusRemoval(page, "10.5");
     await page.keyboard.press("y");
     await expect.poll(() => seenIds(mock)).toEqual([["#6", "10.5"]]);
-    await expect.poll(() => stripMessage(page)).toBe("kept");
+    await expect.poll(() => stripMessage(page)).toBe(KEPT);
     await page.waitForTimeout(SETTLE_MS);
     expect(writes(mock)).toEqual([]);
   });
@@ -266,7 +270,7 @@ test.describe("y on Claude's news", () => {
     await focusRemoval(page, "10.2");
     await page.keyboard.press("y");
     await expect.poll(() => seenIds(mock)).toEqual([["10.2"]]);
-    await expect.poll(() => stripMessage(page)).toBe("kept");
+    await expect.poll(() => stripMessage(page)).toBe(KEPT);
   });
 
   test("on Claude's answer to your question: ok · Claude's answer", async ({ page, birta }) => {
@@ -459,7 +463,7 @@ function revertedUnit(s: State) {
   return recount(s);
 }
 
-test.describe("revert copy, and the interim keep copy", () => {
+test.describe("revert copy, and the keep copy", () => {
   test("a revert says how to restore, and z on it sends the undo's own change back", async ({ page, birta }) => {
     const { mock, state } = await open(page, birta, bent());
     await focusTo(page, UNIT);
@@ -492,7 +496,7 @@ test.describe("revert copy, and the interim keep copy", () => {
     expect(mock.ops()).toEqual([]);
   });
 
-  test("a keep says kept, and z on it says a keep stays kept without reaching back to your note", async ({ page, birta }) => {
+  test("a keep says kept · z to undo, and z takes the keep back with an unkeep, not your note", async ({ page, birta }) => {
     const { mock } = await open(page, birta, bent());
     // A note first, so a z that falls through would take it back
     await focusTo(page, WHY_HEADING);
@@ -505,14 +509,91 @@ test.describe("revert copy, and the interim keep copy", () => {
     await focusTo(page, UNIT);
     await page.keyboard.press("y");
     await expect.poll(() => seenIds(mock)).toEqual([["10.6"]]);
-    await expect.poll(() => stripMessage(page)).toBe("kept");
+    await expect.poll(() => stripMessage(page)).toBe(KEPT);
+    // The state the server sends once the keep lands
+    mock.pushState(recount(checked(bent(), ["10.6"])));
+    await expect.poll(() => page.evaluate(() => (window as unknown as W).BR.currentState().counts.to_check)).toBe(8);
     await page.keyboard.press("z");
-    await expect.poll(() => stripMessage(page)).toBe("nothing to undo · a keep stays kept");
+    await expect.poll(() => stripMessage(page)).toBe(UNKEPT);
+    await expect.poll(() => unkeepIds(mock)).toEqual([["10.6"]]);
     await page.waitForTimeout(SETTLE_MS);
     expect(opsNamed(mock, "retract")).toEqual([]);
-    // The keep's marker is spent; the next z reaches the note
+    // The keep's entry is spent; the next z reaches the note
     await page.keyboard.press("z");
     await expect.poll(() => opsNamed(mock, "retract").length).toBe(1);
+    expect(unkeepIds(mock)).toEqual([["10.6"]]);
+  });
+
+  test("z on a keep of a change and its done row takes the change's keep back", async ({ page, birta }) => {
+    const { mock } = await open(page, birta, bent());
+    await focusTo(page, WHY);
+    await page.keyboard.press("y");
+    await expect.poll(() => seenIds(mock)).toEqual([["#5", "10.0"]]);
+    await expect.poll(() => stripMessage(page)).toBe(KEPT);
+    mock.pushState(recount(checked(bent(), ["#5", "10.0"])));
+    await expect.poll(() => page.evaluate(() => (window as unknown as W).BR.currentState().counts.to_check)).toBe(8);
+    await page.keyboard.press("z");
+    await expect.poll(() => stripMessage(page)).toBe(UNKEPT);
+    // Whether the reply's ok goes with it is open; the change's keep must
+    await expect.poll(() => opsNamed(mock, "unkeep").length).toBe(1);
+    expect(unkeepIds(mock)[0]).toContain("10.0");
+  });
+
+  for (const [reason, says] of [
+    ["not_editable", "already settled · the keep stays"],
+    ["read_only", "couldn't take the keep back · the keep stays"],
+  ]) {
+    test(`an unkeep refused ${reason} says ${says}, never that the file is read-only`, async ({ page, birta }) => {
+      const { mock } = await open(page, birta, bent(), DOC, { acks: "manual" });
+      await focusTo(page, UNIT);
+      await page.keyboard.press("y");
+      await expect.poll(() => opsNamed(mock, "seen").length).toBe(1);
+      mock.ack(opsNamed(mock, "seen")[0].cid);
+      await expect.poll(() => stripMessage(page)).toBe(KEPT);
+      mock.pushState(recount(checked(bent(), ["10.6"])));
+      await expect.poll(() => page.evaluate(() => (window as unknown as W).BR.currentState().counts.to_check)).toBe(8);
+      await page.keyboard.press("z");
+      await expect.poll(() => opsNamed(mock, "unkeep").length).toBe(1);
+      await expect.poll(() => stripMessage(page)).toBe(UNKEPT);
+      mock.nack(opsNamed(mock, "unkeep")[0].cid, reason);
+      await expect.poll(() => stripMessage(page)).toBe(says);
+      await page.waitForTimeout(SETTLE_MS);
+      expect(await stripMessage(page)).toBe(says);
+    });
+  }
+
+  test("an unkeep not yet answered is sent again after a reload, with its own cid", async ({ page, birta }) => {
+    const { mock } = await open(page, birta, bent(), DOC, { acks: "manual" });
+    await focusTo(page, UNIT);
+    await page.keyboard.press("y");
+    await expect.poll(() => opsNamed(mock, "seen").length).toBe(1);
+    mock.ack(opsNamed(mock, "seen")[0].cid);
+    await expect.poll(() => stripMessage(page)).toBe(KEPT);
+    mock.pushState(recount(checked(bent(), ["10.6"])));
+    await expect.poll(() => page.evaluate(() => (window as unknown as W).BR.currentState().counts.to_check)).toBe(8);
+    await page.keyboard.press("z");
+    await expect.poll(() => opsNamed(mock, "unkeep").length).toBe(1);
+    const cid = opsNamed(mock, "unkeep")[0].cid;
+    await page.reload();
+    await booted(page);
+    await expect.poll(() => opsNamed(mock, "unkeep").map((o) => o.cid)).toEqual([cid, cid]);
+  });
+
+  test("y on replies alone puts nothing on the z history: z reaches the note before it", async ({ page, birta }) => {
+    const { mock } = await open(page, birta, bent());
+    await focusTo(page, WHY_HEADING);
+    await page.keyboard.press("c");
+    const area = page.locator('birta-flow[data-kind="composer"] textarea');
+    await expect(area).toBeFocused();
+    await area.fill("shorter");
+    await area.press("Enter");
+    await expect.poll(() => opsNamed(mock, "comment").length).toBe(1);
+    await home(page);
+    await page.keyboard.press("y");
+    await expect.poll(() => stripMessage(page)).toBe("ok · Claude's replies");
+    await page.keyboard.press("z");
+    await expect.poll(() => opsNamed(mock, "retract").length).toBe(1);
+    expect(opsNamed(mock, "unkeep")).toEqual([]);
   });
 });
 
@@ -802,7 +883,7 @@ test.describe("adversary: u on a checked change still in news", () => {
   });
 });
 
-test.describe("adversary: z on a keep or a revert never reaches an older action", () => {
+test.describe("adversary: z on a keep or a revert takes back that act, never an older one", () => {
   /** Saves a note on the ## Why heading, so a z that falls through would retract it. */
   async function noteFirst(page: Page, mock: Mock) {
     await focusTo(page, WHY_HEADING);
@@ -814,23 +895,30 @@ test.describe("adversary: z on a keep or a revert never reaches an older action"
     await expect.poll(() => opsNamed(mock, "comment").length).toBe(1);
   }
 
-  test("adversary: two keeps are two markers: two z say a keep stays, and only the third retracts the note", async ({ page, birta }) => {
+  test("adversary: two keeps are two entries: two z unkeep them newest first, and only the third retracts the note", async ({ page, birta }) => {
     const { mock } = await open(page, birta, bent());
     await noteFirst(page, mock);
     await focusTo(page, WHY);
     await page.keyboard.press("y");
-    await expect.poll(() => stripMessage(page)).toBe("kept");
+    await expect.poll(() => stripMessage(page)).toBe(KEPT);
     await focusTo(page, UNIT);
     await page.keyboard.press("y");
     await expect.poll(() => seenIds(mock).length).toBe(2);
+    mock.pushState(recount(checked(bent(), ["#5", "10.0", "10.6"])));
+    await expect.poll(() => page.evaluate(() => (window as unknown as W).BR.currentState().counts.to_check)).toBe(7);
     for (let i = 0; i < 2; i++) {
       await page.keyboard.press("z");
-      await expect.poll(() => stripMessage(page)).toBe("nothing to undo · a keep stays kept");
+      await expect.poll(() => opsNamed(mock, "unkeep").length).toBe(i + 1);
+      await expect.poll(() => stripMessage(page)).toBe(UNKEPT);
       await page.waitForTimeout(SETTLE_MS);
       expect(opsNamed(mock, "retract")).toEqual([]);
     }
+    expect(unkeepIds(mock)[0]).toEqual(["10.6"]);
+    expect(unkeepIds(mock)[1]).toContain("10.0");
+    expect(unkeepIds(mock)[1]).not.toContain("10.6");
     await page.keyboard.press("z");
     await expect.poll(() => opsNamed(mock, "retract").length).toBe(1);
+    expect(opsNamed(mock, "unkeep")).toHaveLength(2);
   });
 
   test("adversary: z after a revert restores it, and leaves the note before it alone", async ({ page, birta }) => {

@@ -12,7 +12,7 @@ use birta::review::chain::Chain;
 use birta::review::fold::scan;
 use birta::review::log::{AppendCtx, AppendError, Log, Tail, Tailer, approve_ops};
 use birta::review::ops::{self, At, By, ByKind, Header, Line, Op, Parsed, ParsedLine, Via};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const HEADER: &str = r#"{"birta":"review/1","doc":"pr.md","about":"ops after the last hand-back are drafts; don't act on them"}"#;
 const BASELINE: &str = "# Title\n\nSome text.\n";
@@ -226,7 +226,7 @@ fn an_empty_file_counts_as_missing() {
 
 #[test]
 fn a_file_with_a_header_or_any_second_line_is_never_rewritten() {
-    let later = r#"{"birta":"review/2","doc":"pr.md","about":"x"}"#;
+    let later = r#"{"birta":"review/3","doc":"pr.md","about":"x"}"#;
     let later_nl = format!("{later}\n");
     let then_op = |first: &str| format!("{first}\n{}\n", r#"{"op":"claim","round":2}"#);
     let (garbage, torn, blank) = (
@@ -559,7 +559,7 @@ fn a_refused_guard_writes_nothing() {
 
 #[test]
 fn append_refuses_a_log_it_cannot_read_whatever_the_guard_says() {
-    let later = format!("{}\n", r#"{"birta":"review/2","doc":"pr.md","about":"x"}"#);
+    let later = format!("{}\n", r#"{"birta":"review/3","doc":"pr.md","about":"x"}"#);
     let op = r#"{"op":"claim","round":2}"#;
     let later_with_op = format!("{later}{op}\n");
     let garbage = format!("garbage\n{op}\n");
@@ -850,6 +850,456 @@ fn an_append_waiting_on_a_deleted_file_fails_not_found() {
         "{err:?}"
     );
     assert!(!path.exists());
+}
+
+// --- the review/2 bump on the first unkeep ---
+
+const HEADER_2: &str = r#"{"birta":"review/2","doc":"pr.md","about":"ops after the last hand-back are drafts; don't act on them"}"#;
+
+/// Built from its wire form, so each test here names its own failure on a build without it.
+fn unkeep(ids: &[&str]) -> Op {
+    serde_json::from_value(json!({"op": "unkeep", "ids": ids})).expect("unkeep is a log op")
+}
+
+fn seen(ids: &[&str]) -> Op {
+    Op::Seen {
+        ids: ids.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+fn file_id(path: &Path) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    let m = fs::metadata(path).unwrap();
+    (m.dev(), m.ino())
+}
+
+/// The bytes an open handle reads from its start, whatever the path names now.
+fn read_from_start(file: &mut fs::File) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    file.seek(SeekFrom::Start(0)).unwrap();
+    file.read_to_end(&mut bytes).unwrap();
+    bytes
+}
+
+fn names_in(dir: &Path) -> HashSet<String> {
+    fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect()
+}
+
+/// `before` as the bump leaves it: only line 1's major changes, every byte else in place.
+fn bumped(before: &[u8]) -> Vec<u8> {
+    let text = std::str::from_utf8(before).unwrap();
+    let (first, rest) = text.split_once('\n').unwrap();
+    assert!(first.contains("\"review/1\""), "setup: {first}");
+    format!(
+        "{}\n{rest}",
+        first.replacen("\"review/1\"", "\"review/2\"", 1)
+    )
+    .into_bytes()
+}
+
+/// A created log holding a note and a keep, as a page leaves it before its first `z`.
+fn kept(dir: &Path) -> Log {
+    let log = created(dir);
+    log.append(ctx(1_000), vec![note("a")], anything).unwrap();
+    log.append(ctx(2_000), vec![seen(&["4.0"])], anything)
+        .unwrap();
+    log
+}
+
+#[test]
+fn the_first_unkeep_rewrites_line_one_to_review_2_and_moves_no_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = kept(dir.path());
+    let before = fs::read(log.path()).unwrap();
+    let before_lines = raw_lines(log.path());
+
+    assert_eq!(
+        log.append(ctx(3_000), vec![unkeep(&["4.0"])], anything)
+            .unwrap(),
+        [6]
+    );
+
+    let after = raw_lines(log.path());
+    assert_eq!(after[0], HEADER_2);
+    assert_eq!(after[0].len(), before_lines[0].len(), "same byte length");
+    assert_eq!(&after[1..5], &before_lines[1..], "lines 2-5 untouched");
+    assert_eq!(raw_n(&after[5]), 6);
+    // Every offset holds: the old file is a prefix of the new one but for one digit
+    let now = fs::read(log.path()).unwrap();
+    assert_eq!(&now[..before.len()], bumped(&before).as_slice());
+
+    let parsed = read(&log);
+    assert!(!parsed.read_only);
+    assert_eq!(parsed.header.as_ref().unwrap().birta, "review/2");
+    assert_eq!(
+        parsed.lines.iter().map(|l| l.n).collect::<Vec<_>>(),
+        [2, 3, 4, 5, 6]
+    );
+    assert_eq!(parsed.lines[4].op, unkeep(&["4.0"]));
+    assert_eq!(parsed.lines[4].by, human());
+    assert_eq!((parsed.bad.len(), parsed.unknown.len()), (0, 0));
+}
+
+#[test]
+fn the_bump_replaces_the_file_and_a_reader_already_open_keeps_the_whole_old_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = kept(dir.path());
+    let before = fs::read(log.path()).unwrap();
+    let id = file_id(log.path());
+    let mut reader = fs::File::open(log.path()).unwrap();
+
+    log.append(ctx(3_000), vec![unkeep(&["4.0"])], anything)
+        .unwrap();
+
+    assert_ne!(file_id(log.path()), id, "a temp file renamed into place");
+    assert_eq!(read_from_start(&mut reader), before, "the old file, whole");
+    assert_eq!(
+        names_in(dir.path()),
+        HashSet::from(["pr.md.birta.jsonl".to_string()]),
+        "no temp file left behind"
+    );
+}
+
+#[test]
+fn a_second_unkeep_appends_and_never_rewrites() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = kept(dir.path());
+    log.append(ctx(3_000), vec![unkeep(&["4.0"])], anything)
+        .unwrap();
+    let id = file_id(log.path());
+    let once = fs::read(log.path()).unwrap();
+
+    log.append(ctx(4_000), vec![seen(&["4.0"])], anything)
+        .unwrap();
+    assert_eq!(
+        log.append(ctx(5_000), vec![unkeep(&["4.0"])], anything)
+            .unwrap(),
+        [8]
+    );
+
+    assert_eq!(file_id(log.path()), id, "the same file, appended to");
+    let now = fs::read(log.path()).unwrap();
+    assert_eq!(&now[..once.len()], once.as_slice());
+    assert_eq!(raw_lines(log.path())[0], HEADER_2);
+}
+
+#[test]
+fn only_an_unkeep_bumps_the_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = created(dir.path());
+    let id = file_id(log.path());
+    log.append(ctx(1_000), vec![note("a")], anything).unwrap();
+    log.append(ctx(2_000), vec![seen(&["4.0", "#4", "nh:4"])], anything)
+        .unwrap();
+    assert_eq!(raw_lines(log.path())[0], HEADER);
+    assert_eq!(file_id(log.path()), id);
+}
+
+#[test]
+fn new_files_are_still_created_review_1_and_a_bumped_file_is_never_recreated() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = kept(dir.path());
+    log.append(ctx(3_000), vec![unkeep(&["4.0"])], anything)
+        .unwrap();
+    let bumped_bytes = fs::read(log.path()).unwrap();
+    assert!(!log.create_if_missing("pr.md", BASELINE, None).unwrap());
+    assert_eq!(fs::read(log.path()).unwrap(), bumped_bytes);
+
+    let other = tempfile::tempdir().unwrap();
+    let fresh = created(other.path());
+    assert_eq!(raw_lines(fresh.path())[0], HEADER);
+}
+
+#[test]
+fn the_bump_keeps_line_one_byte_for_byte_but_the_major() {
+    // A header birta didn't write: its keys in another order, older words
+    let dir = tempfile::tempdir().unwrap();
+    let log = created(dir.path());
+    let lines = raw_lines(log.path());
+    let own = r#"{"doc":"pr.md","about":"older words","birta":"review/1"}"#;
+    fs::write(log.path(), format!("{own}\n{}\n{}\n", lines[1], lines[2])).unwrap();
+    log.append(ctx(1_000), vec![seen(&["4.0"])], anything)
+        .unwrap();
+
+    log.append(ctx(2_000), vec![unkeep(&["4.0"])], anything)
+        .unwrap();
+
+    assert_eq!(
+        raw_lines(log.path())[0],
+        r#"{"doc":"pr.md","about":"older words","birta":"review/2"}"#
+    );
+}
+
+#[test]
+fn the_bump_keeps_the_review_files_own_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("pr.md"), BASELINE).unwrap();
+    fs::set_permissions(dir.path().join("pr.md"), fs::Permissions::from_mode(0o644)).unwrap();
+    let log = kept(dir.path());
+    // Not the doc's bits, nor a temp file's default
+    fs::set_permissions(log.path(), fs::Permissions::from_mode(0o640)).unwrap();
+
+    log.append(ctx(3_000), vec![unkeep(&["4.0"])], anything)
+        .unwrap();
+
+    let mode = fs::metadata(log.path()).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(mode, 0o640, "{mode:o}");
+}
+
+#[test]
+fn an_unkeep_that_cannot_bump_the_header_writes_nothing() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // The file takes appends, but the folder takes no temp file to rename
+    let dir = tempfile::tempdir().unwrap();
+    let locked = dir.path().join("locked");
+    fs::create_dir(&locked).unwrap();
+    let log = kept(&locked);
+    let before = fs::read(log.path()).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+    let result = log.append(ctx(3_000), vec![unkeep(&["4.0"])], anything);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(result.is_err(), "{result:?}");
+    // An older birta would read an unkeep under review/1 as an unknown op, and the keep as standing
+    assert_eq!(fs::read(log.path()).unwrap(), before);
+}
+
+#[test]
+fn a_writer_blocked_on_the_lock_across_the_bump_appends_to_the_new_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = kept(dir.path());
+    let path = log.path().to_path_buf();
+    let before = fs::read(&path).unwrap();
+    let mut old = fs::File::open(&path).unwrap();
+
+    let mut held = log.hold().unwrap();
+    let waiter = {
+        let path = path.clone();
+        thread::spawn(move || open(&path).append(ctx(9_000), vec![note("waited")], anything))
+    };
+    // Let the waiter open the old file and block on its lock
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        held.append_with(ctx(3_000), |_, _| Ok(vec![unkeep(&["4.0"])]))
+            .unwrap(),
+        [6]
+    );
+    drop(held);
+
+    assert_eq!(waiter.join().unwrap().unwrap(), [7]);
+    let raw = raw_lines(&path);
+    assert_eq!(raw[0], HEADER_2);
+    let parsed = read(&open(&path));
+    assert_eq!(
+        parsed.lines.iter().map(|l| l.n).collect::<Vec<_>>(),
+        [2, 3, 4, 5, 6, 7]
+    );
+    assert_eq!(parsed.lines[4].op, unkeep(&["4.0"]));
+    assert_eq!(parsed.lines[5].op, note("waited"));
+    assert_eq!(
+        read_from_start(&mut old),
+        before,
+        "nothing lands in the unlinked file"
+    );
+}
+
+#[test]
+fn a_writer_that_opens_the_bumped_file_waits_until_the_bumper_lets_go() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = kept(dir.path());
+    let path = log.path().to_path_buf();
+
+    let mut held = log.hold().unwrap();
+    held.append_with(ctx(3_000), |_, _| Ok(vec![unkeep(&["4.0"])]))
+        .unwrap();
+    let bumped_bytes = fs::read(&path).unwrap();
+    // It opens the path after the rename, so it meets the new file's lock, not the old one's
+    let late = {
+        let path = path.clone();
+        thread::spawn(move || open(&path).append(ctx(9_000), vec![note("late")], anything))
+    };
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        bumped_bytes,
+        "wrote while the bumper still held the file"
+    );
+    held.append_with(ctx(3_500), |_, _| Ok(vec![note("mine")]))
+        .unwrap();
+    drop(held);
+
+    assert_eq!(late.join().unwrap().unwrap(), [8]);
+    let parsed = read(&open(&path));
+    assert_eq!(
+        parsed.lines.iter().map(|l| l.n).collect::<Vec<_>>(),
+        [2, 3, 4, 5, 6, 7, 8]
+    );
+    assert_eq!(parsed.lines[5].op, note("mine"));
+    assert_eq!(parsed.lines[6].op, note("late"));
+}
+
+#[test]
+fn one_hold_keeps_writing_to_the_file_it_bumped() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = kept(dir.path());
+    let path = log.path().to_path_buf();
+
+    let mut held = log.hold().unwrap();
+    held.append_with(ctx(3_000), |_, _| Ok(vec![unkeep(&["4.0"])]))
+        .unwrap();
+    let id = file_id(&path);
+    assert_eq!(held.parsed().header.as_ref().unwrap().birta, "review/2");
+    assert_eq!(held.next_line(), 7);
+    held.append_with(ctx(3_100), |_, _| Ok(vec![seen(&["4.0"])]))
+        .unwrap();
+    held.append_with(ctx(3_200), |_, _| Ok(vec![unkeep(&["4.0"])]))
+        .unwrap();
+    assert_eq!(file_id(&path), id, "bumped once");
+    drop(held);
+
+    let parsed = read(&open(&path));
+    assert_eq!(
+        parsed.lines.iter().map(|l| l.n).collect::<Vec<_>>(),
+        [2, 3, 4, 5, 6, 7, 8]
+    );
+    assert_eq!(parsed.lines[5].op, seen(&["4.0"]));
+    assert_eq!(parsed.lines[6].op, unkeep(&["4.0"]));
+}
+
+#[test]
+fn a_bump_never_covers_a_file_put_at_the_path_while_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = kept(dir.path());
+    let path = log.path().to_path_buf();
+    let mut held = log.hold().unwrap();
+    // A sync tool puts a newer copy, with one more line, in place of the held file
+    let mut newer = fs::read(&path).unwrap();
+    newer.extend_from_slice(
+        br#"{"n":6,"ts":1,"by":{"type":"human"},"op":"comment","at":"doc","body":"synced in"}"#,
+    );
+    newer.push(b'\n');
+    let tmp = dir.path().join("swap.tmp");
+    fs::write(&tmp, &newer).unwrap();
+    fs::rename(&tmp, &path).unwrap();
+
+    let result = held.append_with(ctx(3_000), |_, _| Ok(vec![unkeep(&["4.0"])]));
+    drop(held);
+
+    assert!(result.is_err(), "{result:?}");
+    assert_eq!(fs::read(&path).unwrap(), newer, "the newer file stands");
+    assert_eq!(
+        names_in(dir.path()),
+        HashSet::from(["pr.md.birta.jsonl".to_string()])
+    );
+}
+
+#[test]
+fn a_reader_racing_the_bump_sees_the_old_or_the_new_file_whole() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // A large file widens the window a rewrite in place would leave open
+    let baseline = "word ".repeat(512 * 1024) + "\n";
+    for _ in 0..5 {
+        let dir = tempfile::tempdir().unwrap();
+        let log = open(&review_path(dir.path()));
+        assert!(log.create_if_missing("pr.md", &baseline, None).unwrap());
+        log.append(ctx(1_000), vec![seen(&["4.0"])], anything)
+            .unwrap();
+        let before = fs::read(log.path()).unwrap();
+        let after = bumped(&before);
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader = {
+            let (path, stop) = (log.path().to_path_buf(), Arc::clone(&stop));
+            thread::spawn(move || {
+                let mut reads = 0;
+                while !stop.load(Ordering::SeqCst) {
+                    let Ok(bytes) = fs::read(&path) else {
+                        panic!("the review file went missing");
+                    };
+                    assert!(
+                        bytes.len() >= before.len(),
+                        "a torn read: {} bytes",
+                        bytes.len()
+                    );
+                    // Only the unkeep's own append may be caught half-written, never what was there
+                    let whole = &bytes[..before.len()];
+                    assert!(
+                        whole == before.as_slice() || whole == after.as_slice(),
+                        "neither the old file nor the bumped one"
+                    );
+                    assert!(ops::parse(&bytes).header.is_some());
+                    reads += 1;
+                }
+                reads
+            })
+        };
+        thread::sleep(Duration::from_millis(20));
+        log.append(ctx(2_000), vec![unkeep(&["4.0"])], anything)
+            .unwrap();
+        thread::sleep(Duration::from_millis(20));
+        stop.store(true, Ordering::SeqCst);
+        assert!(reader.join().unwrap() > 0);
+        assert_eq!(
+            names_in(dir.path()),
+            HashSet::from(["pr.md.birta.jsonl".to_string()])
+        );
+    }
+}
+
+#[test]
+fn a_tailer_reads_the_bumped_file_again_from_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    // Longer than the bytes a tailer checks before its offset, so line 1 is out of its sight
+    let baseline = "word ".repeat(4096) + "\n";
+    let log = open(&review_path(dir.path()));
+    assert!(log.create_if_missing("pr.md", &baseline, None).unwrap());
+    log.append(ctx(1_000), vec![seen(&["4.0"])], anything)
+        .unwrap();
+    let mut tailer = Tailer::new();
+    assert!(matches!(tailer.poll(&log), Tail::Reset));
+    assert!(matches!(tailer.poll(&log), Tail::Unchanged));
+
+    log.append(ctx(2_000), vec![unkeep(&["4.0"])], anything)
+        .unwrap();
+    let tail = tailer.poll(&log);
+    assert!(matches!(tail, Tail::Reset), "{tail:?}");
+
+    log.append(ctx(3_000), vec![unkeep(&["4.0"])], anything)
+        .unwrap();
+    assert_eq!(appended_ns(tailer.poll(&log)), [6]);
+}
+
+#[test]
+fn a_later_major_than_this_build_reads_is_still_opened_read_only() {
+    // An older birta meets the bumped `review/2` the way this build meets `review/3`
+    let dir = tempfile::tempdir().unwrap();
+    let log = kept(dir.path());
+    log.append(ctx(3_000), vec![unkeep(&["4.0"])], anything)
+        .unwrap();
+    let parsed = read(&log);
+    assert!(!parsed.read_only, "this build reads its own bump");
+    let major = |p: &Parsed| p.header.as_ref().unwrap().birta.clone();
+    assert_eq!(major(&parsed), "review/2");
+
+    let text = fs::read_to_string(log.path()).unwrap();
+    fs::write(log.path(), text.replacen("review/2", "review/3", 1)).unwrap();
+    let before = fs::read(log.path()).unwrap();
+    assert!(read(&log).read_only);
+    let err = log
+        .append(ctx(4_000), vec![unkeep(&["4.0"])], anything)
+        .unwrap_err();
+    assert!(
+        matches!(err, AppendError::Rejected(Reject::ReadOnly)),
+        "{err:?}"
+    );
+    assert_eq!(fs::read(log.path()).unwrap(), before);
 }
 
 // --- approve on a rev-only chain ---

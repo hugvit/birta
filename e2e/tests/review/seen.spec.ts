@@ -528,7 +528,7 @@ test.describe("receipt keys", () => {
     await page.keyboard.press("y");
     await expect.poll(() => mock.ops().length).toBe(1);
     expect(opFields(mock.ops()[0])).toEqual({ ...fixtureOp("seen"), ids: ["13.0"] });
-    await expect.poll(() => stripMessage(page)).toBe("kept");
+    await expect.poll(() => stripMessage(page)).toBe("kept · z to undo");
   });
 
   test("c on a receipt keeps a note on the change", async ({ page, birta }) => {

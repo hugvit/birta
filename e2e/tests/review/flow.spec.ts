@@ -1364,10 +1364,13 @@ test.describe("a big turn", () => {
     const state = fixtureState("rewrite");
     state.rewrite = { turn: 8, pct: 0.8, blocks_changed: 8, blocks_total: 10 };
     await open(page, birta, fixtureDoc("rewrite"), { state });
-    for (const c of state.changes.filter((c: State) => c.range && c.range.sp)) {
-      await focusOn(page, c.range.sp);
-      await expect.poll(async () => (await changeRows(page)).filter((r) => r.sp === c.range.sp).length, c.id).toBe(1);
-      expect((await changeRows(page)).filter((r) => r.sp === c.range.sp)[0].text, c.id).not.toMatch(SIZE_LABEL);
+    // Every change the news puts on a block, one whose hunk starts on a blank line too
+    const onBlocks = state.news.filter((n: State) => n.kind === "change" && n.sp);
+    expect(onBlocks.length).toBe(state.changes.length);
+    for (const n of onBlocks) {
+      await focusOn(page, n.sp);
+      await expect.poll(async () => (await changeRows(page)).filter((r) => r.sp === n.sp).length, n.id).toBe(1);
+      expect((await changeRows(page)).filter((r) => r.sp === n.sp)[0].text, n.id).not.toMatch(SIZE_LABEL);
     }
   });
 });

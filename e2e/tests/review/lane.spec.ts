@@ -404,6 +404,7 @@ test.describe("lane overlay", () => {
         "bar 12:1-13:0 dotted",
         "bar 14:1-14:20 dotted",
         "bar 16:1-16:19 dotted",
+        "bar 18:1-18:20 dotted",
         "bar 5:1-6:68 solid",
         "bar 8:1-8:20 dotted",
         "glyph 10:1-10:29 no",
@@ -413,6 +414,7 @@ test.describe("lane overlay", () => {
         "wash 12:1-13:0",
         "wash 14:1-14:20",
         "wash 16:1-16:19",
+        "wash 18:1-18:20",
         "wash 5:1-6:68",
         "wash 8:1-8:20",
       ]);

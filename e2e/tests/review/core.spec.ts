@@ -690,6 +690,8 @@ test.describe("rev gate, timing and races", () => {
     const mock = await mockReview(page, {});
     await page.goto(`${served.url}/view/a.md`);
     await booted(page);
+    // Until its hello is answered the page takes no doc from a theme update
+    await expect.poll(() => mock.answered).toBe(true);
     mock.holdContent = true;
     served.write("a.md", UNSEEN);
     await page.waitForTimeout(400);

@@ -485,14 +485,16 @@ fn a_hand_back_before_the_change_was_seen_does_not_settle_it() {
     assert!(!ch.settled);
 }
 
+/// An approve as is keeps every change before it, so an unseen one settles too.
 #[test]
-fn scenario_11_an_unseen_change_never_settles() {
+fn scenario_11_an_approve_as_is_settles_an_unseen_change() {
     let (mut s, c) = one_change();
+    assert_eq!(s.fold().counts.unseen, 1, "setup");
     s.approve();
     let state = s.fold();
     let ch = change(&state, &c);
-    assert!(!ch.seen && !ch.settled);
-    assert_eq!(state.counts.unseen, 1);
+    assert!(!ch.seen && ch.settled);
+    assert_eq!(state.counts.unseen, 0);
 }
 
 #[test]

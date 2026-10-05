@@ -878,6 +878,17 @@ test("in a folder the button counts every file's drafts, and nothing else", () =
   assert.deepEqual(plain(BR.pure.turnButton(s, { now: s.server_now, dir, path: "pr.md" })), B("Hand back · 3"));
 });
 
+test("in a folder, on a doc Claude still has, the button counts only the other files' notes a hand-back sends", () => {
+  // A note written mid-turn here waits for the reply; the listing leaves it out
+  const s = bent("picked", (x) => (x.counts.drafts = 1));
+  const here = { paths: ["pr.md"], summary: { stage: "picked_up", phrase: s.phrase, counts: { ...s.counts, drafts: 0 } }, news: false };
+  const dir = { type: "dir_state", root: ".", truncated: false, folder: null, files: [here], totals: { drafts: 1, unseen_files: 0, decided: 0, items: 0 } };
+  const BR = load();
+  assert.deepEqual(plain(BR.pure.turnButton(s, { now: s.server_now, dir, path: "pr.md" })), B("Hand back · 1"));
+  const none = { ...dir, totals: { ...dir.totals, drafts: 0 } };
+  assert.doesNotMatch(plain(BR.pure.turnButton(s, { now: s.server_now, dir: none, path: "pr.md" })).text, /^Hand back/);
+});
+
 // --- Never a blank name, never a leaked value ------------------------------------------------------
 
 test("a nameless human never leaves a blank name, and no value leaks as text", () => {

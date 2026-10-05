@@ -1613,6 +1613,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     area.setSelectionRange(area.value.length, area.value.length);
     // It opens where it can be read whole, between the header and the strip
     BR.pointing.reveal(h.host);
+    // WebKit gives a new host its full height a frame late
+    requestAnimationFrame(function () {
+      if (comp && comp.area === area && h.host.isConnected) BR.pointing.reveal(h.host);
+    });
     BR.chrome.renderStrip();
   }
 

@@ -47,6 +47,8 @@ async function open(page: Page, birta: Start, doc: string, state?: State): Promi
   await page.goto(`${served.url}/view/pr.md`);
   await booted(page);
   if (state) await expect.poll(() => page.evaluate(() => !!(window as unknown as W).BR.currentState())).toBe(true);
+  // A hello answered late would send its state after one the spec pushes
+  await expect.poll(() => mock.answered).toBe(true);
   return { mock, url: served.url };
 }
 

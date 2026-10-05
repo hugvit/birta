@@ -1034,6 +1034,15 @@ fn contract_fixtures_are_consistent() {
         for deletion in &state.deletions {
             assert!(change_ids.contains(deletion.change.as_str()), "{name}");
         }
+        // A change's row opens on the stop its news sits on
+        for n in state.news.iter().filter(|n| n.kind == NewsKind::Change) {
+            let Some(c) = state.changes.iter().find(|c| c.id == n.id) else {
+                continue;
+            };
+            if c.undone_by.is_none() && c.range.status != RangeStatus::Superseded {
+                assert_eq!(c.range.sp, n.sp, "{name}: {}", n.id);
+            }
+        }
         // Lost notes are orphaned; only a note its own turn handled away may be left out
         let orphaned = |i: &&Item| i.at.status == Some(AnchorStatus::Orphaned);
         for item in state.items.iter().filter(orphaned) {

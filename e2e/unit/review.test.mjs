@@ -136,6 +136,8 @@ const FIXTURE_MARKS = {
     bar("16:1-16:19", "dotted", "agent"),
     bar("8:1-8:20", "dotted", "agent"),
     bar("14:1-14:20", "dotted", "agent"),
+    // Added below a blank line, it is on the paragraph it wrote
+    bar("18:1-18:20", "dotted", "agent"),
     wash("5:1-6:68"),
     wash("10:1-10:29"),
     wash("11:1-11:18"),
@@ -143,6 +145,7 @@ const FIXTURE_MARKS = {
     wash("16:1-16:19"),
     wash("8:1-8:20"),
     wash("14:1-14:20"),
+    wash("18:1-18:20"),
   ],
   // Cited and asked fixes are solid; the unasked change and both outside writes are dotted
   flow: [

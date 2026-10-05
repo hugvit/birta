@@ -1088,13 +1088,27 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return found;
   }
 
-  /** The round a hand-back on line `n` started, or null while the state shows none. */
-  function roundFrom(state, n) {
-    return (state.rounds || []).filter(function (r) { return r.submit === n; })[0] || null;
+  /** The round hand-back entry `u` started on this doc, or null while the state shows none. */
+  function roundFrom(state, u) {
+    return (state.rounds || []).filter(function (r) {
+      // A folder's hand-back acked with another file's line is no round of this doc's
+      return r.submit === u.n && (u.batch == null || r.batch === u.batch);
+    })[0] || null;
   }
+
+  // The withdraw z sent for a folder's hand-back this doc has no round of, until its answer
+  var batchOut = null;
 
   /** A hand-back on the history: withdrawn by z before pickup; a gone one is passed over. True when z is done. */
   function takeBackHandBack(top, state) {
+    var round = state ? roundFrom(state, top) : null;
+    // The server finds the batch, and says it once it took it back, or why it couldn't
+    if (!round && top.batch != null) {
+      undos.pop();
+      keepUndos();
+      batchOut = BR.op({ op: 'withdraw', to: top.n, batch: top.batch });
+      return true;
+    }
     var p = (state && state.phrase) || {};
     if (p.stage === 'sent' && p.sent && p.sent.n === top.n && p.sent.can_withdraw) {
       undos.pop();
@@ -1103,7 +1117,6 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       say(WITHDRAWN);
       return true;
     }
-    var round = state ? roundFrom(state, top.n) : null;
     // Its ack came before the state that shows it
     if (!round && state && state.log && state.log.lines < top.n) return true;
     // Picked up since: it and all before it are Claude's
@@ -1126,7 +1139,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       waitingZ = 1;
       return;
     }
-    if (BR.chrome.withdrawBatch()) {
+    var taken = BR.chrome.withdrawBatch();
+    if (taken != null) {
+      undos = undos.filter(function (u) { return !(u.kind === 'handback' && u.batch === taken); });
+      keepUndos();
       say(WITHDRAWN);
       return;
     }
@@ -1195,7 +1211,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     }
     for (var i = undos.length - 1; i >= 0; i--) {
       var u = undos[i];
-      var round = u.kind === 'handback' ? roundFrom(state, u.n) : null;
+      var round = u.kind === 'handback' ? roundFrom(state, u) : null;
       if (round && round.claim != null) {
         undos = undos.slice(i + 1);
         changed = true;
@@ -1225,6 +1241,11 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       if (state && msg.path === CURRENT_PATH) checkUndos(state);
     } else if (msg.type === 'ack' || msg.type === 'nack') {
       if (msg.type === 'ack') delete unkeeping[msg.cid];
+      if (batchOut && msg.cid === batchOut) {
+        batchOut = null;
+        if (msg.type === 'ack') say(WITHDRAWN);
+        return;
+      }
       var entry = undos.filter(function (u) { return u.cid === msg.cid; })[0];
       if (!entry) return;
       if (msg.type === 'nack') {

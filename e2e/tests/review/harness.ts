@@ -363,6 +363,11 @@ export interface Mock {
   path: string;
   /** While set, the server's `content` frames, and theme updates that carry the doc, never reach the page. */
   holdContent: boolean;
+  /**
+   * Whether the server's answer to the page's hello has reached the page. Until then the page takes
+   * no text, and the state the mock sends with that answer lands after any the spec pushed.
+   */
+  answered: boolean;
   push(msg: State): void;
   pushState(state: State, path?: string): void;
   ack(cid: string): void;
@@ -387,6 +392,7 @@ export async function mockReview(page: Page, opts: MockOptions = {}): Promise<Mo
     ops: () => mock.frames.filter((f) => f.msg.type === "op").map((f) => f.msg),
     path: "",
     holdContent: false,
+    answered: false,
     push(msg) {
       for (const ws of open) ws.send(JSON.stringify(msg));
     },
@@ -441,6 +447,7 @@ export async function mockReview(page: Page, opts: MockOptions = {}): Promise<Mo
           mock.onStatePushed?.();
         }
         if (opts.dir) ws.send(JSON.stringify(opts.dir));
+        if (msg.hello) mock.answered = true;
         return;
       }
       ws.send(raw);

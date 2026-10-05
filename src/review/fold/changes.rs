@@ -38,6 +38,8 @@ pub(super) struct Input<'x> {
     pub seen: &'x HashMap<String, u32>,
     /// Lines of hand-backs and approves that stand.
     pub rounds: &'x [u32],
+    /// Lines of approves that stand.
+    pub approves: &'x [u32],
     /// Ids of hunks that render the same, which make no change.
     pub hidden: &'x HashSet<String>,
     /// Lines of the reviewer's replies to the agent's notes, asks and turn notes.
@@ -132,8 +134,10 @@ pub(super) fn build(input: &Input, texts: &mut Texts) -> Built {
             let tail = input.chains.tails.get(id.as_str()).copied();
             let restored_by = tail.filter(|_| undone_by.is_none());
             let checked = seen_at.into_iter().chain(restored_by).min();
-            let settled =
-                undone_by.is_some() || checked.is_some_and(|s| input.rounds.iter().any(|&r| r > s));
+            // An approve keeps every change before it, checked or not
+            let settled = undone_by.is_some()
+                || checked.is_some_and(|s| input.rounds.iter().any(|&r| r > s))
+                || input.approves.iter().any(|&a| a > line.n);
             let flip_reverse = tail.and_then(|t| {
                 take_backs
                     .entry(t)
@@ -934,7 +938,10 @@ fn place(followed: Option<&Followed>, new: (u32, u32), whole: bool, head: &Doc) 
             .then(|| stop_holding(head, at).or_else(|| stop_holding(head, at - 1)))
             .flatten()
     } else {
-        stop_holding(head, at)
+        // Where its news sits too: a hunk can start on the blank line above its block
+        super::span_stop(head, lines)
+            .map(|s| s.sp.clone())
+            .or_else(|| stop_holding(head, at))
     };
     if f.reverse.d.is_empty() {
         let byte = head.lines.range(at).map_or(head.text.len(), |r| r.start);

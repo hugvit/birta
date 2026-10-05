@@ -1250,6 +1250,24 @@ fn the_hand_off_line_names_the_path_it_is_given() {
     );
 }
 
+/// The agent pastes the line into its shell, so a path the shell would split or run is
+/// quoted as every `next:` line quotes it.
+#[test]
+fn the_hand_off_line_quotes_a_path_the_shell_would_split_or_run() {
+    assert_eq!(
+        hand_off(Path::new("my notes.md")),
+        "Take a look at my notes: `birta review 'my notes.md'`"
+    );
+    assert_eq!(
+        hand_off(Path::new("$(touch x).md")),
+        "Take a look at my notes: `birta review '$(touch x).md'`"
+    );
+    assert_eq!(
+        hand_off(Path::new("o'brien.md")),
+        r"Take a look at my notes: `birta review 'o'\''brien.md'`"
+    );
+}
+
 // --- late lines ---
 
 /// A round answered with `covers`, two `unasked` and a reply, either before the yield or

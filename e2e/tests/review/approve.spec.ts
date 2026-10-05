@@ -9,6 +9,7 @@ import {
   REPO,
   State,
   booted,
+  changeRows,
   dispatchKey,
   fixtureDoc,
   fixtureState,
@@ -626,6 +627,32 @@ test.describe("reopen after approve on a real server", () => {
     await expect.poll(() => shownHosts(page)).toContain("note");
     await press(page);
     await expect.poll(() => stripMessage(page)).toBe("handing back · 1 note · z to undo");
+  });
+
+  test("after approve as is and a reopen, Claude's change takes no keys, and y on its block says keep as is", async ({ page, birta }) => {
+    const s = seededRound(1);
+    const ts = Date.now() - 60_000;
+    const human = { type: "human", via: "browser" };
+    // The round's one change was never checked
+    const approve = { by: human, op: "approve", rev: revOf(s.doc), not_before: ts, hold_ms: 0, ts };
+    const served = await birta({ "pr.md": s.doc, "pr.md.birta.jsonl": s.log + JSON.stringify(approve) + "\n" }, GATE_ON);
+    await page.setViewportSize(WIDE);
+    await page.goto(`${served.url}/view/pr.md`);
+    await booted(page);
+    await expect.poll(() => phraseOf(page)).toMatch(/c to reopen$/);
+    await page.keyboard.press("c");
+    await page.keyboard.type("one more pass on the title");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => phraseOf(page)).toBe(`approved ${hhmm(ts)} · reopened`);
+    const sp = (await stops(page)).find((x) => x.sp.startsWith("5:1-"))!.sp;
+    await focusOn(page, sp);
+    await expect.poll(async () => (await changeRows(page)).filter((r) => r.sp === sp).length).toBe(1);
+    expect((await changeRows(page)).filter((r) => r.sp === sp)[0].kbd).toEqual([]);
+    const before = reviewLog(served.root)!.length;
+    await page.keyboard.press("y");
+    await expect.poll(() => reviewLog(served.root)!.slice(before).map((l) => [l.op, l.verdict])).toEqual([["comment", "yes"]]);
+    await page.waitForTimeout(SETTLE_MS);
+    expect(reviewLog(served.root)!.filter((l) => l.op === "seen")).toEqual([]);
   });
 });
 

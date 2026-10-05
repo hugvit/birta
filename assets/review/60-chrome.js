@@ -234,7 +234,8 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     if (opts.busy && total === 0) total = 1;
     // From the hand-back to the reply the turn is the agent's: your new notes wait for the next one
     var away = p.stage === 'sent' || p.stage === 'picked_up';
-    if (total > 0 && (!away || total > mine)) return button('Hand back · ' + total, true);
+    // While away, a hand-back sends only the other files' notes
+    if (total > 0 && (!away || total > mine)) return button('Hand back · ' + (away ? total - mine : total), true);
     if (away) {
       if (cue(s, p, opts.now)) return button(COPY_BUTTON, true);
       var who = holder(s, p);
@@ -1074,7 +1075,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
           handBack();
         }
         // z withdraws this tab's own hand-back until it's picked up
-        if (handing && msg.cid === handing.cid && msg.n != null) BR.pointing.remember({ kind: 'handback', cid: msg.cid, n: msg.n });
+        if (handing && msg.cid === handing.cid && msg.n != null) {
+          // A folder's hand-back is taken back by its batch, as its line may be another file's
+          var entry = { kind: 'handback', cid: msg.cid, n: msg.n };
+          if (msg.batch != null) entry.batch = msg.batch;
+          BR.pointing.remember(entry);
+        }
         if (handing && msg.cid === handing.cid && msg.batch != null) {
           batch = { batch: msg.batch, n: msg.n, count: handing.count, base: handing.base, not_before: msg.not_before };
         }
@@ -1120,12 +1126,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     handing = { cid: cid, count: count ? Number(count[1]) : 0, base: ownDrafts() };
   }
 
-  /** z inside a folder's hand-back: withdraws its whole batch. False when there is none. */
+  /** z inside a folder's hand-back: withdraws its whole batch and names it. Null when there is none. */
   function withdrawBatch() {
     var b = batchHold(now());
-    if (!b) return false;
+    if (!b) return null;
     withdrawing = BR.op({ op: 'withdraw', to: b.n, batch: b.batch });
-    return true;
+    return b.batch;
   }
 
   BR.chrome = {

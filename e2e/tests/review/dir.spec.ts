@@ -619,6 +619,8 @@ test.describe("link dots, more", () => {
   test("dots come back after a theme change re-renders the doc", async ({ page, birta }) => {
     const { served, mock } = await openFolder(page, birta, { dirOnce: true });
     await expect.poll(async () => (await dotted(page)).length).toBe(4);
+    // Until its hello is answered the page takes no doc from a theme update
+    await expect.poll(() => mock.answered).toBe(true);
     mock.holdContent = true;
     const edited = LINKS_DOC.replace("Read [b]", "Themed: read [b]");
     served.write("pr.md", edited);
@@ -1232,6 +1234,102 @@ test.describe("on a real server", () => {
     const submit = linesNamed(b, "submit")[0];
     await expect.poll(() => linesNamed(b, "withdraw").map((w) => w.to)).toEqual([submit.n]);
     expect(fs.existsSync(path.join(served.root, "c.md.birta.jsonl"))).toBe(false);
+    await expect.poll(() => stripMessage(page)).toBe("hand-back withdrawn · your notes are back");
+    // The hand-back z took back leaves the history with it
+    await page.keyboard.press("z");
+    await expect.poll(() => stripMessage(page)).toBe("nothing to undo");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(linesNamed(b, "withdraw").length).toBe(1);
+  });
+
+  /**
+   * c.md, with no notes of its own, hands back b.md's two and waits out the hold. `cLog` seeds
+   * c.md's own review file. Returns b.md's log and its submit.
+   */
+  async function handedBackPastHold(page: Page, birta: Start, cLog?: string) {
+    const files: Record<string, string> = {
+      "c.md": "# C\n\nText.\n",
+      "b.md": "# B\n\nText.\n",
+      "b.md.birta.jsonl": seededLog("b.md", "# B\n\nText.\n", ["B-NOTE", "B-OTHER"]),
+    };
+    if (cLog) files["c.md.birta.jsonl"] = cLog;
+    const served = await birta(files, { ...GATE_ON, BIRTA_REVIEW_HOLD_MS: "1000" }, ["."]);
+    const b = path.join(served.root, "b.md.birta.jsonl");
+    await page.setViewportSize(WIDE);
+    await page.goto(`${served.url}/view/c.md`);
+    await booted(page);
+    await page.keyboard.press("j");
+    await expect.poll(async () => (await turnOf(page))?.text, { timeout: 5_000 }).toBe("Hand back · 2");
+    await page.keyboard.press("ControlOrMeta+Enter");
+    await expect.poll(() => linesNamed(b, "submit").length).toBe(1);
+    const submit = linesNamed(b, "submit")[0];
+    await page.waitForTimeout(Math.max(0, submit.not_before - Date.now()) + 1_000);
+    return { served, b, submit };
+  }
+
+  /** z withdraws b.md's hand-back and says so; the next z has nothing left and writes nothing. */
+  async function zWithdrawsThenNothing(page: Page, b: string, submit: State) {
+    await page.keyboard.press("z");
+    await expect.poll(() => linesNamed(b, "withdraw").map((w) => w.to)).toEqual([submit.n]);
+    await expect.poll(() => stripMessage(page)).toBe("hand-back withdrawn · your notes are back");
+    await page.keyboard.press("z");
+    await expect.poll(() => stripMessage(page)).toBe("nothing to undo");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(linesNamed(b, "withdraw").length).toBe(1);
+  }
+
+  test("after its hold, z on a doc with no notes of its own withdraws the folder's hand-back, and the next z has nothing left", async ({
+    page,
+    birta,
+  }) => {
+    const { served, b, submit } = await handedBackPastHold(page, birta);
+    await zWithdrawsThenNothing(page, b, submit);
+    expect(fs.existsSync(path.join(served.root, "c.md.birta.jsonl"))).toBe(false);
+  });
+
+  test("the folder's hand-back z takes back from a doc with no notes of its own outlives a reload", async ({ page, birta }) => {
+    const { b, submit } = await handedBackPastHold(page, birta);
+    await page.reload();
+    await booted(page);
+    await zWithdrawsThenNothing(page, b, submit);
+  });
+
+  test("a round of the doc's own on the same line number as the folder's hand-back is not the one z takes back", async ({
+    page,
+    birta,
+  }) => {
+    // c.md's own round, claimed and replied, has its hand-back on line 6, where b.md's lands
+    const t = Date.now() - 60_000;
+    const human = { type: "human", via: "browser" };
+    const agent = { type: "agent", name: "claude", via: "cli" };
+    const cLog =
+      seededLog("c.md", "# C\n\nText.\n", ["C-ONE", "C-TWO"]) +
+      [
+        { by: human, op: "submit", upto: 5, not_before: t + 10, hold_ms: 0, to: "*", ts: t + 10 },
+        { by: agent, op: "claim", round: 6, ts: t + 11 },
+        { by: agent, op: "yield", turn: 7, ts: t + 12 },
+      ]
+        .map((l) => JSON.stringify(l) + "\n")
+        .join("");
+    const { b, submit } = await handedBackPastHold(page, birta, cLog);
+    expect(submit.n).toBe(6);
+    await zWithdrawsThenNothing(page, b, submit);
+  });
+
+  test("once the agent picked up the folder's hand-back, z on a doc with no notes of its own withdraws nothing and says so", async ({
+    page,
+    birta,
+  }) => {
+    const { served, b } = await handedBackPastHold(page, birta);
+    const r = birtaReview(served.root, ["b.md", "--as", "claude"]);
+    expect(r.status, r.stderr).toBe(0);
+    await page.keyboard.press("z");
+    await expect.poll(() => stripMessage(page)).toMatch(/already picked it up$/);
+    expect(await stripMessage(page)).not.toBe("hand-back withdrawn · your notes are back");
+    await page.keyboard.press("z");
+    await expect.poll(() => stripMessage(page)).toBe("nothing to undo");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(linesNamed(b, "withdraw")).toEqual([]);
   });
 
   test("another tab opening a file clears its dot here without a reload", async ({ page, context, birta }) => {

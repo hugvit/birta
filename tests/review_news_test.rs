@@ -529,6 +529,93 @@ fn an_approve_as_is_settles_all_news_checked_or_not() {
     );
 }
 
+/// An approve as is keeps every change it didn't see, so after a reopen those changes stay
+/// settled, rows that take no keys; a withdrawn approve settles none.
+#[test]
+fn an_approve_as_is_leaves_its_changes_settled_through_a_reopen() {
+    let (mut s, ext, _) = reworded();
+    let held = s.approve_held();
+    s.withdraw(held);
+    let v = wire(&s.fold());
+    assert_eq!(change(&v, &id(ext, 0))["settled"], false, "withdrawn");
+    s.approve();
+    s.note("one more pass");
+    let v = wire(&s.fold());
+    let c = change(&v, &id(ext, 0));
+    assert_eq!(c["seen"], false, "setup: never checked: {c}");
+    assert_eq!(c["settled"], true, "{c}");
+    assert_eq!(listed(&v), [], "{:?}", listed(&v));
+
+    // Only an approve after a change settles it
+    s.submit();
+    let turn = s.claim(CLAUDE);
+    let later = s.replace_line("- first item", "- first item, after the approve");
+    s.yield_turn(CLAUDE, turn);
+    let v = wire(&s.fold());
+    assert_eq!(change(&v, &id(later, 0))["settled"], false);
+    assert!(listed(&v).iter().any(|(i, ..)| *i == id(later, 0)));
+}
+
+/// A hand-back settles only the changes you checked before it; an unchecked one stays
+/// news, a row with keys.
+#[test]
+fn a_hand_back_leaves_an_unchecked_change_unsettled() {
+    let (mut s, ext, _) = reworded();
+    s.note("one more thing");
+    s.submit();
+    let v = wire(&s.fold());
+    assert_eq!(change(&v, &id(ext, 0))["settled"], false);
+    assert!(listed(&v).iter().any(|(i, ..)| *i == id(ext, 0)));
+}
+
+// --- where a change sits ---
+
+/// A hunk that starts on a blank line sits on its first block with text: its row's block
+/// and its news stop are that one block.
+#[test]
+fn a_change_led_by_a_blank_line_sits_on_its_first_block_with_text() {
+    for blanks in ["\n", "\n\n"] {
+        let mut s = Scenario::new(DOC);
+        s.note("add a closing line");
+        s.submit();
+        let turn = s.claim(CLAUDE);
+        let ext = s.external(&format!("{DOC}{blanks}A closing paragraph.\n"));
+        s.yield_turn(CLAUDE, turn);
+        let v = wire(&s.fold());
+        let c = change(&v, &id(ext, 0));
+        let first = c["range"]["lines"][0].as_u64().unwrap() as usize;
+        for l in first..first + blanks.len() {
+            assert_eq!(
+                s.text().lines().nth(l - 1),
+                Some(""),
+                "setup: the hunk starts on {blanks:?}: {c}"
+            );
+        }
+        let block = sp_of(s.text(), "A closing paragraph.");
+        assert_eq!(c["range"]["sp"], block, "{blanks:?}: {c}");
+        assert_eq!(entry(&v, &id(ext, 0))["sp"], block);
+    }
+}
+
+/// One rule places a change's row and its news: each change Claude's news lists on a
+/// block is on that same block.
+#[test]
+fn every_change_in_the_news_sits_where_its_row_does() {
+    let mut s = journey().s;
+    s.external(&format!("{}\nA closing paragraph.\n", s.text()));
+    let v = wire(&s.fold());
+    let mut checked = 0;
+    for n in news(&v).iter().filter(|n| n["kind"] == "change") {
+        let c = change(&v, n["id"].as_str().unwrap());
+        if !c["undone_by"].is_null() || c["range"]["status"] == "superseded" {
+            continue;
+        }
+        assert_eq!(c["range"]["sp"], n["sp"], "{}", n["id"]);
+        checked += 1;
+    }
+    assert!(checked > 1, "setup: {:?}", listed(&v));
+}
+
 // --- what checks an item ---
 
 #[test]

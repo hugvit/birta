@@ -1199,6 +1199,74 @@ async fn the_folder_listing_counts_a_held_doc_as_its_page_shows_it() {
     );
 }
 
+/// A note on a doc Claude still has waits for its reply, and a folder hand-back skips
+/// that doc, so the folder's count of what a hand-back sends leaves the note out.
+#[tokio::test]
+async fn the_folder_count_leaves_out_a_note_on_a_doc_claude_still_has() {
+    folder_count_while_held(true).await;
+}
+
+/// The same from the hand-back on, before any agent picks it up.
+#[tokio::test]
+async fn the_folder_count_leaves_out_a_note_on_a_doc_handed_back_and_not_picked_up() {
+    folder_count_while_held(false).await;
+}
+
+async fn folder_count_while_held(claimed: bool) {
+    let site = Site::new();
+    site.write("a.md", A_MD);
+    site.write("b.md", B_MD);
+    let mut sa = Scenario::new(A_MD);
+    sa.note("Shorter a.");
+    site.write("a.md.birta.jsonl", &sa.log());
+    site.write("b.md.birta.jsonl", &Scenario::new(B_MD).log());
+    let served = site.serve(&["."], &[GATE_ON, HOLD_0]);
+    let (mut ws, _) = served.viewing("a.md").await;
+    acked(
+        &mut ws,
+        op_on(
+            "a.md",
+            "h1",
+            &rev(A_MD),
+            "hand_back",
+            json!({"scope": "all"}),
+        ),
+    )
+    .await;
+    if claimed {
+        let (code, out, err) = agent(&site, &["review", "a.md", "--as", "claude"], "");
+        assert_eq!(code, 0, "setup: {out}{err}");
+    }
+    let note = |path: &str, cid: &str, text: &str| {
+        op_on(
+            path,
+            cid,
+            &rev(text),
+            "comment",
+            json!({"at": {"k": "doc"}, "body": "later"}),
+        )
+    };
+    acked(&mut ws, note("a.md", "n1", A_MD)).await;
+    acked(&mut ws, note("b.md", "n2", B_MD)).await;
+    // Once the listing has both notes
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let dir = loop {
+        let dir = listing(&served).await;
+        let (a, b) = (entry(&dir, "a.md"), entry(&dir, "b.md"));
+        if a["summary"]["notes"] == 2 && b["summary"]["counts"]["drafts"] == 1 {
+            break dir;
+        }
+        assert!(std::time::Instant::now() < deadline, "never listed: {dir}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(
+        entry(&dir, "a.md")["summary"]["counts"]["drafts"],
+        0,
+        "{dir}"
+    );
+    assert_eq!(dir["totals"]["drafts"], 1, "only b.md's note goes: {dir}");
+}
+
 #[tokio::test]
 async fn claudes_saves_while_held_send_no_state_the_page_already_has() {
     let mut t = mid_turn(false).await;

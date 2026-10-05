@@ -453,9 +453,12 @@ fn kept_lines(lines: &[Line], standing: &[u32]) -> HashMap<String, Vec<u32>> {
 }
 
 /// The line the human copies to point an agent at the notes on `doc`, a path as the
-/// agent would type it.
+/// agent would type it, quoted for its shell.
 pub fn hand_off(doc: &Path) -> String {
-    format!("Take a look at my notes: `birta review {}`", doc.display())
+    format!(
+        "Take a look at my notes: `birta review {}`",
+        crate::agent::render::shell_quote(&doc.to_string_lossy())
+    )
 }
 
 /// Folds `parsed` into the state of `doc`, its current text. Pure and clock-free: the
@@ -639,6 +642,7 @@ pub fn fold<'a>(parsed: &Parsed, chain: &'a Chain, doc: &'a Doc) -> Folded<'a> {
             stets: &stets,
             seen: &seen_at,
             rounds: &standing,
+            approves: &approves,
             hidden: &hidden,
             answers: &answers,
             chains: &chains,

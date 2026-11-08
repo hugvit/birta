@@ -11,6 +11,7 @@ import {
   fixtureState,
   focusTo,
   focused,
+  highlighted,
   marks,
   mockReview,
   say,
@@ -183,7 +184,7 @@ test.describe("the end of a hold", () => {
     expect(await stripMessage(page)).toBeNull();
   });
 
-  test("the approve's hold ending is the approved moment: 6 s, Approved ✓, and the bars fade to dots", async ({ page, birta }) => {
+  test("the approve's hold ending is the approved moment: 6 s, Approved ✓, and the marks go", async ({ page, birta }) => {
     await open(
       page,
       birta,
@@ -199,11 +200,8 @@ test.describe("the end of a hold", () => {
     const t0 = await shows(page, APPROVED, 6_000);
     await expect.poll(async () => (await turnOf(page)) ?? "").toMatch(/^Approved ✓/);
     expect(await bars(page)).toEqual([]);
-    expect(await dotsOn(page)).toEqual(expect.arrayContaining(["10:1-10:16", "5:1-6:68"]));
-    // No tip during the moment, even when focus lands on a dot
-    await jTo(page, "5:1-6:68");
-    await page.waitForTimeout(SETTLE_MS);
-    expect(await stripMessage(page)).toBe(APPROVED);
+    expect(await dotsOn(page)).toEqual([]);
+    expect(await highlighted(page)).toEqual([]);
     await sixSeconds(page, APPROVED, t0);
   });
 
@@ -321,9 +319,23 @@ test.describe("copies", () => {
 
 test.describe("the settled-note tip", () => {
   const clean = () => bent("approved", (s) => (s.hold.not_before = s.server_now - 1_000));
+  // A note written after approve reopens the round, and its settled notes are dots again
+  const reopened = () =>
+    bent("approved", (s) => {
+      s.hold.not_before = s.server_now - 1_000;
+      s.counts.drafts = 1;
+    });
+
+  test("never shows in the approved view, which has no dots", async ({ page, birta }) => {
+    await open(page, birta, fixtureDoc("approved"), clean());
+    await jTo(page, "5:1-6:68");
+    await page.waitForTimeout(SETTLE_MS);
+    expect(await dotsOn(page)).toEqual([]);
+    expect(await stripMessage(page)).toBeNull();
+  });
 
   test("shows when focus first lands on a dotted block, not when the dots are drawn", async ({ page, birta }) => {
-    await open(page, birta, fixtureDoc("approved"), clean());
+    await open(page, birta, fixtureDoc("approved"), reopened());
     await expect.poll(async () => (await dotsOn(page)).length).toBeGreaterThan(0);
     await page.waitForTimeout(SETTLE_MS);
     expect(await stripMessage(page)).toBeNull();
@@ -333,7 +345,7 @@ test.describe("the settled-note tip", () => {
   });
 
   test("shows once ever: not on the next dot, nor after a reload", async ({ page, birta }) => {
-    await open(page, birta, fixtureDoc("approved"), clean());
+    await open(page, birta, fixtureDoc("approved"), reopened());
     await jTo(page, "5:1-6:68");
     await shows(page, TIP);
     await say(page, "");

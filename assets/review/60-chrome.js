@@ -62,7 +62,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     };
   }
 
-  /** Whether `s` is approved and past its hold at `now`: the page then shows only dots. */
+  /** Whether `s` is approved and past its hold at `now`: the page then shows no review marks. */
   BR.pure.clean = function (s, now) {
     if (!s || s.log_writable === false) return false;
     var v = view(s, now);

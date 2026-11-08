@@ -15,6 +15,7 @@ import {
   fixtureState,
   focusTo,
   focused,
+  highlighted,
   marks,
   mockReview,
   revOf,
@@ -717,7 +718,7 @@ test.describe("clean view", () => {
     await expect.poll(() => opsNamed(mock, "approve")).toHaveLength(1);
   });
 
-  test("rows, bars and marks go; the dots stay", async ({ page, birta }) => {
+  test("the review draws nothing: no rows, marks, dots or quote underline", async ({ page, birta }) => {
     await openFixture(page, birta, "approved", (s) => {
       approved(s);
       // An unsettled change too, so a bar and a wash would be drawn outside the clean view
@@ -727,22 +728,42 @@ test.describe("clean view", () => {
     await expect.poll(() => phraseOf(page)).toMatch(/c to reopen$/);
     await expect.poll(() => shownHosts(page)).toEqual([]);
     expect(await laneMarks(page)).toEqual([]);
-    expect(await dotsOn(page)).toEqual(expect.arrayContaining(["10:1-10:16", "5:1-6:68"]));
+    expect(await dotsOn(page)).toEqual([]);
+    expect(await highlighted(page)).toEqual([]);
   });
 
-  test("⏎ on a dotted block opens its note to read, and ⏎ again folds it, sending nothing", async ({ page, birta }) => {
+  test("⏎ on a block that holds a note opens nothing and sends nothing", async ({ page, birta }) => {
     const { mock } = await openFixture(page, birta, "approved", approved);
     await expect.poll(() => phraseOf(page)).toMatch(/c to reopen$/);
     for (let i = 0; i < 4 && (await focused(page)) !== "5:1-6:68"; i++) await page.keyboard.press("j");
     await expect.poll(() => focused(page)).toBe("5:1-6:68");
     await page.keyboard.press("Enter");
-    await expect.poll(async () => (await shownHosts(page)).length).toBeGreaterThan(0);
-    await expect.poll(() => dotsOn(page)).not.toContain("5:1-6:68");
-    await page.keyboard.press("Enter");
-    await expect.poll(() => shownHosts(page)).toEqual([]);
-    await expect.poll(() => dotsOn(page)).toContain("5:1-6:68");
     await page.waitForTimeout(SETTLE_MS);
+    expect(await shownHosts(page)).toEqual([]);
+    expect(await dotsOn(page)).toEqual([]);
+    expect(await highlighted(page)).toEqual([]);
     expect(mock.ops()).toEqual([]);
+  });
+
+  test("⏎ in the approved view leaves the note folded for when c reopens the round", async ({ page, birta }) => {
+    const { mock, state } = await openFixture(page, birta, "approved", approved);
+    await expect.poll(() => phraseOf(page)).toMatch(/c to reopen$/);
+    for (let i = 0; i < 4 && (await focused(page)) !== "5:1-6:68"; i++) await page.keyboard.press("j");
+    await expect.poll(() => focused(page)).toBe("5:1-6:68");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(SETTLE_MS);
+    mock.pushState({ ...state, counts: { ...state.counts, drafts: 1 } });
+    await expect.poll(() => phraseOf(page)).toMatch(/reopened$/);
+    await expect.poll(() => dotsOn(page)).toContain("5:1-6:68");
+  });
+
+  test("a note written after approve brings the earlier notes' underline back", async ({ page, birta }) => {
+    await openFixture(page, birta, "approved", (s) => {
+      approved(s);
+      s.counts.drafts = 1;
+    });
+    await expect.poll(() => phraseOf(page)).toMatch(/reopened$/);
+    await expect.poll(() => highlighted(page)).toEqual(["we just fail"]);
   });
 
   for (const where of ["on a block", "at the doc"] as const) {
@@ -916,9 +937,12 @@ test.describe("clean view", () => {
     });
     await expect.poll(() => stripMessage(page)).toBe("approving · z to undo");
     await expect.poll(async () => (await shownHosts(page)).length).toBeGreaterThan(0);
+    expect(await highlighted(page)).toEqual(["we just fail"]);
     await expect.poll(() => phraseOf(page), { timeout: 8_000 }).toMatch(/c to reopen$/);
     await expect.poll(() => shownHosts(page)).toEqual([]);
     expect(await laneMarks(page)).toEqual([]);
+    await expect.poll(() => highlighted(page)).toEqual([]);
+    expect(await dotsOn(page)).toEqual([]);
     // The keys follow the hold's end too
     await page.keyboard.press("y");
     await expect.poll(() => stripMessage(page)).toBe(REOPEN);

@@ -252,7 +252,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   function render() {
     queued = false;
     var now = BR.chrome.now();
-    // Approved, the doc reads clean: only the dots stay
+    // Approved, the doc reads clean: nothing of the review is drawn
     var clean = current && BR.pure.clean(current, now);
     var marks = current && !clean ? BR.pure.laneMarks(current, { now: now }) : [];
     // Section verdicts on their way wash at once, as their glyph's state is still to come
@@ -495,7 +495,7 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
   function highlight() {
     if (typeof CSS === 'undefined' || !CSS.highlights || typeof Highlight === 'undefined') return;
     var ranges = [];
-    if (current && !hidden && !reading()) {
+    if (current && !hidden && !reading() && !BR.pure.clean(current, BR.chrome.now())) {
       (current.items || []).forEach(function (i) {
         var loc = i.at && i.at.loc;
         if (!loc || !loc.off || i.status === 'retracted') return;

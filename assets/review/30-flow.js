@@ -1055,18 +1055,6 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
     return earlier && !(i.replies || []).some(function (r) { return r.by && r.by.type === 'agent' && !r.seen; });
   }
 
-  /** A dot ⏎ opened in the clean view: the note and its replies to read, with no keys of their own. */
-  function readOnly(i, slot, add) {
-    var agent = i.by && i.by.type === 'agent';
-    var quote = i.at && i.at.scope === 'quote' ? i.at.shown || i.at.quote : null;
-    add({ id: 'n' + i.n, kind: 'note', lead: who(i.by) + ' · ', text: i.body || ANSWERED[i.verdict] || '',
-      prefix: quote ? '→ "' + clamp(quote) + '"' : null, rule: [agent ? 'dotted' : 'solid', agent ? 'agent' : 'you'] }, slot, [G_NOTE, i.n, 0]);
-    (i.replies || []).forEach(function (r, k) {
-      add({ id: 'r' + r.n, kind: 'reply', lead: '↳ ' + who(r.by) + ' · ', text: r.body || ANSWERED[r.verdict] || '', fold: true,
-        rule: ['solid', r.by && r.by.type === 'human' ? 'you' : 'agent'] }, slot, [G_NOTE, i.n, 1 + k]);
-    });
-  }
-
   function dotTitle(i) {
     var owner = i.by && i.by.type === 'agent' ? who(i.by) + "'s note" : 'your note';
     return owner + ' · settled · ⏎ opens it';
@@ -1109,19 +1097,12 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       e.order = order;
       out.push(e);
     }
-    // Approved: every note on a block is its dot, and nothing else of the state is drawn
+    // Approved: the doc reads as plain text, and nothing of the state is drawn
     var clean = !!s && BR.pure.clean(s, BR.chrome.now());
     if (clean) {
       openIds = [];
       keyedRow = null;
-      (s.lost || []).forEach(function (n) { lost[n] = 1; });
-      (s.items || []).forEach(function (i) {
-        if (i.cid) cids[i.cid] = 1;
-        var slot = slotOfItem(i);
-        if (lost[i.n] || i.status === 'retracted' || !slot.sp || !blockOf(slot.sp)) return;
-        if (expanded[i.n]) readOnly(i, slot, add);
-        else dotList.push({ sp: slot.sp, role: i.by && i.by.type === 'agent' ? 'agent' : 'you', title: dotTitle(i) });
-      });
+      (s.items || []).forEach(function (i) { if (i.cid) cids[i.cid] = 1; });
     } else if (s) {
       openRows(s);
       (s.lost || []).forEach(function (n) { lost[n] = 1; });
@@ -2353,14 +2334,15 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
         keepUnsent(u);
         return true;
       }
-      if (!state) return false;
+      // Approved, notes stay out of the doc until c reopens it
+      if (!state || BR.chrome.clean()) return false;
       if (!sp) {
         if ((state.lost || []).length) {
           toggleLost();
           return true;
         }
         // The folder's notes open where its row's ▸ does
-        if (folderNotes > 0 && BOOT.review.dir && !BR.chrome.clean()) {
+        if (folderNotes > 0 && BOOT.review.dir) {
           BR.chrome.openMenu('folder');
           return true;
         }
@@ -2370,14 +2352,10 @@ var BR = BR && BR.__birta === true ? BR : { __birta: true };
       var here = (state.items || []).filter(function (i) { return slotOfItem(i).sp === sp; });
       var open = here.filter(function (i) { return expanded[i.n]; });
       var hit = open.length > 0;
-      // The clean view shows every note on a block as its dot
-      var clean = BR.chrome.clean();
-      var lostNow = {};
-      (state.lost || []).forEach(function (n) { lostNow[n] = 1; });
       if (hit) open.forEach(function (i) { delete expanded[i.n]; });
       else {
         here.forEach(function (i) {
-          if (clean ? lostNow[i.n] || i.status === 'retracted' : !folded(i, slotOfItem(i))) return;
+          if (!folded(i, slotOfItem(i))) return;
           expanded[i.n] = 1;
           hit = true;
         });

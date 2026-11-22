@@ -1,6 +1,6 @@
 //! Markdown to HTML, with hooks for the host application's URL scheme.
 
-use comrak::nodes::NodeValue;
+use comrak::nodes::{Ast, AstNode, NodeValue};
 use comrak::plugins::syntect::SyntectAdapter;
 use comrak::{Arena, Options, format_html_with_plugins, options, parse_document};
 
@@ -28,18 +28,18 @@ pub trait Resolver {
 
     /// The `href` for a `[[target]]` wiki link. `target` is the text before
     /// any `|alias`. Only called when [`RenderOptions::wikilinks`] is set.
-    fn wikilink(&self, target: &str) -> String {
-        target.to_string()
+    fn wikilink(&self, target: &str) -> Resolved {
+        Resolved::Found(target.to_string())
     }
 
     /// The `src` for an `![[image.png]]` embed. `target` is the text before
     /// any `|size`. Only called when [`RenderOptions::embeds`] is set. The
     /// default treats it like a relative image and calls [`Resolver::image`].
-    fn embed(&self, target: &str) -> String {
+    fn embed(&self, target: &str) -> Resolved {
         if is_relative(target) {
-            self.image(target)
+            Resolved::Found(self.image(target))
         } else {
-            target.to_string()
+            Resolved::Found(target.to_string())
         }
     }
 
@@ -54,6 +54,30 @@ pub trait Resolver {
     /// `<span class="tag">`. Only called when [`RenderOptions::tags`] is set.
     fn tag(&self, _name: &str) -> Option<String> {
         None
+    }
+}
+
+/// What [`Resolver::wikilink`] and [`Resolver::embed`] make of a target.
+/// `String`s convert into [`Resolved::Found`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Resolved {
+    /// The target exists at this URL.
+    Found(String),
+    /// The target does not exist. A wiki link still points at the URL (a
+    /// "new note" route, say) and carries `data-unresolved="true"`; an image
+    /// embed becomes a `<span data-unresolved="true">` holding its target.
+    Missing(String),
+}
+
+impl From<String> for Resolved {
+    fn from(url: String) -> Self {
+        Resolved::Found(url)
+    }
+}
+
+impl From<&str> for Resolved {
+    fn from(url: &str) -> Self {
+        Resolved::Found(url.to_string())
     }
 }
 
@@ -78,6 +102,11 @@ pub struct RenderOptions<'a> {
     /// Render Obsidian `#tags` as `<span class="tag">`, or as links when
     /// [`Resolver::tag`] returns a URL.
     pub tags: bool,
+    /// Render `==text==` as `<mark>`.
+    pub highlight: bool,
+    /// The name of the note being rendered, as [`Resolver::embed_note`] would
+    /// receive it, so a note that embeds itself stops at once.
+    pub current_note: Option<&'a str>,
 }
 
 /// The result of [`render`].
@@ -125,6 +154,7 @@ fn render_nested(markdown: &str, opts: &RenderOptions<'_>, embedding: &[&str]) -
     let root = parse_document(&arena, markdown, &options);
     let mut front_matter = None;
     let mut wikilinks: Vec<String> = Vec::new();
+    let mut unresolved = Vec::new();
 
     for node in root.descendants() {
         let mut data = node.data.borrow_mut();
@@ -147,8 +177,10 @@ fn render_nested(markdown: &str, opts: &RenderOptions<'_>, embedding: &[&str]) -
                 {
                     wikilinks.push(link.url.clone());
                 }
-                if let Some(resolver) = opts.resolver {
-                    resolve_urls(value, resolver);
+                if let Some(resolver) = opts.resolver
+                    && resolve_urls(value, resolver)
+                {
+                    unresolved.push(node);
                 }
             }
         }
@@ -166,6 +198,11 @@ fn render_nested(markdown: &str, opts: &RenderOptions<'_>, embedding: &[&str]) -
             note: &|target| embed_note(target, opts, embedding),
         },
     );
+
+    // After the obsidian pass, which skips text inside links
+    for node in unresolved {
+        mark_unresolved(&arena, node, options.render.sourcepos);
+    }
 
     let mut html = String::new();
     format_html_with_plugins(root, &options, &mut html, &plugins).unwrap();
@@ -189,6 +226,7 @@ fn embed_note(target: &str, opts: &RenderOptions<'_>, embedding: &[&str]) -> Opt
     };
     if name.is_empty()
         || embedding.contains(&name)
+        || opts.current_note == Some(name)
         || embedding.len() >= MAX_EMBED_DEPTH
         || heading.is_some_and(|h| h.starts_with('^'))
     {
@@ -307,7 +345,9 @@ fn yaml_cell(value: &Yaml) -> String {
     }
 }
 
-fn resolve_urls(value: &mut NodeValue, resolver: &dyn Resolver) {
+/// Rewrite the URLs in `value`. True when it is a wiki link whose target is
+/// missing.
+fn resolve_urls(value: &mut NodeValue, resolver: &dyn Resolver) -> bool {
     match value {
         NodeValue::HtmlBlock(block) => {
             block.literal = rewrite_html_img_srcs(&block.literal, resolver);
@@ -319,9 +359,45 @@ fn resolve_urls(value: &mut NodeValue, resolver: &dyn Resolver) {
         NodeValue::Image(image) if is_relative(&image.url) => {
             image.url = resolver.image(&image.url);
         }
-        NodeValue::WikiLink(link) => link.url = resolver.wikilink(&link.url),
+        NodeValue::WikiLink(link) => match resolver.wikilink(&link.url) {
+            Resolved::Found(url) => link.url = url,
+            Resolved::Missing(url) => {
+                link.url = url;
+                return true;
+            }
+        },
         _ => {}
     }
+    false
+}
+
+/// Swap a wiki link for raw `<a>` tags around its children: comrak's own
+/// wiki link output has no room for extra attributes.
+fn mark_unresolved<'a>(arena: &'a Arena<'a>, node: &'a AstNode<'a>, sourcepos: bool) {
+    let (url, pos) = {
+        let data = node.data.borrow();
+        let NodeValue::WikiLink(link) = &data.value else {
+            return;
+        };
+        (link.url.clone(), data.sourcepos)
+    };
+    let mut href = String::new();
+    comrak::html::escape_href(&mut href, &url, false).expect("writing to a String cannot fail");
+    let pos_attr = if sourcepos {
+        format!(" data-sourcepos=\"{pos}\"")
+    } else {
+        String::new()
+    };
+    let open =
+        format!("<a{pos_attr} href=\"{href}\" data-wikilink=\"true\" data-unresolved=\"true\">");
+
+    let alloc = |value| arena.alloc(AstNode::from(Ast::new_with_sourcepos(value, pos)));
+    node.insert_before(alloc(NodeValue::HtmlInline(open)));
+    for child in node.children().collect::<Vec<_>>() {
+        node.insert_before(child);
+    }
+    node.insert_before(alloc(NodeValue::HtmlInline("</a>".to_string())));
+    node.detach();
 }
 
 /// Format file stats for the raw-mode file header, e.g. "215 lines (154 loc) · 5.25 KB".
@@ -393,6 +469,7 @@ fn comrak_options(opts: &RenderOptions<'_>) -> Options<'static> {
     options.extension.alerts = true;
     options.extension.math_dollars = true;
     options.extension.math_code = true;
+    options.extension.highlight = opts.highlight;
 
     // Obsidian-style `[[target|alias]]`: the alias comes after the pipe
     options.extension.wikilinks_title_after_pipe = opts.wikilinks;
@@ -479,8 +556,8 @@ mod tests {
         fn link(&self, url: &str) -> String {
             format!("/doc/{url}")
         }
-        fn wikilink(&self, target: &str) -> String {
-            format!("/note/{target}")
+        fn wikilink(&self, target: &str) -> Resolved {
+            format!("/note/{target}").into()
         }
     }
 
@@ -783,6 +860,94 @@ mod tests {
         assert!(html.contains("three"), "got: {html}");
         assert!(!html.contains("four"), "got: {html}");
         assert!(html.contains("<p>![[4]]</p>"), "got: {html}");
+    }
+
+    /// Knows only the notes and images named `here`.
+    struct Partial;
+
+    impl Resolver for Partial {
+        fn wikilink(&self, target: &str) -> Resolved {
+            if target == "here" {
+                Resolved::Found(format!("/n/{target}"))
+            } else {
+                Resolved::Missing(format!("/new?t={target}"))
+            }
+        }
+        fn embed(&self, target: &str) -> Resolved {
+            if target == "here.png" {
+                "/f/here.png".into()
+            } else {
+                Resolved::Missing(String::new())
+            }
+        }
+        fn embed_note(&self, name: &str) -> Option<String> {
+            Some(format!("body of {name}\n\n![[Self]]"))
+        }
+    }
+
+    fn with_partial(markdown: &str, current_note: Option<&str>) -> String {
+        let opts = RenderOptions {
+            resolver: Some(&Partial),
+            wikilinks: true,
+            embeds: true,
+            tags: true,
+            current_note,
+            ..Default::default()
+        };
+        render(markdown, &opts).html
+    }
+
+    #[test]
+    fn missing_wikilink_is_marked_and_keeps_its_href() {
+        let html = with_partial("[[here]] [[gone|the #alias]]", None);
+        assert!(
+            html.contains(
+                "<a data-sourcepos=\"1:1-1:8\" href=\"/n/here\" data-wikilink=\"true\">here</a>"
+            ),
+            "got: {html}"
+        );
+        assert!(
+            html.contains(
+                "<a data-sourcepos=\"1:10-1:28\" href=\"/new?t=gone\" data-wikilink=\"true\" \
+                 data-unresolved=\"true\">the #alias</a>"
+            ),
+            "alias text keeps no tag markup, got: {html}"
+        );
+    }
+
+    #[test]
+    fn missing_image_embed_becomes_a_span() {
+        let html = with_partial("![[here.png]] ![[gone & lost.png]]", None);
+        assert!(html.contains("src=\"/f/here.png\""), "got: {html}");
+        assert!(
+            html.contains(
+                "<span data-embed=\"image\" data-unresolved=\"true\">gone &amp; lost.png</span>"
+            ),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn current_note_stops_a_self_embed_at_once() {
+        let html = with_partial("![[Self]]", Some("Self"));
+        assert!(
+            html.contains("<p data-sourcepos=\"1:1-1:9\">![[Self]]</p>"),
+            "got: {html}"
+        );
+        let html = with_partial("![[Self]]", None);
+        assert_eq!(html.matches("body of Self").count(), 1, "got: {html}");
+    }
+
+    #[test]
+    fn highlight_is_opt_in() {
+        let plain = render("==hi==", &RenderOptions::default()).html;
+        assert!(plain.contains("==hi=="), "got: {plain}");
+        let opts = RenderOptions {
+            highlight: true,
+            ..Default::default()
+        };
+        let html = render("==hi==", &opts).html;
+        assert!(html.contains(">hi</mark>"), "got: {html}");
     }
 
     #[test]

@@ -6,7 +6,7 @@
 use comrak::nodes::{Ast, AstNode, NodeHtmlBlock, NodeValue, Sourcepos};
 use comrak::{Arena, html::escape_href};
 
-use crate::render::{Resolver, html_escape};
+use crate::render::{Resolved, Resolver, html_escape};
 
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "avif"];
 
@@ -233,8 +233,14 @@ fn is_image(target: &str) -> bool {
 
 /// `|300` sets the width, `|300x200` both sides, anything else is alt text.
 fn image_html(target: &str, option: Option<&str>, resolver: Option<&dyn Resolver>) -> String {
-    let src = match resolver {
-        Some(r) => r.embed(target),
+    let src = match resolver.map(|r| r.embed(target)) {
+        Some(Resolved::Found(url)) => url,
+        Some(Resolved::Missing(_)) => {
+            return format!(
+                "<span data-embed=\"image\" data-unresolved=\"true\">{}</span>",
+                html_escape(target)
+            );
+        }
         None => target.to_string(),
     };
     let mut href = String::new();

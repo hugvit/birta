@@ -7,7 +7,7 @@ The API follows birta's needs and may change between `0.x` releases. Pin a versi
 ## Use
 
 ```rust
-use birta_core::render::{RenderOptions, Resolver, render};
+use birta_core::render::{RenderOptions, Resolved, Resolver, render};
 use birta_core::theme::ThemeSearch;
 
 struct Notes;
@@ -16,8 +16,11 @@ impl Resolver for Notes {
     fn image(&self, url: &str) -> String {
         format!("/files/{url}")
     }
-    fn wikilink(&self, target: &str) -> String {
-        format!("/note/{target}")
+    fn wikilink(&self, target: &str) -> Resolved {
+        match lookup(target) {
+            Some(path) => Resolved::Found(format!("/note/{path}")),
+            None => Resolved::Missing(format!("/new?title={target}")),
+        }
     }
 }
 
@@ -54,8 +57,11 @@ let page = render(
 ## Opt-in syntax
 
 - **`wikilinks`**: `[[target]]` and `[[target|alias]]` become links. `Resolver::wikilink` turns the target into an `href`.
+- **Unresolved targets**: `Resolver::wikilink` and `Resolver::embed` return `Resolved::Found(url)` or `Resolved::Missing(url)`. A missing wiki link keeps its `href` and gains `data-unresolved="true"`; a missing image embed becomes a `<span data-unresolved="true">` holding its target.
 - **`front_matter`**: a leading `---` block is left out of the HTML and returned raw in `Rendered::front_matter`. `front_matter_table` turns that block into a GitHub-style table to place above the body.
 - **`embeds`**: `![[image.png]]` becomes an `<img data-embed="image">`. `|300` sets the width, `|300x200` both sides, any other text after the pipe is the alt text. `Resolver::embed` turns the target into a `src`; by default it goes through `Resolver::image`. A paragraph that is only `![[note]]` or `![[note#Heading]]` becomes a `div.markdown-embed` holding that note, when `Resolver::embed_note` returns its markdown. Embedded notes render without `data-sourcepos` and their front matter, nest at most three deep, and stop at cycles. Inline note embeds and `#^block` targets stay plain text. A host that writes checkboxes back by their `data-sourcepos` must skip inputs inside `.markdown-embed`, or `closest('li[data-sourcepos]')` finds a line of the host file.
 - **`tags`**: `#tag` becomes `<span class="tag" data-tag="tag">`, or an `<a class="tag">` when `Resolver::tag` returns a URL. A tag starts after whitespace or at the start of a line, and must contain something other than digits, so `#1`, `C#` and URL fragments stay text.
+- **`highlight`**: `==text==` becomes `<mark>`.
+- **`current_note`**: the name of the note being rendered, so `![[itself]]` stays text instead of expanding once.
 - **Found targets**: `Rendered::wikilinks`, `Rendered::embeds` and `Rendered::tags` list what each enabled syntax found, so an index needs no second parse.
-- **Not supported yet**: inline note embeds, `^block` ids, Obsidian callouts and `==highlight==` render as plain text.
+- **Not supported yet**: inline note embeds, `^block` ids, and Obsidian callouts render as plain text.

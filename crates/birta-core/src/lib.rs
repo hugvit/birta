@@ -7,14 +7,14 @@
 //! [`theme::ResolvedTheme`].
 //!
 //! ```
-//! use birta_core::render::{RenderOptions, Resolver, render};
+//! use birta_core::render::{RenderOptions, Resolved, Resolver, render};
 //! use birta_core::theme::ThemeSearch;
 //!
 //! struct Notes;
 //!
 //! impl Resolver for Notes {
-//!     fn wikilink(&self, target: &str) -> String {
-//!         format!("/note/{target}")
+//!     fn wikilink(&self, target: &str) -> Resolved {
+//!         format!("/note/{target}").into()
 //!     }
 //! }
 //!

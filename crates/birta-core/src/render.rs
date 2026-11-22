@@ -524,6 +524,21 @@ mod tests {
     }
 
     #[test]
+    fn image_embed_in_a_table_cell_takes_an_escaped_pipe() {
+        let html = obsidian("| x |\n|---|\n| ![[a.png\\|300]] |").html;
+        assert!(
+            html.contains("src=\"/img/a.png\" alt=\"a.png\" width=\"300\""),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn image_embed_target_survives_non_ascii_before_it() {
+        let html = obsidian("> - Þú sérð ![[it's.png]]").html;
+        assert!(html.contains("src=\"/img/it&#x27;s.png\""), "got: {html}");
+    }
+
+    #[test]
     fn image_embed_leaves_absolute_urls_alone() {
         let html = obsidian("![[https://x.com/a.png]] ![[/abs.png]]").html;
         assert!(html.contains("src=\"/abs.png\""), "got: {html}");

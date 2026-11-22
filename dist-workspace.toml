@@ -20,3 +20,7 @@ install-updater = false
 # Publish Homebrew formula to this tap
 tap = "hugvit/homebrew-tap"
 publish-jobs = ["homebrew"]
+
+# dist's default for this target is the retired macos-14 image
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"

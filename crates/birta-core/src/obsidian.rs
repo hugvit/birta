@@ -3,7 +3,7 @@
 //! Runs on the parsed tree, after URL resolution, by splitting `Text` nodes.
 //! Code spans and fenced code are separate nodes, so they are never touched.
 
-use comrak::nodes::{Ast, AstNode, NodeValue};
+use comrak::nodes::{Ast, AstNode, NodeHtmlBlock, NodeValue, Sourcepos};
 use comrak::{Arena, html::escape_href};
 
 use crate::render::{Resolver, html_escape};
@@ -14,6 +14,8 @@ pub(crate) struct Syntax<'r> {
     pub embeds: bool,
     pub tags: bool,
     pub resolver: Option<&'r dyn Resolver>,
+    /// Renders a note embed target to HTML, or `None` to leave it as text.
+    pub note: &'r dyn Fn(&str) -> Option<String>,
 }
 
 /// Targets found while rewriting, in document order without duplicates.
@@ -40,6 +42,10 @@ pub(crate) fn rewrite<'a>(
     }
     let lines: Vec<&str> = source.split('\n').collect();
 
+    if syntax.embeds {
+        embed_notes(root, &lines, syntax, &mut found);
+    }
+
     let candidates: Vec<_> = root
         .descendants()
         .filter(|node| matches!(node.data.borrow().value, NodeValue::Text(_)))
@@ -57,12 +63,7 @@ pub(crate) fn rewrite<'a>(
 
         let mut pieces = vec![Piece::Text(literal.clone())];
         if syntax.embeds && literal.contains("![[") {
-            let raw = (sourcepos.start.line == sourcepos.end.line)
-                .then(|| lines.get(sourcepos.start.line.wrapping_sub(1)))
-                .flatten()
-                .and_then(|line| {
-                    line.get(sourcepos.start.column.saturating_sub(1)..sourcepos.end.column)
-                });
+            let raw = raw_text(&lines, sourcepos);
             pieces = split_embeds(&literal, raw, syntax, &mut found);
         }
         if syntax.tags {
@@ -94,6 +95,59 @@ pub(crate) fn rewrite<'a>(
         node.detach();
     }
     found
+}
+
+/// The source text behind a single-line node, columns being byte offsets.
+fn raw_text<'s>(lines: &[&'s str], sourcepos: Sourcepos) -> Option<&'s str> {
+    if sourcepos.start.line != sourcepos.end.line {
+        return None;
+    }
+    let line = lines.get(sourcepos.start.line.wrapping_sub(1))?;
+    line.get(sourcepos.start.column.saturating_sub(1)..sourcepos.end.column)
+}
+
+/// Replace each paragraph that is nothing but a note embed with the rendered
+/// note. Inline note embeds stay text: a `<div>` cannot sit inside a `<p>`.
+fn embed_notes<'a>(root: &'a AstNode<'a>, lines: &[&str], syntax: &Syntax<'_>, found: &mut Found) {
+    let paragraphs: Vec<_> = root
+        .descendants()
+        .filter(|n| matches!(n.data.borrow().value, NodeValue::Paragraph))
+        .collect();
+
+    for paragraph in paragraphs {
+        let Some(child) = paragraph.first_child() else {
+            continue;
+        };
+        if child.next_sibling().is_some() {
+            continue;
+        }
+        let (literal, sourcepos) = match &child.data.borrow().value {
+            NodeValue::Text(t) => (t.to_string(), child.data.borrow().sourcepos),
+            _ => continue,
+        };
+        let inner = match find_embeds(&literal).as_slice() {
+            [(0, end, inner)] if *end == literal.len() => inner.to_string(),
+            _ => continue,
+        };
+        let inner = raw_text(lines, sourcepos)
+            .and_then(|raw| match find_embeds(raw).as_slice() {
+                [(_, _, raw_inner)] => Some(raw_inner.to_string()),
+                _ => None,
+            })
+            .unwrap_or(inner);
+        let target = inner.split('|').next().unwrap_or_default().trim();
+        if target.is_empty() || is_image(target) {
+            continue;
+        }
+        push_unique(&mut found.embeds, target);
+        if let Some(html) = (syntax.note)(target) {
+            paragraph.data.borrow_mut().value = NodeValue::HtmlBlock(NodeHtmlBlock {
+                block_type: 6,
+                literal: html,
+            });
+            child.detach();
+        }
+    }
 }
 
 fn inside_link<'a>(node: &'a AstNode<'a>) -> bool {

@@ -43,6 +43,13 @@ pub trait Resolver {
         }
     }
 
+    /// The markdown of the note an `![[note]]` or `![[note#Heading]]` embed
+    /// points at, or `None` to leave the embed as text. `name` is the text
+    /// before any `#` or `|`. Only called when [`RenderOptions::embeds`] is set.
+    fn embed_note(&self, _name: &str) -> Option<String> {
+        None
+    }
+
     /// The `href` for a `#tag`, or `None` to render it as a plain
     /// `<span class="tag">`. Only called when [`RenderOptions::tags`] is set.
     fn tag(&self, _name: &str) -> Option<String> {
@@ -64,7 +71,9 @@ pub struct RenderOptions<'a> {
     /// HTML and returned in [`Rendered::front_matter`].
     pub front_matter: bool,
     /// Render Obsidian image embeds: `![[image.png]]`, `![[image.png|300]]`
-    /// (width) and `![[image.png|300x200]]`. Other embeds stay plain text.
+    /// (width) and `![[image.png|300x200]]`. A paragraph that is only a note
+    /// embed (`![[note]]`, `![[note#Heading]]`) is replaced by the note when
+    /// [`Resolver::embed_note`] returns it; other embeds stay plain text.
     pub embeds: bool,
     /// Render Obsidian `#tags` as `<span class="tag">`, or as links when
     /// [`Resolver::tag`] returns a URL.
@@ -95,7 +104,17 @@ pub struct Rendered {
 /// Block elements carry `data-sourcepos` attributes with their source lines,
 /// counted from the top of the file even when front matter is stripped.
 pub fn render(markdown: &str, opts: &RenderOptions<'_>) -> Rendered {
-    let options = comrak_options(opts);
+    render_nested(markdown, opts, &[])
+}
+
+/// How deep note embeds may nest inside one another.
+const MAX_EMBED_DEPTH: usize = 3;
+
+/// `embedding` names the notes being embedded around this one, outermost first.
+fn render_nested(markdown: &str, opts: &RenderOptions<'_>, embedding: &[&str]) -> Rendered {
+    let mut options = comrak_options(opts);
+    // Line numbers in an embedded note point into another file
+    options.render.sourcepos = embedding.is_empty();
     let adapter = match opts.syntax_theme {
         Some(st) => highlight::adapter_with_theme(st),
         None => highlight::adapter(),
@@ -144,6 +163,7 @@ pub fn render(markdown: &str, opts: &RenderOptions<'_>) -> Rendered {
             embeds: opts.embeds,
             tags: opts.tags,
             resolver: opts.resolver,
+            note: &|target| embed_note(target, opts, embedding),
         },
     );
 
@@ -156,6 +176,82 @@ pub fn render(markdown: &str, opts: &RenderOptions<'_>) -> Rendered {
         embeds: found.embeds,
         tags: found.tags,
     }
+}
+
+/// Render the note behind a `![[note#Heading]]` target, wrapped in a
+/// `div.markdown-embed`. `None` on a cycle, past [`MAX_EMBED_DEPTH`], for a
+/// missing note or heading, and for `#^block` targets.
+fn embed_note(target: &str, opts: &RenderOptions<'_>, embedding: &[&str]) -> Option<String> {
+    let resolver = opts.resolver?;
+    let (name, heading) = match target.split_once('#') {
+        Some((name, heading)) => (name.trim(), Some(heading.trim())),
+        None => (target.trim(), None),
+    };
+    if name.is_empty()
+        || embedding.contains(&name)
+        || embedding.len() >= MAX_EMBED_DEPTH
+        || heading.is_some_and(|h| h.starts_with('^'))
+    {
+        return None;
+    }
+
+    let markdown = resolver.embed_note(name)?;
+    let markdown = match heading {
+        Some(heading) => heading_section(&markdown, heading)?,
+        None => markdown,
+    };
+    let mut stack = embedding.to_vec();
+    stack.push(name);
+    let nested = RenderOptions {
+        front_matter: true,
+        ..*opts
+    };
+    let html = render_nested(&markdown, &nested, &stack).html;
+    Some(format!(
+        "<div class=\"markdown-embed\" data-embed=\"note\" data-embed-target=\"{}\">\n{html}</div>\n",
+        html_escape(target)
+    ))
+}
+
+/// The lines from the heading whose text is `heading` up to the next heading
+/// of the same or a higher level.
+fn heading_section(markdown: &str, heading: &str) -> Option<String> {
+    let mut options = Options::default();
+    options.extension.front_matter_delimiter = Some("---".to_string());
+    let arena = Arena::new();
+    let root = parse_document(&arena, markdown, &options);
+
+    let headings: Vec<(u8, usize, String)> = root
+        .children()
+        .filter_map(|node| {
+            let data = node.data.borrow();
+            let NodeValue::Heading(h) = &data.value else {
+                return None;
+            };
+            let text: String = node
+                .descendants()
+                .filter_map(|n| match &n.data.borrow().value {
+                    NodeValue::Text(t) => Some(t.to_string()),
+                    NodeValue::Code(c) => Some(c.literal.clone()),
+                    _ => None,
+                })
+                .collect();
+            Some((h.level, data.sourcepos.start.line, text))
+        })
+        .collect();
+
+    let index = headings
+        .iter()
+        .position(|(_, _, text)| text.trim().eq_ignore_ascii_case(heading))?;
+    let (level, start, _) = headings[index];
+    let end = headings[index + 1..]
+        .iter()
+        .find(|(l, _, _)| *l <= level)
+        .map(|(_, line, _)| line - 1);
+
+    let lines: Vec<&str> = markdown.lines().collect();
+    let end = end.unwrap_or(lines.len()).min(lines.len());
+    Some(lines[start - 1..end].join("\n"))
 }
 
 /// Render a front matter block as a GitHub-style table: one column per key,
@@ -566,6 +662,114 @@ mod tests {
             rendered.html
         );
         assert_eq!(rendered.embeds, vec!["Ideas#Next", "a.png"]);
+    }
+
+    /// Serves notes from a fixed list, for note embeds.
+    struct Vault(&'static [(&'static str, &'static str)]);
+
+    impl Resolver for Vault {
+        fn embed_note(&self, name: &str) -> Option<String> {
+            self.0
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, md)| md.to_string())
+        }
+    }
+
+    fn with_vault(vault: &'static Vault, markdown: &str) -> Rendered {
+        let opts = RenderOptions {
+            resolver: Some(vault),
+            embeds: true,
+            tags: true,
+            wikilinks: true,
+            front_matter: true,
+            ..Default::default()
+        };
+        render(markdown, &opts)
+    }
+
+    #[test]
+    fn note_embed_replaces_its_paragraph() {
+        static VAULT: Vault = Vault(&[("Other", "---\ntitle: x\n---\n- [ ] task #t [[x]]\n")]);
+        let rendered = with_vault(&VAULT, "# Host\n\n![[Other]]\n\nafter #host");
+        let html = &rendered.html;
+        assert!(
+            html.contains("<div class=\"markdown-embed\" data-embed=\"note\" data-embed-target=\"Other\">\n<ul>"),
+            "got: {html}"
+        );
+        assert!(
+            !html.contains("title: x"),
+            "front matter is stripped, got: {html}"
+        );
+        assert!(!html.contains("<p data-sourcepos=\"3"), "got: {html}");
+        // Embedded checkboxes must not point at lines of the host file
+        assert!(html.contains("<li><input type=\"checkbox\""), "got: {html}");
+        assert_eq!(rendered.embeds, vec!["Other"]);
+        assert_eq!(
+            rendered.tags,
+            vec!["host"],
+            "embedded tags belong to the other note"
+        );
+        assert!(rendered.wikilinks.is_empty());
+    }
+
+    #[test]
+    fn note_embed_takes_a_heading_section() {
+        static VAULT: Vault = Vault(&[(
+            "N",
+            "# Top\nintro\n## Plan\nin plan\n### Sub\nin sub\n## Next\nnot this\n",
+        )]);
+        let html = with_vault(&VAULT, "![[N#plan]]").html;
+        assert!(
+            html.contains("in plan") && html.contains("in sub"),
+            "got: {html}"
+        );
+        assert!(
+            !html.contains("intro") && !html.contains("not this"),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn note_embeds_that_cannot_render_stay_text() {
+        static VAULT: Vault = Vault(&[("N", "# A\n")]);
+        let html = with_vault(
+            &VAULT,
+            "![[Missing]]\n\n![[N#Nope]]\n\n![[N#^block]]\n\nInline ![[N]] here",
+        )
+        .html;
+        for literal in [
+            "![[Missing]]",
+            "![[N#Nope]]",
+            "![[N#^block]]",
+            "Inline ![[N]] here",
+        ] {
+            assert!(html.contains(literal), "{literal} should stay, got: {html}");
+        }
+        assert!(!html.contains("markdown-embed"), "got: {html}");
+    }
+
+    #[test]
+    fn note_embed_cycle_stops() {
+        static VAULT: Vault = Vault(&[("A", "in a\n\n![[B]]"), ("B", "in b\n\n![[A]]")]);
+        let html = with_vault(&VAULT, "![[A]]").html;
+        assert_eq!(html.matches("in a").count(), 1, "got: {html}");
+        assert_eq!(html.matches("in b").count(), 1, "got: {html}");
+        assert!(html.contains("<p>![[A]]</p>"), "got: {html}");
+    }
+
+    #[test]
+    fn note_embed_depth_is_limited() {
+        static VAULT: Vault = Vault(&[
+            ("1", "one\n\n![[2]]"),
+            ("2", "two\n\n![[3]]"),
+            ("3", "three\n\n![[4]]"),
+            ("4", "four"),
+        ]);
+        let html = with_vault(&VAULT, "![[1]]").html;
+        assert!(html.contains("three"), "got: {html}");
+        assert!(!html.contains("four"), "got: {html}");
+        assert!(html.contains("<p>![[4]]</p>"), "got: {html}");
     }
 
     #[test]

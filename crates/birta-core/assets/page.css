@@ -552,3 +552,10 @@ body.reading-mode .container {
 .markdown-body a.tag:hover {
   text-decoration: underline;
 }
+
+/* Obsidian note embeds */
+.markdown-body .markdown-embed {
+  margin-bottom: var(--base-size-16);
+  padding: 0 1em;
+  border-left: 0.25em solid var(--borderColor-accent-emphasis);
+}

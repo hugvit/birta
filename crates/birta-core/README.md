@@ -29,6 +29,8 @@ let page = render(
         resolver: Some(&Notes),
         wikilinks: true,
         front_matter: true,
+        embeds: true,
+        tags: true,
     },
 );
 ```
@@ -53,4 +55,7 @@ let page = render(
 
 - **`wikilinks`**: `[[target]]` and `[[target|alias]]` become links. `Resolver::wikilink` turns the target into an `href`.
 - **`front_matter`**: a leading `---` block is left out of the HTML and returned raw in `Rendered::front_matter`. `front_matter_table` turns that block into a GitHub-style table to place above the body.
-- **Not supported yet**: `![[embed]]` and `#tags` render as plain text.
+- **`embeds`**: `![[image.png]]` becomes an `<img data-embed="image">`. `|300` sets the width, `|300x200` both sides, any other text after the pipe is the alt text. `Resolver::embed` turns the target into a `src`; by default it goes through `Resolver::image`. Note embeds (`![[note]]`) stay plain text for now.
+- **`tags`**: `#tag` becomes `<span class="tag" data-tag="tag">`, or an `<a class="tag">` when `Resolver::tag` returns a URL. A tag starts after whitespace or at the start of a line, and must contain something other than digits, so `#1`, `C#` and URL fragments stay text.
+- **Found targets**: `Rendered::wikilinks`, `Rendered::embeds` and `Rendered::tags` list what each enabled syntax found, so an index needs no second parse.
+- **Not supported yet**: note embeds, `^block` ids, Obsidian callouts and `==highlight==` render as plain text.

@@ -6,8 +6,8 @@ use comrak::{Arena, Options, format_html_with_plugins, options, parse_document};
 
 use yaml_rust2::{Yaml, YamlLoader};
 
-use crate::highlight;
 use crate::theme::SyntaxTheme;
+use crate::{highlight, obsidian};
 
 /// Maps the URLs found in a document onto the host application's routes.
 ///
@@ -31,6 +31,23 @@ pub trait Resolver {
     fn wikilink(&self, target: &str) -> String {
         target.to_string()
     }
+
+    /// The `src` for an `![[image.png]]` embed. `target` is the text before
+    /// any `|size`. Only called when [`RenderOptions::embeds`] is set. The
+    /// default treats it like a relative image and calls [`Resolver::image`].
+    fn embed(&self, target: &str) -> String {
+        if is_relative(target) {
+            self.image(target)
+        } else {
+            target.to_string()
+        }
+    }
+
+    /// The `href` for a `#tag`, or `None` to render it as a plain
+    /// `<span class="tag">`. Only called when [`RenderOptions::tags`] is set.
+    fn tag(&self, _name: &str) -> Option<String> {
+        None
+    }
 }
 
 /// How to render a document. The default is GitHub-flavoured markdown with
@@ -46,6 +63,12 @@ pub struct RenderOptions<'a> {
     /// Treat a leading `---` block as front matter: it is left out of the
     /// HTML and returned in [`Rendered::front_matter`].
     pub front_matter: bool,
+    /// Render Obsidian image embeds: `![[image.png]]`, `![[image.png|300]]`
+    /// (width) and `![[image.png|300x200]]`. Other embeds stay plain text.
+    pub embeds: bool,
+    /// Render Obsidian `#tags` as `<span class="tag">`, or as links when
+    /// [`Resolver::tag`] returns a URL.
+    pub tags: bool,
 }
 
 /// The result of [`render`].
@@ -56,6 +79,15 @@ pub struct Rendered {
     /// The raw front matter block including its `---` delimiters, when
     /// [`RenderOptions::front_matter`] is set and the document has one.
     pub front_matter: Option<String>,
+    /// `[[wiki link]]` targets, before resolving, in document order without
+    /// duplicates. Empty unless [`RenderOptions::wikilinks`] is set.
+    pub wikilinks: Vec<String>,
+    /// `![[embed]]` targets, images or not, in document order without
+    /// duplicates. Empty unless [`RenderOptions::embeds`] is set.
+    pub embeds: Vec<String>,
+    /// `#tag` names without the `#`, in document order without duplicates.
+    /// Empty unless [`RenderOptions::tags`] is set.
+    pub tags: Vec<String>,
 }
 
 /// Render markdown to an HTML fragment.
@@ -73,6 +105,7 @@ pub fn render(markdown: &str, opts: &RenderOptions<'_>) -> Rendered {
     let arena = Arena::new();
     let root = parse_document(&arena, markdown, &options);
     let mut front_matter = None;
+    let mut wikilinks: Vec<String> = Vec::new();
 
     for node in root.descendants() {
         let mut data = node.data.borrow_mut();
@@ -90,6 +123,11 @@ pub fn render(markdown: &str, opts: &RenderOptions<'_>) -> Rendered {
             }
             NodeValue::FrontMatter(raw) => front_matter = Some(raw.clone()),
             value => {
+                if let NodeValue::WikiLink(link) = value
+                    && !wikilinks.contains(&link.url)
+                {
+                    wikilinks.push(link.url.clone());
+                }
                 if let Some(resolver) = opts.resolver {
                     resolve_urls(value, resolver);
                 }
@@ -97,9 +135,27 @@ pub fn render(markdown: &str, opts: &RenderOptions<'_>) -> Rendered {
         }
     }
 
+    // After resolving, so the embeds it emits as raw HTML aren't resolved twice
+    let found = obsidian::rewrite(
+        &arena,
+        root,
+        markdown,
+        &obsidian::Syntax {
+            embeds: opts.embeds,
+            tags: opts.tags,
+            resolver: opts.resolver,
+        },
+    );
+
     let mut html = String::new();
     format_html_with_plugins(root, &options, &mut html, &plugins).unwrap();
-    Rendered { html, front_matter }
+    Rendered {
+        html,
+        front_matter,
+        wikilinks,
+        embeds: found.embeds,
+        tags: found.tags,
+    }
 }
 
 /// Render a front matter block as a GitHub-style table: one column per key,
@@ -259,7 +315,7 @@ fn comrak_options(opts: &RenderOptions<'_>) -> Options<'static> {
     options
 }
 
-fn is_relative(src: &str) -> bool {
+pub(crate) fn is_relative(src: &str) -> bool {
     !src.is_empty()
         && !src.starts_with("http://")
         && !src.starts_with("https://")
@@ -393,6 +449,178 @@ mod tests {
             html.contains("href=\"/note/note\" data-wikilink=\"true\">an alias</a>"),
             "got: {html}"
         );
+    }
+
+    fn obsidian(markdown: &str) -> Rendered {
+        let opts = RenderOptions {
+            resolver: Some(&Tagging),
+            wikilinks: true,
+            embeds: true,
+            tags: true,
+            ..Default::default()
+        };
+        render(markdown, &opts)
+    }
+
+    #[test]
+    fn embeds_and_tags_are_literal_text_by_default() {
+        let rendered = render("![[a.png]] #idea", &RenderOptions::default());
+        assert!(
+            rendered.html.contains("![[a.png]] #idea"),
+            "got: {}",
+            rendered.html
+        );
+        assert!(rendered.embeds.is_empty() && rendered.tags.is_empty());
+    }
+
+    #[test]
+    fn image_embed_goes_through_the_resolver() {
+        let html = obsidian("See ![[pics/a.png]] here").html;
+        assert!(
+            html.contains(
+                "See <img src=\"/img/pics/a.png\" alt=\"pics/a.png\" data-embed=\"image\" /> here"
+            ),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn image_embed_works_without_wikilinks_or_a_resolver() {
+        let opts = RenderOptions {
+            embeds: true,
+            ..Default::default()
+        };
+        let html = render("![[a.PNG]]", &opts).html;
+        assert!(html.contains("<img src=\"a.PNG\""), "got: {html}");
+    }
+
+    #[test]
+    fn image_embed_size_and_alt() {
+        let html = obsidian("![[a.png|300]] ![[b.png|30x20]] ![[c.png|A cat]]").html;
+        assert!(html.contains("alt=\"a.png\" width=\"300\" "), "got: {html}");
+        assert!(
+            html.contains("alt=\"b.png\" width=\"30\" height=\"20\" "),
+            "got: {html}"
+        );
+        assert!(html.contains("alt=\"A cat\" data-embed"), "got: {html}");
+    }
+
+    #[test]
+    fn image_embed_encodes_and_escapes() {
+        let html = obsidian("![[Pasted image 1.png|a \"b\" & c]]").html;
+        assert!(
+            html.contains("src=\"/img/Pasted%20image%201.png\" alt=\"a &quot;b&quot; &amp; c\""),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn image_embed_target_ignores_smart_punctuation() {
+        let html = obsidian("> - ![[it's -- \"x\"....png]]").html;
+        assert!(
+            html.contains("src=\"/img/it&#x27;s%20--%20%22x%22....png\""),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn image_embed_leaves_absolute_urls_alone() {
+        let html = obsidian("![[https://x.com/a.png]] ![[/abs.png]]").html;
+        assert!(html.contains("src=\"/abs.png\""), "got: {html}");
+        assert!(!html.contains("/img/"), "got: {html}");
+    }
+
+    #[test]
+    fn embeds_in_code_links_and_escapes_stay_literal() {
+        let html =
+            obsidian("`![[a.png]]`\n\n```\n![[b.png]]\n```\n\n[![[c.png]]](x.md) \\![[d.png]]")
+                .html;
+        assert!(html.contains(">![[a.png]]</code>"), "got: {html}");
+        assert!(html.contains("![[b.png]]\n</span>"), "got: {html}");
+        assert!(!html.contains("data-embed"), "got: {html}");
+        // An escaped bang leaves an ordinary wiki link
+        assert!(html.contains("href=\"/note/d.png\""), "got: {html}");
+    }
+
+    #[test]
+    fn note_embeds_stay_literal_but_are_recorded() {
+        let rendered = obsidian("![[Ideas#Next]] ![[a.png|2]] ![[a.png]]");
+        assert!(
+            rendered.html.contains("![[Ideas#Next]]"),
+            "got: {}",
+            rendered.html
+        );
+        assert_eq!(rendered.embeds, vec!["Ideas#Next", "a.png"]);
+    }
+
+    #[test]
+    fn tags_render_as_spans() {
+        let html = obsidian("Note #idea and #a/b-c_d.").html;
+        assert!(
+            html.contains(
+                "Note <span class=\"tag\" data-tag=\"idea\">#idea</span> and \
+                 <span class=\"tag\" data-tag=\"a/b-c_d\">#a/b-c_d</span>."
+            ),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn tags_link_when_the_resolver_gives_a_url() {
+        struct Tags;
+        impl Resolver for Tags {
+            fn tag(&self, name: &str) -> Option<String> {
+                Some(format!("/tags/{name}"))
+            }
+        }
+        let opts = RenderOptions {
+            resolver: Some(&Tags),
+            tags: true,
+            ..Default::default()
+        };
+        let html = render("#idea", &opts).html;
+        assert!(
+            html.contains("<a class=\"tag\" href=\"/tags/idea\" data-tag=\"idea\">#idea</a>"),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn things_that_are_not_tags() {
+        let html = obsidian(
+            "#1 #2024 C#x a#b # x `#code` [#l](u) <https://x.com/#frag> **b**#x\n\n```\n#c\n```",
+        )
+        .html;
+        assert!(!html.contains("class=\"tag\""), "got: {html}");
+    }
+
+    #[test]
+    fn tags_after_line_breaks_and_unicode() {
+        let rendered = obsidian("one\n#tvö (#þrjú) **x** #y2024");
+        assert_eq!(rendered.tags, vec!["tvö", "þrjú", "y2024"]);
+    }
+
+    #[test]
+    fn tag_in_heading_keeps_the_heading_id() {
+        let plain = render("# Plan #draft", &RenderOptions::default()).html;
+        let tagged = obsidian("# Plan #draft").html;
+        let id = |h: &str| {
+            h.split("id=\"")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(id(&plain), id(&tagged), "got: {tagged}");
+        assert!(tagged.contains("class=\"tag\""), "got: {tagged}");
+    }
+
+    #[test]
+    fn rendered_lists_wikilinks() {
+        let rendered = obsidian("[[a]] [[b|B]] [[a]]");
+        assert_eq!(rendered.wikilinks, vec!["a", "b"]);
     }
 
     #[test]

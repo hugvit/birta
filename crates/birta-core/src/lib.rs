@@ -24,6 +24,7 @@
 //!     resolver: Some(&Notes),
 //!     wikilinks: true,
 //!     front_matter: true,
+//!     ..Default::default()
 //! };
 //! let page = render("---\ntitle: Hi\n---\nSee [[ideas]].", &opts);
 //!
@@ -34,5 +35,6 @@
 
 pub mod css;
 pub mod highlight;
+mod obsidian;
 pub mod render;
 pub mod theme;

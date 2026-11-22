@@ -535,3 +535,20 @@ body.reading-mode .container {
 .markdown-body .anchor:focus::before {
   opacity: 1;
 }
+
+/* Obsidian #tags */
+.markdown-body .tag {
+  display: inline-block;
+  padding: 0 0.5em;
+  border-radius: 1em;
+  font-size: 85%;
+  line-height: 1.6;
+  color: var(--fgColor-accent);
+  background-color: var(--bgColor-neutral-muted);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.markdown-body a.tag:hover {
+  text-decoration: underline;
+}

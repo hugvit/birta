@@ -1,11 +1,8 @@
+use birta_core::css;
+
 use crate::theme::ResolvedTheme;
 
 const VIEWER_HTML: &str = include_str!("../assets/viewer.html");
-const GITHUB_CSS: &str = include_str!("../assets/github-markdown.css");
-const PAGE_CSS: &str = include_str!("../assets/page.css");
-const SYNTAX_CSS: &str = include_str!("../assets/syntax.css");
-const ALERTS_CSS: &str = include_str!("../assets/alerts.css");
-const THEME_OVERRIDES: &str = include_str!("../assets/theme-overrides.css");
 
 pub struct PageOptions<'a> {
     pub filename: &'a str,
@@ -52,7 +49,7 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
     // for the github theme. When a tmTheme is active (custom themes), syntect
     // emits inline styles that naturally override these class rules. Keeping
     // it present ensures theme hot-swap to github works correctly.
-    let syntax_css = SYNTAX_CSS;
+    let syntax_css = css::SYNTAX;
 
     // GitHub uses the vendored CSS untouched — theme-overrides.css provides
     // standalone [data-theme] selectors so the dark/light toggle works
@@ -112,11 +109,11 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
     fill_template(
         VIEWER_HTML,
         &[
-            ("GITHUB_CSS", GITHUB_CSS),
-            ("THEME_OVERRIDES", THEME_OVERRIDES),
-            ("PAGE_CSS", PAGE_CSS),
+            ("GITHUB_CSS", css::GITHUB_MARKDOWN),
+            ("THEME_OVERRIDES", css::THEME_OVERRIDES),
+            ("PAGE_CSS", css::PAGE),
             ("SYNTAX_CSS", syntax_css),
-            ("ALERTS_CSS", ALERTS_CSS),
+            ("ALERTS_CSS", css::ALERTS),
             ("THEME_VARS_CSS", &theme_vars_css),
             ("FONT_CSS", font_css.unwrap_or("")),
             ("CUSTOM_CSS", &custom_style),

@@ -174,7 +174,7 @@ Bundled: `github` `catppuccin` `dracula` `gruvbox` `monokai` `night-owl` `nord` 
 
 Themes with both light and dark variants get a toggle in the header. Switch themes at runtime from the dropdown — no restart needed.
 
-Custom themes go in `~/.config/birta/themes/` as TOML files. See the [bundled themes](https://github.com/hugvit/birta/tree/main/assets/themes) for the format.
+Custom themes go in `~/.config/birta/themes/` as TOML files. See the [bundled themes](https://github.com/hugvit/birta/tree/main/crates/birta-core/assets/themes) for the format.
 
 &nbsp;
 

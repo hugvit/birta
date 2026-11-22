@@ -122,7 +122,7 @@ pub async fn run_stdin(markdown: &str, opts: ServerOptions) -> anyhow::Result<()
 
     let mut registry = ThemeRegistry::new(opts.theme);
     if opts.enable_swap {
-        registry.discover_all();
+        registry.discover_all(&crate::theme::search());
     }
     let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
@@ -197,7 +197,7 @@ pub async fn start(
 
     let mut registry = ThemeRegistry::new(opts.theme);
     if opts.enable_swap {
-        registry.discover_all();
+        registry.discover_all(&crate::theme::search());
     }
 
     let (tx, _rx) = broadcast::channel::<ContentUpdate>(16);

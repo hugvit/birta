@@ -19,6 +19,7 @@ pub struct CliOptions {
     pub no_header: bool,
     pub no_theme_swap: bool,
     pub no_toggle: bool,
+    pub no_front_matter: bool,
 }
 
 /// Result of merging CLI options with config file settings.
@@ -37,6 +38,7 @@ pub struct MergedOptions {
     pub enable_swap: bool,
     pub enable_toggle: bool,
     pub show_header: bool,
+    pub front_matter: bool,
 }
 
 /// Merge CLI options with config, applying priority rules:
@@ -45,6 +47,9 @@ pub struct MergedOptions {
 /// Boolean display flags (`no_header`, `no_theme_swap`, `no_toggle`) use AND
 /// logic: the feature is enabled only if both CLI and config agree. A `no_*`
 /// flag from CLI disables it; `show_controls.x = false` in config disables it.
+///
+/// `front_matter` follows the same AND logic: on unless `--no-front-matter`
+/// or `front_matter = false` in config turns it off.
 ///
 /// `no_open` and `reading_mode` use OR logic: either source being true
 /// enables the behavior.
@@ -66,6 +71,8 @@ pub fn merge(cli: CliOptions, config: &Config) -> MergedOptions {
     let enable_swap = !cli.no_theme_swap && config.theme.controls.show_controls.theme_swap;
     let enable_toggle = !cli.no_toggle && config.theme.controls.show_controls.theme_toggle;
     let show_header = !cli.no_header && config.theme.controls.show_controls.header;
+
+    let front_matter = !cli.no_front_matter && config.front_matter.unwrap_or(true);
 
     let reading_mode = cli.reading_mode || config.reading_mode.unwrap_or(false);
     let raw_mode = cli.raw_mode || config.raw_mode.unwrap_or(false);
@@ -102,6 +109,7 @@ pub fn merge(cli: CliOptions, config: &Config) -> MergedOptions {
         enable_swap,
         enable_toggle,
         show_header,
+        front_matter,
     }
 }
 
@@ -492,5 +500,29 @@ mod tests {
         };
         let merged = merge(cli, &config);
         assert!(merged.reading_mode);
+    }
+
+    #[test]
+    fn merge_front_matter_on_by_default() {
+        let merged = merge(CliOptions::default(), &Config::default());
+        assert!(merged.front_matter);
+    }
+
+    #[test]
+    fn merge_front_matter_off_from_cli_flag() {
+        let cli = CliOptions {
+            no_front_matter: true,
+            ..Default::default()
+        };
+        assert!(!merge(cli, &Config::default()).front_matter);
+    }
+
+    #[test]
+    fn merge_front_matter_off_from_config() {
+        let config = Config {
+            front_matter: Some(false),
+            ..Default::default()
+        };
+        assert!(!merge(CliOptions::default(), &config).front_matter);
     }
 }

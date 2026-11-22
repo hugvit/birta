@@ -83,6 +83,10 @@ struct Cli {
     #[arg(long, help_heading = "Display")]
     raw: bool,
 
+    /// Show YAML front matter as markdown instead of a table
+    #[arg(long, help_heading = "Display")]
+    no_front_matter: bool,
+
     /// Hide the header bar
     #[arg(long, help_heading = "Display")]
     no_header: bool,
@@ -145,6 +149,7 @@ async fn main() -> anyhow::Result<()> {
         no_header: cli.no_header,
         no_theme_swap: cli.no_theme_swap,
         no_toggle: cli.no_toggle,
+        no_front_matter: cli.no_front_matter,
     };
     let merged = birta::options::merge(cli_opts, &config);
 
@@ -199,6 +204,7 @@ async fn main() -> anyhow::Result<()> {
             show_header: merged.show_header,
             reading_mode: merged.reading_mode,
             raw_mode: merged.raw_mode,
+            front_matter: merged.front_matter,
             keybindings_json,
             variant_explicit,
         };
@@ -229,6 +235,7 @@ async fn main() -> anyhow::Result<()> {
                 show_header: merged.show_header,
                 reading_mode: merged.reading_mode,
                 raw_mode: merged.raw_mode,
+                front_matter: merged.front_matter,
                 no_open: merged.no_open,
                 keybindings_json: &keybindings_json,
                 variant_explicit,
@@ -248,6 +255,7 @@ async fn main() -> anyhow::Result<()> {
         show_header: merged.show_header,
         reading_mode: merged.reading_mode,
         raw_mode: merged.raw_mode,
+        front_matter: merged.front_matter,
         keybindings_json,
         variant_explicit,
     };
@@ -261,6 +269,7 @@ struct StaticOptions<'a> {
     show_header: bool,
     reading_mode: bool,
     raw_mode: bool,
+    front_matter: bool,
     no_open: bool,
     keybindings_json: &'a str,
     variant_explicit: bool,
@@ -299,6 +308,7 @@ fn run_static(file: &std::path::Path, opts: StaticOptions<'_>) -> anyhow::Result
             show_header: opts.show_header,
             reading_mode: opts.reading_mode,
             raw_mode: opts.raw_mode,
+            front_matter: opts.front_matter,
             variant_explicit: opts.variant_explicit,
             keybindings_json: opts.keybindings_json,
         },

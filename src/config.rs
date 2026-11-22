@@ -9,6 +9,7 @@ pub struct Config {
     pub css: Option<PathBuf>,
     pub reading_mode: Option<bool>,
     pub raw_mode: Option<bool>,
+    pub front_matter: Option<bool>,
     pub syntax_theme: Option<PathBuf>,
     #[serde(default, deserialize_with = "deserialize_theme_config")]
     pub theme: ThemeConfig,

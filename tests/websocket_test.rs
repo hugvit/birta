@@ -39,6 +39,7 @@ async fn start_server(tmpfile: &NamedTempFile) -> u16 {
             show_header: true,
             reading_mode: false,
             raw_mode: false,
+            front_matter: true,
             keybindings_json: "{}".to_string(),
             variant_explicit: false,
         };

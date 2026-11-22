@@ -65,7 +65,8 @@ pub enum Resolved {
     Found(String),
     /// The target does not exist. A wiki link still points at the URL (a
     /// "new note" route, say) and carries `data-unresolved="true"`; an image
-    /// embed becomes a `<span data-unresolved="true">` holding its target.
+    /// embed ignores the URL and becomes a `<span data-unresolved="true">`
+    /// holding its target.
     Missing(String),
 }
 
@@ -142,8 +143,11 @@ const MAX_EMBED_DEPTH: usize = 3;
 /// `embedding` names the notes being embedded around this one, outermost first.
 fn render_nested(markdown: &str, opts: &RenderOptions<'_>, embedding: &[&str]) -> Rendered {
     let mut options = comrak_options(opts);
-    // Line numbers in an embedded note point into another file
-    options.render.sourcepos = embedding.is_empty();
+    if !embedding.is_empty() {
+        // Line numbers would point into another file, and ids could repeat the host's
+        options.render.sourcepos = false;
+        options.extension.header_ids = None;
+    }
     let adapter = match opts.syntax_theme {
         Some(st) => highlight::adapter_with_theme(st),
         None => highlight::adapter(),
@@ -730,6 +734,68 @@ mod tests {
         assert!(html.contains("href=\"/note/d.png\""), "got: {html}");
     }
 
+    fn embeds_only(markdown: &str) -> Rendered {
+        let opts = RenderOptions {
+            embeds: true,
+            tags: true,
+            ..Default::default()
+        };
+        render(markdown, &opts)
+    }
+
+    #[test]
+    fn escaped_embeds_stay_literal_without_wikilinks() {
+        for md in [
+            "Escaped \\![[b.png]]",
+            "!\\[[a.png]]",
+            "&#33;[[a.png]]",
+            "&#33;[[a.png]] then ![[b.png]]",
+        ] {
+            let rendered = embeds_only(md);
+            assert!(
+                !rendered.html.contains("<img"),
+                "{md} got: {}",
+                rendered.html
+            );
+            assert!(rendered.embeds.is_empty(), "{md}");
+        }
+        let html = embeds_only("\\\\![[real.png]]").html;
+        assert!(
+            html.contains("\\<img src=\"real.png\""),
+            "an escaped backslash is not an escape, got: {html}"
+        );
+    }
+
+    #[test]
+    fn escaped_note_embed_stays_literal() {
+        static VAULT: Vault = Vault(&[("N", "body")]);
+        let html = with_vault(&VAULT, "\\![[N]]").html;
+        assert!(!html.contains("markdown-embed"), "got: {html}");
+    }
+
+    #[test]
+    fn empty_embed_targets_are_ignored() {
+        let rendered = embeds_only("![[ ]] ![[ |300]] ![[a.png]]");
+        assert_eq!(rendered.embeds, vec!["a.png"]);
+        assert!(
+            rendered.html.contains("![[ ]] ![[ |300]] <img"),
+            "got: {}",
+            rendered.html
+        );
+    }
+
+    #[test]
+    fn embeds_render_in_every_inline_context() {
+        let md = "# H ![[h.png]]\n\n> [!NOTE]\n> ![[n.png]]\n\n1. *x* ![[l.png]]\n\nfoot[^1]\n\n[^1]: ![[f.png]]\n\nTerm\n\n: ![[d.png]]\n";
+        let html = obsidian(md).html;
+        for src in ["h.png", "n.png", "l.png", "f.png", "d.png"] {
+            assert!(
+                html.contains(&format!("src=\"/img/{src}\"")),
+                "{src} got: {html}"
+            );
+        }
+    }
+
     #[test]
     fn note_embeds_stay_literal_but_are_recorded() {
         let rendered = obsidian("![[Ideas#Next]] ![[a.png|2]] ![[a.png]]");
@@ -788,6 +854,14 @@ mod tests {
             "embedded tags belong to the other note"
         );
         assert!(rendered.wikilinks.is_empty());
+    }
+
+    #[test]
+    fn embedded_headings_add_no_ids() {
+        static VAULT: Vault = Vault(&[("b", "# Sub\ntext\n")]);
+        let html = with_vault(&VAULT, "# Sub\n\n![[b#sub]]\n\n![[b]]").html;
+        assert_eq!(html.matches("id=\"").count(), 1, "got: {html}");
+        assert!(html.contains("id=\"sub\""), "got: {html}");
     }
 
     #[test]
@@ -989,6 +1063,17 @@ mod tests {
         )
         .html;
         assert!(!html.contains("class=\"tag\""), "got: {html}");
+    }
+
+    #[test]
+    fn escaped_tags_stay_text() {
+        let rendered = obsidian("\\#notatag &#35;enttag \"#quoted\" #a #ab\n\\\\#real");
+        assert_eq!(rendered.tags, vec!["quoted", "a", "ab"]);
+        assert!(
+            rendered.html.contains("#notatag #enttag"),
+            "got: {}",
+            rendered.html
+        );
     }
 
     #[test]

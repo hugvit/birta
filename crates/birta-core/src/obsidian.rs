@@ -60,21 +60,31 @@ pub(crate) fn rewrite<'a>(
             };
             (text.to_string(), data.sourcepos)
         };
+        let sourcepos = widen_in_table_cell(node, sourcepos);
 
+        // Escapes and entities are already decoded in `literal`, so every
+        // match is checked against the source text, and without it nothing changes
+        let Some(raw) = raw_text(&lines, sourcepos) else {
+            continue;
+        };
         let mut pieces = vec![Piece::Text(literal.clone())];
         if syntax.embeds && literal.contains("![[") {
-            let raw = raw_text(&lines, sourcepos);
             pieces = split_embeds(&literal, raw, syntax, &mut found);
         }
         if syntax.tags {
             let starts_clean = starts_at_boundary(node);
+            let mut cursor = 0;
             pieces = pieces
                 .into_iter()
                 .enumerate()
                 .flat_map(|(i, piece)| match piece {
-                    Piece::Text(text) => {
-                        split_tags(&text, i == 0 && starts_clean, syntax, &mut found)
-                    }
+                    Piece::Text(text) => split_tags(
+                        &text,
+                        i == 0 && starts_clean,
+                        (raw, &mut cursor),
+                        syntax,
+                        &mut found,
+                    ),
                     html => vec![html],
                 })
                 .collect();
@@ -97,13 +107,52 @@ pub(crate) fn rewrite<'a>(
     found
 }
 
-/// The source text behind a single-line node, columns being byte offsets.
-fn raw_text<'s>(lines: &[&'s str], sourcepos: Sourcepos) -> Option<&'s str> {
+/// The source text behind a single-line node, and where it sits in its line.
+#[derive(Clone, Copy)]
+struct Raw<'s> {
+    line: &'s str,
+    start: usize,
+    text: &'s str,
+}
+
+impl Raw<'_> {
+    /// Whether `pos` in `text` follows an odd run of backslashes. Counts over
+    /// the whole line: a node can start just after the backslash escaping it.
+    fn escaped(&self, pos: usize) -> bool {
+        let abs = self.start + pos;
+        self.line[..abs]
+            .bytes()
+            .rev()
+            .take_while(|b| *b == b'\\')
+            .count()
+            % 2
+            == 1
+    }
+}
+
+/// Columns in sourcepos are 1-based byte offsets.
+fn raw_text<'s>(lines: &[&'s str], sourcepos: Sourcepos) -> Option<Raw<'s>> {
     if sourcepos.start.line != sourcepos.end.line {
         return None;
     }
     let line = lines.get(sourcepos.start.line.wrapping_sub(1))?;
-    line.get(sourcepos.start.column.saturating_sub(1)..sourcepos.end.column)
+    let start = sourcepos.start.column.saturating_sub(1);
+    let text = line.get(start..sourcepos.end.column)?;
+    Some(Raw { line, start, text })
+}
+
+/// comrak ends a table cell's text at its unescaped length, so `\|` cuts the
+/// span short. The cell's own end still covers it, plus trailing spaces.
+fn widen_in_table_cell<'a>(node: &'a AstNode<'a>, mut sourcepos: Sourcepos) -> Sourcepos {
+    if let Some(parent) = node.parent() {
+        let data = parent.data.borrow();
+        if matches!(data.value, NodeValue::TableCell)
+            && data.sourcepos.end.line == sourcepos.end.line
+        {
+            sourcepos.end.column = data.sourcepos.end.column;
+        }
+    }
+    sourcepos
 }
 
 /// Replace each paragraph that is nothing but a note embed with the rendered
@@ -125,16 +174,16 @@ fn embed_notes<'a>(root: &'a AstNode<'a>, lines: &[&str], syntax: &Syntax<'_>, f
             NodeValue::Text(t) => (t.to_string(), child.data.borrow().sourcepos),
             _ => continue,
         };
-        let inner = match find_embeds(&literal).as_slice() {
-            [(0, end, inner)] if *end == literal.len() => inner.to_string(),
+        if !matches!(find_embeds(&literal).as_slice(), [(0, end, _)] if *end == literal.len()) {
+            continue;
+        }
+        let Some(raw) = raw_text(lines, sourcepos) else {
+            continue;
+        };
+        let inner = match find_embeds(raw.text).as_slice() {
+            [(start, _, inner)] if !raw.escaped(*start) => inner.to_string(),
             _ => continue,
         };
-        let inner = raw_text(lines, sourcepos)
-            .and_then(|raw| match find_embeds(raw).as_slice() {
-                [(_, _, raw_inner)] => Some(raw_inner.to_string()),
-                _ => None,
-            })
-            .unwrap_or(inner);
         let target = inner.split('|').next().unwrap_or_default().trim();
         if target.is_empty() || is_image(target) {
             continue;
@@ -190,29 +239,32 @@ fn find_embeds(text: &str) -> Vec<(usize, usize, &str)> {
     out
 }
 
-/// Split embeds out of a text node. Targets come from `raw`, the node's
-/// source text, because smart punctuation has already rewritten `literal`
-/// (`it's` to `it’s`, `--` to `–`) and file names must match on disk.
-fn split_embeds(
-    literal: &str,
-    raw: Option<&str>,
-    syntax: &Syntax<'_>,
-    found: &mut Found,
-) -> Vec<Piece> {
+/// Split embeds out of a text node. Matches and targets come from `raw`, the
+/// node's source text: smart punctuation has rewritten `literal` (`it's` to
+/// `it’s`) and escapes are gone from it (`\![[x]]` reads `![[x]]`).
+fn split_embeds(literal: &str, raw: Raw<'_>, syntax: &Syntax<'_>, found: &mut Found) -> Vec<Piece> {
     let matches = find_embeds(literal);
-    let raw_inners: Vec<&str> = raw
-        .map(|r| find_embeds(r).into_iter().map(|m| m.2).collect())
-        .unwrap_or_default();
-    let use_raw = raw_inners.len() == matches.len();
+    let raw_matches = find_embeds(raw.text);
+    // An escape or entity created or hid a match (`!\[[x]]`, `&#33;[[x]]`)
+    if matches.len() != raw_matches.len() {
+        return vec![Piece::Text(literal.to_string())];
+    }
 
     let mut pieces = Vec::new();
     let mut last = 0;
-    for (n, (start, end, inner)) in matches.into_iter().enumerate() {
-        let inner = if use_raw { raw_inners[n] } else { inner };
+    for ((start, end, _), (raw_start, _, inner)) in matches.into_iter().zip(raw_matches) {
+        if raw.escaped(raw_start) {
+            continue;
+        }
+        // Obsidian escapes the pipe as `\|` inside tables
+        let inner = inner.replace("\\|", "|");
         let (target, option) = match inner.split_once('|') {
             Some((t, o)) => (t.trim(), Some(o.trim())),
             None => (inner.trim(), None),
         };
+        if target.is_empty() {
+            continue;
+        }
         push_unique(&mut found.embeds, target);
         if !is_image(target) {
             continue;
@@ -270,10 +322,12 @@ fn parse_size(option: &str) -> Option<(u32, Option<u32>)> {
 }
 
 /// Split `#tags` out of a text piece. `starts_clean` says whether a tag may
-/// sit at offset 0; elsewhere it must follow whitespace.
+/// sit at offset 0; elsewhere it must follow whitespace. Each tag must also
+/// appear unescaped in `raw`, searched forward from `cursor`.
 fn split_tags(
     text: &str,
     starts_clean: bool,
+    (raw, cursor): (Raw<'_>, &mut usize),
     syntax: &Syntax<'_>,
     found: &mut Found,
 ) -> Vec<Piece> {
@@ -300,6 +354,7 @@ fn split_tags(
             || name
                 .chars()
                 .all(|ch| ch.is_ascii_digit() || ch == '/' || ch == '-' || ch == '_')
+            || !in_source(raw, cursor, name)
         {
             continue;
         }
@@ -314,6 +369,28 @@ fn split_tags(
     }
     pieces.push(Piece::Text(text[last..].to_string()));
     pieces
+}
+
+/// Find `#name` in `raw` from `cursor` on, moving the cursor past it. False
+/// when it is escaped (`\#name`) or absent, as for an entity (`&#35;name`).
+fn in_source(raw: Raw<'_>, cursor: &mut usize, name: &str) -> bool {
+    let needle = format!("#{name}");
+    let mut from = *cursor;
+    while let Some(at) = raw
+        .text
+        .get(from..)
+        .and_then(|r| r.find(&needle))
+        .map(|i| i + from)
+    {
+        let after = at + needle.len();
+        if raw.text[after..].chars().next().is_some_and(is_tag_char) {
+            from = at + 1;
+            continue;
+        }
+        *cursor = after;
+        return !raw.escaped(at);
+    }
+    false
 }
 
 fn is_tag_char(c: char) -> bool {

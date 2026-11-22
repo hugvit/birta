@@ -37,7 +37,7 @@ let page = render(
 
 | Module | What it gives you |
 |---|---|
-| `render` | `render` (markdown to an HTML fragment), `Resolver` (your URL scheme), `render_source` (highlighted raw view), `format_file_stats` |
+| `render` | `render` (markdown to an HTML fragment), `Resolver` (your URL scheme), `front_matter_table`, `render_source` (highlighted raw view), `format_file_stats` |
 | `theme` | `ThemeSearch` (find and resolve themes), `ResolvedTheme`, `ThemeRegistry` (switch theme and light/dark at runtime), the embedded themes |
 | `css` | The stylesheets as `&'static str`: `GITHUB_MARKDOWN`, `THEME_OVERRIDES`, `PAGE`, `SYNTAX`, `ALERTS` |
 | `highlight` | The syntect adapters behind `render` |
@@ -52,5 +52,5 @@ let page = render(
 ## Opt-in syntax
 
 - **`wikilinks`**: `[[target]]` and `[[target|alias]]` become links. `Resolver::wikilink` turns the target into an `href`.
-- **`front_matter`**: a leading `---` block is left out of the HTML and returned raw in `Rendered::front_matter`.
+- **`front_matter`**: a leading `---` block is left out of the HTML and returned raw in `Rendered::front_matter`. `front_matter_table` turns that block into a GitHub-style table to place above the body.
 - **Not supported yet**: `![[embed]]` and `#tags` render as plain text.

@@ -184,6 +184,7 @@ Persistent settings live in `~/.config/birta/config.toml`:
 
 ```toml
 port = 3000
+front_matter = false       # show YAML front matter as plain markdown
 
 [theme]
 name = "catppuccin"

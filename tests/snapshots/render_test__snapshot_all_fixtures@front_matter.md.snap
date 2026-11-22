@@ -1,0 +1,8 @@
+---
+source: tests/render_test.rs
+expression: html
+input_file: tests/fixtures/front_matter.md
+---
+<table class="front-matter"><thead><tr><th>title</th><th>tags</th><th>created</th><th>draft</th></tr></thead><tbody><tr><td>Front matter</td><td>notes, a &amp; b</td><td>2026-01-01</td><td>false</td></tr></tbody></table>
+<h1 data-sourcepos="8:1-8:14"><a href="#front-matter" aria-hidden="true" class="anchor" id="front-matter"></a>Front matter</h1>
+<p data-sourcepos="10:1-10:35">The block above renders as a table.</p>

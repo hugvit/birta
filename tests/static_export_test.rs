@@ -26,6 +26,7 @@ fn opts<'a>(theme: &'a ResolvedTheme) -> BundleOptions<'a> {
         show_header: true,
         reading_mode: false,
         raw_mode: false,
+        front_matter: true,
         variant_explicit: false,
         keybindings_json: "{}",
     }

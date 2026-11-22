@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use birta_core::render::{RenderOptions, Resolver};
+use birta_core::render::{RenderOptions, Resolver, front_matter_table};
 pub use birta_core::render::{format_file_stats, render_source};
 
 use crate::theme::SyntaxTheme;
@@ -131,42 +131,57 @@ impl Resolver for BundleResolver {
     }
 }
 
-fn render_with(
-    markdown: &str,
-    syntax_theme: Option<&SyntaxTheme>,
-    resolver: &dyn Resolver,
-) -> String {
+/// What the CLI's settings ask of every render.
+#[derive(Clone, Copy, Default)]
+pub struct Style<'a> {
+    /// Highlight code with this theme's inline colours instead of CSS classes.
+    pub syntax_theme: Option<&'a SyntaxTheme>,
+    /// Show a leading `---` block as a table instead of parsing it as markdown.
+    pub front_matter: bool,
+}
+
+impl<'a> Style<'a> {
+    pub fn new(syntax_theme: Option<&'a SyntaxTheme>, front_matter: bool) -> Self {
+        Self {
+            syntax_theme,
+            front_matter,
+        }
+    }
+}
+
+fn render_with(markdown: &str, style: Style<'_>, resolver: &dyn Resolver) -> String {
     let opts = RenderOptions {
-        syntax_theme,
+        syntax_theme: style.syntax_theme,
         resolver: Some(resolver),
+        front_matter: style.front_matter,
         ..Default::default()
     };
-    birta_core::render::render(markdown, &opts).html
+    let rendered = birta_core::render::render(markdown, &opts);
+    match rendered.front_matter {
+        Some(raw) => front_matter_table(&raw) + &rendered.html,
+        None => rendered.html,
+    }
 }
 
 /// Render markdown to HTML, rewriting relative image paths to `/local/` server URLs.
-pub fn render(markdown: &str, syntax_theme: Option<&SyntaxTheme>) -> String {
-    render_with(markdown, syntax_theme, &ServerResolver)
+pub fn render(markdown: &str, style: Style<'_>) -> String {
+    render_with(markdown, style, &ServerResolver)
 }
 
 /// Render markdown to HTML with directory navigation support.
 /// Rewrites relative `.md` links to `/view/` routes and images to `/local/` routes,
 /// resolving paths relative to the current file's directory.
-pub fn render_dir(
-    markdown: &str,
-    syntax_theme: Option<&SyntaxTheme>,
-    file_relpath: &Path,
-) -> String {
+pub fn render_dir(markdown: &str, style: Style<'_>, file_relpath: &Path) -> String {
     let file_dir = file_relpath.parent().unwrap_or(Path::new("")).to_path_buf();
-    render_with(markdown, syntax_theme, &DirectoryResolver { file_dir })
+    render_with(markdown, style, &DirectoryResolver { file_dir })
 }
 
 /// Render markdown to HTML for a multi-file static bundle: `.md` links become
 /// relative `.html`, images/assets stay relative. Returns the HTML and the set of
 /// relative URLs referenced (pages to crawl + assets to copy).
-pub fn render_bundle(markdown: &str, syntax_theme: Option<&SyntaxTheme>) -> (String, References) {
+pub fn render_bundle(markdown: &str, style: Style<'_>) -> (String, References) {
     let resolver = BundleResolver::default();
-    let html = render_with(markdown, syntax_theme, &resolver);
+    let html = render_with(markdown, style, &resolver);
     (html, resolver.refs.into_inner())
 }
 
@@ -213,7 +228,7 @@ mod tests {
     fn render_dir_rewrites_md_links() {
         let html = render_dir(
             "# Hello\n\n[guide](docs/guide.md)",
-            None,
+            Style::default(),
             Path::new("README.md"),
         );
         assert!(
@@ -224,7 +239,11 @@ mod tests {
 
     #[test]
     fn render_dir_preserves_fragment() {
-        let html = render_dir("[link](other.md#section)", None, Path::new("README.md"));
+        let html = render_dir(
+            "[link](other.md#section)",
+            Style::default(),
+            Path::new("README.md"),
+        );
         assert!(
             html.contains("href=\"/view/other.md#section\""),
             "should preserve fragment, got: {html}"
@@ -233,7 +252,7 @@ mod tests {
 
     #[test]
     fn render_dir_non_md_to_local() {
-        let html = render_dir("[dl](file.zip)", None, Path::new("README.md"));
+        let html = render_dir("[dl](file.zip)", Style::default(), Path::new("README.md"));
         assert!(
             html.contains("href=\"file.zip\""),
             "non-md links should pass through unchanged, got: {html}"
@@ -242,7 +261,11 @@ mod tests {
 
     #[test]
     fn render_dir_external_unchanged() {
-        let html = render_dir("[ext](https://example.com)", None, Path::new("README.md"));
+        let html = render_dir(
+            "[ext](https://example.com)",
+            Style::default(),
+            Path::new("README.md"),
+        );
         assert!(
             html.contains("href=\"https://example.com\""),
             "external links should be unchanged, got: {html}"
@@ -251,7 +274,11 @@ mod tests {
 
     #[test]
     fn render_dir_anchor_unchanged() {
-        let html = render_dir("[section](#heading)", None, Path::new("README.md"));
+        let html = render_dir(
+            "[section](#heading)",
+            Style::default(),
+            Path::new("README.md"),
+        );
         assert!(
             html.contains("href=\"#heading\""),
             "anchor links should be unchanged, got: {html}"
@@ -260,7 +287,11 @@ mod tests {
 
     #[test]
     fn render_dir_parent_traversal() {
-        let html = render_dir("[back](../README.md)", None, Path::new("docs/guide.md"));
+        let html = render_dir(
+            "[back](../README.md)",
+            Style::default(),
+            Path::new("docs/guide.md"),
+        );
         assert!(
             html.contains("href=\"/view/README.md\""),
             "../ should resolve relative to file dir, got: {html}"
@@ -269,7 +300,11 @@ mod tests {
 
     #[test]
     fn render_dir_images_resolve_relative_to_file() {
-        let html = render_dir("![img](img/photo.png)", None, Path::new("docs/guide.md"));
+        let html = render_dir(
+            "![img](img/photo.png)",
+            Style::default(),
+            Path::new("docs/guide.md"),
+        );
         assert!(
             html.contains("src=\"/local/docs/img/photo.png\""),
             "images should resolve relative to file dir, got: {html}"
@@ -278,7 +313,7 @@ mod tests {
 
     #[test]
     fn render_without_dir_does_not_rewrite_links() {
-        let html = render("[link](other.md)", None);
+        let html = render("[link](other.md)", Style::default());
         assert!(
             html.contains("href=\"other.md\""),
             "plain render should not rewrite links, got: {html}"
@@ -287,7 +322,7 @@ mod tests {
 
     #[test]
     fn render_bundle_swaps_md_to_html() {
-        let (html, refs) = render_bundle("[guide](docs/guide.md)", None);
+        let (html, refs) = render_bundle("[guide](docs/guide.md)", Style::default());
         assert!(
             html.contains("href=\"docs/guide.html\""),
             "should swap .md link to relative .html, got: {html}"
@@ -298,7 +333,7 @@ mod tests {
 
     #[test]
     fn render_bundle_preserves_fragment_in_href() {
-        let (html, refs) = render_bundle("[s](../README.md#sec)", None);
+        let (html, refs) = render_bundle("[s](../README.md#sec)", Style::default());
         assert!(
             html.contains("href=\"../README.html#sec\""),
             "should swap ext and keep fragment, got: {html}"
@@ -309,7 +344,7 @@ mod tests {
 
     #[test]
     fn render_bundle_collects_image_assets() {
-        let (html, refs) = render_bundle("![img](img/photo.png)", None);
+        let (html, refs) = render_bundle("![img](img/photo.png)", Style::default());
         assert!(
             html.contains("src=\"img/photo.png\""),
             "image src should stay relative, got: {html}"
@@ -319,7 +354,7 @@ mod tests {
 
     #[test]
     fn render_bundle_strips_image_query() {
-        let (html, refs) = render_bundle("![img](photo.png?v=2)", None);
+        let (html, refs) = render_bundle("![img](photo.png?v=2)", Style::default());
         assert!(
             html.contains("src=\"photo.png\""),
             "image src query should be stripped, got: {html}"
@@ -329,7 +364,7 @@ mod tests {
 
     #[test]
     fn render_bundle_uppercase_md_extension_is_a_page() {
-        let (html, refs) = render_bundle("[g](Guide.MD)", None);
+        let (html, refs) = render_bundle("[g](Guide.MD)", Style::default());
         assert_eq!(
             refs.md_links,
             vec!["Guide.MD".to_string()],
@@ -344,7 +379,7 @@ mod tests {
 
     #[test]
     fn render_bundle_uppercase_markdown_extension_swaps() {
-        let (html, refs) = render_bundle("[g](Guide.MARKDOWN)", None);
+        let (html, refs) = render_bundle("[g](Guide.MARKDOWN)", Style::default());
         assert_eq!(refs.md_links, vec!["Guide.MARKDOWN".to_string()]);
         assert!(
             html.contains("href=\"Guide.html\""),
@@ -354,7 +389,7 @@ mod tests {
 
     #[test]
     fn render_bundle_link_strips_query_and_fragment_in_target() {
-        let (html, refs) = render_bundle("[x](p.md?q=1#s)", None);
+        let (html, refs) = render_bundle("[x](p.md?q=1#s)", Style::default());
         assert_eq!(
             refs.md_links,
             vec!["p.md".to_string()],
@@ -368,7 +403,7 @@ mod tests {
 
     #[test]
     fn render_bundle_non_md_link_is_asset() {
-        let (html, refs) = render_bundle("[dl](file.zip)", None);
+        let (html, refs) = render_bundle("[dl](file.zip)", Style::default());
         assert!(
             html.contains("href=\"file.zip\""),
             "non-md link href should be unchanged, got: {html}"
@@ -379,7 +414,7 @@ mod tests {
 
     #[test]
     fn render_bundle_collects_raw_html_img() {
-        let (_html, refs) = render_bundle("<img src=\"logo.png\">", None);
+        let (_html, refs) = render_bundle("<img src=\"logo.png\">", Style::default());
         assert_eq!(refs.assets, vec!["logo.png".to_string()]);
     }
 
@@ -387,7 +422,7 @@ mod tests {
     fn render_bundle_ignores_external_and_anchor() {
         let (_html, refs) = render_bundle(
             "[a](https://x.com) [b](#h) [c](mailto:a@b.c) ![d](data:image/png;base64,AAAA)",
-            None,
+            Style::default(),
         );
         assert!(refs.md_links.is_empty(), "no md links expected");
         assert!(
@@ -395,5 +430,27 @@ mod tests {
             "external/anchor/mailto/data must not be collected, got: {:?}",
             refs.assets
         );
+    }
+
+    #[test]
+    fn front_matter_is_markdown_when_off() {
+        let html = render("---\ntitle: x\n---\nbody", Style::default());
+        assert!(html.contains("<hr"), "got: {html}");
+        assert!(!html.contains("front-matter"), "got: {html}");
+    }
+
+    #[test]
+    fn front_matter_becomes_a_table_above_the_body_when_on() {
+        let style = Style {
+            front_matter: true,
+            ..Default::default()
+        };
+        let html = render("---\ntitle: x\n---\nbody", style);
+        assert!(
+            html.starts_with("<table class=\"front-matter\"><thead><tr><th>title</th>"),
+            "got: {html}"
+        );
+        assert!(!html.contains("<hr"), "got: {html}");
+        assert!(html.contains(">body</p>"), "got: {html}");
     }
 }

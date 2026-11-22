@@ -4,6 +4,8 @@ use comrak::nodes::NodeValue;
 use comrak::plugins::syntect::SyntectAdapter;
 use comrak::{Arena, Options, format_html_with_plugins, options, parse_document};
 
+use yaml_rust2::{Yaml, YamlLoader};
+
 use crate::highlight;
 use crate::theme::SyntaxTheme;
 
@@ -98,6 +100,59 @@ pub fn render(markdown: &str, opts: &RenderOptions<'_>) -> Rendered {
     let mut html = String::new();
     format_html_with_plugins(root, &options, &mut html, &plugins).unwrap();
     Rendered { html, front_matter }
+}
+
+/// Render a front matter block as a GitHub-style table: one column per key,
+/// one row of values. Takes the raw block from [`Rendered::front_matter`].
+///
+/// Nested mappings become nested tables and lists of plain values are joined
+/// with commas. A block that is not a YAML mapping is shown as written in a
+/// `<pre>`, and an empty block renders nothing.
+pub fn front_matter_table(raw: &str) -> String {
+    match YamlLoader::load_from_str(raw).ok().as_deref() {
+        Some([Yaml::Hash(map), ..]) if map.is_empty() => String::new(),
+        Some([Yaml::Hash(map), ..]) => yaml_table(map, " class=\"front-matter\""),
+        Some([] | [Yaml::Null, ..]) => String::new(),
+        _ => {
+            let body: Vec<&str> = raw.lines().filter(|l| l.trim_end() != "---").collect();
+            format!(
+                "<pre class=\"front-matter\"><code>{}</code></pre>\n",
+                html_escape(&body.join("\n"))
+            )
+        }
+    }
+}
+
+fn yaml_table(map: &yaml_rust2::yaml::Hash, attrs: &str) -> String {
+    let mut head = String::new();
+    let mut row = String::new();
+    for (key, value) in map {
+        head.push_str(&format!("<th>{}</th>", yaml_cell(key)));
+        row.push_str(&format!("<td>{}</td>", yaml_cell(value)));
+    }
+    format!("<table{attrs}><thead><tr>{head}</tr></thead><tbody><tr>{row}</tr></tbody></table>\n")
+}
+
+fn yaml_cell(value: &Yaml) -> String {
+    match value {
+        Yaml::Hash(map) => yaml_table(map, ""),
+        Yaml::Array(items)
+            if items
+                .iter()
+                .any(|i| matches!(i, Yaml::Hash(_) | Yaml::Array(_))) =>
+        {
+            let rows: String = items
+                .iter()
+                .map(|i| format!("<tr><td>{}</td></tr>", yaml_cell(i)))
+                .collect();
+            format!("<table><tbody>{rows}</tbody></table>")
+        }
+        Yaml::Array(items) => items.iter().map(yaml_cell).collect::<Vec<_>>().join(", "),
+        Yaml::String(s) | Yaml::Real(s) => html_escape(s),
+        Yaml::Integer(n) => n.to_string(),
+        Yaml::Boolean(b) => b.to_string(),
+        _ => String::new(),
+    }
 }
 
 fn resolve_urls(value: &mut NodeValue, resolver: &dyn Resolver) {
@@ -373,6 +428,56 @@ mod tests {
         };
         let html = render("---\ntitle: x\n---\n# T\n", &opts).html;
         assert!(html.contains("data-sourcepos=\"4:1-4:3\""), "got: {html}");
+    }
+
+    #[test]
+    fn front_matter_table_has_a_column_per_key() {
+        let html = front_matter_table(
+            "---\ntitle: Ideas\ntags: [self, bench]\ncreated: 2026-01-01\n---\n",
+        );
+        assert_eq!(
+            html,
+            "<table class=\"front-matter\"><thead><tr><th>title</th><th>tags</th><th>created</th></tr></thead>\
+             <tbody><tr><td>Ideas</td><td>self, bench</td><td>2026-01-01</td></tr></tbody></table>\n"
+        );
+    }
+
+    #[test]
+    fn front_matter_table_escapes_html() {
+        let html = front_matter_table("---\ntitle: \"<b>x</b> & y\"\n---\n");
+        assert!(
+            html.contains("<td>&lt;b&gt;x&lt;/b&gt; &amp; y</td>"),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn front_matter_table_nests_mappings_and_joins_block_lists() {
+        let html = front_matter_table("---\nmeta:\n  a: 1\ntags:\n  - x\n  - y\n---\n");
+        assert!(
+            html.contains("<td><table><thead><tr><th>a</th></tr></thead><tbody><tr><td>1</td></tr></tbody></table>\n</td>"),
+            "got: {html}"
+        );
+        assert!(html.contains("<td>x, y</td>"), "got: {html}");
+    }
+
+    #[test]
+    fn front_matter_table_shows_non_mapping_blocks_as_written() {
+        let html = front_matter_table("---\njust <text>\n---\n");
+        assert_eq!(
+            html,
+            "<pre class=\"front-matter\"><code>just &lt;text&gt;</code></pre>\n"
+        );
+        let html = front_matter_table("---\nkey: [unclosed\n---\n");
+        assert!(
+            html.starts_with("<pre class=\"front-matter\">"),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn front_matter_table_is_empty_for_an_empty_block() {
+        assert_eq!(front_matter_table("---\n---\n"), "");
     }
 
     #[test]

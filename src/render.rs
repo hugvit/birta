@@ -154,6 +154,8 @@ fn render_with(markdown: &str, style: Style<'_>, resolver: &dyn Resolver) -> Str
         syntax_theme: style.syntax_theme,
         resolver: Some(resolver),
         front_matter: style.front_matter,
+        // Plain markdown never contains `![[`, so this changes nothing for it
+        embeds: true,
         ..Default::default()
     };
     let rendered = birta_core::render::render(markdown, &opts);
@@ -430,6 +432,28 @@ mod tests {
             "external/anchor/mailto/data must not be collected, got: {:?}",
             refs.assets
         );
+    }
+
+    #[test]
+    fn render_dir_image_embed_resolves_relative_to_file() {
+        let html = render_dir(
+            "![[img/photo 1.png|200]]",
+            Style::default(),
+            Path::new("docs/guide.md"),
+        );
+        assert!(
+            html.contains(
+                "src=\"/local/docs/img/photo%201.png\" alt=\"img/photo 1.png\" width=\"200\""
+            ),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn render_bundle_collects_image_embeds() {
+        let (html, refs) = render_bundle("![[img/photo.png]]", Style::default());
+        assert!(html.contains("src=\"img/photo.png\""), "got: {html}");
+        assert_eq!(refs.assets, vec!["img/photo.png".to_string()]);
     }
 
     #[test]

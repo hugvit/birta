@@ -7,14 +7,14 @@
 //! [`theme::ResolvedTheme`].
 //!
 //! ```
-//! use birta_core::render::{RenderOptions, Resolver, render};
+//! use birta_core::render::{RenderOptions, Resolved, Resolver, render};
 //! use birta_core::theme::ThemeSearch;
 //!
 //! struct Notes;
 //!
 //! impl Resolver for Notes {
-//!     fn wikilink(&self, target: &str) -> String {
-//!         format!("/note/{target}")
+//!     fn wikilink(&self, target: &str) -> Resolved {
+//!         format!("/note/{target}").into()
 //!     }
 //! }
 //!
@@ -24,6 +24,7 @@
 //!     resolver: Some(&Notes),
 //!     wikilinks: true,
 //!     front_matter: true,
+//!     ..Default::default()
 //! };
 //! let page = render("---\ntitle: Hi\n---\nSee [[ideas]].", &opts);
 //!
@@ -34,5 +35,6 @@
 
 pub mod css;
 pub mod highlight;
+mod obsidian;
 pub mod render;
 pub mod theme;

@@ -1,0 +1,12 @@
+---
+source: tests/render_test.rs
+expression: html
+input_file: tests/fixtures/obsidian_embeds.md
+---
+<h1 data-sourcepos="1:1-1:8"><a href="#embeds" aria-hidden="true" class="anchor" id="embeds"></a>Embeds</h1>
+<p data-sourcepos="3:1-3:39">An image embed: <img src="/local/assets/diagram.png" alt="assets/diagram.png" data-embed="image" /></p>
+<p data-sourcepos="5:1-5:70">Sized: <img src="/local/assets/diagram.png" alt="assets/diagram.png" width="300" data-embed="image" /> and <img src="/local/assets/diagram.png" alt="assets/diagram.png" width="300" height="200" data-embed="image" /></p>
+<p data-sourcepos="7:1-7:60">With alt text: <img src="/local/assets/Pasted%20image%201.png" alt="A pasted image" data-embed="image" /></p>
+<p data-sourcepos="9:1-9:48">A note embed stays text: ![[Other note#Heading]]</p>
+<p data-sourcepos="11:1-11:34">In code: <code data-sourcepos="11:10-11:34">![[assets/diagram.png]]</code></p>
+<p data-sourcepos="13:1-13:34">#tags are not rendered by the CLI.</p>

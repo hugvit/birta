@@ -1,13 +1,13 @@
 //! Markdown to HTML, with hooks for the host application's URL scheme.
 
-use comrak::nodes::NodeValue;
+use comrak::nodes::{Ast, AstNode, NodeValue};
 use comrak::plugins::syntect::SyntectAdapter;
 use comrak::{Arena, Options, format_html_with_plugins, options, parse_document};
 
 use yaml_rust2::{Yaml, YamlLoader};
 
-use crate::highlight;
 use crate::theme::SyntaxTheme;
+use crate::{highlight, obsidian};
 
 /// Maps the URLs found in a document onto the host application's routes.
 ///
@@ -28,8 +28,57 @@ pub trait Resolver {
 
     /// The `href` for a `[[target]]` wiki link. `target` is the text before
     /// any `|alias`. Only called when [`RenderOptions::wikilinks`] is set.
-    fn wikilink(&self, target: &str) -> String {
-        target.to_string()
+    fn wikilink(&self, target: &str) -> Resolved {
+        Resolved::Found(target.to_string())
+    }
+
+    /// The `src` for an `![[image.png]]` embed. `target` is the text before
+    /// any `|size`. Only called when [`RenderOptions::embeds`] is set. The
+    /// default treats it like a relative image and calls [`Resolver::image`].
+    fn embed(&self, target: &str) -> Resolved {
+        if is_relative(target) {
+            Resolved::Found(self.image(target))
+        } else {
+            Resolved::Found(target.to_string())
+        }
+    }
+
+    /// The markdown of the note an `![[note]]` or `![[note#Heading]]` embed
+    /// points at, or `None` to leave the embed as text. `name` is the text
+    /// before any `#` or `|`. Only called when [`RenderOptions::embeds`] is set.
+    fn embed_note(&self, _name: &str) -> Option<String> {
+        None
+    }
+
+    /// The `href` for a `#tag`, or `None` to render it as a plain
+    /// `<span class="tag">`. Only called when [`RenderOptions::tags`] is set.
+    fn tag(&self, _name: &str) -> Option<String> {
+        None
+    }
+}
+
+/// What [`Resolver::wikilink`] and [`Resolver::embed`] make of a target.
+/// `String`s convert into [`Resolved::Found`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Resolved {
+    /// The target exists at this URL.
+    Found(String),
+    /// The target does not exist. A wiki link still points at the URL (a
+    /// "new note" route, say) and carries `data-unresolved="true"`; an image
+    /// embed ignores the URL and becomes a `<span data-unresolved="true">`
+    /// holding its target.
+    Missing(String),
+}
+
+impl From<String> for Resolved {
+    fn from(url: String) -> Self {
+        Resolved::Found(url)
+    }
+}
+
+impl From<&str> for Resolved {
+    fn from(url: &str) -> Self {
+        Resolved::Found(url.to_string())
     }
 }
 
@@ -46,6 +95,19 @@ pub struct RenderOptions<'a> {
     /// Treat a leading `---` block as front matter: it is left out of the
     /// HTML and returned in [`Rendered::front_matter`].
     pub front_matter: bool,
+    /// Render Obsidian image embeds: `![[image.png]]`, `![[image.png|300]]`
+    /// (width) and `![[image.png|300x200]]`. A paragraph that is only a note
+    /// embed (`![[note]]`, `![[note#Heading]]`) is replaced by the note when
+    /// [`Resolver::embed_note`] returns it; other embeds stay plain text.
+    pub embeds: bool,
+    /// Render Obsidian `#tags` as `<span class="tag">`, or as links when
+    /// [`Resolver::tag`] returns a URL.
+    pub tags: bool,
+    /// Render `==text==` as `<mark>`.
+    pub highlight: bool,
+    /// The name of the note being rendered, as [`Resolver::embed_note`] would
+    /// receive it, so a note that embeds itself stops at once.
+    pub current_note: Option<&'a str>,
 }
 
 /// The result of [`render`].
@@ -56,6 +118,15 @@ pub struct Rendered {
     /// The raw front matter block including its `---` delimiters, when
     /// [`RenderOptions::front_matter`] is set and the document has one.
     pub front_matter: Option<String>,
+    /// `[[wiki link]]` targets, before resolving, in document order without
+    /// duplicates. Empty unless [`RenderOptions::wikilinks`] is set.
+    pub wikilinks: Vec<String>,
+    /// `![[embed]]` targets, images or not, in document order without
+    /// duplicates. Empty unless [`RenderOptions::embeds`] is set.
+    pub embeds: Vec<String>,
+    /// `#tag` names without the `#`, in document order without duplicates.
+    /// Empty unless [`RenderOptions::tags`] is set.
+    pub tags: Vec<String>,
 }
 
 /// Render markdown to an HTML fragment.
@@ -63,7 +134,20 @@ pub struct Rendered {
 /// Block elements carry `data-sourcepos` attributes with their source lines,
 /// counted from the top of the file even when front matter is stripped.
 pub fn render(markdown: &str, opts: &RenderOptions<'_>) -> Rendered {
-    let options = comrak_options(opts);
+    render_nested(markdown, opts, &[])
+}
+
+/// How deep note embeds may nest inside one another.
+const MAX_EMBED_DEPTH: usize = 3;
+
+/// `embedding` names the notes being embedded around this one, outermost first.
+fn render_nested(markdown: &str, opts: &RenderOptions<'_>, embedding: &[&str]) -> Rendered {
+    let mut options = comrak_options(opts);
+    if !embedding.is_empty() {
+        // Line numbers would point into another file, and ids could repeat the host's
+        options.render.sourcepos = false;
+        options.extension.header_ids = None;
+    }
     let adapter = match opts.syntax_theme {
         Some(st) => highlight::adapter_with_theme(st),
         None => highlight::adapter(),
@@ -73,6 +157,8 @@ pub fn render(markdown: &str, opts: &RenderOptions<'_>) -> Rendered {
     let arena = Arena::new();
     let root = parse_document(&arena, markdown, &options);
     let mut front_matter = None;
+    let mut wikilinks: Vec<String> = Vec::new();
+    let mut unresolved = Vec::new();
 
     for node in root.descendants() {
         let mut data = node.data.borrow_mut();
@@ -90,16 +176,124 @@ pub fn render(markdown: &str, opts: &RenderOptions<'_>) -> Rendered {
             }
             NodeValue::FrontMatter(raw) => front_matter = Some(raw.clone()),
             value => {
-                if let Some(resolver) = opts.resolver {
-                    resolve_urls(value, resolver);
+                if let NodeValue::WikiLink(link) = value
+                    && !wikilinks.contains(&link.url)
+                {
+                    wikilinks.push(link.url.clone());
+                }
+                if let Some(resolver) = opts.resolver
+                    && resolve_urls(value, resolver)
+                {
+                    unresolved.push(node);
                 }
             }
         }
     }
 
+    // After resolving, so the embeds it emits as raw HTML aren't resolved twice
+    let found = obsidian::rewrite(
+        &arena,
+        root,
+        markdown,
+        &obsidian::Syntax {
+            embeds: opts.embeds,
+            tags: opts.tags,
+            resolver: opts.resolver,
+            note: &|target| embed_note(target, opts, embedding),
+        },
+    );
+
+    // After the obsidian pass, which skips text inside links
+    for node in unresolved {
+        mark_unresolved(&arena, node, options.render.sourcepos);
+    }
+
     let mut html = String::new();
     format_html_with_plugins(root, &options, &mut html, &plugins).unwrap();
-    Rendered { html, front_matter }
+    Rendered {
+        html,
+        front_matter,
+        wikilinks,
+        embeds: found.embeds,
+        tags: found.tags,
+    }
+}
+
+/// Render the note behind a `![[note#Heading]]` target, wrapped in a
+/// `div.markdown-embed`. `None` on a cycle, past [`MAX_EMBED_DEPTH`], for a
+/// missing note or heading, and for `#^block` targets.
+fn embed_note(target: &str, opts: &RenderOptions<'_>, embedding: &[&str]) -> Option<String> {
+    let resolver = opts.resolver?;
+    let (name, heading) = match target.split_once('#') {
+        Some((name, heading)) => (name.trim(), Some(heading.trim())),
+        None => (target.trim(), None),
+    };
+    if name.is_empty()
+        || embedding.contains(&name)
+        || opts.current_note == Some(name)
+        || embedding.len() >= MAX_EMBED_DEPTH
+        || heading.is_some_and(|h| h.starts_with('^'))
+    {
+        return None;
+    }
+
+    let markdown = resolver.embed_note(name)?;
+    let markdown = match heading {
+        Some(heading) => heading_section(&markdown, heading)?,
+        None => markdown,
+    };
+    let mut stack = embedding.to_vec();
+    stack.push(name);
+    let nested = RenderOptions {
+        front_matter: true,
+        ..*opts
+    };
+    let html = render_nested(&markdown, &nested, &stack).html;
+    Some(format!(
+        "<div class=\"markdown-embed\" data-embed=\"note\" data-embed-target=\"{}\">\n{html}</div>\n",
+        html_escape(target)
+    ))
+}
+
+/// The lines from the heading whose text is `heading` up to the next heading
+/// of the same or a higher level.
+fn heading_section(markdown: &str, heading: &str) -> Option<String> {
+    let mut options = Options::default();
+    options.extension.front_matter_delimiter = Some("---".to_string());
+    let arena = Arena::new();
+    let root = parse_document(&arena, markdown, &options);
+
+    let headings: Vec<(u8, usize, String)> = root
+        .children()
+        .filter_map(|node| {
+            let data = node.data.borrow();
+            let NodeValue::Heading(h) = &data.value else {
+                return None;
+            };
+            let text: String = node
+                .descendants()
+                .filter_map(|n| match &n.data.borrow().value {
+                    NodeValue::Text(t) => Some(t.to_string()),
+                    NodeValue::Code(c) => Some(c.literal.clone()),
+                    _ => None,
+                })
+                .collect();
+            Some((h.level, data.sourcepos.start.line, text))
+        })
+        .collect();
+
+    let index = headings
+        .iter()
+        .position(|(_, _, text)| text.trim().to_lowercase() == heading.to_lowercase())?;
+    let (level, start, _) = headings[index];
+    let end = headings[index + 1..]
+        .iter()
+        .find(|(l, _, _)| *l <= level)
+        .map(|(_, line, _)| line - 1);
+
+    let lines: Vec<&str> = markdown.lines().collect();
+    let end = end.unwrap_or(lines.len()).min(lines.len());
+    Some(lines.get(start.checked_sub(1)?..end)?.join("\n"))
 }
 
 /// Render a front matter block as a GitHub-style table: one column per key,
@@ -155,7 +349,9 @@ fn yaml_cell(value: &Yaml) -> String {
     }
 }
 
-fn resolve_urls(value: &mut NodeValue, resolver: &dyn Resolver) {
+/// Rewrite the URLs in `value`. True when it is a wiki link whose target is
+/// missing.
+fn resolve_urls(value: &mut NodeValue, resolver: &dyn Resolver) -> bool {
     match value {
         NodeValue::HtmlBlock(block) => {
             block.literal = rewrite_html_img_srcs(&block.literal, resolver);
@@ -167,9 +363,45 @@ fn resolve_urls(value: &mut NodeValue, resolver: &dyn Resolver) {
         NodeValue::Image(image) if is_relative(&image.url) => {
             image.url = resolver.image(&image.url);
         }
-        NodeValue::WikiLink(link) => link.url = resolver.wikilink(&link.url),
+        NodeValue::WikiLink(link) => match resolver.wikilink(&link.url) {
+            Resolved::Found(url) => link.url = url,
+            Resolved::Missing(url) => {
+                link.url = url;
+                return true;
+            }
+        },
         _ => {}
     }
+    false
+}
+
+/// Swap a wiki link for raw `<a>` tags around its children: comrak's own
+/// wiki link output has no room for extra attributes.
+fn mark_unresolved<'a>(arena: &'a Arena<'a>, node: &'a AstNode<'a>, sourcepos: bool) {
+    let (url, pos) = {
+        let data = node.data.borrow();
+        let NodeValue::WikiLink(link) = &data.value else {
+            return;
+        };
+        (link.url.clone(), data.sourcepos)
+    };
+    let mut href = String::new();
+    comrak::html::escape_href(&mut href, &url, false).expect("writing to a String cannot fail");
+    let pos_attr = if sourcepos {
+        format!(" data-sourcepos=\"{pos}\"")
+    } else {
+        String::new()
+    };
+    let open =
+        format!("<a{pos_attr} href=\"{href}\" data-wikilink=\"true\" data-unresolved=\"true\">");
+
+    let alloc = |value| arena.alloc(AstNode::from(Ast::new_with_sourcepos(value, pos)));
+    node.insert_before(alloc(NodeValue::HtmlInline(open)));
+    for child in node.children().collect::<Vec<_>>() {
+        node.insert_before(child);
+    }
+    node.insert_before(alloc(NodeValue::HtmlInline("</a>".to_string())));
+    node.detach();
 }
 
 /// Format file stats for the raw-mode file header, e.g. "215 lines (154 loc) · 5.25 KB".
@@ -241,6 +473,7 @@ fn comrak_options(opts: &RenderOptions<'_>) -> Options<'static> {
     options.extension.alerts = true;
     options.extension.math_dollars = true;
     options.extension.math_code = true;
+    options.extension.highlight = opts.highlight;
 
     // Obsidian-style `[[target|alias]]`: the alias comes after the pipe
     options.extension.wikilinks_title_after_pipe = opts.wikilinks;
@@ -259,7 +492,7 @@ fn comrak_options(opts: &RenderOptions<'_>) -> Options<'static> {
     options
 }
 
-fn is_relative(src: &str) -> bool {
+pub(crate) fn is_relative(src: &str) -> bool {
     !src.is_empty()
         && !src.starts_with("http://")
         && !src.starts_with("https://")
@@ -327,8 +560,8 @@ mod tests {
         fn link(&self, url: &str) -> String {
             format!("/doc/{url}")
         }
-        fn wikilink(&self, target: &str) -> String {
-            format!("/note/{target}")
+        fn wikilink(&self, target: &str) -> Resolved {
+            format!("/note/{target}").into()
         }
     }
 
@@ -393,6 +626,488 @@ mod tests {
             html.contains("href=\"/note/note\" data-wikilink=\"true\">an alias</a>"),
             "got: {html}"
         );
+    }
+
+    fn obsidian(markdown: &str) -> Rendered {
+        let opts = RenderOptions {
+            resolver: Some(&Tagging),
+            wikilinks: true,
+            embeds: true,
+            tags: true,
+            ..Default::default()
+        };
+        render(markdown, &opts)
+    }
+
+    #[test]
+    fn embeds_and_tags_are_literal_text_by_default() {
+        let rendered = render("![[a.png]] #idea", &RenderOptions::default());
+        assert!(
+            rendered.html.contains("![[a.png]] #idea"),
+            "got: {}",
+            rendered.html
+        );
+        assert!(rendered.embeds.is_empty() && rendered.tags.is_empty());
+    }
+
+    #[test]
+    fn image_embed_goes_through_the_resolver() {
+        let html = obsidian("See ![[pics/a.png]] here").html;
+        assert!(
+            html.contains(
+                "See <img src=\"/img/pics/a.png\" alt=\"pics/a.png\" data-embed=\"image\" /> here"
+            ),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn image_embed_works_without_wikilinks_or_a_resolver() {
+        let opts = RenderOptions {
+            embeds: true,
+            ..Default::default()
+        };
+        let html = render("![[a.PNG]]", &opts).html;
+        assert!(html.contains("<img src=\"a.PNG\""), "got: {html}");
+    }
+
+    #[test]
+    fn image_embed_size_and_alt() {
+        let html = obsidian("![[a.png|300]] ![[b.png|30x20]] ![[c.png|A cat]]").html;
+        assert!(html.contains("alt=\"a.png\" width=\"300\" "), "got: {html}");
+        assert!(
+            html.contains("alt=\"b.png\" width=\"30\" height=\"20\" "),
+            "got: {html}"
+        );
+        assert!(html.contains("alt=\"A cat\" data-embed"), "got: {html}");
+    }
+
+    #[test]
+    fn image_embed_encodes_and_escapes() {
+        let html = obsidian("![[Pasted image 1.png|a \"b\" & c]]").html;
+        assert!(
+            html.contains("src=\"/img/Pasted%20image%201.png\" alt=\"a &quot;b&quot; &amp; c\""),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn image_embed_target_ignores_smart_punctuation() {
+        let html = obsidian("> - ![[it's -- \"x\"....png]]").html;
+        assert!(
+            html.contains("src=\"/img/it&#x27;s%20--%20%22x%22....png\""),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn image_embed_in_a_table_cell_takes_an_escaped_pipe() {
+        let html = obsidian("| x |\n|---|\n| ![[a.png\\|300]] |").html;
+        assert!(
+            html.contains("src=\"/img/a.png\" alt=\"a.png\" width=\"300\""),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn image_embed_target_survives_non_ascii_before_it() {
+        let html = obsidian("> - Þú sérð ![[it's.png]]").html;
+        assert!(html.contains("src=\"/img/it&#x27;s.png\""), "got: {html}");
+    }
+
+    #[test]
+    fn image_embed_leaves_absolute_urls_alone() {
+        let html = obsidian("![[https://x.com/a.png]] ![[/abs.png]]").html;
+        assert!(html.contains("src=\"/abs.png\""), "got: {html}");
+        assert!(!html.contains("/img/"), "got: {html}");
+    }
+
+    #[test]
+    fn embeds_in_code_links_and_escapes_stay_literal() {
+        let html =
+            obsidian("`![[a.png]]`\n\n```\n![[b.png]]\n```\n\n[![[c.png]]](x.md) \\![[d.png]]")
+                .html;
+        assert!(html.contains(">![[a.png]]</code>"), "got: {html}");
+        assert!(html.contains("![[b.png]]\n</span>"), "got: {html}");
+        assert!(!html.contains("data-embed"), "got: {html}");
+        // An escaped bang leaves an ordinary wiki link
+        assert!(html.contains("href=\"/note/d.png\""), "got: {html}");
+    }
+
+    fn embeds_only(markdown: &str) -> Rendered {
+        let opts = RenderOptions {
+            embeds: true,
+            tags: true,
+            ..Default::default()
+        };
+        render(markdown, &opts)
+    }
+
+    #[test]
+    fn escaped_embeds_stay_literal_without_wikilinks() {
+        for md in [
+            "Escaped \\![[b.png]]",
+            "!\\[[a.png]]",
+            "&#33;[[a.png]]",
+            "&#33;[[a.png]] then ![[b.png]]",
+        ] {
+            let rendered = embeds_only(md);
+            assert!(
+                !rendered.html.contains("<img"),
+                "{md} got: {}",
+                rendered.html
+            );
+            assert!(rendered.embeds.is_empty(), "{md}");
+        }
+        let html = embeds_only("\\\\![[real.png]]").html;
+        assert!(
+            html.contains("\\<img src=\"real.png\""),
+            "an escaped backslash is not an escape, got: {html}"
+        );
+    }
+
+    #[test]
+    fn escaped_note_embed_stays_literal() {
+        static VAULT: Vault = Vault(&[("N", "body")]);
+        let html = with_vault(&VAULT, "\\![[N]]").html;
+        assert!(!html.contains("markdown-embed"), "got: {html}");
+    }
+
+    #[test]
+    fn empty_embed_targets_are_ignored() {
+        let rendered = embeds_only("![[ ]] ![[ |300]] ![[a.png]]");
+        assert_eq!(rendered.embeds, vec!["a.png"]);
+        assert!(
+            rendered.html.contains("![[ ]] ![[ |300]] <img"),
+            "got: {}",
+            rendered.html
+        );
+    }
+
+    #[test]
+    fn embeds_render_in_every_inline_context() {
+        let md = "# H ![[h.png]]\n\n> [!NOTE]\n> ![[n.png]]\n\n1. *x* ![[l.png]]\n\nfoot[^1]\n\n[^1]: ![[f.png]]\n\nTerm\n\n: ![[d.png]]\n";
+        let html = obsidian(md).html;
+        for src in ["h.png", "n.png", "l.png", "f.png", "d.png"] {
+            assert!(
+                html.contains(&format!("src=\"/img/{src}\"")),
+                "{src} got: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn note_embeds_stay_literal_but_are_recorded() {
+        let rendered = obsidian("![[Ideas#Next]] ![[a.png|2]] ![[a.png]]");
+        assert!(
+            rendered.html.contains("![[Ideas#Next]]"),
+            "got: {}",
+            rendered.html
+        );
+        assert_eq!(rendered.embeds, vec!["Ideas#Next", "a.png"]);
+    }
+
+    /// Serves notes from a fixed list, for note embeds.
+    struct Vault(&'static [(&'static str, &'static str)]);
+
+    impl Resolver for Vault {
+        fn embed_note(&self, name: &str) -> Option<String> {
+            self.0
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, md)| md.to_string())
+        }
+    }
+
+    fn with_vault(vault: &'static Vault, markdown: &str) -> Rendered {
+        let opts = RenderOptions {
+            resolver: Some(vault),
+            embeds: true,
+            tags: true,
+            wikilinks: true,
+            front_matter: true,
+            ..Default::default()
+        };
+        render(markdown, &opts)
+    }
+
+    #[test]
+    fn note_embed_replaces_its_paragraph() {
+        static VAULT: Vault = Vault(&[("Other", "---\ntitle: x\n---\n- [ ] task #t [[x]]\n")]);
+        let rendered = with_vault(&VAULT, "# Host\n\n![[Other]]\n\nafter #host");
+        let html = &rendered.html;
+        assert!(
+            html.contains("<div class=\"markdown-embed\" data-embed=\"note\" data-embed-target=\"Other\">\n<ul>"),
+            "got: {html}"
+        );
+        assert!(
+            !html.contains("title: x"),
+            "front matter is stripped, got: {html}"
+        );
+        assert!(!html.contains("<p data-sourcepos=\"3"), "got: {html}");
+        // Embedded checkboxes must not point at lines of the host file
+        assert!(html.contains("<li><input type=\"checkbox\""), "got: {html}");
+        assert_eq!(rendered.embeds, vec!["Other"]);
+        assert_eq!(
+            rendered.tags,
+            vec!["host"],
+            "embedded tags belong to the other note"
+        );
+        assert!(rendered.wikilinks.is_empty());
+    }
+
+    #[test]
+    fn embedded_headings_add_no_ids() {
+        static VAULT: Vault = Vault(&[("b", "# Sub\ntext\n")]);
+        let html = with_vault(&VAULT, "# Sub\n\n![[b#sub]]\n\n![[b]]").html;
+        assert_eq!(html.matches("id=\"").count(), 1, "got: {html}");
+        assert!(html.contains("id=\"sub\""), "got: {html}");
+    }
+
+    #[test]
+    fn note_embed_takes_a_heading_section() {
+        static VAULT: Vault = Vault(&[(
+            "N",
+            "# Top\nintro\n## Plan\nin plan\n### Sub\nin sub\n## Next\nnot this\n",
+        )]);
+        let html = with_vault(&VAULT, "![[N#plan]]").html;
+        assert!(
+            html.contains("in plan") && html.contains("in sub"),
+            "got: {html}"
+        );
+        assert!(
+            !html.contains("intro") && !html.contains("not this"),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn note_embed_heading_matches_non_ascii_case() {
+        static VAULT: Vault = Vault(&[("N", "## Þróun\nþetta\n")]);
+        let html = with_vault(&VAULT, "![[N#þróun]]").html;
+        assert!(html.contains("þetta"), "got: {html}");
+    }
+
+    #[test]
+    fn note_embed_with_carriage_returns_does_not_panic() {
+        static VAULT: Vault = Vault(&[("N", "# A\rintro\r## B\rx")]);
+        with_vault(&VAULT, "![[N#B]]");
+    }
+
+    #[test]
+    fn note_embeds_that_cannot_render_stay_text() {
+        static VAULT: Vault = Vault(&[("N", "# A\n")]);
+        let html = with_vault(
+            &VAULT,
+            "![[Missing]]\n\n![[N#Nope]]\n\n![[N#^block]]\n\nInline ![[N]] here",
+        )
+        .html;
+        for literal in [
+            "![[Missing]]",
+            "![[N#Nope]]",
+            "![[N#^block]]",
+            "Inline ![[N]] here",
+        ] {
+            assert!(html.contains(literal), "{literal} should stay, got: {html}");
+        }
+        assert!(!html.contains("markdown-embed"), "got: {html}");
+    }
+
+    #[test]
+    fn note_embed_cycle_stops() {
+        static VAULT: Vault = Vault(&[("A", "in a\n\n![[B]]"), ("B", "in b\n\n![[A]]")]);
+        let html = with_vault(&VAULT, "![[A]]").html;
+        assert_eq!(html.matches("in a").count(), 1, "got: {html}");
+        assert_eq!(html.matches("in b").count(), 1, "got: {html}");
+        assert!(html.contains("<p>![[A]]</p>"), "got: {html}");
+    }
+
+    #[test]
+    fn note_embed_depth_is_limited() {
+        static VAULT: Vault = Vault(&[
+            ("1", "one\n\n![[2]]"),
+            ("2", "two\n\n![[3]]"),
+            ("3", "three\n\n![[4]]"),
+            ("4", "four"),
+        ]);
+        let html = with_vault(&VAULT, "![[1]]").html;
+        assert!(html.contains("three"), "got: {html}");
+        assert!(!html.contains("four"), "got: {html}");
+        assert!(html.contains("<p>![[4]]</p>"), "got: {html}");
+    }
+
+    /// Knows only the notes and images named `here`.
+    struct Partial;
+
+    impl Resolver for Partial {
+        fn wikilink(&self, target: &str) -> Resolved {
+            if target == "here" {
+                Resolved::Found(format!("/n/{target}"))
+            } else {
+                Resolved::Missing(format!("/new?t={target}"))
+            }
+        }
+        fn embed(&self, target: &str) -> Resolved {
+            if target == "here.png" {
+                "/f/here.png".into()
+            } else {
+                Resolved::Missing(String::new())
+            }
+        }
+        fn embed_note(&self, name: &str) -> Option<String> {
+            Some(format!("body of {name}\n\n![[Self]]"))
+        }
+    }
+
+    fn with_partial(markdown: &str, current_note: Option<&str>) -> String {
+        let opts = RenderOptions {
+            resolver: Some(&Partial),
+            wikilinks: true,
+            embeds: true,
+            tags: true,
+            current_note,
+            ..Default::default()
+        };
+        render(markdown, &opts).html
+    }
+
+    #[test]
+    fn missing_wikilink_is_marked_and_keeps_its_href() {
+        let html = with_partial("[[here]] [[gone|the #alias]]", None);
+        assert!(
+            html.contains(
+                "<a data-sourcepos=\"1:1-1:8\" href=\"/n/here\" data-wikilink=\"true\">here</a>"
+            ),
+            "got: {html}"
+        );
+        assert!(
+            html.contains(
+                "<a data-sourcepos=\"1:10-1:28\" href=\"/new?t=gone\" data-wikilink=\"true\" \
+                 data-unresolved=\"true\">the #alias</a>"
+            ),
+            "alias text keeps no tag markup, got: {html}"
+        );
+    }
+
+    #[test]
+    fn missing_image_embed_becomes_a_span() {
+        let html = with_partial("![[here.png]] ![[gone & lost.png]]", None);
+        assert!(html.contains("src=\"/f/here.png\""), "got: {html}");
+        assert!(
+            html.contains(
+                "<span data-embed=\"image\" data-unresolved=\"true\">gone &amp; lost.png</span>"
+            ),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn current_note_stops_a_self_embed_at_once() {
+        let html = with_partial("![[Self]]", Some("Self"));
+        assert!(
+            html.contains("<p data-sourcepos=\"1:1-1:9\">![[Self]]</p>"),
+            "got: {html}"
+        );
+        let html = with_partial("![[Self]]", None);
+        assert_eq!(html.matches("body of Self").count(), 1, "got: {html}");
+    }
+
+    #[test]
+    fn highlight_is_opt_in() {
+        let plain = render("==hi==", &RenderOptions::default()).html;
+        assert!(plain.contains("==hi=="), "got: {plain}");
+        let opts = RenderOptions {
+            highlight: true,
+            ..Default::default()
+        };
+        let html = render("==hi==", &opts).html;
+        assert!(html.contains(">hi</mark>"), "got: {html}");
+    }
+
+    #[test]
+    fn tags_render_as_spans() {
+        let html = obsidian("Note #idea and #a/b-c_d.").html;
+        assert!(
+            html.contains(
+                "Note <span class=\"tag\" data-tag=\"idea\">#idea</span> and \
+                 <span class=\"tag\" data-tag=\"a/b-c_d\">#a/b-c_d</span>."
+            ),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn tags_link_when_the_resolver_gives_a_url() {
+        struct Tags;
+        impl Resolver for Tags {
+            fn tag(&self, name: &str) -> Option<String> {
+                Some(format!("/tags/{name}"))
+            }
+        }
+        let opts = RenderOptions {
+            resolver: Some(&Tags),
+            tags: true,
+            ..Default::default()
+        };
+        let html = render("#idea", &opts).html;
+        assert!(
+            html.contains("<a class=\"tag\" href=\"/tags/idea\" data-tag=\"idea\">#idea</a>"),
+            "got: {html}"
+        );
+    }
+
+    #[test]
+    fn things_that_are_not_tags() {
+        let html = obsidian(
+            "#1 #2024 C#x a#b # x `#code` [#l](u) <https://x.com/#frag> **b**#x\n\n```\n#c\n```",
+        )
+        .html;
+        assert!(!html.contains("class=\"tag\""), "got: {html}");
+    }
+
+    #[test]
+    fn escaped_tags_stay_text() {
+        let rendered = obsidian("\\#notatag &#35;enttag \"#quoted\" #a #ab\n\\\\#real");
+        assert_eq!(rendered.tags, vec!["quoted", "a", "ab"]);
+        assert!(
+            rendered.html.contains("#notatag #enttag"),
+            "got: {}",
+            rendered.html
+        );
+        // An earlier `#c` that is not a tag must not stand in for the escaped one
+        for md in ["x#c then \\#c", "![[note#d]] \\#d"] {
+            let rendered = obsidian(md);
+            assert!(rendered.tags.is_empty(), "{md} got: {}", rendered.html);
+        }
+    }
+
+    #[test]
+    fn tags_after_line_breaks_and_unicode() {
+        let rendered = obsidian("one\n#tvö (#þrjú) **x** #y2024");
+        assert_eq!(rendered.tags, vec!["tvö", "þrjú", "y2024"]);
+    }
+
+    #[test]
+    fn tag_in_heading_keeps_the_heading_id() {
+        let plain = render("# Plan #draft", &RenderOptions::default()).html;
+        let tagged = obsidian("# Plan #draft").html;
+        let id = |h: &str| {
+            h.split("id=\"")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(id(&plain), id(&tagged), "got: {tagged}");
+        assert!(tagged.contains("class=\"tag\""), "got: {tagged}");
+    }
+
+    #[test]
+    fn rendered_lists_wikilinks() {
+        let rendered = obsidian("[[a]] [[b|B]] [[a]]");
+        assert_eq!(rendered.wikilinks, vec!["a", "b"]);
     }
 
     #[test]

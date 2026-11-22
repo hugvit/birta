@@ -52,6 +52,7 @@
 - **Directory navigation** — relative markdown links are clickable, letting you browse across files in a project
 - **Static export** — render a self-contained, portable HTML bundle of a file and everything it links to, with assets copied in — no server required
 - **Interactive checkboxes** — click task list items in the browser to toggle them in the source file
+- **Obsidian syntax** — `![[image.png]]` embeds (with `|300` sizing) render as images; `#tags` render as tags with `--tags`
 - **Stdin support** — pipe markdown from any source: `cat notes.md | birta -`
 
 &nbsp;
@@ -185,6 +186,8 @@ Persistent settings live in `~/.config/birta/config.toml`:
 ```toml
 port = 3000
 front_matter = false       # show YAML front matter as plain markdown
+embeds = false             # leave ![[image]] embeds as text (--no-embeds)
+tags = true                # render #tags as tags (--tags)
 
 [theme]
 name = "catppuccin"

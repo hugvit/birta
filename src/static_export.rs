@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 
 use crate::render;
+use crate::render::Features;
 use crate::template::{self, PageOptions};
 use crate::theme::ResolvedTheme;
 
@@ -26,7 +27,7 @@ pub struct BundleOptions<'a> {
     pub show_header: bool,
     pub reading_mode: bool,
     pub raw_mode: bool,
-    pub front_matter: bool,
+    pub features: Features,
     pub variant_explicit: bool,
     pub keybindings_json: &'a str,
 }
@@ -135,7 +136,7 @@ pub fn export_bundle(
         let markdown = std::fs::read_to_string(&canonical)
             .with_context(|| format!("could not read {}", canonical.display()))?;
         let (content_html, references) =
-            render::render_bundle(&markdown, render::Style::new(syntax, opts.front_matter));
+            render::render_bundle(&markdown, render::Style::new(syntax, opts.features));
         let source_html = render::render_source(&markdown, syntax);
         let file_stats = render::format_file_stats(&markdown);
         let filename = safe_rel

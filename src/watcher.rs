@@ -74,7 +74,7 @@ pub(crate) fn watch_dir(
 
                 let html = render::render_dir(
                     &markdown,
-                    render::Style::new(syntax_theme.as_ref(), state.front_matter),
+                    render::Style::new(syntax_theme.as_ref(), state.features),
                     std::path::Path::new(&relpath),
                 );
                 let source = render::render_source(&markdown, syntax_theme.as_ref());

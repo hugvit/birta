@@ -13,7 +13,7 @@ use axum::routing::{get, post};
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, RwLock, broadcast};
 
-use crate::render::Style;
+use crate::render::{Features, Style};
 use crate::theme::{ResolvedTheme, ThemeRegistry, Variant};
 use crate::{render, template, watcher};
 
@@ -41,7 +41,7 @@ pub struct ServerOptions {
     pub show_header: bool,
     pub reading_mode: bool,
     pub raw_mode: bool,
-    pub front_matter: bool,
+    pub features: Features,
     pub keybindings_json: String,
     /// Variant was explicitly chosen via `--light`/`--dark` or config.
     pub variant_explicit: bool,
@@ -73,7 +73,7 @@ pub(crate) struct AppState {
     pub(crate) show_header: bool,
     pub(crate) reading_mode: bool,
     pub(crate) raw_mode: bool,
-    pub(crate) front_matter: bool,
+    pub(crate) features: Features,
     pub(crate) keybindings_json: String,
     /// Variant was explicitly chosen via `--light`/`--dark` or config.
     pub(crate) variant_explicit: bool,
@@ -119,7 +119,7 @@ pub async fn run_stdin(markdown: &str, opts: ServerOptions) -> anyhow::Result<()
     }
 
     let syntax = opts.theme.active_data().syntax.as_ref();
-    let content_html = render::render(markdown, Style::new(syntax, opts.front_matter));
+    let content_html = render::render(markdown, Style::new(syntax, opts.features));
     let source_html = render::render_source(markdown, syntax);
     let file_stats = render::format_file_stats(markdown);
 
@@ -153,7 +153,7 @@ pub async fn run_stdin(markdown: &str, opts: ServerOptions) -> anyhow::Result<()
         show_header: opts.show_header,
         reading_mode: opts.reading_mode,
         raw_mode: opts.raw_mode,
-        front_matter: opts.front_matter,
+        features: opts.features,
         variant_explicit: opts.variant_explicit,
         keybindings_json: opts.keybindings_json,
         last_request: AtomicU64::new(now_secs()),
@@ -189,11 +189,11 @@ pub async fn start(
     let content_html = if let Some(ref relpath) = initial_relpath {
         render::render_dir(
             &markdown,
-            Style::new(syntax, opts.front_matter),
+            Style::new(syntax, opts.features),
             StdPath::new(relpath),
         )
     } else {
-        render::render(&markdown, Style::new(syntax, opts.front_matter))
+        render::render(&markdown, Style::new(syntax, opts.features))
     };
     let source_html = render::render_source(&markdown, syntax);
     let file_stats = render::format_file_stats(&markdown);
@@ -237,7 +237,7 @@ pub async fn start(
         show_header: opts.show_header,
         reading_mode: opts.reading_mode,
         raw_mode: opts.raw_mode,
-        front_matter: opts.front_matter,
+        features: opts.features,
         variant_explicit: opts.variant_explicit,
         keybindings_json: opts.keybindings_json,
         last_request: AtomicU64::new(now_secs),
@@ -421,7 +421,7 @@ async fn view_handler(Path(path): Path<String>, State(state): State<Arc<AppState
 
     let html = render::render_dir(
         &markdown,
-        Style::new(syntax_theme.as_ref(), state.front_matter),
+        Style::new(syntax_theme.as_ref(), state.features),
         StdPath::new(&path),
     );
     let source_html = render::render_source(&markdown, syntax_theme.as_ref());
@@ -490,7 +490,7 @@ async fn render_handler(
 
     let html = render::render_dir(
         &markdown,
-        Style::new(syntax_theme.as_ref(), state.front_matter),
+        Style::new(syntax_theme.as_ref(), state.features),
         StdPath::new(&path),
     );
     Html(html).into_response()
@@ -544,13 +544,13 @@ async fn broadcast_theme_update(state: &AppState) {
                 let rendered = if let Some(relpath) = &state.initial_relpath {
                     render::render_dir(
                         &markdown,
-                        Style::new(active.syntax.as_ref(), state.front_matter),
+                        Style::new(active.syntax.as_ref(), state.features),
                         StdPath::new(relpath),
                     )
                 } else {
                     render::render(
                         &markdown,
-                        Style::new(active.syntax.as_ref(), state.front_matter),
+                        Style::new(active.syntax.as_ref(), state.features),
                     )
                 };
                 let source = render::render_source(&markdown, active.syntax.as_ref());
@@ -834,7 +834,7 @@ mod tests {
             show_header: true,
             reading_mode: false,
             raw_mode: false,
-            front_matter: true,
+            features: Features::CLI,
             variant_explicit: false,
             keybindings_json: "{}".to_string(),
             last_request: AtomicU64::new(0),
@@ -917,7 +917,7 @@ mod tests {
             show_header: true,
             reading_mode: false,
             raw_mode: false,
-            front_matter: true,
+            features: Features::CLI,
             variant_explicit: false,
             keybindings_json: "{}".to_string(),
             last_request: AtomicU64::new(0),
@@ -1078,7 +1078,7 @@ mod tests {
             show_header: true,
             reading_mode: false,
             raw_mode: false,
-            front_matter: true,
+            features: Features::CLI,
             variant_explicit: false,
             keybindings_json: "{}".to_string(),
             last_request: AtomicU64::new(0),

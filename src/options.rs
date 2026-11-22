@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use crate::config::Config;
+use crate::render::Features;
 
 /// CLI-provided options, decoupled from clap for testability.
 #[derive(Default)]
@@ -20,6 +21,8 @@ pub struct CliOptions {
     pub no_theme_swap: bool,
     pub no_toggle: bool,
     pub no_front_matter: bool,
+    pub no_embeds: bool,
+    pub tags: bool,
 }
 
 /// Result of merging CLI options with config file settings.
@@ -38,7 +41,7 @@ pub struct MergedOptions {
     pub enable_swap: bool,
     pub enable_toggle: bool,
     pub show_header: bool,
-    pub front_matter: bool,
+    pub features: Features,
 }
 
 /// Merge CLI options with config, applying priority rules:
@@ -48,8 +51,9 @@ pub struct MergedOptions {
 /// logic: the feature is enabled only if both CLI and config agree. A `no_*`
 /// flag from CLI disables it; `show_controls.x = false` in config disables it.
 ///
-/// `front_matter` follows the same AND logic: on unless `--no-front-matter`
-/// or `front_matter = false` in config turns it off.
+/// `front_matter` and `embeds` follow the same AND logic: on unless
+/// `--no-front-matter`/`--no-embeds` or `= false` in config turns them off.
+/// `tags` is off unless `--tags` or `tags = true` turns it on.
 ///
 /// `no_open` and `reading_mode` use OR logic: either source being true
 /// enables the behavior.
@@ -72,7 +76,11 @@ pub fn merge(cli: CliOptions, config: &Config) -> MergedOptions {
     let enable_toggle = !cli.no_toggle && config.theme.controls.show_controls.theme_toggle;
     let show_header = !cli.no_header && config.theme.controls.show_controls.header;
 
-    let front_matter = !cli.no_front_matter && config.front_matter.unwrap_or(true);
+    let features = Features {
+        front_matter: !cli.no_front_matter && config.front_matter.unwrap_or(true),
+        embeds: !cli.no_embeds && config.embeds.unwrap_or(true),
+        tags: cli.tags || config.tags.unwrap_or(false),
+    };
 
     let reading_mode = cli.reading_mode || config.reading_mode.unwrap_or(false);
     let raw_mode = cli.raw_mode || config.raw_mode.unwrap_or(false);
@@ -109,7 +117,7 @@ pub fn merge(cli: CliOptions, config: &Config) -> MergedOptions {
         enable_swap,
         enable_toggle,
         show_header,
-        front_matter,
+        features,
     }
 }
 
@@ -503,9 +511,43 @@ mod tests {
     }
 
     #[test]
+    fn merge_embeds_on_and_tags_off_by_default() {
+        let merged = merge(CliOptions::default(), &Config::default());
+        assert_eq!(merged.features, Features::CLI);
+    }
+
+    #[test]
+    fn merge_embeds_off_from_cli_flag_or_config() {
+        let cli = CliOptions {
+            no_embeds: true,
+            ..Default::default()
+        };
+        assert!(!merge(cli, &Config::default()).features.embeds);
+        let config = Config {
+            embeds: Some(false),
+            ..Default::default()
+        };
+        assert!(!merge(CliOptions::default(), &config).features.embeds);
+    }
+
+    #[test]
+    fn merge_tags_on_from_cli_flag_or_config() {
+        let cli = CliOptions {
+            tags: true,
+            ..Default::default()
+        };
+        assert!(merge(cli, &Config::default()).features.tags);
+        let config = Config {
+            tags: Some(true),
+            ..Default::default()
+        };
+        assert!(merge(CliOptions::default(), &config).features.tags);
+    }
+
+    #[test]
     fn merge_front_matter_on_by_default() {
         let merged = merge(CliOptions::default(), &Config::default());
-        assert!(merged.front_matter);
+        assert!(merged.features.front_matter);
     }
 
     #[test]
@@ -514,7 +556,7 @@ mod tests {
             no_front_matter: true,
             ..Default::default()
         };
-        assert!(!merge(cli, &Config::default()).front_matter);
+        assert!(!merge(cli, &Config::default()).features.front_matter);
     }
 
     #[test]
@@ -523,6 +565,6 @@ mod tests {
             front_matter: Some(false),
             ..Default::default()
         };
-        assert!(!merge(CliOptions::default(), &config).front_matter);
+        assert!(!merge(CliOptions::default(), &config).features.front_matter);
     }
 }

@@ -10,6 +10,8 @@ pub struct Config {
     pub reading_mode: Option<bool>,
     pub raw_mode: Option<bool>,
     pub front_matter: Option<bool>,
+    pub embeds: Option<bool>,
+    pub tags: Option<bool>,
     pub syntax_theme: Option<PathBuf>,
     #[serde(default, deserialize_with = "deserialize_theme_config")]
     pub theme: ThemeConfig,

@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::Path;
 
+use birta::render::Features;
 use birta::static_export::{BundleOptions, export_bundle};
 use birta::theme::{ResolvedTheme, ThemeVariants, Variant, VariantData};
 use tempfile::tempdir;
@@ -26,7 +27,7 @@ fn opts<'a>(theme: &'a ResolvedTheme) -> BundleOptions<'a> {
         show_header: true,
         reading_mode: false,
         raw_mode: false,
-        front_matter: true,
+        features: Features::CLI,
         variant_explicit: false,
         keybindings_json: "{}",
     }

@@ -131,20 +131,39 @@ impl Resolver for BundleResolver {
     }
 }
 
+/// Which optional markdown syntax the CLI renders.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Features {
+    /// Show a leading `---` block as a table instead of parsing it as markdown.
+    pub front_matter: bool,
+    /// Render Obsidian `![[image.png]]` embeds.
+    pub embeds: bool,
+    /// Render Obsidian `#tags`.
+    pub tags: bool,
+}
+
+impl Features {
+    /// What the CLI renders when no flag or config key says otherwise.
+    pub const CLI: Features = Features {
+        front_matter: true,
+        embeds: true,
+        tags: false,
+    };
+}
+
 /// What the CLI's settings ask of every render.
 #[derive(Clone, Copy, Default)]
 pub struct Style<'a> {
     /// Highlight code with this theme's inline colours instead of CSS classes.
     pub syntax_theme: Option<&'a SyntaxTheme>,
-    /// Show a leading `---` block as a table instead of parsing it as markdown.
-    pub front_matter: bool,
+    pub features: Features,
 }
 
 impl<'a> Style<'a> {
-    pub fn new(syntax_theme: Option<&'a SyntaxTheme>, front_matter: bool) -> Self {
+    pub fn new(syntax_theme: Option<&'a SyntaxTheme>, features: Features) -> Self {
         Self {
             syntax_theme,
-            front_matter,
+            features,
         }
     }
 }
@@ -153,9 +172,9 @@ fn render_with(markdown: &str, style: Style<'_>, resolver: &dyn Resolver) -> Str
     let opts = RenderOptions {
         syntax_theme: style.syntax_theme,
         resolver: Some(resolver),
-        front_matter: style.front_matter,
-        // Plain markdown never contains `![[`, so this changes nothing for it
-        embeds: true,
+        front_matter: style.features.front_matter,
+        embeds: style.features.embeds,
+        tags: style.features.tags,
         ..Default::default()
     };
     let rendered = birta_core::render::render(markdown, &opts);
@@ -434,11 +453,40 @@ mod tests {
         );
     }
 
+    const EMBEDS: Style<'static> = Style {
+        syntax_theme: None,
+        features: Features {
+            front_matter: false,
+            embeds: true,
+            tags: false,
+        },
+    };
+
+    #[test]
+    fn embeds_and_tags_follow_the_features() {
+        let md = "![[a.png]] #idea";
+        let off = render(md, Style::default());
+        assert!(off.contains("![[a.png]] #idea"), "got: {off}");
+        let on = render(
+            md,
+            Style::new(
+                None,
+                Features {
+                    embeds: true,
+                    tags: true,
+                    ..Default::default()
+                },
+            ),
+        );
+        assert!(on.contains("src=\"/local/a.png\""), "got: {on}");
+        assert!(on.contains("class=\"tag\""), "got: {on}");
+    }
+
     #[test]
     fn render_dir_image_embed_resolves_relative_to_file() {
         let html = render_dir(
             "![[img/photo 1.png|200]]",
-            Style::default(),
+            EMBEDS,
             Path::new("docs/guide.md"),
         );
         assert!(
@@ -451,7 +499,7 @@ mod tests {
 
     #[test]
     fn render_bundle_collects_image_embeds() {
-        let (html, refs) = render_bundle("![[img/photo.png]]", Style::default());
+        let (html, refs) = render_bundle("![[img/photo.png]]", EMBEDS);
         assert!(html.contains("src=\"img/photo.png\""), "got: {html}");
         assert_eq!(refs.assets, vec!["img/photo.png".to_string()]);
     }
@@ -465,10 +513,13 @@ mod tests {
 
     #[test]
     fn front_matter_becomes_a_table_above_the_body_when_on() {
-        let style = Style {
-            front_matter: true,
-            ..Default::default()
-        };
+        let style = Style::new(
+            None,
+            Features {
+                front_matter: true,
+                ..Default::default()
+            },
+        );
         let html = render("---\ntitle: x\n---\nbody", style);
         assert!(
             html.starts_with("<table class=\"front-matter\"><thead><tr><th>title</th>"),

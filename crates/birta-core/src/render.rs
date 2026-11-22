@@ -242,7 +242,7 @@ fn heading_section(markdown: &str, heading: &str) -> Option<String> {
 
     let index = headings
         .iter()
-        .position(|(_, _, text)| text.trim().eq_ignore_ascii_case(heading))?;
+        .position(|(_, _, text)| text.trim().to_lowercase() == heading.to_lowercase())?;
     let (level, start, _) = headings[index];
     let end = headings[index + 1..]
         .iter()
@@ -251,7 +251,7 @@ fn heading_section(markdown: &str, heading: &str) -> Option<String> {
 
     let lines: Vec<&str> = markdown.lines().collect();
     let end = end.unwrap_or(lines.len()).min(lines.len());
-    Some(lines[start - 1..end].join("\n"))
+    Some(lines.get(start.checked_sub(1)?..end)?.join("\n"))
 }
 
 /// Render a front matter block as a GitHub-style table: one column per key,
@@ -728,6 +728,19 @@ mod tests {
             !html.contains("intro") && !html.contains("not this"),
             "got: {html}"
         );
+    }
+
+    #[test]
+    fn note_embed_heading_matches_non_ascii_case() {
+        static VAULT: Vault = Vault(&[("N", "## Þróun\nþetta\n")]);
+        let html = with_vault(&VAULT, "![[N#þróun]]").html;
+        assert!(html.contains("þetta"), "got: {html}");
+    }
+
+    #[test]
+    fn note_embed_with_carriage_returns_does_not_panic() {
+        static VAULT: Vault = Vault(&[("N", "# A\rintro\r## B\rx")]);
+        with_vault(&VAULT, "![[N#B]]");
     }
 
     #[test]

@@ -18,3 +18,13 @@ pr_body = """
 {% endif %}
 {% endfor %}
 """
+
+# A second workspace member would otherwise switch the tag to `birta-v<version>`
+[[package]]
+name = "birta"
+git_tag_name = "v{{ version }}"
+
+# Library crate: published to crates.io, no tag and no GitHub release
+[[package]]
+name = "birta-core"
+git_tag_enable = false

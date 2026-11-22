@@ -339,7 +339,7 @@ fn split_tags(
     while let Some((i, c)) = iter.next() {
         let at_boundary = match prev {
             None => starts_clean,
-            Some(p) => p.is_whitespace() || matches!(p, '(' | '[' | '"' | '\'' | '“' | '‘'),
+            Some(p) => opens_tag(p),
         };
         prev = Some(c);
         if c != '#' || !at_boundary {
@@ -383,7 +383,10 @@ fn in_source(raw: Raw<'_>, cursor: &mut usize, name: &str) -> bool {
         .map(|i| i + from)
     {
         let after = at + needle.len();
-        if raw.text[after..].chars().next().is_some_and(is_tag_char) {
+        let before = raw.line[..raw.start + at].chars().next_back();
+        // `\` stays a candidate here so that the escape check below rejects it
+        let at_boundary = at == 0 || before.is_some_and(|c| c == '\\' || opens_tag(c));
+        if !at_boundary || raw.text[after..].chars().next().is_some_and(is_tag_char) {
             from = at + 1;
             continue;
         }
@@ -391,6 +394,11 @@ fn in_source(raw: Raw<'_>, cursor: &mut usize, name: &str) -> bool {
         return !raw.escaped(at);
     }
     false
+}
+
+/// Whether a tag may start right after `c`.
+fn opens_tag(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '(' | '[' | '"' | '\'' | '“' | '‘')
 }
 
 fn is_tag_char(c: char) -> bool {

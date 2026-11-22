@@ -1074,6 +1074,11 @@ mod tests {
             "got: {}",
             rendered.html
         );
+        // An earlier `#c` that is not a tag must not stand in for the escaped one
+        for md in ["x#c then \\#c", "![[note#d]] \\#d"] {
+            let rendered = obsidian(md);
+            assert!(rendered.tags.is_empty(), "{md} got: {}", rendered.html);
+        }
     }
 
     #[test]

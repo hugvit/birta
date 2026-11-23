@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/hugvit/birta/compare/v0.9.0...v0.10.0) - 2026-11-23
+
+### Fixed
+
+- *(birta-core)* [**breaking**] resolve theme paths only when allow_paths is set
+
 ## [0.9.0](https://github.com/hugvit/birta/compare/v0.8.1...v0.9.0) - 2026-11-22
 
 ### Added

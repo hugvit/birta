@@ -343,14 +343,18 @@ impl ResolvedTheme {
 /// Directories searched for theme TOML files, besides the themes embedded in
 /// this crate. The default searches nothing on disk.
 ///
-/// A theme name resolves in this order: `user_dir`, a filesystem path,
-/// `data_dir`, then the embedded themes.
+/// A theme name resolves in this order: `user_dir`, a filesystem path (only
+/// with `allow_paths`), `data_dir`, then the embedded themes.
 #[derive(Debug, Default, Clone)]
 pub struct ThemeSearch {
     /// Themes the user wrote; these win over everything else.
     pub user_dir: Option<PathBuf>,
     /// On-disk copies of the bundled themes (see [`install_bundled_themes`]).
     pub data_dir: Option<PathBuf>,
+    /// Also accept a theme name as a path to a `.toml` file, absolute or
+    /// relative to the working directory. Off by default so a library host
+    /// never probes whatever directory it was started in.
+    pub allow_paths: bool,
 }
 
 /// Names of the themes embedded in this crate.
@@ -395,7 +399,8 @@ impl ThemeSearch {
         list_installed(self)
     }
 
-    /// Resolve a theme by name, or by path to a `.toml` theme file.
+    /// Resolve a theme by name, or (with `allow_paths`) by path to a `.toml`
+    /// theme file.
     pub fn resolve(&self, name: &str) -> anyhow::Result<ResolvedTheme> {
         let (theme_toml, base_dir) = find_theme_toml(self, name)?;
         build_resolved_theme(theme_toml, base_dir)
@@ -469,6 +474,15 @@ fn find_theme_toml(
     search: &ThemeSearch,
     name: &str,
 ) -> anyhow::Result<(ThemeToml, Option<PathBuf>)> {
+    // Joining an absolute or `..` name onto a theme dir would escape it
+    let is_plain_name = {
+        let mut parts = Path::new(name).components();
+        matches!(parts.next(), Some(std::path::Component::Normal(_))) && parts.next().is_none()
+    };
+    if !search.allow_paths && !is_plain_name {
+        anyhow::bail!("theme '{name}' not found: paths are not allowed, use a theme name");
+    }
+
     // 1. User config dir
     if let Some(dir) = search.user_dir.clone() {
         let path = dir.join(format!("{name}.toml"));
@@ -482,7 +496,7 @@ fn find_theme_toml(
 
     // 2. Absolute path (or relative to cwd)
     let as_path = Path::new(name);
-    if as_path.is_absolute() || as_path.exists() {
+    if search.allow_paths && (as_path.is_absolute() || as_path.exists()) {
         // Could be path to .toml file or directory containing one
         let toml_path = if as_path.extension().is_some_and(|e| e == "toml") {
             as_path.to_path_buf()
@@ -898,6 +912,63 @@ mod tests {
             registry.active().active_variant,
             Variant::Light,
             "switching back should still preserve variant preference"
+        );
+    }
+
+    // Unit tests run with the crate root as cwd, so this path exists relative to it.
+    const RELATIVE_THEME: &str = "assets/themes/dracula.toml";
+
+    fn absolute_theme() -> String {
+        format!("{}/{RELATIVE_THEME}", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    #[test]
+    fn default_search_ignores_paths() {
+        assert!(Path::new(RELATIVE_THEME).exists());
+        let search = ThemeSearch::default();
+        for name in [RELATIVE_THEME, "assets/themes/dracula", &absolute_theme()] {
+            let Err(err) = search.resolve(name) else {
+                panic!("{name} resolved");
+            };
+            let err = err.to_string();
+            assert!(err.contains("not found"), "{name}: {err}");
+        }
+    }
+
+    #[test]
+    fn default_search_ignores_paths_with_user_dir() {
+        // An absolute name must not escape `user_dir` through `PathBuf::join`
+        let search = ThemeSearch {
+            user_dir: Some(std::env::temp_dir()),
+            data_dir: Some(std::env::temp_dir()),
+            ..ThemeSearch::default()
+        };
+        let abs_without_ext = absolute_theme().trim_end_matches(".toml").to_string();
+        for name in [abs_without_ext.as_str(), "../themes/dracula"] {
+            let Err(err) = search.resolve(name) else {
+                panic!("{name} resolved");
+            };
+            assert!(err.to_string().contains("not found"), "{name}: {err}");
+        }
+    }
+
+    #[test]
+    fn allow_paths_resolves_relative_and_absolute_paths() {
+        let search = ThemeSearch {
+            allow_paths: true,
+            ..ThemeSearch::default()
+        };
+        let abs_without_ext = absolute_theme().trim_end_matches(".toml").to_string();
+        for name in [RELATIVE_THEME, &absolute_theme(), &abs_without_ext] {
+            assert_eq!(search.resolve(name).unwrap().name, "dracula", "{name}");
+        }
+    }
+
+    #[test]
+    fn default_search_resolves_bundled_names() {
+        assert_eq!(
+            ThemeSearch::default().resolve("monokai").unwrap().name,
+            "monokai"
         );
     }
 }

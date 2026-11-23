@@ -21,6 +21,7 @@ pub fn search() -> ThemeSearch {
     ThemeSearch {
         user_dir: config_themes_dir(),
         data_dir: data_themes_dir(),
+        allow_paths: true,
     }
 }
 

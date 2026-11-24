@@ -1,0 +1,26 @@
+THIRD-PARTY LICENSES
+====================
+
+The birta binary includes code from the crates listed below. Each section
+gives a license and the crates it covers, followed by the license text.
+Source code for every crate is available from https://crates.io.
+
+This file is generated from Cargo.lock by cargo-about (see about.toml).
+Do not edit it by hand.
+{{!-- Workspace crates have no `source`; skipping them keeps release-plz version bumps from staling this file --}}
+{{#each licenses}}
+{{#if used_by.0.crate.source}}
+
+================================================================================
+{{{name}}} ({{id}})
+
+Used by:
+{{#each used_by}}
+{{#if crate.source}}
+  - {{crate.name}} {{crate.version}}
+{{/if}}
+{{/each}}
+
+{{{text}}}
+{{/if}}
+{{/each}}

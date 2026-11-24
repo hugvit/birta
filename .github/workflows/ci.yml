@@ -20,3 +20,19 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace -- -D warnings
       - run: cargo test --workspace
+
+  licenses:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+      - name: Check THIRD-PARTY-LICENSES is up to date
+        run: |
+          cargo about generate --locked --fail about.hbs -o THIRD-PARTY-LICENSES
+          git diff --exit-code THIRD-PARTY-LICENSES || {
+            echo "::error::THIRD-PARTY-LICENSES is stale; run: cargo about generate --locked --fail about.hbs -o THIRD-PARTY-LICENSES"
+            exit 1
+          }

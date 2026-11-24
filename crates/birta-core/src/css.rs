@@ -41,7 +41,31 @@ mod tests {
     fn diff_colours_fall_back_from_syntax_theme_to_alerts() {
         assert!(super::DIFF.contains("var(--birta-diff-add, var(--alert-tip"));
         assert!(super::DIFF.contains("var(--birta-diff-del, var(--alert-caution"));
-        assert!(super::DIFF.contains("var(--birta-diff-change, var(--alert-warning"));
+    }
+
+    #[test]
+    fn diff_uses_github_primer_colours_for_github() {
+        // Primer diffBlob tokens: addition/deletion line, number and word backgrounds
+        for token in [
+            "#dafbe1", "#aceebb", "#ffebe9", "#ffcecb", "#ddf4ff", "#b6e3ff",
+        ] {
+            assert!(super::DIFF.contains(token), "light {token}");
+        }
+        for token in [
+            "#2ea04326",
+            "#3fb9504d",
+            "#2ea04366",
+            "#f851491a",
+            "#f851494d",
+            "#f8514966",
+        ] {
+            assert!(super::DIFF.contains(token), "dark {token}");
+        }
+        // Derived colours apply to every birta theme except github itself
+        assert!(
+            super::DIFF
+                .contains("[data-birta-theme]:not([data-birta-theme=\"github\"]) .birta-diff {")
+        );
     }
 
     #[test]

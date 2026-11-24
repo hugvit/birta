@@ -4,14 +4,83 @@
   display: block;
   width: 100%;
   font-family: var(--fontStack-monospace, ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace);
-  font-size: 85%;
-  line-height: 1.45;
-  color: var(--fgColor-default, inherit);
-  --birta-diff-num-w: calc(var(--birta-diff-digits, 3) * 1ch + 1.5ch);
-  /* Syntax-theme colours first, then the theme's alert colours, then GitHub's */
-  --birta-diff-add-color: var(--birta-diff-add, var(--alert-tip, var(--fgColor-success, #1a7f37)));
-  --birta-diff-del-color: var(--birta-diff-del, var(--alert-caution, var(--fgColor-danger, #cf222e)));
-  --birta-diff-change-color: var(--birta-diff-change, var(--alert-warning, var(--fgColor-attention, #9a6700)));
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--fgColor-default, #1f2328);
+  --birta-diff-num-w: calc(var(--birta-diff-digits, 3) * 1ch + 2ch);
+  --birta-diff-gutter: calc(2 * var(--birta-diff-num-w));
+  /* GitHub's own diff colours (Primer diffBlob tokens), light */
+  --birta-diff-add-line-bg: #dafbe1;
+  --birta-diff-add-num-bg: #aceebb;
+  --birta-diff-add-word-bg: #aceebb;
+  --birta-diff-del-line-bg: #ffebe9;
+  --birta-diff-del-num-bg: #ffcecb;
+  --birta-diff-del-word-bg: #ffcecb;
+  --birta-diff-hunk-line-bg: #ddf4ff;
+  --birta-diff-hunk-num-bg: #b6e3ff;
+  --birta-diff-empty-bg: #f6f8fa;
+  --birta-diff-muted: #59636e;
+}
+
+@media (prefers-color-scheme: dark) {
+  .birta-diff {
+    color: var(--fgColor-default, #f0f6fc);
+    --birta-diff-add-line-bg: #2ea04326;
+    --birta-diff-add-num-bg: #3fb9504d;
+    --birta-diff-add-word-bg: #2ea04366;
+    --birta-diff-del-line-bg: #f851491a;
+    --birta-diff-del-num-bg: #f851494d;
+    --birta-diff-del-word-bg: #f8514966;
+    --birta-diff-hunk-line-bg: #388bfd1a;
+    --birta-diff-hunk-num-bg: #0c2d6b;
+    --birta-diff-empty-bg: #151b23;
+    --birta-diff-muted: #9198a1;
+  }
+}
+
+[data-theme="light"] .birta-diff {
+  color: var(--fgColor-default, #1f2328);
+  --birta-diff-add-line-bg: #dafbe1;
+  --birta-diff-add-num-bg: #aceebb;
+  --birta-diff-add-word-bg: #aceebb;
+  --birta-diff-del-line-bg: #ffebe9;
+  --birta-diff-del-num-bg: #ffcecb;
+  --birta-diff-del-word-bg: #ffcecb;
+  --birta-diff-hunk-line-bg: #ddf4ff;
+  --birta-diff-hunk-num-bg: #b6e3ff;
+  --birta-diff-empty-bg: #f6f8fa;
+  --birta-diff-muted: #59636e;
+}
+
+[data-theme="dark"] .birta-diff {
+  color: var(--fgColor-default, #f0f6fc);
+  --birta-diff-add-line-bg: #2ea04326;
+  --birta-diff-add-num-bg: #3fb9504d;
+  --birta-diff-add-word-bg: #2ea04366;
+  --birta-diff-del-line-bg: #f851491a;
+  --birta-diff-del-num-bg: #f851494d;
+  --birta-diff-del-word-bg: #f8514966;
+  --birta-diff-hunk-line-bg: #388bfd1a;
+  --birta-diff-hunk-num-bg: #0c2d6b;
+  --birta-diff-empty-bg: #151b23;
+  --birta-diff-muted: #9198a1;
+}
+
+/* Other birta themes: the syntax theme's diff colours, else the theme's alert colours */
+[data-birta-theme]:not([data-birta-theme="github"]) .birta-diff {
+  --birta-diff-add-color: var(--birta-diff-add, var(--alert-tip, #1a7f37));
+  --birta-diff-del-color: var(--birta-diff-del, var(--alert-caution, #cf222e));
+  --birta-diff-hunk-color: var(--fgColor-accent, #0969da);
+  --birta-diff-add-line-bg: color-mix(in srgb, var(--birta-diff-add-color) 14%, transparent);
+  --birta-diff-add-num-bg: color-mix(in srgb, var(--birta-diff-add-color) 30%, transparent);
+  --birta-diff-add-word-bg: color-mix(in srgb, var(--birta-diff-add-color) 32%, transparent);
+  --birta-diff-del-line-bg: color-mix(in srgb, var(--birta-diff-del-color) 14%, transparent);
+  --birta-diff-del-num-bg: color-mix(in srgb, var(--birta-diff-del-color) 30%, transparent);
+  --birta-diff-del-word-bg: color-mix(in srgb, var(--birta-diff-del-color) 32%, transparent);
+  --birta-diff-hunk-line-bg: color-mix(in srgb, var(--birta-diff-hunk-color) 10%, transparent);
+  --birta-diff-hunk-num-bg: color-mix(in srgb, var(--birta-diff-hunk-color) 22%, transparent);
+  --birta-diff-empty-bg: var(--bgColor-muted, color-mix(in srgb, currentColor 6%, transparent));
+  --birta-diff-muted: var(--fgColor-muted, #59636e);
 }
 
 /* Only `auto` queries its width; a container collapses to 0 in a shrink-to-fit parent */
@@ -35,7 +104,7 @@
 
 .birta-diff .diff-note {
   padding: 0.25em 1ch;
-  color: var(--fgColor-muted, #59636e);
+  color: var(--birta-diff-muted);
   font-style: italic;
 }
 
@@ -46,49 +115,43 @@
 }
 
 .birta-diff .diff-num {
-  padding-right: 1ch;
+  padding: 0 1ch;
   text-align: right;
-  color: var(--fgColor-muted, #59636e);
+  color: var(--birta-diff-muted);
   user-select: none;
+}
+
+.birta-diff .diff-del > .diff-num,
+.birta-diff .diff-add > .diff-num {
+  color: inherit;
 }
 
 .birta-diff .diff-sign {
   user-select: none;
 }
 
+/* The gutter takes the stronger number colour, the rest of the row the line colour */
 .birta-diff .diff-del {
-  background: var(--birta-diff-del-bg, color-mix(in srgb, var(--birta-diff-del-color) 14%, transparent));
+  background: linear-gradient(to right, var(--birta-diff-del-num-bg) var(--birta-diff-gutter), var(--birta-diff-del-line-bg) var(--birta-diff-gutter));
 }
 
 .birta-diff .diff-add {
-  background: var(--birta-diff-add-bg, color-mix(in srgb, var(--birta-diff-add-color) 14%, transparent));
-}
-
-.birta-diff .diff-del > .diff-sign {
-  color: var(--birta-diff-del-color);
-}
-
-.birta-diff .diff-add > .diff-sign {
-  color: var(--birta-diff-add-color);
-}
-
-.birta-diff .diff-hunk[data-kind="changed"] > .diff-cell:not(.diff-empty) > .diff-num {
-  box-shadow: inset 2px 0 0 var(--birta-diff-change-color);
+  background: linear-gradient(to right, var(--birta-diff-add-num-bg) var(--birta-diff-gutter), var(--birta-diff-add-line-bg) var(--birta-diff-gutter));
 }
 
 .birta-diff del.diff-word,
 .birta-diff ins.diff-word {
   color: inherit;
   text-decoration: none;
-  border-radius: 2px;
+  border-radius: 0.2em;
 }
 
 .birta-diff del.diff-word {
-  background: var(--birta-diff-del-word-bg, color-mix(in srgb, var(--birta-diff-del-color) 32%, transparent));
+  background: var(--birta-diff-del-word-bg);
 }
 
 .birta-diff ins.diff-word {
-  background: var(--birta-diff-add-word-bg, color-mix(in srgb, var(--birta-diff-add-color) 32%, transparent));
+  background: var(--birta-diff-add-word-bg);
 }
 
 /* Folds; these beat `.markdown-body details` and `summary` when nested in a document */
@@ -100,11 +163,11 @@
 .birta-diff .diff-fold > summary {
   display: block;
   margin: 0;
-  padding: 0.15em 1ch;
+  padding: 0 1ch 0 calc(var(--birta-diff-gutter) + 1ch);
   list-style: none;
   cursor: pointer;
-  color: var(--fgColor-muted, #59636e);
-  background: var(--bgColor-muted, color-mix(in srgb, currentColor 6%, transparent));
+  color: var(--birta-diff-muted);
+  background: linear-gradient(to right, var(--birta-diff-hunk-num-bg) var(--birta-diff-gutter), var(--birta-diff-hunk-line-bg) var(--birta-diff-gutter));
 }
 
 .birta-diff .diff-fold > summary::-webkit-details-marker {
@@ -177,6 +240,10 @@
   padding: 0.25em 1ch;
 }
 
+.birta-diff[data-layout="split"] .diff-cell {
+  --birta-diff-gutter: var(--birta-diff-num-w);
+}
+
 .birta-diff[data-layout="split"] .diff-hunk {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -213,7 +280,7 @@
 
 .birta-diff[data-layout="split"] .diff-empty {
   display: block;
-  background: var(--bgColor-muted, color-mix(in srgb, currentColor 6%, transparent));
+  background: var(--birta-diff-empty-bg);
 }
 
 @container birta-diff (min-width: 48rem) {
@@ -225,6 +292,10 @@
 
   .birta-diff[data-layout="auto"] .diff-label {
     padding: 0.25em 1ch;
+  }
+
+  .birta-diff[data-layout="auto"] .diff-cell {
+    --birta-diff-gutter: var(--birta-diff-num-w);
   }
 
   .birta-diff[data-layout="auto"] .diff-hunk {
@@ -263,6 +334,6 @@
 
   .birta-diff[data-layout="auto"] .diff-empty {
     display: block;
-    background: var(--bgColor-muted, color-mix(in srgb, currentColor 6%, transparent));
+    background: var(--birta-diff-empty-bg);
   }
 }

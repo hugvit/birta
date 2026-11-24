@@ -177,6 +177,7 @@ pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
         .collect();
 
     let mut extracted = Extracted::default();
+    let mut used = Vec::new();
     for node in root.descendants() {
         let data = node.data.borrow();
         match &data.value {
@@ -185,7 +186,10 @@ pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
                 if !extracted.wikilinks.contains(&link.url) {
                     extracted.wikilinks.push(link.url.clone());
                 }
-                if let Some(range) = wikilink_range(markdown, &line_starts, data.sourcepos) {
+                if let Some(range) =
+                    wikilink_range(markdown, &line_starts, data.sourcepos, &link.url, &used)
+                {
+                    used.push(range.start);
                     extracted.wikilink_spans.push(TargetSpan {
                         target: link.url.clone(),
                         range,
@@ -195,6 +199,11 @@ pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
             _ => {}
         }
     }
+
+    // Footnote definitions come last in the tree but not in the source
+    extracted
+        .wikilink_spans
+        .sort_by_key(|span| span.range.start);
 
     let found = obsidian::find(root, markdown, opts.embeds, opts.tags);
     extracted.embeds = found.embeds;
@@ -207,20 +216,42 @@ pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
     extracted
 }
 
-/// comrak's end column falls short after a `\|` escape inside a table, so the
-/// range runs from the `[[` it reports to the next `]]`.
+/// The source range of a wiki link on the line comrak reports. comrak's
+/// columns drift inside tables (each `\|` shifts later text left; a table on the
+/// first line of a file with a BOM is shifted right) and its end falls short
+/// after `\|`, so the link is the unused `[[target` nearest the reported
+/// column, running to the next `]]`.
 fn wikilink_range(
     source: &str,
     line_starts: &[usize],
     sourcepos: comrak::nodes::Sourcepos,
+    target: &str,
+    used: &[usize],
 ) -> Option<std::ops::Range<usize>> {
-    let start = line_starts.get(sourcepos.start.line.checked_sub(1)?)?
-        + sourcepos.start.column.checked_sub(1)?;
-    let rest = source.get(start..)?;
-    if !rest.starts_with("[[") {
-        return None;
-    }
-    let close = rest.find("]]")?;
+    let index = sourcepos.start.line.checked_sub(1)?;
+    let line_start = *line_starts.get(index)?;
+    let line_end = line_starts
+        .get(index + 1)
+        .map_or(source.len(), |next| next - 1);
+    let line = source.get(line_start..line_end)?;
+    let estimate = line_start + sourcepos.start.column.saturating_sub(1);
+
+    let opens: Vec<usize> = line
+        .match_indices("[[")
+        .map(|(i, _)| line_start + i)
+        .filter(|start| !used.contains(start))
+        // `![[` is an embed unless its `!` is escaped
+        .filter(|&start| {
+            let before = &source[..start];
+            !before.ends_with('!') || before[..before.len() - 1].ends_with('\\')
+        })
+        .collect();
+    let named = |start: &&usize| source[**start + 2..].starts_with(target);
+    let nearest = |starts: &mut dyn Iterator<Item = &usize>| {
+        starts.copied().min_by_key(|start| start.abs_diff(estimate))
+    };
+    let start = nearest(&mut opens.iter().filter(named)).or_else(|| nearest(&mut opens.iter()))?;
+    let close = source[start..line_end].find("]]")?;
     Some(start..start + close + 2)
 }
 
@@ -832,12 +863,7 @@ mod tests {
 
     #[test]
     fn escaped_embeds_stay_literal_without_wikilinks() {
-        for md in [
-            "Escaped \\![[b.png]]",
-            "!\\[[a.png]]",
-            "&#33;[[a.png]]",
-            "&#33;[[a.png]] then ![[b.png]]",
-        ] {
+        for md in ["Escaped \\![[b.png]]", "!\\[[a.png]]", "&#33;[[a.png]]"] {
             let rendered = embeds_only(md);
             assert!(
                 !rendered.html.contains("<img"),
@@ -846,6 +872,20 @@ mod tests {
             );
             assert!(rendered.embeds.is_empty(), "{md}");
         }
+        // An entity-written embed stays text without hiding a real one after it
+        let rendered = embeds_only("&#33;[[a.png]] then ![[b.png]]");
+        assert_eq!(rendered.embeds, ["b.png"]);
+        assert_eq!(
+            rendered.html.matches("<img").count(),
+            1,
+            "{}",
+            rendered.html
+        );
+        assert!(
+            rendered.html.contains("![[a.png]] then <img src=\"b.png\""),
+            "{}",
+            rendered.html
+        );
         let html = embeds_only("\\\\![[real.png]]").html;
         assert!(
             html.contains("\\<img src=\"real.png\""),

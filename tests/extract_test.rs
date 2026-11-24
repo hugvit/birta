@@ -177,3 +177,141 @@ fn edge_case_fixture_finds_what_obsidian_would() {
     );
     assert_eq!(e.wikilinks.iter().filter(|t| *t == "Target").count(), 1);
 }
+
+fn spans_of<'m>(markdown: &'m str, extracted: &Extracted) -> (Vec<&'m str>, Vec<&'m str>) {
+    let slice = |spans: &[birta_core::render::TargetSpan]| {
+        spans
+            .iter()
+            .map(|s| &markdown[s.range.clone()])
+            .collect::<Vec<_>>()
+    };
+    (
+        slice(&extracted.wikilink_spans),
+        slice(&extracted.embed_spans),
+    )
+}
+
+#[test]
+fn wikilink_spans_survive_table_column_drift() {
+    for (markdown, expected) in [
+        (
+            "a | b\n--|--\n[[A\\|B]] [[C]] | x",
+            vec!["[[A\\|B]]", "[[C]]"],
+        ),
+        ("a | b\n--|--\n`x\\|y` [[C]] | x", vec!["[[C]]"]),
+        ("a | b\n--|--\n![[q.png\\|20]] [[C]] | x", vec!["[[C]]"]),
+        ("\u{feff}a | b\n--|--\n![[p.png]] [[C]] | x", vec!["[[C]]"]),
+        (
+            "\u{feff}a | [[H]]\n--|--\n[[C]] | [[D]]",
+            vec!["[[H]]", "[[C]]", "[[D]]"],
+        ),
+    ] {
+        let e = assert_matches_render(markdown, &all_on(None), markdown);
+        assert_eq!(spans_of(markdown, &e).0, expected, "{markdown:?}");
+    }
+}
+
+#[test]
+fn wikilink_spans_are_in_source_order() {
+    let markdown = "x[^1]\n\n[^1]: [[B]]\n\n[[A]]";
+    let e = extract(markdown, &all_on(None));
+    assert_eq!(spans_of(markdown, &e).0, ["[[B]]", "[[A]]"]);
+}
+
+#[test]
+fn a_lone_embed_with_an_escaped_pipe_is_one_target() {
+    let expanding = Expanding;
+    for markdown in [
+        "![[q.png\\|20]]",
+        "![[Note\\|x]]",
+        "a | b\n--|--\n![[Note\\|x]] | y",
+    ] {
+        for resolver in [None, Some(&expanding as &dyn Resolver)] {
+            let e = assert_matches_render(markdown, &all_on(resolver), markdown);
+            assert_eq!(e.embeds.len(), 1, "{markdown:?}: {:?}", e.embeds);
+            assert!(!e.embeds[0].ends_with('\\'), "{markdown:?}: {:?}", e.embeds);
+            assert_eq!(e.embed_spans.len(), 1, "{markdown:?}");
+        }
+    }
+}
+
+fn embeds_only() -> RenderOptions<'static> {
+    RenderOptions {
+        embeds: true,
+        tags: true,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn escaped_embeds_in_table_cells_stay_text() {
+    for markdown in [
+        "a | b\n--|--\n\\![[e.png]] | y",
+        "a | b\n--|--\nx\\|y \\![[e.png]] | z",
+        "a | b\n--|--\n`p\\|q` \\![[e.png]] ![[f.png]] | z",
+    ] {
+        let rendered = render(markdown, &embeds_only());
+        assert!(
+            !rendered.embeds.contains(&"e.png".to_string()),
+            "{markdown:?}: {:?}",
+            rendered.embeds
+        );
+        assert!(
+            !rendered.html.contains("src=\"e.png\""),
+            "{markdown:?}: {}",
+            rendered.html
+        );
+        assert_matches_render(markdown, &embeds_only(), markdown);
+    }
+    let markdown = "a | b\n--|--\n`p\\|q` \\![[e.png]] ![[f.png]] | z";
+    assert_eq!(
+        render(markdown, &embeds_only())
+            .html
+            .matches("<img")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn entity_spelled_embeds_do_not_hide_or_duplicate_real_ones() {
+    for (markdown, expected) in [
+        ("&#33;[[E]] ![[p.png]]", vec!["p.png"]),
+        ("![[a.png]] &#33;[[E]] ![[p.png]]", vec!["a.png", "p.png"]),
+        (
+            "&#33;[[e.png]] ![[p.png]] ![[q.png]]",
+            vec!["p.png", "q.png"],
+        ),
+        ("!\\[[x.png]] ![[p.png]]", vec!["p.png"]),
+        (
+            "it's ![[p.png]] -- and ![[q.png]]...",
+            vec!["p.png", "q.png"],
+        ),
+    ] {
+        let rendered = render(markdown, &embeds_only());
+        assert_eq!(rendered.embeds, expected, "{markdown:?}");
+        assert_eq!(
+            rendered.html.matches("<img").count(),
+            expected.len(),
+            "{markdown:?}: {}",
+            rendered.html
+        );
+        let e = assert_matches_render(markdown, &embeds_only(), markdown);
+        assert_eq!(e.embed_spans.len(), expected.len(), "{markdown:?}");
+    }
+}
+
+#[test]
+fn a_bom_keeps_table_cell_embeds_and_tags() {
+    let markdown = "\u{feff}a | b\n--|--\n![[p.png]] #celltag | y";
+    let rendered = render(markdown, &embeds_only());
+    assert_eq!(rendered.embeds, ["p.png"]);
+    assert_eq!(rendered.tags, ["celltag"]);
+    assert!(
+        rendered.html.contains("<img src=\"p.png\""),
+        "{}",
+        rendered.html
+    );
+    let e = assert_matches_render(markdown, &embeds_only(), "bom");
+    assert_eq!(spans_of(markdown, &e).1, ["![[p.png]]"]);
+}

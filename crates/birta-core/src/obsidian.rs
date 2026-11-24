@@ -85,16 +85,14 @@ fn scan<'a>(
             };
             (text.to_string(), data.sourcepos)
         };
-        let sourcepos = widen_in_table_cell(node, sourcepos);
-
         // Escapes and entities are already decoded in `literal`, so every
         // match is checked against the source text, and without it nothing changes
-        let Some(raw) = raw_text(&lines, sourcepos) else {
+        let Some((raw, map)) = source_of(&lines, node, &literal, sourcepos) else {
             continue;
         };
         let mut pieces = vec![Piece::Text(literal.clone())];
         if syntax.embeds && literal.contains("![[") {
-            pieces = split_embeds(&literal, raw, syntax, &mut found);
+            pieces = split_embeds(&literal, raw, map.as_deref(), syntax, &mut found);
         }
         if syntax.tags {
             let starts_clean = starts_at_boundary(node);
@@ -201,6 +199,129 @@ fn raw_text<'s>(lines: &Lines<'s>, sourcepos: Sourcepos) -> Option<Raw<'s>> {
     })
 }
 
+/// The source behind a text node, and with it, when the node's decoded text
+/// can be traced back character by character, where each of its bytes came from.
+///
+/// comrak's columns drift inside tables (each `\|` shifts later text left, and a
+/// table on the first line of a file with a BOM is shifted right), so the source
+/// is found by aligning `literal` at the offsets nearest the reported column.
+fn source_of<'s, 'a>(
+    lines: &Lines<'s>,
+    node: &'a AstNode<'a>,
+    literal: &str,
+    sourcepos: Sourcepos,
+) -> Option<(Raw<'s>, Option<Vec<usize>>)> {
+    if sourcepos.start.line == sourcepos.end.line
+        && let Some(index) = sourcepos.start.line.checked_sub(1)
+        && let Some(line) = lines.lines.get(index)
+    {
+        let estimate = sourcepos.start.column.saturating_sub(1);
+        for shift in
+            std::iter::once(0).chain((1..=MAX_DRIFT).flat_map(|d| [d as isize, -(d as isize)]))
+        {
+            let Some(start) = estimate.checked_add_signed(shift) else {
+                continue;
+            };
+            if let Some((end, map)) = align(line, literal, start) {
+                let raw = Raw {
+                    line,
+                    start,
+                    text: &line[start..end],
+                    offset: lines.starts[index] + start,
+                };
+                return Some((
+                    raw,
+                    Some(map.into_iter().map(|m| m.wrapping_sub(start)).collect()),
+                ));
+            }
+        }
+    }
+    let sourcepos = widen_in_table_cell(node, sourcepos);
+    raw_text(lines, sourcepos).map(|raw| (raw, None))
+}
+
+/// How far from comrak's column a text node's source is searched for.
+const MAX_DRIFT: usize = 24;
+
+/// Trace `literal` through `line` from byte `from`, undoing what comrak decodes:
+/// backslash escapes, entities and smart punctuation. Returns the end of the
+/// source and, for each byte offset of `literal` on a char boundary, its source
+/// offset in `line` (`usize::MAX` elsewhere).
+fn align(line: &str, literal: &str, from: usize) -> Option<(usize, Vec<usize>)> {
+    let mut map = vec![usize::MAX; literal.len() + 1];
+    let mut r = from;
+    for (l, c) in literal.char_indices() {
+        let rest = line.get(r..)?;
+        map[l] = r;
+        let rc = rest.chars().next()?;
+        if rc == '\\'
+            && let Some(next) = rest[1..].chars().next()
+            && next == c
+            && next.is_ascii_punctuation()
+        {
+            r += 1 + next.len_utf8();
+            continue;
+        }
+        if rc == '&'
+            && let Some(len) = entity_len(rest)
+            && !(c == '&' && !rest.starts_with("&amp;") && !rest.starts_with("&#38;"))
+        {
+            r += len;
+            continue;
+        }
+        if rc == c {
+            r += rc.len_utf8();
+            continue;
+        }
+        let smart = match c {
+            '’' | '‘' => "'",
+            '“' | '”' => "\"",
+            '—' => "---",
+            '–' => "--",
+            '…' => "...",
+            _ => return None,
+        };
+        if !rest.starts_with(smart) {
+            return None;
+        }
+        r += smart.len();
+    }
+    map[literal.len()] = r;
+    Some((r, map))
+}
+
+/// The length of an HTML entity (`&name;`, `&#123;`, `&#x7b;`) at the start of `text`.
+fn entity_len(text: &str) -> Option<usize> {
+    let body = text.strip_prefix('&')?;
+    let semi = body.find(';')?;
+    let name = &body[..semi];
+    let valid = match name.strip_prefix('#') {
+        Some(num) => match num.strip_prefix(['x', 'X']) {
+            Some(hex) => {
+                !hex.is_empty() && hex.len() <= 6 && hex.chars().all(|c| c.is_ascii_hexdigit())
+            }
+            None => !num.is_empty() && num.len() <= 7 && num.chars().all(|c| c.is_ascii_digit()),
+        },
+        None => {
+            !name.is_empty() && name.len() <= 32 && name.chars().all(|c| c.is_ascii_alphanumeric())
+        }
+    };
+    valid.then_some(semi + 2)
+}
+
+/// The raw range of a decoded `![[…]]` match, when its `!`, `[[` and `]]` are
+/// literally in the source, unescaped: entities and escapes can spell a match
+/// that Obsidian would not see.
+fn raw_embed(raw: Raw<'_>, map: &[usize], start: usize, end: usize) -> Option<Range<usize>> {
+    let open = *map.get(start)?;
+    let close = *map.get(end - 2)?;
+    let text = raw.text;
+    (text.get(open..)?.starts_with("![[")
+        && text.get(close..)?.starts_with("]]")
+        && !raw.escaped(open))
+    .then_some(open..close + 2)
+}
+
 /// comrak ends a table cell's text at its unescaped length, so `\|` cuts the
 /// span short. The cell's own end still covers it, plus trailing spaces.
 fn widen_in_table_cell<'a>(node: &'a AstNode<'a>, mut sourcepos: Sourcepos) -> Sourcepos {
@@ -242,15 +363,22 @@ fn embed_notes<'a>(
         if !matches!(find_embeds(&literal).as_slice(), [(0, end, _)] if *end == literal.len()) {
             continue;
         }
-        let Some(raw) = raw_text(lines, sourcepos) else {
+        let Some((raw, map)) = source_of(lines, child, &literal, sourcepos) else {
             continue;
         };
-        let (inner, span) = match find_embeds(raw.text).as_slice() {
-            [(start, end, inner)] if !raw.escaped(*start) => {
-                (inner.to_string(), raw.offset + start..raw.offset + end)
-            }
-            _ => continue,
+        let range = match map {
+            Some(map) => match raw_embed(raw, &map, 0, literal.len()) {
+                Some(range) => range,
+                None => continue,
+            },
+            None => match find_embeds(raw.text).as_slice() {
+                [(start, end, _)] if !raw.escaped(*start) => *start..*end,
+                _ => continue,
+            },
         };
+        // Obsidian escapes the pipe as `\|` inside tables
+        let inner = raw.text[range.start + 3..range.end - 2].replace("\\|", "|");
+        let span = raw.offset + range.start..raw.offset + range.end;
         let target = inner.split('|').next().unwrap_or_default().trim();
         if target.is_empty() || is_image(target) {
             continue;
@@ -310,7 +438,54 @@ fn find_embeds(text: &str) -> Vec<(usize, usize, &str)> {
 /// Split embeds out of a text node. Matches and targets come from `raw`, the
 /// node's source text: smart punctuation has rewritten `literal` (`it's` to
 /// `it’s`) and escapes are gone from it (`\![[x]]` reads `![[x]]`).
-fn split_embeds(literal: &str, raw: Raw<'_>, syntax: &Syntax<'_>, found: &mut Found) -> Vec<Piece> {
+fn split_embeds(
+    literal: &str,
+    raw: Raw<'_>,
+    map: Option<&[usize]>,
+    syntax: &Syntax<'_>,
+    found: &mut Found,
+) -> Vec<Piece> {
+    let Some(map) = map else {
+        return split_embeds_unaligned(literal, raw, syntax, found);
+    };
+    let mut pieces = Vec::new();
+    let mut last = 0;
+    for (start, end, _) in find_embeds(literal) {
+        let Some(range) = raw_embed(raw, map, start, end) else {
+            continue;
+        };
+        let inner = raw.text[range.start + 3..range.end - 2].replace("\\|", "|");
+        let (target, option) = match inner.split_once('|') {
+            Some((t, o)) => (t.trim(), Some(o.trim())),
+            None => (inner.trim(), None),
+        };
+        if target.is_empty() {
+            continue;
+        }
+        push_unique(&mut found.embeds, target);
+        found.embed_spans.push((
+            target.to_string(),
+            raw.offset + range.start..raw.offset + range.end,
+        ));
+        if !is_image(target) {
+            continue;
+        }
+        pieces.push(Piece::Text(literal[last..start].to_string()));
+        pieces.push(Piece::Html(image_html(target, option, syntax.resolver)));
+        last = end;
+    }
+    pieces.push(Piece::Text(literal[last..].to_string()));
+    pieces
+}
+
+/// The pairing used when a node's text can't be traced to its source: decoded
+/// and source matches by index, giving up when their counts differ.
+fn split_embeds_unaligned(
+    literal: &str,
+    raw: Raw<'_>,
+    syntax: &Syntax<'_>,
+    found: &mut Found,
+) -> Vec<Piece> {
     let matches = find_embeds(literal);
     let raw_matches = find_embeds(raw.text);
     // An escape or entity created or hid a match (`!\[[x]]`, `&#33;[[x]]`)

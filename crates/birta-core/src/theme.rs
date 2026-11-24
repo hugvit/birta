@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use syntect::highlighting::ThemeSet;
+use syntect::highlighting::{Color, Highlighter, ThemeSet};
+use syntect::parsing::Scope;
 
 // ---------------------------------------------------------------------------
 // Bundled theme data (embedded at compile time)
@@ -238,12 +239,52 @@ pub fn variant_to_css(variant: &VariantDef, theme_name: &str) -> String {
             None => {}
         }
     }
-    // Apply to :root, .markdown-body, and both data-theme selectors
-    // so theme colors always take effect regardless of toggle state
+    css_block(&decls)
+}
+
+// Apply to :root, .markdown-body, and both data-theme selectors
+// so theme colors always take effect regardless of toggle state
+fn css_block(decls: &[String]) -> String {
     let block = decls.join("\n");
     format!(
         ":root,\n.markdown-body,\n[data-theme=\"dark\"],\n[data-theme=\"light\"] {{\n{block}\n}}"
     )
+}
+
+const DIFF_CSS_MARKER: &str = "/* birta:diff-colors */";
+
+const DIFF_SCOPES: &[(&str, &str)] = &[
+    ("markup.inserted.diff", "--birta-diff-add"),
+    ("markup.deleted.diff", "--birta-diff-del"),
+    ("markup.changed.diff", "--birta-diff-change"),
+];
+
+pub(crate) fn color_to_hex(c: Color) -> String {
+    if c.a == 255 {
+        format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b)
+    } else {
+        format!("#{:02x}{:02x}{:02x}{:02x}", c.r, c.g, c.b, c.a)
+    }
+}
+
+/// Diff colour variables taken from the syntax theme's `markup.*.diff`
+/// scopes, or an empty string when the theme styles none of them.
+pub fn syntax_diff_css(syntax: &SyntaxTheme) -> String {
+    let highlighter = Highlighter::new(&syntax.theme);
+    let mut decls = Vec::new();
+    for &(scope, css_var) in DIFF_SCOPES {
+        let Ok(scope) = Scope::new(scope) else {
+            continue;
+        };
+        let style = highlighter.style_mod_for_stack(&[scope]);
+        if let Some(color) = style.foreground.or(style.background) {
+            decls.push(format!("  {css_var}: {};", color_to_hex(color)));
+        }
+    }
+    if decls.is_empty() {
+        return String::new();
+    }
+    format!("\n{DIFF_CSS_MARKER}\n{}", css_block(&decls))
 }
 
 // ---------------------------------------------------------------------------
@@ -326,13 +367,22 @@ impl ResolvedTheme {
 
     /// Replace the active variant's syntax highlighting theme.
     pub fn set_syntax_theme(&mut self, syntax: SyntaxTheme) {
-        match &mut self.variants {
+        let data = match &mut self.variants {
             ThemeVariants::Both { light, dark } => match self.active_variant {
-                Variant::Light => light.syntax = Some(syntax),
-                Variant::Dark => dark.syntax = Some(syntax),
+                Variant::Light => light,
+                Variant::Dark => dark,
             },
-            ThemeVariants::Single(data) => data.syntax = Some(syntax),
+            ThemeVariants::Single(data) => data,
+        };
+        if let Some(pos) = data.css_vars.find(DIFF_CSS_MARKER) {
+            // Drop the separating newline too so repeated swaps don't accumulate blank lines
+            let cut = data.css_vars[..pos]
+                .strip_suffix('\n')
+                .map_or(pos, str::len);
+            data.css_vars.truncate(cut);
         }
+        data.css_vars.push_str(&syntax_diff_css(&syntax));
+        data.syntax = Some(syntax);
     }
 }
 
@@ -589,7 +639,7 @@ fn resolve_variant(
     theme_name: &str,
     base_dir: &Option<PathBuf>,
 ) -> anyhow::Result<VariantData> {
-    let css_vars = variant_to_css(variant_def, theme_name);
+    let mut css_vars = variant_to_css(variant_def, theme_name);
     let syntax = match &variant_def.syntax {
         Some(syntax_ref) => {
             let rel = &syntax_ref.filepath;
@@ -607,6 +657,9 @@ fn resolve_variant(
         }
         None => None,
     };
+    if let Some(syntax) = &syntax {
+        css_vars.push_str(&syntax_diff_css(syntax));
+    }
     Ok(VariantData { css_vars, syntax })
 }
 
@@ -961,6 +1014,113 @@ mod tests {
         let abs_without_ext = absolute_theme().trim_end_matches(".toml").to_string();
         for name in [RELATIVE_THEME, &absolute_theme(), &abs_without_ext] {
             assert_eq!(search.resolve(name).unwrap().name, "dracula", "{name}");
+        }
+    }
+
+    fn tmtheme(settings: &str) -> SyntaxTheme {
+        let plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>name</key><string>test</string>
+<key>settings</key><array>
+<dict><key>settings</key><dict><key>foreground</key><string>#000000</string></dict></dict>
+{settings}
+</array></dict></plist>"#
+        );
+        let mut reader = std::io::Cursor::new(plist);
+        SyntaxTheme {
+            theme: ThemeSet::load_from_reader(&mut reader).unwrap(),
+            theme_name: "test".to_string(),
+        }
+    }
+
+    fn scope_setting(scope: &str, key: &str, color: &str) -> String {
+        format!(
+            "<dict><key>scope</key><string>{scope}</string>\
+             <key>settings</key><dict><key>{key}</key><string>{color}</string></dict></dict>"
+        )
+    }
+
+    #[test]
+    fn syntax_diff_css_reads_markup_scopes() {
+        let syntax = tmtheme(
+            &[
+                scope_setting("markup.inserted", "foreground", "#00FF00"),
+                scope_setting("markup.deleted", "background", "#ff000080"),
+            ]
+            .concat(),
+        );
+        let css = syntax_diff_css(&syntax);
+        assert!(css.contains(DIFF_CSS_MARKER), "{css}");
+        assert!(css.contains("--birta-diff-add: #00ff00;"), "{css}");
+        assert!(css.contains("--birta-diff-del: #ff000080;"), "{css}");
+        assert!(!css.contains("--birta-diff-change"), "{css}");
+    }
+
+    #[test]
+    fn syntax_diff_css_empty_without_markup_scopes() {
+        let syntax = tmtheme(&scope_setting("comment", "foreground", "#888888"));
+        assert_eq!(syntax_diff_css(&syntax), "");
+    }
+
+    #[test]
+    fn set_syntax_theme_replaces_diff_block() {
+        let dracula: ThemeToml =
+            toml::from_str(include_str!("../assets/themes/dracula.toml")).unwrap();
+        let mut resolved = build_resolved_theme(dracula, None).unwrap();
+        assert_eq!(
+            resolved
+                .active_data()
+                .css_vars
+                .matches(DIFF_CSS_MARKER)
+                .count(),
+            1
+        );
+
+        let base_len = resolved
+            .active_data()
+            .css_vars
+            .find(DIFF_CSS_MARKER)
+            .unwrap();
+        for _ in 0..2 {
+            resolved.set_syntax_theme(tmtheme(&scope_setting(
+                "markup.inserted",
+                "foreground",
+                "#123456",
+            )));
+        }
+        let css = &resolved.active_data().css_vars;
+        assert_eq!(css.matches(DIFF_CSS_MARKER).count(), 1, "{css}");
+        assert_eq!(css.find(DIFF_CSS_MARKER), Some(base_len), "{css}");
+        assert!(css.contains("--birta-diff-add: #123456;"), "{css}");
+        assert!(!css.contains("--birta-diff-del"), "{css}");
+
+        resolved.set_syntax_theme(tmtheme(""));
+        let css = &resolved.active_data().css_vars;
+        assert!(!css.contains(DIFF_CSS_MARKER), "{css}");
+        assert!(css.ends_with('}'), "{css}");
+    }
+
+    #[test]
+    fn bundled_themes_resolve_with_diff_colors() {
+        for name in bundled_theme_names() {
+            let resolved = ThemeSearch::default().resolve(name).unwrap();
+            let variants: Vec<&VariantData> = match &resolved.variants {
+                ThemeVariants::Both { light, dark } => vec![light, dark],
+                ThemeVariants::Single(data) => vec![data],
+            };
+            for data in variants {
+                // diff.css falls back to these when the syntax theme has no diff colours
+                assert!(data.css_vars.contains("--alert-tip:"), "{name}");
+                assert!(data.css_vars.contains("--alert-caution:"), "{name}");
+                let markers = data.css_vars.matches(DIFF_CSS_MARKER).count();
+                assert!(markers <= 1, "{name}");
+                if let Some(syntax) = &data.syntax {
+                    assert_eq!(markers == 1, !syntax_diff_css(syntax).is_empty(), "{name}");
+                } else {
+                    assert_eq!(markers, 0, "{name}");
+                }
+            }
         }
     }
 

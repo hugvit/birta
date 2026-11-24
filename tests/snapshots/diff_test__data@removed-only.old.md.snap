@@ -1,0 +1,24 @@
+---
+source: tests/diff_test.rs
+expression: "(&result.hunks, &result.stats, result.identical, result.line_endings_differ,\nresult.final_newline_differs, result.bom_differs, result.degraded,)"
+input_file: tests/fixtures/diff/removed-only.old.md
+---
+(
+    [
+        Hunk {
+            id: 0,
+            old: 1..2,
+            new: 1..1,
+            kind: Removed,
+        },
+    ],
+    DiffStats {
+        added: 0,
+        removed: 1,
+    },
+    false,
+    false,
+    false,
+    false,
+    false,
+)

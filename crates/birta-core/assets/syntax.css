@@ -1,4 +1,120 @@
-/* Syntax highlighting — GitHub-inspired colors for syntect TextMate scope classes */
+/* Syntax highlighting — GitHub-inspired colors for syntect TextMate scope classes.
+ * Colours are variables set on the element carrying data-theme, so the nearest
+ * data-theme decides light or dark; the OS preference applies only without one. */
+
+:root {
+  --birta-syn-bg: #f6f8fa;
+  --birta-syn-fg: #1f2328;
+  --birta-syn-keyword: #cf222e;
+  --birta-syn-function: #8250df;
+  --birta-syn-type: #953800;
+  --birta-syn-tag: #116329;
+  --birta-syn-string: #0a3069;
+  --birta-syn-constant: #0550ae;
+  --birta-syn-comment: #6e7781;
+  --birta-syn-variable: #953800;
+  --birta-syn-parameter: #24292f;
+  --birta-syn-punctuation: #1f2328;
+  --birta-syn-call: #8250df;
+  --birta-syn-attribute: #0550ae;
+  --birta-syn-variable-other: #0550ae;
+  --birta-syn-inserted: #116329;
+  --birta-syn-inserted-bg: #dafbe1;
+  --birta-syn-deleted: #82071e;
+  --birta-syn-deleted-bg: #ffebe9;
+  --birta-syn-md-heading: #0550ae;
+  --birta-syn-md-string: #0a3069;
+  --birta-syn-md-code: #0550ae;
+  --birta-syn-md-bullet: #953800;
+  --birta-syn-md-lang: #6639ba;
+  --birta-syn-md-table: #3b2300;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --birta-syn-bg: #161b22;
+    --birta-syn-fg: #f0f6fc;
+    --birta-syn-keyword: #ff7b72;
+    --birta-syn-function: #d2a8ff;
+    --birta-syn-type: #ffa657;
+    --birta-syn-tag: #7ee787;
+    --birta-syn-string: #a5d6ff;
+    --birta-syn-constant: #79c0ff;
+    --birta-syn-comment: #8b949e;
+    --birta-syn-variable: #ffa657;
+    --birta-syn-parameter: #f0f6fc;
+    --birta-syn-punctuation: #f0f6fc;
+    --birta-syn-call: #8250df;
+    --birta-syn-attribute: #79c0ff;
+    --birta-syn-variable-other: #79c0ff;
+    --birta-syn-inserted: #aff5b4;
+    --birta-syn-inserted-bg: #033a16;
+    --birta-syn-deleted: #ffdcd7;
+    --birta-syn-deleted-bg: #67060c;
+    --birta-syn-md-heading: #1f6feb;
+    --birta-syn-md-string: #a5d6ff;
+    --birta-syn-md-code: #79c0ff;
+    --birta-syn-md-bullet: #ffa657;
+    --birta-syn-md-lang: #d2a8ff;
+    --birta-syn-md-table: #f2cc60;
+  }
+}
+
+[data-theme="light"] {
+  --birta-syn-bg: #f6f8fa;
+  --birta-syn-fg: #1f2328;
+  --birta-syn-keyword: #cf222e;
+  --birta-syn-function: #8250df;
+  --birta-syn-type: #953800;
+  --birta-syn-tag: #116329;
+  --birta-syn-string: #0a3069;
+  --birta-syn-constant: #0550ae;
+  --birta-syn-comment: #6e7781;
+  --birta-syn-variable: #953800;
+  --birta-syn-parameter: #24292f;
+  --birta-syn-punctuation: #1f2328;
+  --birta-syn-call: #8250df;
+  --birta-syn-attribute: #0550ae;
+  --birta-syn-variable-other: #0550ae;
+  --birta-syn-inserted: #116329;
+  --birta-syn-inserted-bg: #dafbe1;
+  --birta-syn-deleted: #82071e;
+  --birta-syn-deleted-bg: #ffebe9;
+  --birta-syn-md-heading: #0550ae;
+  --birta-syn-md-string: #0a3069;
+  --birta-syn-md-code: #0550ae;
+  --birta-syn-md-bullet: #953800;
+  --birta-syn-md-lang: #6639ba;
+  --birta-syn-md-table: #3b2300;
+}
+
+[data-theme="dark"] {
+  --birta-syn-bg: #161b22;
+  --birta-syn-fg: #f0f6fc;
+  --birta-syn-keyword: #ff7b72;
+  --birta-syn-function: #d2a8ff;
+  --birta-syn-type: #ffa657;
+  --birta-syn-tag: #7ee787;
+  --birta-syn-string: #a5d6ff;
+  --birta-syn-constant: #79c0ff;
+  --birta-syn-comment: #8b949e;
+  --birta-syn-variable: #ffa657;
+  --birta-syn-parameter: #f0f6fc;
+  --birta-syn-punctuation: #f0f6fc;
+  --birta-syn-call: #8250df;
+  --birta-syn-attribute: #79c0ff;
+  --birta-syn-variable-other: #79c0ff;
+  --birta-syn-inserted: #aff5b4;
+  --birta-syn-inserted-bg: #033a16;
+  --birta-syn-deleted: #ffdcd7;
+  --birta-syn-deleted-bg: #67060c;
+  --birta-syn-md-heading: #1f6feb;
+  --birta-syn-md-string: #a5d6ff;
+  --birta-syn-md-code: #79c0ff;
+  --birta-syn-md-bullet: #ffa657;
+  --birta-syn-md-lang: #d2a8ff;
+  --birta-syn-md-table: #f2cc60;
+}
 
 pre.syntax-highlighting {
   padding: 16px;
@@ -6,180 +122,77 @@ pre.syntax-highlighting {
   font-size: 85%;
   line-height: 1.45;
   border-radius: 6px;
-}
-
-/* Light theme (default) */
-pre.syntax-highlighting {
-  background-color: #f6f8fa;
-  color: #1f2328;
+  background-color: var(--birta-syn-bg);
+  color: var(--birta-syn-fg);
 }
 
 /* Keywords, storage */
-.keyword, .storage { color: #cf222e; }
-.storage.type { color: #cf222e; }
-.storage.modifier { color: #cf222e; }
+.keyword, .storage { color: var(--birta-syn-keyword); }
+.storage.type { color: var(--birta-syn-keyword); }
+.storage.modifier { color: var(--birta-syn-keyword); }
 
 /* Functions, methods */
-.entity.name.function { color: #8250df; }
-.entity.name.type, .entity.name.class { color: #953800; }
-.entity.name.tag { color: #116329; }
+.entity.name.function { color: var(--birta-syn-function); }
+.entity.name.type, .entity.name.class { color: var(--birta-syn-type); }
+.entity.name.tag { color: var(--birta-syn-tag); }
 
 /* Strings */
-.string { color: #0a3069; }
+.string { color: var(--birta-syn-string); }
 
 /* Numbers, constants */
-.constant, .constant.numeric { color: #0550ae; }
-.constant.language { color: #0550ae; }
+.constant, .constant.numeric { color: var(--birta-syn-constant); }
+.constant.language { color: var(--birta-syn-constant); }
 
 /* Comments */
-.comment { color: #6e7781; font-style: italic; }
+.comment { color: var(--birta-syn-comment); font-style: italic; }
 
 /* Variables, parameters */
-.variable { color: #953800; }
-.variable.parameter { color: #24292f; }
+.variable { color: var(--birta-syn-variable); }
+.variable.parameter { color: var(--birta-syn-parameter); }
 
 /* Punctuation */
-.punctuation { color: #1f2328; }
+.punctuation { color: var(--birta-syn-punctuation); }
 
 /* Operators */
-.keyword.operator { color: #cf222e; }
+.keyword.operator { color: var(--birta-syn-keyword); }
 
 /* Types, support */
-.support.type, .support.class { color: #953800; }
-.support.function { color: #8250df; }
+.support.type, .support.class { color: var(--birta-syn-type); }
+.support.function { color: var(--birta-syn-function); }
 
 /* Meta */
-.meta.function-call { color: #8250df; }
+.meta.function-call { color: var(--birta-syn-call); }
 
 /* Attributes */
-.entity.other.attribute-name { color: #0550ae; }
+.entity.other.attribute-name { color: var(--birta-syn-attribute); }
 
 /* Diff */
-.markup.inserted, .markup.inserted.diff { color: #116329; background-color: #dafbe1; }
-.markup.deleted, .markup.deleted.diff { color: #82071e; background-color: #ffebe9; }
-.punctuation.definition.inserted.diff { color: #116329; }
-.punctuation.definition.deleted.diff { color: #82071e; }
+.markup.inserted, .markup.inserted.diff { color: var(--birta-syn-inserted); background-color: var(--birta-syn-inserted-bg); }
+.markup.deleted, .markup.deleted.diff { color: var(--birta-syn-deleted); background-color: var(--birta-syn-deleted-bg); }
+.punctuation.definition.inserted.diff { color: var(--birta-syn-inserted); }
+.punctuation.definition.deleted.diff { color: var(--birta-syn-deleted); }
 
 /* Embedded/special */
-.variable.other { color: #0550ae; }
+.variable.other { color: var(--birta-syn-variable-other); }
 
-/* Dark theme overrides */
-[data-theme="dark"] pre.syntax-highlighting,
-:root[data-theme="dark"] pre.syntax-highlighting {
-  background-color: #161b22;
-  color: #e6edf3;
+/* Markdown source in the github theme, as GitHub colours it (pl-mh, pl-s, pl-c1, pl-v, pl-en, pl-corl) */
+:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .markup.heading.markdown,
+:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .markup.heading.markdown .punctuation,
+:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .markup.heading.markdown .entity {
+  color: var(--birta-syn-md-heading);
+  font-weight: 700;
 }
-
-[data-theme="dark"] .keyword,
-[data-theme="dark"] .storage,
-[data-theme="dark"] .storage.type,
-[data-theme="dark"] .storage.modifier {
-  color: #ff7b72;
-}
-
-[data-theme="dark"] .entity.name.function {
-  color: #d2a8ff;
-}
-
-[data-theme="dark"] .entity.name.type,
-[data-theme="dark"] .entity.name.class {
-  color: #ffa657;
-}
-
-[data-theme="dark"] .entity.name.tag {
-  color: #7ee787;
-}
-
-[data-theme="dark"] .string {
-  color: #a5d6ff;
-}
-
-[data-theme="dark"] .constant,
-[data-theme="dark"] .constant.numeric,
-[data-theme="dark"] .constant.language {
-  color: #79c0ff;
-}
-
-[data-theme="dark"] .comment {
-  color: #8b949e;
-}
-
-[data-theme="dark"] .variable {
-  color: #ffa657;
-}
-
-[data-theme="dark"] .variable.parameter {
-  color: #e6edf3;
-}
-
-[data-theme="dark"] .punctuation {
-  color: #e6edf3;
-}
-
-[data-theme="dark"] .keyword.operator {
-  color: #ff7b72;
-}
-
-[data-theme="dark"] .support.type,
-[data-theme="dark"] .support.class {
-  color: #ffa657;
-}
-
-[data-theme="dark"] .support.function {
-  color: #d2a8ff;
-}
-
-[data-theme="dark"] .entity.other.attribute-name {
-  color: #79c0ff;
-}
-
-[data-theme="dark"] .variable.other {
-  color: #79c0ff;
-}
-
-[data-theme="dark"] .markup.inserted,
-[data-theme="dark"] .markup.inserted.diff {
-  color: #aff5b4; background-color: #033a16;
-}
-[data-theme="dark"] .markup.deleted,
-[data-theme="dark"] .markup.deleted.diff {
-  color: #ffdcd7; background-color: #67060c;
-}
-[data-theme="dark"] .punctuation.definition.inserted.diff { color: #aff5b4; }
-[data-theme="dark"] .punctuation.definition.deleted.diff { color: #ffdcd7; }
-
-/* System preference dark mode (no explicit data-theme) */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) pre.syntax-highlighting {
-    background-color: #161b22;
-    color: #e6edf3;
-  }
-  :root:not([data-theme="light"]) .keyword,
-  :root:not([data-theme="light"]) .storage,
-  :root:not([data-theme="light"]) .storage.type,
-  :root:not([data-theme="light"]) .storage.modifier { color: #ff7b72; }
-  :root:not([data-theme="light"]) .entity.name.function { color: #d2a8ff; }
-  :root:not([data-theme="light"]) .entity.name.type,
-  :root:not([data-theme="light"]) .entity.name.class { color: #ffa657; }
-  :root:not([data-theme="light"]) .entity.name.tag { color: #7ee787; }
-  :root:not([data-theme="light"]) .string { color: #a5d6ff; }
-  :root:not([data-theme="light"]) .constant,
-  :root:not([data-theme="light"]) .constant.numeric,
-  :root:not([data-theme="light"]) .constant.language { color: #79c0ff; }
-  :root:not([data-theme="light"]) .comment { color: #8b949e; }
-  :root:not([data-theme="light"]) .variable { color: #ffa657; }
-  :root:not([data-theme="light"]) .variable.parameter { color: #e6edf3; }
-  :root:not([data-theme="light"]) .punctuation { color: #e6edf3; }
-  :root:not([data-theme="light"]) .keyword.operator { color: #ff7b72; }
-  :root:not([data-theme="light"]) .support.type,
-  :root:not([data-theme="light"]) .support.class { color: #ffa657; }
-  :root:not([data-theme="light"]) .support.function { color: #d2a8ff; }
-  :root:not([data-theme="light"]) .entity.other.attribute-name { color: #79c0ff; }
-  :root:not([data-theme="light"]) .variable.other { color: #79c0ff; }
-  :root:not([data-theme="light"]) .markup.inserted,
-  :root:not([data-theme="light"]) .markup.inserted.diff { color: #aff5b4; background-color: #033a16; }
-  :root:not([data-theme="light"]) .markup.deleted,
-  :root:not([data-theme="light"]) .markup.deleted.diff { color: #ffdcd7; background-color: #67060c; }
-  :root:not([data-theme="light"]) .punctuation.definition.inserted.diff { color: #aff5b4; }
-  :root:not([data-theme="light"]) .punctuation.definition.deleted.diff { color: #ffdcd7; }
+:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .markup.raw.inline.markdown { color: var(--birta-syn-md-code); }
+:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.definition.raw.markdown,
+:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.definition.bold.markdown,
+:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.definition.link.markdown,
+:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.definition.image.markdown,
+:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.definition.metadata.markdown { color: var(--birta-syn-md-string); }
+/* Only the pipes: GitHub leaves a delimiter row's dashes in the text colour */
+:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.separator.table-cell.markdown { color: var(--birta-syn-md-table); }
+:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.definition.list_item.markdown { color: var(--birta-syn-md-bullet); }
+:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .constant.other.language-name.markdown { color: var(--birta-syn-md-lang); }
+:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .markup.underline.link.markdown {
+  color: var(--birta-syn-md-string);
+  text-decoration: underline;
 }

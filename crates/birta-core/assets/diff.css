@@ -1,0 +1,414 @@
+/* Diff view from birta_core::diff. One DOM, laid out unified or side by side by data-layout. */
+
+/* GitHub's diff colours (Primer diffBlob tokens). They are set on the element that
+ * carries data-theme, so the nearest data-theme decides light or dark for text and
+ * rows alike; the OS preference applies only when no data-theme is set. */
+:root {
+  --birta-diff-fg: #1f2328;
+  --birta-diff-bg: #ffffff;
+  --birta-diff-muted: #59636e;
+  --birta-diff-add-line-bg: #dafbe1;
+  --birta-diff-add-num-bg: #aceebb;
+  --birta-diff-add-word-bg: #aceebb;
+  --birta-diff-del-line-bg: #ffebe9;
+  --birta-diff-del-num-bg: #ffcecb;
+  --birta-diff-del-word-bg: #ffcecb;
+  --birta-diff-hunk-line-bg: #ddf4ff;
+  --birta-diff-hunk-num-bg: #b6e3ff;
+  --birta-diff-empty-bg: #f6f8fa;
+  --birta-diff-border: #d1d9e0;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --birta-diff-fg: #f0f6fc;
+    --birta-diff-bg: #0d1117;
+    --birta-diff-muted: #9198a1;
+    --birta-diff-add-line-bg: #2ea04326;
+    --birta-diff-add-num-bg: #3fb9504d;
+    --birta-diff-add-word-bg: #2ea04366;
+    --birta-diff-del-line-bg: #f851491a;
+    --birta-diff-del-num-bg: #f851494d;
+    --birta-diff-del-word-bg: #f8514966;
+    --birta-diff-hunk-line-bg: #388bfd1a;
+    --birta-diff-hunk-num-bg: #0c2d6b;
+    --birta-diff-empty-bg: #151b23;
+    --birta-diff-border: #3d444d;
+  }
+}
+
+[data-theme="light"] {
+  --birta-diff-fg: #1f2328;
+  --birta-diff-bg: #ffffff;
+  --birta-diff-muted: #59636e;
+  --birta-diff-add-line-bg: #dafbe1;
+  --birta-diff-add-num-bg: #aceebb;
+  --birta-diff-add-word-bg: #aceebb;
+  --birta-diff-del-line-bg: #ffebe9;
+  --birta-diff-del-num-bg: #ffcecb;
+  --birta-diff-del-word-bg: #ffcecb;
+  --birta-diff-hunk-line-bg: #ddf4ff;
+  --birta-diff-hunk-num-bg: #b6e3ff;
+  --birta-diff-empty-bg: #f6f8fa;
+  --birta-diff-border: #d1d9e0;
+}
+
+[data-theme="dark"] {
+  --birta-diff-fg: #f0f6fc;
+  --birta-diff-bg: #0d1117;
+  --birta-diff-muted: #9198a1;
+  --birta-diff-add-line-bg: #2ea04326;
+  --birta-diff-add-num-bg: #3fb9504d;
+  --birta-diff-add-word-bg: #2ea04366;
+  --birta-diff-del-line-bg: #f851491a;
+  --birta-diff-del-num-bg: #f851494d;
+  --birta-diff-del-word-bg: #f8514966;
+  --birta-diff-hunk-line-bg: #388bfd1a;
+  --birta-diff-hunk-num-bg: #0c2d6b;
+  --birta-diff-empty-bg: #151b23;
+  --birta-diff-border: #3d444d;
+}
+
+.birta-diff {
+  display: block;
+  width: 100%;
+  font-family: var(--fontStack-monospace, ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace);
+  font-size: 12px;
+  line-height: 24px;
+  color: var(--birta-diff-fg);
+  background: var(--birta-diff-bg);
+  /* GitHub: 40px for two-digit numbers, 44px for three, wider beyond */
+  --birta-diff-num-w: max(40px, round(up, calc(var(--birta-diff-digits, 3) * 1ch + 22px), 1px));
+  --birta-diff-gutter: calc(2 * var(--birta-diff-num-w));
+}
+
+/* Other birta themes: the syntax theme's diff colours, else the theme's alert colours */
+[data-birta-theme]:not([data-birta-theme="github"]) .birta-diff {
+  --birta-diff-add-color: var(--birta-diff-add, var(--alert-tip, #1a7f37));
+  --birta-diff-del-color: var(--birta-diff-del, var(--alert-caution, #cf222e));
+  --birta-diff-hunk-color: var(--fgColor-accent, #0969da);
+  --birta-diff-add-line-bg: color-mix(in srgb, var(--birta-diff-add-color) 14%, transparent);
+  --birta-diff-add-num-bg: color-mix(in srgb, var(--birta-diff-add-color) 30%, transparent);
+  --birta-diff-add-word-bg: color-mix(in srgb, var(--birta-diff-add-color) 32%, transparent);
+  --birta-diff-del-line-bg: color-mix(in srgb, var(--birta-diff-del-color) 14%, transparent);
+  --birta-diff-del-num-bg: color-mix(in srgb, var(--birta-diff-del-color) 30%, transparent);
+  --birta-diff-del-word-bg: color-mix(in srgb, var(--birta-diff-del-color) 32%, transparent);
+  --birta-diff-hunk-line-bg: color-mix(in srgb, var(--birta-diff-hunk-color) 10%, transparent);
+  --birta-diff-hunk-num-bg: color-mix(in srgb, var(--birta-diff-hunk-color) 22%, transparent);
+  --birta-diff-empty-bg: var(--bgColor-muted, color-mix(in srgb, currentColor 6%, transparent));
+  --birta-diff-muted: var(--fgColor-muted, #59636e);
+  --birta-diff-fg: var(--fgColor-default, #1f2328);
+  --birta-diff-bg: var(--bgColor-default, #ffffff);
+  --birta-diff-border: var(--borderColor-default, #d1d9e0);
+}
+
+/* Only `auto` queries its width; a container collapses to 0 in a shrink-to-fit parent */
+.birta-diff[data-layout="auto"] {
+  container: birta-diff / inline-size;
+}
+
+/* Syntect scope classes (`header`, `tag`, ...) collide with page and markdown styles */
+.birta-diff .diff-text span {
+  display: inline;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  font-size: inherit;
+  font-family: inherit;
+  position: static;
+  float: none;
+}
+
+.birta-diff .diff-note {
+  padding: 0 8px;
+  color: var(--birta-diff-muted);
+  font-style: italic;
+}
+
+.birta-diff .diff-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.birta-diff .diff-num {
+  padding: 0;
+  text-align: center;
+  color: var(--birta-diff-muted);
+  user-select: none;
+}
+
+.birta-diff .diff-del > .diff-num,
+.birta-diff .diff-add > .diff-num {
+  color: inherit;
+}
+
+/* GitHub puts the sign 8px into its 24px lead-in before the text */
+.birta-diff .diff-sign {
+  padding-left: 8px;
+  user-select: none;
+}
+
+/* The gutter takes the stronger number colour, the rest of the row the line colour */
+.birta-diff .diff-del {
+  background: linear-gradient(to right, var(--birta-diff-del-num-bg) var(--birta-diff-gutter), var(--birta-diff-del-line-bg) var(--birta-diff-gutter)), var(--birta-diff-bg);
+}
+
+.birta-diff .diff-add {
+  background: linear-gradient(to right, var(--birta-diff-add-num-bg) var(--birta-diff-gutter), var(--birta-diff-add-line-bg) var(--birta-diff-gutter)), var(--birta-diff-bg);
+}
+
+/* Word marks drop the syntax colour, as GitHub does */
+.birta-diff del.diff-word,
+.birta-diff ins.diff-word {
+  color: var(--birta-diff-fg);
+  text-decoration: none;
+  border-radius: 3px;
+}
+
+.birta-diff del.diff-word {
+  background: var(--birta-diff-del-word-bg);
+}
+
+.birta-diff ins.diff-word {
+  background: var(--birta-diff-add-word-bg);
+}
+
+/* Hunk header rows; these beat `.markdown-body details` and `summary` when nested in a document */
+.birta-diff .diff-fold {
+  display: block;
+  margin: 0;
+}
+
+.birta-diff .diff-fold-top,
+.birta-diff .diff-fold > summary {
+  display: grid;
+  grid-template-columns: var(--birta-diff-gutter) minmax(0, 1fr);
+  min-height: 24px;
+  margin: 0;
+  list-style: none;
+  color: var(--birta-diff-muted);
+  background: linear-gradient(to right, var(--birta-diff-hunk-num-bg) var(--birta-diff-gutter), var(--birta-diff-hunk-line-bg) var(--birta-diff-gutter));
+}
+
+.birta-diff .diff-fold > summary {
+  cursor: pointer;
+}
+
+.birta-diff .diff-fold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.birta-diff .diff-expander {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Primer Octicons fold-up, fold-down and unfold (MIT, Copyright (c) GitHub Inc.) */
+.birta-diff .diff-fold > summary .diff-expander::before {
+  content: "";
+  width: 16px;
+  height: 16px;
+  background-color: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m8.177.677 2.896 2.896a.25.25 0 0 1-.177.427H8.75v1.25a.75.75 0 0 1-1.5 0V4H5.104a.25.25 0 0 1-.177-.427L7.823.677a.25.25 0 0 1 .354 0ZM7.25 10.75a.75.75 0 0 1 1.5 0V12h2.146a.25.25 0 0 1 .177.427l-2.896 2.896a.25.25 0 0 1-.354 0l-2.896-2.896A.25.25 0 0 1 5.104 12H7.25v-1.25Zm-5-2a.75.75 0 0 0 0-1.5h-.5a.75.75 0 0 0 0 1.5h.5ZM6 8a.75.75 0 0 1-.75.75h-.5a.75.75 0 0 1 0-1.5h.5A.75.75 0 0 1 6 8Zm2.25.75a.75.75 0 0 0 0-1.5h-.5a.75.75 0 0 0 0 1.5h.5ZM12 8a.75.75 0 0 1-.75.75h-.5a.75.75 0 0 1 0-1.5h.5A.75.75 0 0 1 12 8Zm2.25.75a.75.75 0 0 0 0-1.5h-.5a.75.75 0 0 0 0 1.5h.5Z'/%3E%3C/svg%3E") center / 16px no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m8.177.677 2.896 2.896a.25.25 0 0 1-.177.427H8.75v1.25a.75.75 0 0 1-1.5 0V4H5.104a.25.25 0 0 1-.177-.427L7.823.677a.25.25 0 0 1 .354 0ZM7.25 10.75a.75.75 0 0 1 1.5 0V12h2.146a.25.25 0 0 1 .177.427l-2.896 2.896a.25.25 0 0 1-.354 0l-2.896-2.896A.25.25 0 0 1 5.104 12H7.25v-1.25Zm-5-2a.75.75 0 0 0 0-1.5h-.5a.75.75 0 0 0 0 1.5h.5ZM6 8a.75.75 0 0 1-.75.75h-.5a.75.75 0 0 1 0-1.5h.5A.75.75 0 0 1 6 8Zm2.25.75a.75.75 0 0 0 0-1.5h-.5a.75.75 0 0 0 0 1.5h.5ZM12 8a.75.75 0 0 1-.75.75h-.5a.75.75 0 0 1 0-1.5h.5A.75.75 0 0 1 12 8Zm2.25.75a.75.75 0 0 0 0-1.5h-.5a.75.75 0 0 0 0 1.5h.5Z'/%3E%3C/svg%3E") center / 16px no-repeat;
+}
+
+.birta-diff .diff-fold[data-at="start"] > summary .diff-expander::before {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M7.823 1.677 4.927 4.573A.25.25 0 0 0 5.104 5H7.25v3.236a.75.75 0 1 0 1.5 0V5h2.146a.25.25 0 0 0 .177-.427L8.177 1.677a.25.25 0 0 0-.354 0ZM13.75 11a.75.75 0 0 0 0 1.5h.5a.75.75 0 0 0 0-1.5h-.5Zm-3.75.75a.75.75 0 0 1 .75-.75h.5a.75.75 0 0 1 0 1.5h-.5a.75.75 0 0 1-.75-.75ZM7.75 11a.75.75 0 0 0 0 1.5h.5a.75.75 0 0 0 0-1.5h-.5ZM4 11.75a.75.75 0 0 1 .75-.75h.5a.75.75 0 0 1 0 1.5h-.5a.75.75 0 0 1-.75-.75ZM1.75 11a.75.75 0 0 0 0 1.5h.5a.75.75 0 0 0 0-1.5h-.5Z'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M7.823 1.677 4.927 4.573A.25.25 0 0 0 5.104 5H7.25v3.236a.75.75 0 1 0 1.5 0V5h2.146a.25.25 0 0 0 .177-.427L8.177 1.677a.25.25 0 0 0-.354 0ZM13.75 11a.75.75 0 0 0 0 1.5h.5a.75.75 0 0 0 0-1.5h-.5Zm-3.75.75a.75.75 0 0 1 .75-.75h.5a.75.75 0 0 1 0 1.5h-.5a.75.75 0 0 1-.75-.75ZM7.75 11a.75.75 0 0 0 0 1.5h.5a.75.75 0 0 0 0-1.5h-.5ZM4 11.75a.75.75 0 0 1 .75-.75h.5a.75.75 0 0 1 0 1.5h-.5a.75.75 0 0 1-.75-.75ZM1.75 11a.75.75 0 0 0 0 1.5h.5a.75.75 0 0 0 0-1.5h-.5Z'/%3E%3C/svg%3E");
+}
+
+.birta-diff .diff-fold[data-at="end"] > summary .diff-expander::before {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m8.177 14.323 2.896-2.896a.25.25 0 0 0-.177-.427H8.75V7.764a.75.75 0 1 0-1.5 0V11H5.104a.25.25 0 0 0-.177.427l2.896 2.896a.25.25 0 0 0 .354 0ZM2.25 5a.75.75 0 0 0 0-1.5h-.5a.75.75 0 0 0 0 1.5h.5ZM6 4.25a.75.75 0 0 1-.75.75h-.5a.75.75 0 0 1 0-1.5h.5a.75.75 0 0 1 .75.75ZM8.25 5a.75.75 0 0 0 0-1.5h-.5a.75.75 0 0 0 0 1.5h.5ZM12 4.25a.75.75 0 0 1-.75.75h-.5a.75.75 0 0 1 0-1.5h.5a.75.75 0 0 1 .75.75Zm2.25.75a.75.75 0 0 0 0-1.5h-.5a.75.75 0 0 0 0 1.5h.5Z'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m8.177 14.323 2.896-2.896a.25.25 0 0 0-.177-.427H8.75V7.764a.75.75 0 1 0-1.5 0V11H5.104a.25.25 0 0 0-.177.427l2.896 2.896a.25.25 0 0 0 .354 0ZM2.25 5a.75.75 0 0 0 0-1.5h-.5a.75.75 0 0 0 0 1.5h.5ZM6 4.25a.75.75 0 0 1-.75.75h-.5a.75.75 0 0 1 0-1.5h.5a.75.75 0 0 1 .75.75ZM8.25 5a.75.75 0 0 0 0-1.5h-.5a.75.75 0 0 0 0 1.5h.5ZM12 4.25a.75.75 0 0 1-.75.75h-.5a.75.75 0 0 1 0-1.5h.5a.75.75 0 0 1 .75.75Zm2.25.75a.75.75 0 0 0 0-1.5h-.5a.75.75 0 0 0 0 1.5h.5Z'/%3E%3C/svg%3E");
+}
+
+.birta-diff .diff-hunk-header {
+  padding: 0 24px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Unified: the default, and `auto` below the breakpoint. Each line is one 24px grid row. */
+
+.birta-diff .diff-head {
+  display: none;
+}
+
+.birta-diff .diff-hunk {
+  display: block;
+}
+
+.birta-diff .diff-cell,
+.birta-diff .diff-ctx {
+  display: grid;
+  grid-template-columns: var(--birta-diff-num-w) var(--birta-diff-num-w) 24px minmax(0, 1fr);
+}
+
+/* Explicit rows keep auto-placement from wrapping a context row's second number */
+.birta-diff .diff-cell > *,
+.birta-diff .diff-ctx > .diff-cell > * {
+  grid-row: 1;
+}
+
+.birta-diff .diff-ctx > .diff-cell {
+  display: contents;
+}
+
+.birta-diff .diff-cell > .diff-sign {
+  grid-column: 3;
+}
+
+.birta-diff .diff-cell > .diff-text {
+  grid-column: 4;
+}
+
+.birta-diff .diff-del > .diff-num,
+.birta-diff .diff-ctx > .diff-old > .diff-num {
+  grid-column: 1;
+}
+
+.birta-diff .diff-add > .diff-num,
+.birta-diff .diff-ctx > .diff-new > .diff-num {
+  grid-column: 2;
+}
+
+.birta-diff .diff-ctx > .diff-new > .diff-sign,
+.birta-diff .diff-ctx > .diff-new > .diff-text,
+.birta-diff .diff-empty {
+  display: none;
+}
+
+/* Side by side: `split`, and `auto` at 48rem and wider. The two blocks below must stay identical. */
+
+.birta-diff[data-layout="split"] > * {
+  --birta-diff-gutter: var(--birta-diff-num-w);
+}
+
+.birta-diff[data-layout="split"] .diff-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  column-gap: 1px;
+  background: var(--birta-diff-border);
+  font-weight: 600;
+}
+
+.birta-diff[data-layout="split"] .diff-label {
+  padding: 0 8px;
+  background: var(--birta-diff-bg);
+}
+
+/* A 1px gap over the border colour draws GitHub's divider between the sides */
+.birta-diff[data-layout="split"] .diff-hunk,
+.birta-diff[data-layout="split"] .diff-ctx {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  column-gap: 1px;
+  padding: 0;
+  background: var(--birta-diff-border);
+}
+
+.birta-diff[data-layout="split"] .diff-hunk {
+  grid-template-rows: repeat(var(--rows, 1), auto);
+  grid-auto-flow: column;
+}
+
+.birta-diff[data-layout="split"] .diff-ctx > .diff-cell {
+  display: grid;
+  background: var(--birta-diff-bg);
+}
+
+.birta-diff[data-layout="split"] .diff-cell {
+  grid-template-columns: var(--birta-diff-num-w) 24px minmax(0, 1fr);
+}
+
+.birta-diff[data-layout="split"] .diff-cell > .diff-num,
+.birta-diff[data-layout="split"] .diff-ctx > .diff-cell > .diff-num {
+  grid-column: 1;
+}
+
+.birta-diff[data-layout="split"] .diff-cell > .diff-sign,
+.birta-diff[data-layout="split"] .diff-ctx > .diff-cell > .diff-sign {
+  display: block;
+  grid-column: 2;
+}
+
+.birta-diff[data-layout="split"] .diff-cell > .diff-text,
+.birta-diff[data-layout="split"] .diff-ctx > .diff-cell > .diff-text {
+  display: block;
+  grid-column: 3;
+}
+
+.birta-diff[data-layout="split"] .diff-empty {
+  display: block;
+  background: var(--birta-diff-empty-bg);
+}
+
+@container birta-diff (min-width: 48rem) {
+  .birta-diff[data-layout="auto"] > * {
+    --birta-diff-gutter: var(--birta-diff-num-w);
+  }
+
+  .birta-diff[data-layout="auto"] .diff-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: 1px;
+    background: var(--birta-diff-border);
+    font-weight: 600;
+  }
+
+  .birta-diff[data-layout="auto"] .diff-label {
+    padding: 0 8px;
+    background: var(--birta-diff-bg);
+  }
+
+  /* A 1px gap over the border colour draws GitHub's divider between the sides */
+  .birta-diff[data-layout="auto"] .diff-hunk,
+  .birta-diff[data-layout="auto"] .diff-ctx {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: 1px;
+    padding: 0;
+    background: var(--birta-diff-border);
+  }
+
+  .birta-diff[data-layout="auto"] .diff-hunk {
+    grid-template-rows: repeat(var(--rows, 1), auto);
+    grid-auto-flow: column;
+  }
+
+  .birta-diff[data-layout="auto"] .diff-ctx > .diff-cell {
+    display: grid;
+    background: var(--birta-diff-bg);
+  }
+
+  .birta-diff[data-layout="auto"] .diff-cell {
+    grid-template-columns: var(--birta-diff-num-w) 24px minmax(0, 1fr);
+  }
+
+  .birta-diff[data-layout="auto"] .diff-cell > .diff-num,
+  .birta-diff[data-layout="auto"] .diff-ctx > .diff-cell > .diff-num {
+    grid-column: 1;
+  }
+
+  .birta-diff[data-layout="auto"] .diff-cell > .diff-sign,
+  .birta-diff[data-layout="auto"] .diff-ctx > .diff-cell > .diff-sign {
+    display: block;
+    grid-column: 2;
+  }
+
+  .birta-diff[data-layout="auto"] .diff-cell > .diff-text,
+  .birta-diff[data-layout="auto"] .diff-ctx > .diff-cell > .diff-text {
+    display: block;
+    grid-column: 3;
+  }
+
+  .birta-diff[data-layout="auto"] .diff-empty {
+    display: block;
+    background: var(--birta-diff-empty-bg);
+  }
+}

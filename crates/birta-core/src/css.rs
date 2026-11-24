@@ -61,6 +61,15 @@ mod tests {
         ] {
             assert!(super::DIFF.contains(token), "dark {token}");
         }
+        // Tokens sit on the data-theme element itself, so the nearest one decides the mode,
+        // and the diff paints text and background from the same tokens as its rows
+        assert!(super::DIFF.contains("[data-theme=\"light\"] {\n  --birta-diff-fg: #1f2328;"));
+        assert!(super::DIFF.contains("[data-theme=\"dark\"] {\n  --birta-diff-fg: #f0f6fc;"));
+        assert!(!super::DIFF.contains("[data-theme=\"light\"] .birta-diff"));
+        assert!(
+            super::DIFF
+                .contains("color: var(--birta-diff-fg);\n  background: var(--birta-diff-bg);")
+        );
         // Derived colours apply to every birta theme except github itself
         assert!(
             super::DIFF

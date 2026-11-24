@@ -1,15 +1,12 @@
 /* Diff view from birta_core::diff. One DOM, laid out unified or side by side by data-layout. */
 
-.birta-diff {
-  display: block;
-  width: 100%;
-  font-family: var(--fontStack-monospace, ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace);
-  font-size: 12px;
-  line-height: 20px;
-  color: var(--fgColor-default, #1f2328);
-  --birta-diff-num-w: calc(var(--birta-diff-digits, 3) * 1ch + 2ch);
-  --birta-diff-gutter: calc(2 * var(--birta-diff-num-w));
-  /* GitHub's own diff colours (Primer diffBlob tokens), light */
+/* GitHub's diff colours (Primer diffBlob tokens). They are set on the element that
+ * carries data-theme, so the nearest data-theme decides light or dark for text and
+ * rows alike; the OS preference applies only when no data-theme is set. */
+:root {
+  --birta-diff-fg: #1f2328;
+  --birta-diff-bg: #ffffff;
+  --birta-diff-muted: #59636e;
   --birta-diff-add-line-bg: #dafbe1;
   --birta-diff-add-num-bg: #aceebb;
   --birta-diff-add-word-bg: #aceebb;
@@ -19,12 +16,13 @@
   --birta-diff-hunk-line-bg: #ddf4ff;
   --birta-diff-hunk-num-bg: #b6e3ff;
   --birta-diff-empty-bg: #f6f8fa;
-  --birta-diff-muted: #59636e;
 }
 
 @media (prefers-color-scheme: dark) {
-  .birta-diff {
-    color: var(--fgColor-default, #f0f6fc);
+  :root {
+    --birta-diff-fg: #f0f6fc;
+    --birta-diff-bg: #0d1117;
+    --birta-diff-muted: #9198a1;
     --birta-diff-add-line-bg: #2ea04326;
     --birta-diff-add-num-bg: #3fb9504d;
     --birta-diff-add-word-bg: #2ea04366;
@@ -34,12 +32,13 @@
     --birta-diff-hunk-line-bg: #388bfd1a;
     --birta-diff-hunk-num-bg: #0c2d6b;
     --birta-diff-empty-bg: #151b23;
-    --birta-diff-muted: #9198a1;
   }
 }
 
-[data-theme="light"] .birta-diff {
-  color: var(--fgColor-default, #1f2328);
+[data-theme="light"] {
+  --birta-diff-fg: #1f2328;
+  --birta-diff-bg: #ffffff;
+  --birta-diff-muted: #59636e;
   --birta-diff-add-line-bg: #dafbe1;
   --birta-diff-add-num-bg: #aceebb;
   --birta-diff-add-word-bg: #aceebb;
@@ -49,11 +48,12 @@
   --birta-diff-hunk-line-bg: #ddf4ff;
   --birta-diff-hunk-num-bg: #b6e3ff;
   --birta-diff-empty-bg: #f6f8fa;
-  --birta-diff-muted: #59636e;
 }
 
-[data-theme="dark"] .birta-diff {
-  color: var(--fgColor-default, #f0f6fc);
+[data-theme="dark"] {
+  --birta-diff-fg: #f0f6fc;
+  --birta-diff-bg: #0d1117;
+  --birta-diff-muted: #9198a1;
   --birta-diff-add-line-bg: #2ea04326;
   --birta-diff-add-num-bg: #3fb9504d;
   --birta-diff-add-word-bg: #2ea04366;
@@ -63,7 +63,18 @@
   --birta-diff-hunk-line-bg: #388bfd1a;
   --birta-diff-hunk-num-bg: #0c2d6b;
   --birta-diff-empty-bg: #151b23;
-  --birta-diff-muted: #9198a1;
+}
+
+.birta-diff {
+  display: block;
+  width: 100%;
+  font-family: var(--fontStack-monospace, ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace);
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--birta-diff-fg);
+  background: var(--birta-diff-bg);
+  --birta-diff-num-w: calc(var(--birta-diff-digits, 3) * 1ch + 2ch);
+  --birta-diff-gutter: calc(2 * var(--birta-diff-num-w));
 }
 
 /* Other birta themes: the syntax theme's diff colours, else the theme's alert colours */
@@ -81,6 +92,8 @@
   --birta-diff-hunk-num-bg: color-mix(in srgb, var(--birta-diff-hunk-color) 22%, transparent);
   --birta-diff-empty-bg: var(--bgColor-muted, color-mix(in srgb, currentColor 6%, transparent));
   --birta-diff-muted: var(--fgColor-muted, #59636e);
+  --birta-diff-fg: var(--fgColor-default, #1f2328);
+  --birta-diff-bg: var(--bgColor-default, #ffffff);
 }
 
 /* Only `auto` queries its width; a container collapses to 0 in a shrink-to-fit parent */

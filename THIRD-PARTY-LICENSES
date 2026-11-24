@@ -3642,11 +3642,13 @@ Used by:
   - rustix 1.1.4
   - scopeguard 1.2.0
   - signal-hook-registry 1.4.8
+  - similar 3.2.1
   - smallvec 1.15.1
   - socket2 0.6.3
   - tempfile 3.27.0
   - tungstenite 0.28.0
   - unicode-normalization 0.1.25
+  - unicode-segmentation 1.13.3
   - version_check 0.9.5
 
                               Apache License
@@ -7488,3 +7490,33 @@ the following restrictions:
     misrepresented as being the original software.
 
 3. This notice may not be removed or altered from any source distribution.
+
+================================================================================
+Bundled assets
+
+Files shipped inside the birta binary that do not come from a crate.
+
+  - Primer Octicons fold-up, fold-down and unfold icons, embedded in
+    birta-core's diff.css (https://github.com/primer/octicons)
+
+MIT License
+
+Copyright (c) 2026 GitHub Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

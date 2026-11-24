@@ -1,7 +1,6 @@
 /* Diff view from birta_core::diff. One DOM, laid out unified or side by side by data-layout. */
 
 .birta-diff {
-  container: birta-diff / inline-size;
   display: block;
   width: 100%;
   font-family: var(--fontStack-monospace, ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace);
@@ -13,6 +12,25 @@
   --birta-diff-add-color: var(--birta-diff-add, var(--alert-tip, var(--fgColor-success, #1a7f37)));
   --birta-diff-del-color: var(--birta-diff-del, var(--alert-caution, var(--fgColor-danger, #cf222e)));
   --birta-diff-change-color: var(--birta-diff-change, var(--alert-warning, var(--fgColor-attention, #9a6700)));
+}
+
+/* Only `auto` queries its width; a container collapses to 0 in a shrink-to-fit parent */
+.birta-diff[data-layout="auto"] {
+  container: birta-diff / inline-size;
+}
+
+/* Syntect scope classes (`header`, `tag`, ...) collide with page and markdown styles */
+.birta-diff .diff-text span {
+  display: inline;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  font-size: inherit;
+  font-family: inherit;
+  position: static;
+  float: none;
 }
 
 .birta-diff .diff-note {

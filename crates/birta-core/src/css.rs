@@ -43,4 +43,14 @@ mod tests {
         assert!(super::DIFF.contains("var(--birta-diff-del, var(--alert-caution"));
         assert!(super::DIFF.contains("var(--birta-diff-change, var(--alert-warning"));
     }
+
+    #[test]
+    fn diff_css_resets_syntax_spans_and_scopes_the_container() {
+        assert!(super::DIFF.contains(".birta-diff .diff-text span {"));
+        assert!(super::DIFF.contains(
+            ".birta-diff[data-layout=\"auto\"] {\n  container: birta-diff / inline-size;"
+        ));
+        // Forced layouts must not become size containers, which collapse in shrink-to-fit parents
+        assert_eq!(super::DIFF.matches("container: birta-diff").count(), 1);
+    }
 }

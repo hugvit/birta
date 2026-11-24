@@ -70,8 +70,8 @@ let d = diff(theirs, mine, &DiffOptions {
 ```
 
 - **Styles**: include `css::DIFF` (and `css::SYNTAX` in class mode) after the stylesheets above. Colours come from the syntax theme's `markup.inserted` / `markup.deleted` / `markup.changed` scopes when the theme has them, otherwise from its alert colours.
-- **Layout**: one HTML renders unified or side by side. `data-layout="auto"` (the default) is side by side when the diff is at least 48rem wide. Set `data-layout` to `unified` or `split` on the `.birta-diff` element to force one; no new diff is needed.
-- **Data**: hunks are 0-based, half-open line ranges into `old_lines` and `new_lines`. Each changed cell carries `data-hunk`, and every cell has 1-based `data-old` / `data-new`, so a host can wire actions without parsing the HTML.
+- **Layout**: one HTML renders unified or side by side. `data-layout="auto"` (the default) is side by side when the diff is at least 48rem wide. `auto` measures its own width, so give the diff a parent with a definite width (a block, not an inline-block or a shrink-to-fit flex item). Set `data-layout` to `unified` or `split` on the `.birta-diff` element to force one; no new diff is needed.
+- **Data**: hunks are 0-based, half-open line ranges into `old_lines` and `new_lines`. In the HTML, each `.diff-hunk` wrapper carries `data-hunk`; removed cells carry a 1-based `data-old`, added cells a `data-new`, and context rows (`.diff-ctx`) both. A host can wire actions without parsing the HTML.
 - **Line endings**: by default CRLF vs LF, a byte order mark and a missing final newline are ignored, each with its own flag and a note in the HTML. `LineEndings::Exact` compares bytes.
 - **Text**: `DiffOptions::strings` replaces the fold and note text; `labels` names the two columns.
 - **Scoped syntax CSS**: class-mode token classes in a diff are not under `pre.syntax-highlighting`. A host that scopes its syntax CSS there must add `.birta-diff` to that scope.

@@ -9,6 +9,7 @@ pub(super) fn render(
     diff: &Diff,
     old_marks: &[Vec<Range<usize>>],
     new_marks: &[Vec<Range<usize>>],
+    oversized: bool,
     opts: &DiffOptions<'_>,
 ) -> String {
     let digits = diff
@@ -59,8 +60,8 @@ pub(super) fn render(
         return out;
     }
 
-    let old_html = side_html(&diff.old_lines, old_marks, "del", diff.degraded, opts);
-    let new_html = side_html(&diff.new_lines, new_marks, "ins", diff.degraded, opts);
+    let old_html = side_html(&diff.old_lines, old_marks, "del", oversized, opts);
+    let new_html = side_html(&diff.new_lines, new_marks, "ins", oversized, opts);
     let cells = Cells {
         old: &old_html,
         new: &new_html,

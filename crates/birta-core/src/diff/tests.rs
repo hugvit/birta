@@ -248,6 +248,34 @@ fn long_unchanged_runs_fold() {
 }
 
 #[test]
+fn a_single_hidden_line_is_shown_instead_of_folded() {
+    // Seven unchanged lines between two edits: 3 + 1 + 3 would fold just one
+    let old: String = (1..=9).map(|i| format!("{i}\n")).collect();
+    let new = old.replace("1\n", "one\n").replace("9\n", "nine\n");
+    let r = d(&old, &new);
+    assert!(r.rows.iter().all(|row| !row.folded));
+    assert!(!r.html.contains("diff-fold"));
+}
+
+#[test]
+fn an_overlong_line_is_shown_plain_and_flagged() {
+    let long = "*a* _b_ `c` [d](e) ".repeat(1_000);
+    let old = format!("# Title\n{long}\n");
+    let new = format!("# Title!\n{long}x\n");
+    let started = std::time::Instant::now();
+    let r = d(&old, &new);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(r.degraded);
+    // The short line keeps its syntax spans; the long one is escaped text only
+    assert!(r.html.contains("heading"));
+    assert!(r.html.contains("*a* _b_ `c` [d](e) *a*"));
+}
+
+#[test]
 fn fold_text_comes_from_strings() {
     let opts = DiffOptions {
         strings: DiffStrings {

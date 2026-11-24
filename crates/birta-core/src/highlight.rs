@@ -40,13 +40,22 @@ pub fn highlight_source(source: &str, syntax_theme: Option<&SyntaxTheme>) -> Str
         .find_syntax_by_extension("md")
         .unwrap_or_else(|| ss.find_syntax_plain_text());
 
-    let html = match syntax_theme {
-        None => highlight_classed(source, syntax, ss),
-        Some(st) => highlight_styled(source, syntax, ss, st),
+    // Syntect's generator can't skip one line, so a too-long line drops highlighting for all
+    let html = if source.lines().any(|l| l.len() > HIGHLIGHT_MAX_LINE) {
+        crate::render::html_escape(source)
+    } else {
+        match syntax_theme {
+            None => highlight_classed(source, syntax, ss),
+            Some(st) => highlight_styled(source, syntax, ss, st),
+        }
     };
     // The HTML parser normalizes raw CRs to LF, which breaks CRLF line alignment and copying
     html.replace('\r', "&#13;")
 }
+
+/// Lines longer than this many bytes are left unhighlighted; syntect's cost
+/// on one long line grows much faster than linearly.
+pub(crate) const HIGHLIGHT_MAX_LINE: usize = 8 * 1024;
 
 // Loading the default syntaxes takes milliseconds; a diff highlights twice per call
 fn syntax_set() -> &'static SyntaxSet {
@@ -112,6 +121,9 @@ pub(crate) fn highlight_line_segments(
                 .iter()
                 .enumerate()
                 .map(|(i, line)| {
+                    if line.len() > HIGHLIGHT_MAX_LINE {
+                        return plain_line(line, marks_for(i), mark_tag);
+                    }
                     classed_line(line, &mut state, &mut stack, ss, marks_for(i), mark_tag)
                 })
                 .collect()
@@ -122,6 +134,9 @@ pub(crate) fn highlight_line_segments(
                 .iter()
                 .enumerate()
                 .map(|(i, line)| {
+                    if line.len() > HIGHLIGHT_MAX_LINE {
+                        return plain_line(line, marks_for(i), mark_tag);
+                    }
                     let with_newline = format!("{line}\n");
                     let mut out = String::new();
                     match highlighter.highlight_line(&with_newline, ss) {
@@ -152,6 +167,12 @@ pub(crate) fn highlight_line_segments(
                 .collect()
         }
     }
+}
+
+fn plain_line(line: &str, marks: &[std::ops::Range<usize>], mark_tag: &str) -> String {
+    let mut out = String::new();
+    push_marked(&mut out, line, 0..line.len(), marks, mark_tag);
+    out
 }
 
 fn classed_line(
@@ -421,5 +442,17 @@ mod tests {
             html.matches("</span>").count()
         );
         assert_eq!(strip_tags(html), line);
+    }
+
+    #[test]
+    fn overlong_lines_are_escaped_without_spans() {
+        let long = "<b>x</b> ".repeat(HIGHLIGHT_MAX_LINE / 4);
+        let lines = ["# Title", long.as_str()];
+        let out = highlight_line_segments(&lines, None, &[], "del");
+        assert!(out[0].contains("<span"));
+        assert!(!out[1].contains("<span") && out[1].starts_with("&lt;b&gt;"));
+        let source = highlight_source(&format!("# Title\n{long}\n"), None);
+        assert!(!source.contains("<span") && source.contains("&lt;b&gt;"));
+        assert!(highlight_source("# Title\n", None).contains("<span"));
     }
 }

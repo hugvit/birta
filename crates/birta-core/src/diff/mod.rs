@@ -142,7 +142,8 @@ pub struct Diff {
     /// Set only when both sides are non-empty.
     pub final_newline_differs: bool,
     pub bom_differs: bool,
-    /// Highlighting and word marks were skipped because an input was too large.
+    /// Highlighting and word marks were skipped: for everything when an input
+    /// exceeds `highlight_limit`, or for single lines over the per-line cap.
     pub degraded: bool,
     /// The deadline had passed by the time the diff finished, so the line diff or
     /// some word marks may be less precise than they could be.
@@ -241,8 +242,14 @@ pub fn diff(old: &str, new: &str, opts: &DiffOptions<'_>) -> Diff {
         added: hunks.iter().map(|h| h.new.len()).sum(),
         removed: hunks.iter().map(|h| h.old.len()).sum(),
     };
-    let degraded = old.len() > opts.highlight_limit || new.len() > opts.highlight_limit;
-    let (old_marks, new_marks) = if opts.words && !degraded {
+    let too_long = |lines: &[String]| {
+        lines
+            .iter()
+            .any(|l| l.len() > crate::highlight::HIGHLIGHT_MAX_LINE)
+    };
+    let oversized = old.len() > opts.highlight_limit || new.len() > opts.highlight_limit;
+    let degraded = oversized || too_long(&old_lines) || too_long(&new_lines);
+    let (old_marks, new_marks) = if opts.words && !oversized {
         word_marks(&hunks, &old_lines, &new_lines, deadline)
     } else {
         (
@@ -267,7 +274,7 @@ pub fn diff(old: &str, new: &str, opts: &DiffOptions<'_>) -> Diff {
         degraded,
         timed_out,
     };
-    result.html = html::render(&result, &old_marks, &new_marks, opts);
+    result.html = html::render(&result, &old_marks, &new_marks, oversized, opts);
     result
 }
 
@@ -432,6 +439,8 @@ fn build_rows(
             let last = hunks_done == hunks.len();
             let len = old.len();
             let shown = visible_context(len, first, last, context);
+            // A fold that hides one line costs as much space as the line itself
+            let hides_one = (0..len).filter(|&i| !shown(i)).count() == 1;
             for (i, (o, n)) in old.zip(new).enumerate() {
                 rows.push(Row {
                     kind: RowKind::Context,
@@ -439,7 +448,7 @@ fn build_rows(
                     old: Some(o),
                     new: Some(n),
                     marks: Vec::new(),
-                    folded: !shown(i),
+                    folded: !hides_one && !shown(i),
                 });
             }
             continue;

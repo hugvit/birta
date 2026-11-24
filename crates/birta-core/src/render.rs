@@ -318,20 +318,43 @@ fn wikilink_range(
 ) -> Option<std::ops::Range<usize>> {
     let (start, estimate, end) = search_window(source, line_starts, sourcepos)?;
     let window = &opens[opens.partition_point(|&o| o < start)..opens.partition_point(|&o| o < end)];
+    // comrak's column is exact outside the drift cases, so a `[[` there is the link
+    if let Some(open) = nearest_first(window, estimate).find(|open| !used.contains(open))
+        && open == estimate
+    {
+        let close = source[open..].find("]]")?;
+        return Some(open..open + close + 2);
+    }
     let mut fallback = None;
+    // Only drift-sized distances: a link whose own `[[` fails to decode must not
+    // take the span of a later link that happens to
     let found = nearest_first(window, estimate)
         .filter(|open| !used.contains(open))
+        .take_while(|open| open.abs_diff(estimate) <= SEARCH_BEFORE)
         .find(|&open| {
             fallback.get_or_insert(open);
-            // Entities and escapes in the source decode to `target`, as comrak read them
-            obsidian::decodes_to(source, target, open + 2).is_some_and(|end| {
-                let rest = source[end..].trim_start_matches([' ', '\t', '\r', '\n']);
-                rest.starts_with("]]") || rest.starts_with('|')
-            })
+            names(source, open, target)
         });
-    let open = found.or(fallback)?;
+    let open = match found.or(fallback) {
+        Some(open) => open,
+        // After a line-broken link comrak's estimate can fall further out
+        None => nearest_first(window, estimate).find(|open| !used.contains(open))?,
+    };
     let close = source[open..].find("]]")?;
     Some(open..open + close + 2)
+}
+
+/// Whether the link opening at `open` reads as `target`: comrak trims the
+/// target and decodes its entities and escapes, and an alias follows a `|`,
+/// written `\\|` inside tables.
+fn names(source: &str, open: usize, target: &str) -> bool {
+    const SPACE: [char; 4] = [' ', '\t', '\r', '\n'];
+    let inner = &source[open + 2..];
+    let from = open + 2 + (inner.len() - inner.trim_start_matches(SPACE).len());
+    obsidian::decodes_to(source, target, from).is_some_and(|end| {
+        let rest = source[end..].trim_start_matches(SPACE);
+        rest.starts_with("]]") || rest.starts_with('|') || rest.starts_with("\\|")
+    })
 }
 
 /// Where to look for a node comrak reports at `sourcepos`: from a little

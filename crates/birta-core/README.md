@@ -42,7 +42,7 @@ let page = render(
 
 | Module | What it gives you |
 |---|---|
-| `render` | `render` (markdown to an HTML fragment), `Resolver` (your URL scheme), `front_matter_table`, `render_source` (highlighted raw view), `format_file_stats` |
+| `render` | `render` (markdown to an HTML fragment), `extract` (the links, embeds and tags `render` would report, with their source ranges, without building HTML), `Resolver` (your URL scheme), `front_matter_table`, `render_source` (highlighted raw view), `format_file_stats` |
 | `theme` | `ThemeSearch` (find and resolve themes), `ResolvedTheme`, `ThemeRegistry` (switch theme and light/dark at runtime), the embedded themes |
 | `diff` | `diff` (two texts to line hunks, rows and themed HTML), `DiffOptions`, `Layout` |
 | `css` | The stylesheets as `&'static str`: `GITHUB_MARKDOWN`, `THEME_OVERRIDES`, `PAGE`, `SYNTAX`, `ALERTS`, `DIFF` |
@@ -86,6 +86,6 @@ let d = diff(theirs, mine, &DiffOptions {
 - **Escapes**: `\![[x]]` and `\#tag` stay plain text, as do embeds and tags written with entities (`&#33;[[x]]`, `&#35;tag`).
 - **`highlight`**: `==text==` becomes `<mark>`.
 - **`current_note`**: the name of the note being rendered, so `![[itself]]` stays text instead of expanding once.
-- **Found targets**: `Rendered::wikilinks`, `Rendered::embeds` and `Rendered::tags` list what each enabled syntax found, so an index needs no second parse.
+- **Found targets**: `Rendered::wikilinks`, `Rendered::embeds` and `Rendered::tags` list what each enabled syntax found, so an index needs no second parse. To index without rendering, `extract` returns the same lists from the same options, plus `wikilink_spans` and `embed_spans`: the byte range of every occurrence in the source.
 - **Known limitation**: relative links and images inside an embedded note go through the host's `Resolver`, as if they were written in the host note. `embed_note` has no way to name the embedded note's own location yet.
 - **Not supported yet**: inline note embeds, `^block` ids, and Obsidian callouts render as plain text.

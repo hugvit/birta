@@ -137,6 +137,128 @@ pub fn render(markdown: &str, opts: &RenderOptions<'_>) -> Rendered {
     render_nested(markdown, opts, &[])
 }
 
+/// The links, embeds and tags of a document, from [`extract`].
+#[non_exhaustive]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Extracted {
+    /// As [`Rendered::front_matter`].
+    pub front_matter: Option<String>,
+    /// As [`Rendered::wikilinks`].
+    pub wikilinks: Vec<String>,
+    /// As [`Rendered::embeds`].
+    pub embeds: Vec<String>,
+    /// As [`Rendered::tags`].
+    pub tags: Vec<String>,
+    /// Every `[[wiki link]]` occurrence, duplicates included, in source order.
+    pub wikilink_spans: Vec<TargetSpan>,
+    /// Every `![[embed]]` occurrence, duplicates included, in source order.
+    pub embed_spans: Vec<TargetSpan>,
+}
+
+/// Where a link or embed sits in the source.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetSpan {
+    /// The target, as it appears in the lists of [`Extracted`].
+    pub target: String,
+    /// Byte range of the whole `[[…]]` or `![[…]]` in the source, front matter included.
+    pub range: std::ops::Range<usize>,
+}
+
+/// The wiki links, embeds and tags [`render`] would report for `markdown`
+/// with the same options, without building HTML, highlighting code or
+/// calling the [`Resolver`]. Embedded notes are not followed, as in `render`.
+pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
+    let options = comrak_options(opts);
+    let arena = Arena::new();
+    let root = parse_document(&arena, markdown, &options);
+    let line_starts: Vec<usize> = std::iter::once(0)
+        .chain(markdown.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+
+    let mut extracted = Extracted::default();
+    let mut used = Vec::new();
+    for node in root.descendants() {
+        let data = node.data.borrow();
+        match &data.value {
+            NodeValue::FrontMatter(raw) => extracted.front_matter = Some(raw.clone()),
+            NodeValue::WikiLink(link) => {
+                if !extracted.wikilinks.contains(&link.url) {
+                    extracted.wikilinks.push(link.url.clone());
+                }
+                if let Some(range) =
+                    wikilink_range(markdown, &line_starts, data.sourcepos, &link.url, &used)
+                {
+                    used.push(range.start);
+                    extracted.wikilink_spans.push(TargetSpan {
+                        target: link.url.clone(),
+                        range,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Footnote definitions come last in the tree but not in the source
+    extracted
+        .wikilink_spans
+        .sort_by_key(|span| span.range.start);
+
+    let found = obsidian::find(root, markdown, opts.embeds, opts.tags);
+    extracted.embeds = found.embeds;
+    extracted.tags = found.tags;
+    extracted.embed_spans = found
+        .embed_spans
+        .into_iter()
+        .map(|(target, range)| TargetSpan { target, range })
+        .collect();
+    extracted
+}
+
+/// The source range of a wiki link near where comrak reports it. comrak's
+/// columns drift inside tables (each `\|` shifts later text left; a table on the
+/// first line of a file with a BOM is shifted right), its end falls short after
+/// `\|`, and after a link that breaks across lines it keeps counting columns on
+/// the first line. So the link is the unused `[[target` nearest the reported
+/// position, from that line on, running to the next `]]`.
+fn wikilink_range(
+    source: &str,
+    line_starts: &[usize],
+    sourcepos: comrak::nodes::Sourcepos,
+    target: &str,
+    used: &[usize],
+) -> Option<std::ops::Range<usize>> {
+    let line_start = *line_starts.get(sourcepos.start.line.checked_sub(1)?)?;
+    let estimate = line_start + sourcepos.start.column.saturating_sub(1);
+    let mut window_end = (estimate + WIKILINK_SEARCH).min(source.len());
+    while !source.is_char_boundary(window_end) {
+        window_end -= 1;
+    }
+    let window = source.get(line_start..window_end)?;
+
+    let opens: Vec<usize> = window
+        .match_indices("[[")
+        .map(|(i, _)| line_start + i)
+        .filter(|start| !used.contains(start))
+        // `![[` is an embed unless its `!` is escaped
+        .filter(|&start| {
+            let before = &source[..start];
+            !before.ends_with('!') || before[..before.len() - 1].ends_with('\\')
+        })
+        .collect();
+    let named = |start: &&usize| source[**start + 2..].starts_with(target);
+    let nearest = |starts: &mut dyn Iterator<Item = &usize>| {
+        starts.copied().min_by_key(|start| start.abs_diff(estimate))
+    };
+    let start = nearest(&mut opens.iter().filter(named)).or_else(|| nearest(&mut opens.iter()))?;
+    let close = source[start..].find("]]")?;
+    Some(start..start + close + 2)
+}
+
+/// How far past comrak's reported position a wiki link is looked for.
+const WIKILINK_SEARCH: usize = 1024;
+
 /// How deep note embeds may nest inside one another.
 const MAX_EMBED_DEPTH: usize = 3;
 
@@ -745,12 +867,7 @@ mod tests {
 
     #[test]
     fn escaped_embeds_stay_literal_without_wikilinks() {
-        for md in [
-            "Escaped \\![[b.png]]",
-            "!\\[[a.png]]",
-            "&#33;[[a.png]]",
-            "&#33;[[a.png]] then ![[b.png]]",
-        ] {
+        for md in ["Escaped \\![[b.png]]", "!\\[[a.png]]", "&#33;[[a.png]]"] {
             let rendered = embeds_only(md);
             assert!(
                 !rendered.html.contains("<img"),
@@ -759,6 +876,20 @@ mod tests {
             );
             assert!(rendered.embeds.is_empty(), "{md}");
         }
+        // An entity-written embed stays text without hiding a real one after it
+        let rendered = embeds_only("&#33;[[a.png]] then ![[b.png]]");
+        assert_eq!(rendered.embeds, ["b.png"]);
+        assert_eq!(
+            rendered.html.matches("<img").count(),
+            1,
+            "{}",
+            rendered.html
+        );
+        assert!(
+            rendered.html.contains("![[a.png]] then <img src=\"b.png\""),
+            "{}",
+            rendered.html
+        );
         let html = embeds_only("\\\\![[real.png]]").html;
         assert!(
             html.contains("\\<img src=\"real.png\""),

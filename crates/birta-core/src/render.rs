@@ -137,6 +137,93 @@ pub fn render(markdown: &str, opts: &RenderOptions<'_>) -> Rendered {
     render_nested(markdown, opts, &[])
 }
 
+/// The links, embeds and tags of a document, from [`extract`].
+#[non_exhaustive]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Extracted {
+    /// As [`Rendered::front_matter`].
+    pub front_matter: Option<String>,
+    /// As [`Rendered::wikilinks`].
+    pub wikilinks: Vec<String>,
+    /// As [`Rendered::embeds`].
+    pub embeds: Vec<String>,
+    /// As [`Rendered::tags`].
+    pub tags: Vec<String>,
+    /// Every `[[wiki link]]` occurrence, duplicates included, in source order.
+    pub wikilink_spans: Vec<TargetSpan>,
+    /// Every `![[embed]]` occurrence, duplicates included, in source order.
+    pub embed_spans: Vec<TargetSpan>,
+}
+
+/// Where a link or embed sits in the source.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetSpan {
+    /// The target, as it appears in the lists of [`Extracted`].
+    pub target: String,
+    /// Byte range of the whole `[[…]]` or `![[…]]` in the source, front matter included.
+    pub range: std::ops::Range<usize>,
+}
+
+/// The wiki links, embeds and tags [`render`] would report for `markdown`
+/// with the same options, without building HTML, highlighting code or
+/// calling the [`Resolver`]. Embedded notes are not followed, as in `render`.
+pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
+    let options = comrak_options(opts);
+    let arena = Arena::new();
+    let root = parse_document(&arena, markdown, &options);
+    let line_starts: Vec<usize> = std::iter::once(0)
+        .chain(markdown.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+
+    let mut extracted = Extracted::default();
+    for node in root.descendants() {
+        let data = node.data.borrow();
+        match &data.value {
+            NodeValue::FrontMatter(raw) => extracted.front_matter = Some(raw.clone()),
+            NodeValue::WikiLink(link) => {
+                if !extracted.wikilinks.contains(&link.url) {
+                    extracted.wikilinks.push(link.url.clone());
+                }
+                if let Some(range) = wikilink_range(markdown, &line_starts, data.sourcepos) {
+                    extracted.wikilink_spans.push(TargetSpan {
+                        target: link.url.clone(),
+                        range,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let found = obsidian::find(root, markdown, opts.embeds, opts.tags);
+    extracted.embeds = found.embeds;
+    extracted.tags = found.tags;
+    extracted.embed_spans = found
+        .embed_spans
+        .into_iter()
+        .map(|(target, range)| TargetSpan { target, range })
+        .collect();
+    extracted
+}
+
+/// comrak's end column falls short after a `\|` escape inside a table, so the
+/// range runs from the `[[` it reports to the next `]]`.
+fn wikilink_range(
+    source: &str,
+    line_starts: &[usize],
+    sourcepos: comrak::nodes::Sourcepos,
+) -> Option<std::ops::Range<usize>> {
+    let start = line_starts.get(sourcepos.start.line.checked_sub(1)?)?
+        + sourcepos.start.column.checked_sub(1)?;
+    let rest = source.get(start..)?;
+    if !rest.starts_with("[[") {
+        return None;
+    }
+    let close = rest.find("]]")?;
+    Some(start..start + close + 2)
+}
+
 /// How deep note embeds may nest inside one another.
 const MAX_EMBED_DEPTH: usize = 3;
 

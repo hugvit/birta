@@ -3,6 +3,8 @@
 //! Runs on the parsed tree, after URL resolution, by splitting `Text` nodes.
 //! Code spans and fenced code are separate nodes, so they are never touched.
 
+use std::ops::Range;
+
 use comrak::nodes::{Ast, AstNode, NodeHtmlBlock, NodeValue, Sourcepos};
 use comrak::{Arena, html::escape_href};
 
@@ -23,6 +25,8 @@ pub(crate) struct Syntax<'r> {
 pub(crate) struct Found {
     pub embeds: Vec<String>,
     pub tags: Vec<String>,
+    /// Every embed occurrence with its byte range in the source, in source order.
+    pub embed_spans: Vec<(String, Range<usize>)>,
 }
 
 enum Piece {
@@ -36,11 +40,32 @@ pub(crate) fn rewrite<'a>(
     source: &str,
     syntax: &Syntax<'_>,
 ) -> Found {
+    scan(Some(arena), root, source, syntax)
+}
+
+/// What [`rewrite`] would find, leaving the tree as it is.
+pub(crate) fn find<'a>(root: &'a AstNode<'a>, source: &str, embeds: bool, tags: bool) -> Found {
+    let syntax = Syntax {
+        embeds,
+        tags,
+        resolver: None,
+        note: &|_| None,
+    };
+    scan(None, root, source, &syntax)
+}
+
+/// Rewrites the tree when given an arena; without one it only collects.
+fn scan<'a>(
+    arena: Option<&'a Arena<'a>>,
+    root: &'a AstNode<'a>,
+    source: &str,
+    syntax: &Syntax<'_>,
+) -> Found {
     let mut found = Found::default();
     if !syntax.embeds && !syntax.tags {
         return found;
     }
-    let lines: Vec<&str> = source.split('\n').collect();
+    let lines = Lines::new(source);
 
     if syntax.embeds {
         embed_notes(root, &lines, syntax, &mut found);
@@ -90,6 +115,9 @@ pub(crate) fn rewrite<'a>(
                 .collect();
         }
 
+        let Some(arena) = arena else {
+            continue;
+        };
         if matches!(pieces.as_slice(), [Piece::Text(t)] if *t == literal) {
             continue;
         }
@@ -104,7 +132,31 @@ pub(crate) fn rewrite<'a>(
         }
         node.detach();
     }
+    // The paragraph pass and the inline pass can both see a note embed left as text
+    found.embed_spans.sort_by_key(|(_, range)| range.start);
+    found.embed_spans.dedup();
     found
+}
+
+/// The source split into lines, with each line's byte offset.
+struct Lines<'s> {
+    lines: Vec<&'s str>,
+    starts: Vec<usize>,
+}
+
+impl<'s> Lines<'s> {
+    fn new(source: &'s str) -> Self {
+        let lines: Vec<&str> = source.split('\n').collect();
+        let starts = lines
+            .iter()
+            .scan(0, |at, line| {
+                let start = *at;
+                *at += line.len() + 1;
+                Some(start)
+            })
+            .collect();
+        Lines { lines, starts }
+    }
 }
 
 /// The source text behind a single-line node, and where it sits in its line.
@@ -113,6 +165,8 @@ struct Raw<'s> {
     line: &'s str,
     start: usize,
     text: &'s str,
+    /// Byte offset of `text` in the whole source.
+    offset: usize,
 }
 
 impl Raw<'_> {
@@ -131,14 +185,20 @@ impl Raw<'_> {
 }
 
 /// Columns in sourcepos are 1-based byte offsets.
-fn raw_text<'s>(lines: &[&'s str], sourcepos: Sourcepos) -> Option<Raw<'s>> {
+fn raw_text<'s>(lines: &Lines<'s>, sourcepos: Sourcepos) -> Option<Raw<'s>> {
     if sourcepos.start.line != sourcepos.end.line {
         return None;
     }
-    let line = lines.get(sourcepos.start.line.wrapping_sub(1))?;
+    let index = sourcepos.start.line.wrapping_sub(1);
+    let line = lines.lines.get(index)?;
     let start = sourcepos.start.column.saturating_sub(1);
     let text = line.get(start..sourcepos.end.column)?;
-    Some(Raw { line, start, text })
+    Some(Raw {
+        line,
+        start,
+        text,
+        offset: lines.starts[index] + start,
+    })
 }
 
 /// comrak ends a table cell's text at its unescaped length, so `\|` cuts the
@@ -157,7 +217,12 @@ fn widen_in_table_cell<'a>(node: &'a AstNode<'a>, mut sourcepos: Sourcepos) -> S
 
 /// Replace each paragraph that is nothing but a note embed with the rendered
 /// note. Inline note embeds stay text: a `<div>` cannot sit inside a `<p>`.
-fn embed_notes<'a>(root: &'a AstNode<'a>, lines: &[&str], syntax: &Syntax<'_>, found: &mut Found) {
+fn embed_notes<'a>(
+    root: &'a AstNode<'a>,
+    lines: &Lines<'_>,
+    syntax: &Syntax<'_>,
+    found: &mut Found,
+) {
     let paragraphs: Vec<_> = root
         .descendants()
         .filter(|n| matches!(n.data.borrow().value, NodeValue::Paragraph))
@@ -180,8 +245,10 @@ fn embed_notes<'a>(root: &'a AstNode<'a>, lines: &[&str], syntax: &Syntax<'_>, f
         let Some(raw) = raw_text(lines, sourcepos) else {
             continue;
         };
-        let inner = match find_embeds(raw.text).as_slice() {
-            [(start, _, inner)] if !raw.escaped(*start) => inner.to_string(),
+        let (inner, span) = match find_embeds(raw.text).as_slice() {
+            [(start, end, inner)] if !raw.escaped(*start) => {
+                (inner.to_string(), raw.offset + start..raw.offset + end)
+            }
             _ => continue,
         };
         let target = inner.split('|').next().unwrap_or_default().trim();
@@ -189,6 +256,7 @@ fn embed_notes<'a>(root: &'a AstNode<'a>, lines: &[&str], syntax: &Syntax<'_>, f
             continue;
         }
         push_unique(&mut found.embeds, target);
+        found.embed_spans.push((target.to_string(), span));
         if let Some(html) = (syntax.note)(target) {
             paragraph.data.borrow_mut().value = NodeValue::HtmlBlock(NodeHtmlBlock {
                 block_type: 6,
@@ -252,7 +320,7 @@ fn split_embeds(literal: &str, raw: Raw<'_>, syntax: &Syntax<'_>, found: &mut Fo
 
     let mut pieces = Vec::new();
     let mut last = 0;
-    for ((start, end, _), (raw_start, _, inner)) in matches.into_iter().zip(raw_matches) {
+    for ((start, end, _), (raw_start, raw_end, inner)) in matches.into_iter().zip(raw_matches) {
         if raw.escaped(raw_start) {
             continue;
         }
@@ -266,6 +334,10 @@ fn split_embeds(literal: &str, raw: Raw<'_>, syntax: &Syntax<'_>, found: &mut Fo
             continue;
         }
         push_unique(&mut found.embeds, target);
+        found.embed_spans.push((
+            target.to_string(),
+            raw.offset + raw_start..raw.offset + raw_end,
+        ));
         if !is_image(target) {
             continue;
         }

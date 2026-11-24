@@ -1,0 +1,44 @@
+# Licenses allowed in birta's release binaries; anything else fails `cargo about generate`
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+]
+# Keep in sync with `targets` in dist-workspace.toml so platform-only deps are covered
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+ignore-dev-dependencies = true
+
+# onig_sys compiles the bundled Oniguruma C library into the binary
+[onig_sys.clarify]
+license = "MIT AND BSD-2-Clause"
+
+[[onig_sys.clarify.files]]
+path = "LICENSE.md"
+license = "MIT"
+checksum = "71f321038b088358004bee991635ac09e4c703bec467d3c30c06992c0595f189"
+
+[[onig_sys.clarify.files]]
+path = "oniguruma/COPYING"
+license = "BSD-2-Clause"
+checksum = "70ba5469ea0bab6e18a32d7009068f996503168d27be57747e08da34337ff26f"
+
+# COPYING bundles notices for code ported from cmark-gfm, houdini and utf8proc
+[comrak.clarify]
+license = "BSD-2-Clause"
+
+[[comrak.clarify.files]]
+path = "COPYING"
+license = "BSD-2-Clause"
+checksum = "27293e2353ce5d83e07331ffc423051908b062787d148193b8927d50d9873bd5"

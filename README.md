@@ -228,3 +228,9 @@ Most flags can be accessed through the plugin's config.
 ## License
 
 [MIT](LICENSE)
+
+Release archives include [THIRD-PARTY-LICENSES](THIRD-PARTY-LICENSES) for the crates compiled into birta. After changing dependencies, regenerate it with [cargo-about](https://github.com/EmbarkStudios/cargo-about):
+
+```sh
+cargo about generate --locked --fail about.hbs -o THIRD-PARTY-LICENSES
+```

@@ -142,9 +142,13 @@ pub struct Diff {
     /// Set only when both sides are non-empty.
     pub final_newline_differs: bool,
     pub bom_differs: bool,
-    /// Highlighting and word marks were skipped: for everything when an input
-    /// exceeds `highlight_limit`, or for single lines over the per-line cap.
+    /// Highlighting and word marks were skipped for everything, because an
+    /// input exceeded `highlight_limit`.
     pub degraded: bool,
+    /// Lines shown without syntax highlighting because each is over the
+    /// per-line cap (8 KiB), e.g. a data URI. Informational: the rest of the
+    /// diff is highlighted as usual.
+    pub unhighlighted_lines: usize,
     /// The deadline had passed by the time the diff finished, so the line diff or
     /// some word marks may be less precise than they could be.
     pub timed_out: bool,
@@ -242,14 +246,17 @@ pub fn diff(old: &str, new: &str, opts: &DiffOptions<'_>) -> Diff {
         added: hunks.iter().map(|h| h.new.len()).sum(),
         removed: hunks.iter().map(|h| h.old.len()).sum(),
     };
-    let too_long = |lines: &[String]| {
-        lines
+    let degraded = old.len() > opts.highlight_limit || new.len() > opts.highlight_limit;
+    let unhighlighted_lines = if degraded {
+        0
+    } else {
+        old_lines
             .iter()
-            .any(|l| l.len() > crate::highlight::HIGHLIGHT_MAX_LINE)
+            .chain(&new_lines)
+            .filter(|l| l.len() > crate::highlight::HIGHLIGHT_MAX_LINE)
+            .count()
     };
-    let oversized = old.len() > opts.highlight_limit || new.len() > opts.highlight_limit;
-    let degraded = oversized || too_long(&old_lines) || too_long(&new_lines);
-    let (old_marks, new_marks) = if opts.words && !oversized {
+    let (old_marks, new_marks) = if opts.words && !degraded {
         word_marks(&hunks, &old_lines, &new_lines, deadline)
     } else {
         (
@@ -272,9 +279,10 @@ pub fn diff(old: &str, new: &str, opts: &DiffOptions<'_>) -> Diff {
         final_newline_differs: norm.final_newline_differs,
         bom_differs: norm.bom_differs,
         degraded,
+        unhighlighted_lines,
         timed_out,
     };
-    result.html = html::render(&result, &old_marks, &new_marks, oversized, opts);
+    result.html = html::render(&result, &old_marks, &new_marks, opts);
     result
 }
 

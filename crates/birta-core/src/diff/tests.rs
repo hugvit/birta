@@ -269,7 +269,9 @@ fn an_overlong_line_is_shown_plain_and_flagged() {
         "{:?}",
         started.elapsed()
     );
-    assert!(r.degraded);
+    assert!(!r.degraded);
+    // The old and the new version of the long line
+    assert_eq!(r.unhighlighted_lines, 2);
     // The short line keeps its syntax spans; the long one is escaped text only
     assert!(r.html.contains("heading"));
     assert!(r.html.contains("*a* _b_ `c` [d](e) *a*"));

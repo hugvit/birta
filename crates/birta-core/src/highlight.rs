@@ -40,14 +40,9 @@ pub fn highlight_source(source: &str, syntax_theme: Option<&SyntaxTheme>) -> Str
         .find_syntax_by_extension("md")
         .unwrap_or_else(|| ss.find_syntax_plain_text());
 
-    // Syntect's generator can't skip one line, so a too-long line drops highlighting for all
-    let html = if source.lines().any(|l| l.len() > HIGHLIGHT_MAX_LINE) {
-        crate::render::html_escape(source)
-    } else {
-        match syntax_theme {
-            None => highlight_classed(source, syntax, ss),
-            Some(st) => highlight_styled(source, syntax, ss, st),
-        }
+    let html = match syntax_theme {
+        None => highlight_classed(source, syntax, ss),
+        Some(st) => highlight_styled(source, syntax, ss, st),
     };
     // The HTML parser normalizes raw CRs to LF, which breaks CRLF line alignment and copying
     html.replace('\r', "&#13;")
@@ -451,8 +446,28 @@ mod tests {
         let out = highlight_line_segments(&lines, None, &[], "del");
         assert!(out[0].contains("<span"));
         assert!(!out[1].contains("<span") && out[1].starts_with("&lt;b&gt;"));
-        let source = highlight_source(&format!("# Title\n{long}\n"), None);
-        assert!(!source.contains("<span") && source.contains("&lt;b&gt;"));
-        assert!(highlight_source("# Title\n", None).contains("<span"));
+    }
+
+    #[test]
+    fn highlight_source_highlights_long_lines_like_main() {
+        let data_uri = format!("![img](data:image/png;base64,{})", "QUJD".repeat(5_000));
+        let row = format!("| {} |", "cell ".repeat(1_900));
+        let source = format!("# Title\n\n{data_uri}\n\n{row}\n");
+        assert!(data_uri.len() > HIGHLIGHT_MAX_LINE && row.len() > HIGHLIGHT_MAX_LINE);
+
+        // The pre-cache code path: a fresh syntax set and syntect's own generators
+        let ss = SyntaxSet::load_defaults_newlines();
+        let syntax = ss.find_syntax_by_extension("md").unwrap();
+        let theme = default_syntax_theme();
+        for mode in [None, Some(&theme)] {
+            let expected = match mode {
+                None => highlight_classed(&source, syntax, &ss),
+                Some(st) => highlight_styled(&source, syntax, &ss, st),
+            }
+            .replace('\r', "&#13;");
+            let actual = highlight_source(&source, mode);
+            assert_eq!(actual, expected);
+            assert!(actual.contains("<span"));
+        }
     }
 }

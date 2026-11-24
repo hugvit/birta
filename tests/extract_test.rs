@@ -352,6 +352,9 @@ fn every_wikilink_occurrence_gets_a_span_in_generated_documents() {
         "| ",
         "\\| ",
         "&#33;[[f]] ",
+        "[[lamb&#32;soup]] ",
+        "`[[lamb soup]]` ",
+        "`x\\|y` ",
         "\r\n",
     ];
     let mut seed: u64 = 7;
@@ -381,6 +384,14 @@ fn every_wikilink_occurrence_gets_a_span_in_generated_documents() {
                 "{doc:?}: {text:?}"
             );
         }
+        // A literal `[[…]]` in a code span is never a link's span
+        for span in &e.wikilink_spans {
+            assert!(
+                !doc[..span.range.start].ends_with('`'),
+                "{doc:?}: {:?}",
+                e.wikilink_spans
+            );
+        }
         let anchors = rendered.html.matches("data-wikilink=\"true\"").count();
         assert_eq!(
             e.wikilink_spans.len(),
@@ -389,4 +400,52 @@ fn every_wikilink_occurrence_gets_a_span_in_generated_documents() {
             e.wikilink_spans
         );
     }
+}
+
+#[test]
+fn spelled_links_beat_literal_lookalikes_in_code_spans() {
+    for (markdown, expected) in [
+        ("[[lamb&#32;soup]] and `[[lamb soup]]`", "[[lamb&#32;soup]]"),
+        (
+            "`[[lamb soup]]` then [[lamb&#32;soup]]",
+            "[[lamb&#32;soup]]",
+        ),
+        ("[[a\\_b]] and `[[a_b]]`", "[[a\\_b]]"),
+        ("a | b\n--|--\nx\\|y `[[c]]` [[c]] | z", "[[c]]"),
+        ("``x ` [[d]]`` [[d]]", "[[d]]"),
+    ] {
+        let e = assert_matches_render(markdown, &all_on(None), markdown);
+        let spans = spans_of(markdown, &e).0;
+        assert_eq!(spans, [expected], "{markdown:?}");
+        // The span is the link itself, never the code span's text
+        let span = &e.wikilink_spans[0];
+        assert!(
+            markdown.rfind(expected) == Some(span.range.start)
+                || markdown.find(expected) == Some(span.range.start)
+        );
+        assert!(!markdown[..span.range.start].ends_with('`'), "{markdown:?}");
+    }
+}
+
+#[test]
+fn many_links_in_one_note_all_get_spans() {
+    // 4,000 links, many sharing targets, with code-span lookalikes between them
+    let mut doc = String::new();
+    for i in 0..4000 {
+        doc.push_str(&format!("[[n{}]] ", i % 97));
+        if i % 10 == 0 {
+            doc.push_str(&format!("`[[n{}]]` ", i % 97));
+        }
+        if i % 25 == 0 {
+            doc.push('\n');
+        }
+    }
+    let e = extract(&doc, &all_on(None));
+    assert_eq!(e.wikilink_spans.len(), 4000);
+    assert_eq!(e.wikilinks.len(), 97);
+    assert!(
+        e.wikilink_spans
+            .iter()
+            .all(|s| !doc[..s.range.start].ends_with('`'))
+    );
 }

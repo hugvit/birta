@@ -315,3 +315,78 @@ fn a_bom_keeps_table_cell_embeds_and_tags() {
     let e = assert_matches_render(markdown, &embeds_only(), "bom");
     assert_eq!(spans_of(markdown, &e).1, ["![[p.png]]"]);
 }
+
+#[test]
+fn wikilinks_broken_across_lines_keep_their_spans() {
+    for (markdown, expected) in [
+        ("[[x\n]] [[B]]", vec!["[[x\n]]", "[[B]]"]),
+        ("a [[x\ny]] [[B]]", vec!["[[x\ny]]", "[[B]]"]),
+        ("> a [[x\n> y]] [[B]]", vec!["[[x\n> y]]", "[[B]]"]),
+        ("[[x\r\n]] [[B]]", vec!["[[x\r\n]]", "[[B]]"]),
+        (
+            "p [[a\nb]] [[c]]\nnext [[d]] and [[e\nf]]",
+            vec!["[[a\nb]]", "[[c]]", "[[d]]", "[[e\nf]]"],
+        ),
+    ] {
+        let e = assert_matches_render(markdown, &all_on(None), markdown);
+        assert_eq!(spans_of(markdown, &e).0, expected, "{markdown:?}");
+    }
+}
+
+/// Every wiki link `render` reports has as many spans as it has occurrences,
+/// across randomly built documents mixing line breaks, quotes, tables and escapes.
+#[test]
+fn every_wikilink_occurrence_gets_a_span_in_generated_documents() {
+    let tokens = [
+        "[[a]]",
+        "[[b|B]]",
+        "[[c\n]]",
+        "[[d\ne]]",
+        "\n",
+        "\n\n",
+        "> ",
+        "x ",
+        "`[[no]]` ",
+        "\\[[esc]] ",
+        "![[img.png]] ",
+        "| ",
+        "\\| ",
+        "&#33;[[f]] ",
+        "\r\n",
+    ];
+    let mut seed: u64 = 7;
+    let mut next = || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as usize
+    };
+    for _ in 0..300 {
+        let mut doc = String::new();
+        if next() % 3 == 0 {
+            doc.push_str("h | k\n--|--\n");
+        }
+        for _ in 0..(1 + next() % 12) {
+            doc.push_str(tokens[next() % tokens.len()]);
+        }
+        let rendered = render(&doc, &all_on(None));
+        let e = extract(&doc, &all_on(None));
+        assert_eq!(e.wikilinks, rendered.wikilinks, "{doc:?}");
+        assert_eq!(e.embeds, rendered.embeds, "{doc:?}");
+        assert_eq!(e.tags, rendered.tags, "{doc:?}");
+        for span in &e.wikilink_spans {
+            let text = &doc[span.range.clone()];
+            assert!(
+                text.starts_with("[[") && text.ends_with("]]"),
+                "{doc:?}: {text:?}"
+            );
+        }
+        let anchors = rendered.html.matches("data-wikilink=\"true\"").count();
+        assert_eq!(
+            e.wikilink_spans.len(),
+            anchors,
+            "{doc:?}: {:?}",
+            e.wikilink_spans
+        );
+    }
+}

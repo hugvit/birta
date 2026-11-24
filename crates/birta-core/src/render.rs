@@ -216,11 +216,12 @@ pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
     extracted
 }
 
-/// The source range of a wiki link on the line comrak reports. comrak's
+/// The source range of a wiki link near where comrak reports it. comrak's
 /// columns drift inside tables (each `\|` shifts later text left; a table on the
-/// first line of a file with a BOM is shifted right) and its end falls short
-/// after `\|`, so the link is the unused `[[target` nearest the reported
-/// column, running to the next `]]`.
+/// first line of a file with a BOM is shifted right), its end falls short after
+/// `\|`, and after a link that breaks across lines it keeps counting columns on
+/// the first line. So the link is the unused `[[target` nearest the reported
+/// position, from that line on, running to the next `]]`.
 fn wikilink_range(
     source: &str,
     line_starts: &[usize],
@@ -228,15 +229,15 @@ fn wikilink_range(
     target: &str,
     used: &[usize],
 ) -> Option<std::ops::Range<usize>> {
-    let index = sourcepos.start.line.checked_sub(1)?;
-    let line_start = *line_starts.get(index)?;
-    let line_end = line_starts
-        .get(index + 1)
-        .map_or(source.len(), |next| next - 1);
-    let line = source.get(line_start..line_end)?;
+    let line_start = *line_starts.get(sourcepos.start.line.checked_sub(1)?)?;
     let estimate = line_start + sourcepos.start.column.saturating_sub(1);
+    let mut window_end = (estimate + WIKILINK_SEARCH).min(source.len());
+    while !source.is_char_boundary(window_end) {
+        window_end -= 1;
+    }
+    let window = source.get(line_start..window_end)?;
 
-    let opens: Vec<usize> = line
+    let opens: Vec<usize> = window
         .match_indices("[[")
         .map(|(i, _)| line_start + i)
         .filter(|start| !used.contains(start))
@@ -251,9 +252,12 @@ fn wikilink_range(
         starts.copied().min_by_key(|start| start.abs_diff(estimate))
     };
     let start = nearest(&mut opens.iter().filter(named)).or_else(|| nearest(&mut opens.iter()))?;
-    let close = source[start..line_end].find("]]")?;
+    let close = source[start..].find("]]")?;
     Some(start..start + close + 2)
 }
+
+/// How far past comrak's reported position a wiki link is looked for.
+const WIKILINK_SEARCH: usize = 1024;
 
 /// How deep note embeds may nest inside one another.
 const MAX_EMBED_DEPTH: usize = 3;

@@ -107,6 +107,11 @@ mod tests {
             ".punctuation.definition.list_item.markdown",
             ".constant.other.language-name.markdown",
             ".markup.underline.link.markdown",
+            ".punctuation.definition.link.markdown",
+            ".punctuation.definition.image.markdown",
+            ".punctuation.definition.metadata.markdown",
+            ".punctuation.separator.table-cell.markdown",
+            ".punctuation.section.table-header.markdown",
         ] {
             assert!(
                 super::SYNTAX.contains(&format!("{guard} {scope}")),
@@ -119,6 +124,7 @@ mod tests {
             ("md-code", "#0550ae", "#79c0ff"),
             ("md-bullet", "#953800", "#ffa657"),
             ("md-lang", "#6639ba", "#d2a8ff"),
+            ("md-table", "#3b2300", "#f2cc60"),
         ] {
             assert!(
                 super::SYNTAX.contains(&format!("--birta-syn-{token}: {light};")),
@@ -129,5 +135,17 @@ mod tests {
                 "{token}"
             );
         }
+    }
+
+    #[test]
+    fn page_header_bar_cannot_match_syntax_scope_spans() {
+        // Syntect emits `<span class="... header ...">` for table header lines
+        for line in super::PAGE.lines() {
+            let selector = line.trim_start();
+            assert!(!selector.starts_with(".header {"), "{line}");
+            assert!(!selector.starts_with(".header."), "{line}");
+            assert!(!selector.contains(" .header {"), "{line}");
+        }
+        assert!(super::PAGE.contains("header.header {"));
     }
 }

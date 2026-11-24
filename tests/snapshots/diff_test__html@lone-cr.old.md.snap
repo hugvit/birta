@@ -1,6 +1,5 @@
 ---
 source: tests/diff_test.rs
-assertion_line: 22
 expression: result.html
 input_file: tests/fixtures/diff/lone-cr.old.md
 ---

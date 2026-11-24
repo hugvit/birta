@@ -110,7 +110,7 @@ impl FontConfig {
         if let Some(body) = &self.body {
             rules.push(format!(
                 ".markdown-body {{ font-family: {body} !important; }}\n\
-                 .header {{ font-family: {body}; }}"
+                 header.header {{ font-family: {body}; }}"
             ));
         }
         if let Some(mono) = &self.mono {

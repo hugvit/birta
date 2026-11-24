@@ -17,7 +17,7 @@
 }
 
 [data-theme="dark"] {
-  --birta-fg: #e6edf3;
+  --birta-fg: #f0f6fc;
   --birta-fg-muted: #9198a1;
   --birta-bg: #0d1117;
   --birta-bg-secondary: #161b22;
@@ -26,7 +26,7 @@
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --birta-fg: #e6edf3;
+    --birta-fg: #f0f6fc;
     --birta-fg-muted: #9198a1;
     --birta-bg: #0d1117;
     --birta-bg-secondary: #161b22;
@@ -46,7 +46,7 @@ html, body {
   transition: background-color 0.2s, color 0.2s;
 }
 
-.header {
+header.header {
   position: sticky;
   top: 0;
   z-index: 100;
@@ -62,7 +62,7 @@ html, body {
   transition: transform 0.3s ease, opacity 0.3s ease;
 }
 
-.header.header-hidden {
+header.header.header-hidden {
   display: none;
 }
 
@@ -324,7 +324,7 @@ html, body {
     padding: 16px;
   }
 
-  .header {
+  header.header {
     padding: 8px 16px;
   }
 }
@@ -350,7 +350,7 @@ html, body {
 }
 
 /* --- Reading mode --- */
-body.reading-mode .header {
+body.reading-mode header.header {
   transform: translateY(-100%);
   pointer-events: none;
   opacity: 0;
@@ -448,8 +448,7 @@ body.reading-mode .container {
 .source-lines span {
   display: block;
   padding: 0 12px 0 16px;
-  color: var(--birta-fg);
-  opacity: 0.35;
+  color: var(--birta-fg-muted);
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   font-size: 12px;
   line-height: 20px;

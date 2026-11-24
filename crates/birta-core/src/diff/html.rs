@@ -80,9 +80,15 @@ pub(super) fn render(
             let end = run_end(&diff.rows, i, |r| r.kind == RowKind::Context && r.folded);
             let run = &diff.rows[i..end];
             let label = html_escape(&s.fold.replace("{n}", &run.len().to_string()));
+            // GitHub's icon depends on which side of the file the hidden lines are
+            let at = match (i == 0, end == diff.rows.len()) {
+                (true, _) => " data-at=\"start\"",
+                (_, true) => " data-at=\"end\"",
+                _ => "",
+            };
             let _ = writeln!(
                 out,
-                "<details class=\"diff-fold\" data-old=\"{}\" data-new=\"{}\" data-count=\"{}\"><summary aria-label=\"{label}\" title=\"{label}\"><span class=\"diff-expander\" aria-hidden=\"true\"></span>{}</summary>",
+                "<details class=\"diff-fold\"{at} data-old=\"{}\" data-new=\"{}\" data-count=\"{}\"><summary aria-label=\"{label}\" title=\"{label}\"><span class=\"diff-expander\" aria-hidden=\"true\"></span>{}</summary>",
                 line_no(run[0].old),
                 line_no(run[0].new),
                 run.len(),

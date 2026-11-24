@@ -27,12 +27,13 @@
   --birta-syn-md-code: #0550ae;
   --birta-syn-md-bullet: #953800;
   --birta-syn-md-lang: #6639ba;
+  --birta-syn-md-table: #3b2300;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     --birta-syn-bg: #161b22;
-    --birta-syn-fg: #e6edf3;
+    --birta-syn-fg: #f0f6fc;
     --birta-syn-keyword: #ff7b72;
     --birta-syn-function: #d2a8ff;
     --birta-syn-type: #ffa657;
@@ -41,8 +42,8 @@
     --birta-syn-constant: #79c0ff;
     --birta-syn-comment: #8b949e;
     --birta-syn-variable: #ffa657;
-    --birta-syn-parameter: #e6edf3;
-    --birta-syn-punctuation: #e6edf3;
+    --birta-syn-parameter: #f0f6fc;
+    --birta-syn-punctuation: #f0f6fc;
     --birta-syn-call: #8250df;
     --birta-syn-attribute: #79c0ff;
     --birta-syn-variable-other: #79c0ff;
@@ -55,6 +56,7 @@
     --birta-syn-md-code: #79c0ff;
     --birta-syn-md-bullet: #ffa657;
     --birta-syn-md-lang: #d2a8ff;
+    --birta-syn-md-table: #f2cc60;
   }
 }
 
@@ -83,11 +85,12 @@
   --birta-syn-md-code: #0550ae;
   --birta-syn-md-bullet: #953800;
   --birta-syn-md-lang: #6639ba;
+  --birta-syn-md-table: #3b2300;
 }
 
 [data-theme="dark"] {
   --birta-syn-bg: #161b22;
-  --birta-syn-fg: #e6edf3;
+  --birta-syn-fg: #f0f6fc;
   --birta-syn-keyword: #ff7b72;
   --birta-syn-function: #d2a8ff;
   --birta-syn-type: #ffa657;
@@ -96,8 +99,8 @@
   --birta-syn-constant: #79c0ff;
   --birta-syn-comment: #8b949e;
   --birta-syn-variable: #ffa657;
-  --birta-syn-parameter: #e6edf3;
-  --birta-syn-punctuation: #e6edf3;
+  --birta-syn-parameter: #f0f6fc;
+  --birta-syn-punctuation: #f0f6fc;
   --birta-syn-call: #8250df;
   --birta-syn-attribute: #79c0ff;
   --birta-syn-variable-other: #79c0ff;
@@ -110,6 +113,7 @@
   --birta-syn-md-code: #79c0ff;
   --birta-syn-md-bullet: #ffa657;
   --birta-syn-md-lang: #d2a8ff;
+  --birta-syn-md-table: #f2cc60;
 }
 
 pre.syntax-highlighting {
@@ -180,7 +184,12 @@ pre.syntax-highlighting {
 }
 :is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .markup.raw.inline.markdown { color: var(--birta-syn-md-code); }
 :is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.definition.raw.markdown,
-:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.definition.bold.markdown { color: var(--birta-syn-md-string); }
+:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.definition.bold.markdown,
+:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.definition.link.markdown,
+:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.definition.image.markdown,
+:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.definition.metadata.markdown { color: var(--birta-syn-md-string); }
+:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.separator.table-cell.markdown,
+:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.section.table-header.markdown { color: var(--birta-syn-md-table); }
 :is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.definition.list_item.markdown { color: var(--birta-syn-md-bullet); }
 :is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .constant.other.language-name.markdown { color: var(--birta-syn-md-lang); }
 :is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .markup.underline.link.markdown {

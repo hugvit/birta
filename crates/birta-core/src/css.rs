@@ -111,7 +111,6 @@ mod tests {
             ".punctuation.definition.image.markdown",
             ".punctuation.definition.metadata.markdown",
             ".punctuation.separator.table-cell.markdown",
-            ".punctuation.section.table-header.markdown",
         ] {
             assert!(
                 super::SYNTAX.contains(&format!("{guard} {scope}")),
@@ -147,5 +146,14 @@ mod tests {
             assert!(!selector.contains(" .header {"), "{line}");
         }
         assert!(super::PAGE.contains("header.header {"));
+    }
+
+    #[test]
+    fn page_defaults_never_outrank_theme_variables() {
+        assert!(!super::SYNTAX.contains(".punctuation.section.table-header.markdown"));
+        // Theme vars are `:root, .markdown-body, [data-theme=…]` at (0,1,0); page defaults must be lower
+        assert!(super::PAGE.contains(":where(:root) {"));
+        assert!(super::PAGE.contains(":where(:root:not([data-theme=\"light\"])) {"));
+        assert!(!super::PAGE.contains("\n:root {"));
     }
 }

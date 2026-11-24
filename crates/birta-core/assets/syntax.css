@@ -188,8 +188,8 @@ pre.syntax-highlighting {
 :is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.definition.link.markdown,
 :is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.definition.image.markdown,
 :is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.definition.metadata.markdown { color: var(--birta-syn-md-string); }
-:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.separator.table-cell.markdown,
-:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.section.table-header.markdown { color: var(--birta-syn-md-table); }
+/* Only the pipes: GitHub leaves a delimiter row's dashes in the text colour */
+:is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.separator.table-cell.markdown { color: var(--birta-syn-md-table); }
 :is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .punctuation.definition.list_item.markdown { color: var(--birta-syn-md-bullet); }
 :is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .constant.other.language-name.markdown { color: var(--birta-syn-md-lang); }
 :is(:root:not([data-birta-theme]), [data-birta-theme="github"]) .markup.underline.link.markdown {

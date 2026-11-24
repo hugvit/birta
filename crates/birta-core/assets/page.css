@@ -8,7 +8,8 @@
  * our own variables that mirror the github-markdown-css palette.
  */
 
-:root {
+/* Zero specificity, so a theme's own variables (#theme-vars) always win */
+:where(:root) {
   --birta-fg: #1f2328;
   --birta-fg-muted: #59636e;
   --birta-bg: #ffffff;
@@ -25,7 +26,7 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
+  :where(:root:not([data-theme="light"])) {
     --birta-fg: #f0f6fc;
     --birta-fg-muted: #9198a1;
     --birta-bg: #0d1117;

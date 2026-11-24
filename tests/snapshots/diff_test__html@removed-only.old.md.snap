@@ -1,0 +1,13 @@
+---
+source: tests/diff_test.rs
+expression: result.html
+input_file: tests/fixtures/diff/removed-only.old.md
+---
+<div class="birta-diff" data-layout="auto" style="--birta-diff-digits:1">
+<div class="diff-ctx" data-old="1" data-new="1"><div class="diff-cell diff-old"><span class="diff-num">1</span><span class="diff-sign"> </span><span class="diff-text"><span class="text html markdown"><span class="meta paragraph markdown">one</span></span></span></div><div class="diff-cell diff-new"><span class="diff-num">1</span><span class="diff-sign"> </span><span class="diff-text"><span class="text html markdown"><span class="meta paragraph markdown">one</span></span></span></div></div>
+<div class="diff-hunk" data-hunk="0" data-kind="removed" style="--rows:1">
+<div class="diff-cell diff-del" data-old="2"><span class="diff-num">2</span><span class="diff-sign">-</span><span class="diff-text"><span class="text html markdown"><span class="meta paragraph markdown">two</span></span></span></div>
+<div class="diff-cell diff-empty" aria-hidden="true"></div>
+</div>
+<div class="diff-ctx" data-old="3" data-new="2"><div class="diff-cell diff-old"><span class="diff-num">3</span><span class="diff-sign"> </span><span class="diff-text"><span class="text html markdown"><span class="meta paragraph markdown">three</span></span></span></div><div class="diff-cell diff-new"><span class="diff-num">2</span><span class="diff-sign"> </span><span class="diff-text"><span class="text html markdown"><span class="meta paragraph markdown">three</span></span></span></div></div>
+</div>

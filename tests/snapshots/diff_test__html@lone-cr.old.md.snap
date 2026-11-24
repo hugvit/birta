@@ -1,0 +1,13 @@
+---
+source: tests/diff_test.rs
+expression: result.html
+input_file: tests/fixtures/diff/lone-cr.old.md
+---
+<div class="birta-diff" data-layout="auto" style="--birta-diff-digits:1">
+<div class="diff-hunk" data-hunk="0" data-kind="changed" style="--rows:2">
+<div class="diff-cell diff-del" data-old="1"><span class="diff-num">1</span><span class="diff-sign">-</span><span class="diff-text"><span class="text html markdown"><span class="meta paragraph markdown">before<del class="diff-word">&#13;after</del></span></span></span></div>
+<div class="diff-cell diff-empty" aria-hidden="true"></div>
+<div class="diff-cell diff-add" data-new="1"><span class="diff-num">1</span><span class="diff-sign">+</span><span class="diff-text"><span class="text html markdown"><span class="meta paragraph markdown">before</span></span></span></div>
+<div class="diff-cell diff-add" data-new="2"><span class="diff-num">2</span><span class="diff-sign">+</span><span class="diff-text"><span class="text html markdown"><span class="meta paragraph markdown">after</span></span></span></div>
+</div>
+</div>

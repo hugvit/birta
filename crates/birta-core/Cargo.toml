@@ -13,6 +13,10 @@ categories = ["text-processing"]
 anyhow = "1"
 comrak = { version = "0.51", default-features = false, features = ["shortcodes", "syntect"] }
 serde = { version = "1", features = ["derive"] }
+similar = { version = "3.2", features = ["inline", "unicode"] }
 syntect = { version = "5", default-features = false, features = ["plist-load", "html"] }
 toml = "0.8"
 yaml-rust2 = "0.13.2"
+
+[dev-dependencies]
+proptest = "1"

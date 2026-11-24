@@ -4,7 +4,8 @@
 //! It knows nothing about servers, routes or files being watched. A host
 //! application renders with [`render::render`], maps URLs onto its own routes
 //! through a [`render::Resolver`], and builds its page from [`css`] plus a
-//! [`theme::ResolvedTheme`].
+//! [`theme::ResolvedTheme`]. [`diff::diff`] compares two versions of a
+//! document as highlighted source.
 //!
 //! ```
 //! use birta_core::render::{RenderOptions, Resolved, Resolver, render};
@@ -34,6 +35,7 @@
 //! ```
 
 pub mod css;
+pub mod diff;
 pub mod highlight;
 mod obsidian;
 pub mod render;

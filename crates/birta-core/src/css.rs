@@ -24,3 +24,23 @@ pub const SYNTAX: &str = include_str!("../assets/syntax.css");
 /// Colours for GitHub-style alerts (`> [!NOTE]`), driven by the `--alert-*`
 /// variables. Applies when the root element has a `data-birta-theme` attribute.
 pub const ALERTS: &str = include_str!("../assets/alerts.css");
+
+/// Styles for [`diff`](crate::diff::diff) output, unified or side by side.
+///
+/// Include it after [`ALERTS`], plus [`SYNTAX`] when diffing without a
+/// [`SyntaxTheme`](crate::theme::SyntaxTheme). Its colours come from the theme's
+/// syntax diff scopes when the theme's CSS variables carry them, else from the
+/// alert colours. In class mode the syntax classes inside a diff are unscoped:
+/// a host that scopes its syntax CSS (e.g. to `pre.syntax-highlighting`) must
+/// also scope it to `.birta-diff`.
+pub const DIFF: &str = include_str!("../assets/diff.css");
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn diff_colours_fall_back_from_syntax_theme_to_alerts() {
+        assert!(super::DIFF.contains("var(--birta-diff-add, var(--alert-tip"));
+        assert!(super::DIFF.contains("var(--birta-diff-del, var(--alert-caution"));
+        assert!(super::DIFF.contains("var(--birta-diff-change, var(--alert-warning"));
+    }
+}

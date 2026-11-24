@@ -1,0 +1,17 @@
+---
+source: tests/diff_test.rs
+expression: "(&result.hunks, &result.stats, result.identical, result.line_endings_differ,\nresult.final_newline_differs, result.bom_differs, result.degraded,)"
+input_file: tests/fixtures/diff/no-final-newline.old.md
+---
+(
+    [],
+    DiffStats {
+        added: 0,
+        removed: 0,
+    },
+    true,
+    false,
+    true,
+    false,
+    false,
+)

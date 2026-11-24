@@ -1,0 +1,24 @@
+---
+source: tests/diff_test.rs
+expression: "(&result.hunks, &result.stats, result.identical, result.line_endings_differ,\nresult.final_newline_differs, result.bom_differs, result.degraded,)"
+input_file: tests/fixtures/diff/fenced-code-change.old.md
+---
+(
+    [
+        Hunk {
+            id: 0,
+            old: 4..5,
+            new: 4..5,
+            kind: Changed,
+        },
+    ],
+    DiffStats {
+        added: 1,
+        removed: 1,
+    },
+    false,
+    false,
+    false,
+    false,
+    false,
+)

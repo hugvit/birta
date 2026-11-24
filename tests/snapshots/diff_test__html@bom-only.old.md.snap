@@ -1,0 +1,9 @@
+---
+source: tests/diff_test.rs
+expression: result.html
+input_file: tests/fixtures/diff/bom-only.old.md
+---
+<div class="birta-diff" data-layout="auto" data-identical="true" style="--birta-diff-digits:1">
+<div class="diff-note" data-note="bom">Only one side starts with a byte order mark.</div>
+<div class="diff-note" data-note="identical">No differences.</div>
+</div>

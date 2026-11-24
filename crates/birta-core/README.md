@@ -44,7 +44,8 @@ let page = render(
 |---|---|
 | `render` | `render` (markdown to an HTML fragment), `Resolver` (your URL scheme), `front_matter_table`, `render_source` (highlighted raw view), `format_file_stats` |
 | `theme` | `ThemeSearch` (find and resolve themes), `ResolvedTheme`, `ThemeRegistry` (switch theme and light/dark at runtime), the embedded themes |
-| `css` | The stylesheets as `&'static str`: `GITHUB_MARKDOWN`, `THEME_OVERRIDES`, `PAGE`, `SYNTAX`, `ALERTS` |
+| `diff` | `diff` (two texts to line hunks, rows and themed HTML), `DiffOptions`, `Layout` |
+| `css` | The stylesheets as `&'static str`: `GITHUB_MARKDOWN`, `THEME_OVERRIDES`, `PAGE`, `SYNTAX`, `ALERTS`, `DIFF` |
 | `highlight` | The syntect adapters behind `render` |
 
 ## Building a page
@@ -53,6 +54,27 @@ let page = render(
 2. Include the stylesheets in the order listed in `css`, then the active theme's `css_vars`.
 3. Set `data-theme="light"` or `"dark"` on the root element. For any theme other than `github`, also set `data-birta-theme="<name>"`.
 4. Math and Mermaid are left for the browser: load KaTeX for `[data-math-style]` elements and Mermaid for `pre.mermaid`.
+
+## Showing a diff
+
+`diff::diff(old, new, &opts)` compares two versions of a document as highlighted source:
+
+```rust
+use birta_core::diff::{diff, DiffOptions};
+
+let d = diff(theirs, mine, &DiffOptions {
+    labels: Some(["Theirs", "Yours"]),
+    ..Default::default()
+});
+// d.html: the view; d.hunks / d.rows / d.old_lines / d.new_lines: the same diff as data
+```
+
+- **Styles**: include `css::DIFF` (and `css::SYNTAX` in class mode) after the stylesheets above. Colours come from the syntax theme's `markup.inserted` / `markup.deleted` / `markup.changed` scopes when the theme has them, otherwise from its alert colours.
+- **Layout**: one HTML renders unified or side by side. `data-layout="auto"` (the default) is side by side when the diff is at least 48rem wide. Set `data-layout` to `unified` or `split` on the `.birta-diff` element to force one; no new diff is needed.
+- **Data**: hunks are 0-based, half-open line ranges into `old_lines` and `new_lines`. Each changed cell carries `data-hunk`, and every cell has 1-based `data-old` / `data-new`, so a host can wire actions without parsing the HTML.
+- **Line endings**: by default CRLF vs LF, a byte order mark and a missing final newline are ignored, each with its own flag and a note in the HTML. `LineEndings::Exact` compares bytes.
+- **Text**: `DiffOptions::strings` replaces the fold and note text; `labels` names the two columns.
+- **Scoped syntax CSS**: class-mode token classes in a diff are not under `pre.syntax-highlighting`. A host that scopes its syntax CSS there must add `.birta-diff` to that scope.
 
 ## Opt-in syntax
 

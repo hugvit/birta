@@ -1,0 +1,24 @@
+---
+source: tests/diff_test.rs
+expression: "(&result.hunks, &result.stats, result.identical, result.line_endings_differ,\nresult.final_newline_differs, result.bom_differs, result.degraded,)"
+input_file: tests/fixtures/diff/table-row-added.old.md
+---
+(
+    [
+        Hunk {
+            id: 0,
+            old: 3..3,
+            new: 3..4,
+            kind: Added,
+        },
+    ],
+    DiffStats {
+        added: 1,
+        removed: 0,
+    },
+    false,
+    false,
+    false,
+    false,
+    false,
+)

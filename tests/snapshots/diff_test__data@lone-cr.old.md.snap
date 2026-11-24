@@ -1,0 +1,24 @@
+---
+source: tests/diff_test.rs
+expression: "(&result.hunks, &result.stats, result.identical, result.line_endings_differ,\nresult.final_newline_differs, result.bom_differs, result.degraded,)"
+input_file: tests/fixtures/diff/lone-cr.old.md
+---
+(
+    [
+        Hunk {
+            id: 0,
+            old: 0..1,
+            new: 0..2,
+            kind: Changed,
+        },
+    ],
+    DiffStats {
+        added: 2,
+        removed: 1,
+    },
+    false,
+    false,
+    false,
+    false,
+    false,
+)

@@ -1,9 +1,11 @@
 ---
 source: tests/diff_test.rs
+assertion_line: 22
 expression: result.html
 input_file: tests/fixtures/diff/prose-word-edit.old.md
 ---
 <div class="birta-diff" data-layout="auto" style="--birta-diff-digits:1">
+<div class="diff-fold diff-fold-top"><span class="diff-expander" aria-hidden="true"></span><span class="diff-hunk-header">@@ -1,5 +1,5 @@</span></div>
 <div class="diff-ctx" data-old="1" data-new="1"><div class="diff-cell diff-old"><span class="diff-num">1</span><span class="diff-sign"> </span><span class="diff-text"><span class="text html markdown"><span class="meta block-level markdown"><span class="markup heading 1 markdown"><span class="punctuation definition heading begin markdown">#</span> </span><span class="markup heading 1 markdown"><span class="entity name section markdown">Notes</span><span class="meta whitespace newline markdown"></span></span></span></span></span></div><div class="diff-cell diff-new"><span class="diff-num">1</span><span class="diff-sign"> </span><span class="diff-text"><span class="text html markdown"><span class="meta block-level markdown"><span class="markup heading 1 markdown"><span class="punctuation definition heading begin markdown">#</span> </span><span class="markup heading 1 markdown"><span class="entity name section markdown">Notes</span><span class="meta whitespace newline markdown"></span></span></span></span></span></div></div>
 <div class="diff-ctx" data-old="2" data-new="2"><div class="diff-cell diff-old"><span class="diff-num">2</span><span class="diff-sign"> </span><span class="diff-text"><span class="text html markdown"></span></span></div><div class="diff-cell diff-new"><span class="diff-num">2</span><span class="diff-sign"> </span><span class="diff-text"><span class="text html markdown"></span></span></div></div>
 <div class="diff-hunk" data-hunk="0" data-kind="changed" style="--rows:1">

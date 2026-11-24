@@ -234,7 +234,7 @@ fn long_unchanged_runs_fold() {
     // 19 lines before the edit keep 3 visible, 20 after keep 3
     assert!(r.html.contains("data-count=\"16\""), "{}", r.html);
     assert!(r.html.contains("data-count=\"17\""));
-    assert!(r.html.contains("<summary>16 unchanged lines</summary>"));
+    assert!(r.html.contains("aria-label=\"16 unchanged lines\""));
     assert_eq!(r.rows.iter().filter(|row| row.folded).count(), 33);
     let all = diff(
         &old,
@@ -244,7 +244,7 @@ fn long_unchanged_runs_fold() {
             ..Default::default()
         },
     );
-    assert!(!all.html.contains("diff-fold"));
+    assert!(!all.html.contains("<details"));
 }
 
 #[test]
@@ -254,7 +254,7 @@ fn a_single_hidden_line_is_shown_instead_of_folded() {
     let new = old.replace("1\n", "one\n").replace("9\n", "nine\n");
     let r = d(&old, &new);
     assert!(r.rows.iter().all(|row| !row.folded));
-    assert!(!r.html.contains("diff-fold"));
+    assert!(!r.html.contains("<details"));
 }
 
 #[test]
@@ -278,6 +278,37 @@ fn an_overlong_line_is_shown_plain_and_flagged() {
 }
 
 #[test]
+fn hunk_headers_follow_git_and_github() {
+    let old: String = std::iter::once("# Title\n".to_string())
+        .chain((2..=40).map(|i| format!("line {i}\n")))
+        .collect();
+    let new = old.replace("line 20\n", "line twenty\n");
+    let r = d(&old, &new);
+    // Context 3 around line 20: lines 17..=23, with git's funcname from line 16
+    assert!(
+        r.html.contains("@@ -17,7 +17,7 @@ line 16</span>"),
+        "{}",
+        r.html
+    );
+    assert!(!r.html.contains("diff-fold-top"));
+    // A change on line 1 shows a header above the first chunk too
+    let r = d("a\nb\n", "A\nb\n");
+    assert!(r.html.contains("<div class=\"diff-fold diff-fold-top\">"));
+    assert!(r.html.contains("@@ -1,2 +1,2 @@</span>"));
+    // Headings and indented lines are not funcname candidates; long ones are cut at 80 bytes
+    let long = "é".repeat(60);
+    let old = format!("# Head\n  indented\n{long}\n1\n2\n3\n4\n5\n6\ng\n");
+    let r = d(&old, &old.replace("g\n", "G\n"));
+    assert!(
+        r.html.contains(&format!(" {}</span>", "é".repeat(40))),
+        "{}",
+        r.html
+    );
+    // Pure insertion into an empty file, and single-line ranges without ",1"
+    assert!(d("", "x\n").html.contains("@@ -0,0 +1 @@</span>"));
+}
+
+#[test]
 fn fold_text_comes_from_strings() {
     let opts = DiffOptions {
         strings: DiffStrings {
@@ -288,7 +319,7 @@ fn fold_text_comes_from_strings() {
     };
     let old: String = (1..=20).map(|i| format!("{i}\n")).collect();
     let r = diff(&old, &old.replace("10\n", "tíu\n"), &opts);
-    assert!(r.html.contains("óbreyttar línur</summary>"));
+    assert!(r.html.contains("óbreyttar línur\""));
 }
 
 /// Rebuild one side's lines from the HTML: its changed cells plus its half of each context row.

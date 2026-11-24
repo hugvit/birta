@@ -66,19 +66,27 @@ pub(super) fn render(
         new: &new_html,
     };
 
+    if diff.rows.first().is_some_and(|r| !r.folded) {
+        let _ = writeln!(
+            out,
+            "<div class=\"diff-fold diff-fold-top\"><span class=\"diff-expander\" aria-hidden=\"true\"></span>{}</div>",
+            hunk_header(diff, 0),
+        );
+    }
     let mut i = 0;
     while i < diff.rows.len() {
         let row = &diff.rows[i];
         if row.kind == RowKind::Context && row.folded {
             let end = run_end(&diff.rows, i, |r| r.kind == RowKind::Context && r.folded);
             let run = &diff.rows[i..end];
+            let label = html_escape(&s.fold.replace("{n}", &run.len().to_string()));
             let _ = writeln!(
                 out,
-                "<details class=\"diff-fold\" data-old=\"{}\" data-new=\"{}\" data-count=\"{}\"><summary>{}</summary>",
+                "<details class=\"diff-fold\" data-old=\"{}\" data-new=\"{}\" data-count=\"{}\"><summary aria-label=\"{label}\" title=\"{label}\"><span class=\"diff-expander\" aria-hidden=\"true\"></span>{}</summary>",
                 line_no(run[0].old),
                 line_no(run[0].new),
                 run.len(),
-                html_escape(&s.fold.replace("{n}", &run.len().to_string())),
+                hunk_header(diff, end),
             );
             for r in run {
                 cells.context(&mut out, r);
@@ -99,6 +107,57 @@ pub(super) fn render(
     }
     out.push_str("</div>");
     out
+}
+
+/// GitHub's `@@ -a,b +c,d @@ context` line for the visible rows starting at
+/// `start`, up to the next fold; empty when nothing visible follows.
+fn hunk_header(diff: &Diff, start: usize) -> String {
+    let rows = &diff.rows;
+    let end = run_end(rows, start, |r| !r.folded);
+    if start >= end {
+        return String::new();
+    }
+    let consumed = |range: &[Row], old: bool| {
+        range
+            .iter()
+            .filter(|r| {
+                if old {
+                    r.old.is_some()
+                } else {
+                    r.new.is_some()
+                }
+            })
+            .count()
+    };
+    let (old_pos, new_pos) = (
+        consumed(&rows[..start], true),
+        consumed(&rows[..start], false),
+    );
+    let chunk = &rows[start..end];
+    let range = |pos: usize, count: usize| match count {
+        0 => format!("{pos},0"),
+        1 => format!("{}", pos + 1),
+        n => format!("{},{n}", pos + 1),
+    };
+    // git's default funcname, which GitHub shows: the nearest earlier line
+    // starting with a letter, `_` or `$`, cut to 80 bytes
+    let context = diff.old_lines[..old_pos]
+        .iter()
+        .rev()
+        .find(|l| l.starts_with(|c: char| c.is_alphabetic() || c == '_' || c == '$'))
+        .map(|l| {
+            let mut end = l.len().min(80);
+            while !l.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!(" {}", html_escape(l[..end].trim_end()))
+        })
+        .unwrap_or_default();
+    format!(
+        "<span class=\"diff-hunk-header\">@@ -{} +{} @@{context}</span>",
+        range(old_pos, consumed(chunk, true)),
+        range(new_pos, consumed(chunk, false)),
+    )
 }
 
 fn side_html(

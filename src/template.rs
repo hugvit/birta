@@ -560,8 +560,10 @@ mod tests {
         let theme = github_theme();
         let page = render_with(true, false, false, None, &theme, &["github"]);
         // The html tag should not have data-birta-theme for github
+        let html_tag = &page[page.find("<html").unwrap()..];
+        let html_tag = &html_tag[..html_tag.find('>').unwrap()];
         assert!(
-            !page.contains("data-birta-theme=\"github\""),
+            !html_tag.contains("data-birta-theme"),
             "github theme should not set data-birta-theme attribute on html element"
         );
     }

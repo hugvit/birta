@@ -1,9 +1,11 @@
 ---
 source: tests/diff_test.rs
+assertion_line: 22
 expression: result.html
 input_file: tests/fixtures/diff/two-separate-edits.old.md
 ---
 <div class="birta-diff" data-layout="auto" style="--birta-diff-digits:2">
+<div class="diff-fold diff-fold-top"><span class="diff-expander" aria-hidden="true"></span><span class="diff-hunk-header">@@ -1,12 +1,12 @@</span></div>
 <div class="diff-ctx" data-old="1" data-new="1"><div class="diff-cell diff-old"><span class="diff-num">1</span><span class="diff-sign"> </span><span class="diff-text"><span class="text html markdown"><span class="meta paragraph markdown">Line 1 of the note.</span></span></span></div><div class="diff-cell diff-new"><span class="diff-num">1</span><span class="diff-sign"> </span><span class="diff-text"><span class="text html markdown"><span class="meta paragraph markdown">Line 1 of the note.</span></span></span></div></div>
 <div class="diff-hunk" data-hunk="0" data-kind="changed" style="--rows:1">
 <div class="diff-cell diff-del" data-old="2"><span class="diff-num">2</span><span class="diff-sign">-</span><span class="diff-text"><span class="text html markdown"><span class="meta paragraph markdown">Line <del class="diff-word">2</del> of the note.</span></span></span></div>

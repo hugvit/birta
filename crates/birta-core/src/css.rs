@@ -86,4 +86,48 @@ mod tests {
         // Forced layouts must not become size containers, which collapse in shrink-to-fit parents
         assert_eq!(super::DIFF.matches("container: birta-diff").count(), 1);
     }
+
+    #[test]
+    fn syntax_colours_follow_the_nearest_data_theme() {
+        assert!(super::SYNTAX.contains("[data-theme=\"light\"] {\n  --birta-syn-bg: #f6f8fa;"));
+        assert!(super::SYNTAX.contains("[data-theme=\"dark\"] {\n  --birta-syn-bg: #161b22;"));
+        // No rule may key a token colour on an ancestor's mode
+        assert!(!super::SYNTAX.contains("[data-theme=\"dark\"] ."));
+        assert!(!super::SYNTAX.contains(":root:not([data-theme"));
+    }
+
+    #[test]
+    fn markdown_source_colours_apply_to_the_github_theme_only() {
+        let guard = ":is(:root:not([data-birta-theme]), [data-birta-theme=\"github\"])";
+        for scope in [
+            ".markup.heading.markdown",
+            ".markup.raw.inline.markdown",
+            ".punctuation.definition.raw.markdown",
+            ".punctuation.definition.bold.markdown",
+            ".punctuation.definition.list_item.markdown",
+            ".constant.other.language-name.markdown",
+            ".markup.underline.link.markdown",
+        ] {
+            assert!(
+                super::SYNTAX.contains(&format!("{guard} {scope}")),
+                "{scope}"
+            );
+        }
+        for (token, light, dark) in [
+            ("md-heading", "#0550ae", "#1f6feb"),
+            ("md-string", "#0a3069", "#a5d6ff"),
+            ("md-code", "#0550ae", "#79c0ff"),
+            ("md-bullet", "#953800", "#ffa657"),
+            ("md-lang", "#6639ba", "#d2a8ff"),
+        ] {
+            assert!(
+                super::SYNTAX.contains(&format!("--birta-syn-{token}: {light};")),
+                "{token}"
+            );
+            assert!(
+                super::SYNTAX.contains(&format!("--birta-syn-{token}: {dark};")),
+                "{token}"
+            );
+        }
+    }
 }

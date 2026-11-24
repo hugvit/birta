@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2](https://github.com/hugvit/birta/compare/v0.10.1...v0.10.2) - 2026-11-24
+
+### Added
+
+- *(birta-core)* add diff module for highlighted source diffs
+
+### Fixed
+
+- *(birta-core)* close the remaining GitHub parity gaps in diffs and source view
+- *(birta-core)* match GitHub's diff geometry, hunk rows and markdown colours
+- *(birta-core)* harden diff view against host CSS and long lines
+
+### Other
+
+- credit every bundled third-party asset in THIRD-PARTY-LICENSES
+- list the bundled Primer Octicons in THIRD-PARTY-LICENSES
+- Merge origin/main into feat-birta-core-diff
+
 ## [0.10.1](https://github.com/hugvit/birta/compare/v0.10.0...v0.10.1) - 2026-11-24
 
 ### Other

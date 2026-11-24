@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/hugvit/birta/compare/birta-core-v0.3.1...birta-core-v0.3.2) - 2026-11-24
+
+### Added
+
+- *(birta-core)* add diff module for highlighted source diffs
+
+### Fixed
+
+- *(birta-core)* keep table delimiter dashes plain and let theme variables beat page defaults
+- *(birta-core)* close the remaining GitHub parity gaps in diffs and source view
+- *(birta-core)* match GitHub's diff geometry, hunk rows and markdown colours
+- *(birta-core)* take diff text and row colours from the same light/dark mode
+- *(birta-core)* match GitHub's diff colours and layout in the github theme
+- *(birta-core)* keep the long-line cap out of highlight_source
+- *(birta-core)* harden diff view against host CSS and long lines
+
+### Other
+
+- Merge origin/main into feat-birta-core-diff
+
 ## [0.3.1](https://github.com/hugvit/birta/compare/birta-core-v0.3.0...birta-core-v0.3.1) - 2026-11-24
 
 ### Other

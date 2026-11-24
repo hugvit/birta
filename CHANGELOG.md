@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.3](https://github.com/hugvit/birta/compare/v0.10.2...v0.10.3) - 2026-11-24
+
+### Added
+
+- *(birta-core)* add extract for links, embeds and tags without rendering
+
+### Fixed
+
+- *(birta-core)* keep spans for wiki links that break across lines
+- *(birta-core)* trace Obsidian syntax to its exact source in render and extract
+
 ## [0.10.2](https://github.com/hugvit/birta/compare/v0.10.1...v0.10.2) - 2026-11-24
 
 ### Added

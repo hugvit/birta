@@ -280,11 +280,16 @@ fn code_span_after(
             continue;
         }
         // The content is the literal plus escapes, padding and line endings
-        let limit = (at + 2 * literal.len() + 64).min(source.len());
+        let mut limit = (at + 2 * literal.len() + 64).min(source.len());
+        while !source.is_char_boundary(limit) {
+            limit -= 1;
+        }
         let Some(close) = closing_fence(&source[..limit], at, fence) else {
             continue;
         };
-        if code_content(&source[at..close]) == literal {
+        // `\\|` is unescaped only inside table cells
+        let content = code_content(&source[at..close]);
+        if content == literal || content.replace("\\|", "|") == literal {
             return Some(open..close + fence);
         }
     }
@@ -305,14 +310,24 @@ fn closing_fence(source: &str, from: usize, fence: usize) -> Option<usize> {
     None
 }
 
-/// A code span's text as comrak stores it: line endings become spaces, one
-/// space is stripped from each side of padded content, and `\\|` (table cells)
-/// becomes `|`.
+/// A code span's text as comrak stores it: a line ending and the next line's
+/// indentation and quote markers become one space, and one space is stripped
+/// from each side of padded content.
 fn code_content(raw: &str) -> String {
-    let text = raw
-        .replace("\r\n", " ")
-        .replace('\n', " ")
-        .replace("\\|", "|");
+    let joined = raw
+        .split('\n')
+        .enumerate()
+        .map(|(i, line)| {
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            if i == 0 {
+                line
+            } else {
+                line.trim_start_matches([' ', '\t', '>'])
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let text = joined;
     match text.strip_prefix(' ').and_then(|t| t.strip_suffix(' ')) {
         Some(inner) if !text.chars().all(|c| c == ' ') => inner.to_string(),
         _ => text,

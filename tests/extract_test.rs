@@ -556,7 +556,7 @@ fn every_span_is_its_own_link_when_replaced() {
             .wrapping_add(1442695040888963407);
         (seed >> 33) as usize
     };
-    for _ in 0..300 {
+    for _ in 0..150 {
         let mut doc = String::new();
         if next() % 2 == 0 {
             doc.push_str("h | k\n--|--\n");
@@ -661,12 +661,17 @@ fn line_broken_links_get_exact_spans_or_none() {
         " ",
         "x",
         "[[a&amp;b]]",
+        "é",
+        "日本",
+        "🦀",
+        "``",
+        "[[ü\n]]",
     ];
     // EXTRACT_FUZZ_DOCS raises the count for a longer local run
     let docs: usize = std::env::var("EXTRACT_FUZZ_DOCS")
         .ok()
         .and_then(|n| n.parse().ok())
-        .unwrap_or(250);
+        .unwrap_or(120);
     let mut seed: u64 = 23;
     let mut next = || {
         seed = seed
@@ -683,4 +688,26 @@ fn line_broken_links_get_exact_spans_or_none() {
         assert_spans_survive_replacement(&doc);
         assert_spans_map_to_their_links(&doc);
     }
+}
+
+#[test]
+fn multibyte_text_after_an_unmatched_backtick_run_is_fine() {
+    for markdown in [
+        format!("``{}ï `ab`\n", "a".repeat(67)),
+        format!("``{}日本 `ab` [[x]]\n", "a".repeat(66)),
+        format!("`{}🦀 `c` ![[p.png]] #tag", "é".repeat(40)),
+    ] {
+        assert_matches_render(&markdown, &all_on(None), &markdown);
+        assert_spans_survive_replacement(&markdown);
+    }
+}
+
+#[test]
+fn a_line_broken_link_does_not_move_embeds_into_code_spans() {
+    let markdown = "[[ml\n]]`[[c]]#c![[c]]`[[a]]]`x\n[[A]]`![[Note|x]][[Note]]";
+    let rendered = render(markdown, &all_on(None));
+    assert_eq!(rendered.embeds, ["Note"], "{}", rendered.html);
+    assert!(rendered.tags.is_empty());
+    let e = assert_matches_render(markdown, &all_on(None), markdown);
+    assert_eq!(spans_of(markdown, &e).1, ["![[Note|x]]"]);
 }

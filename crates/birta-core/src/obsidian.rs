@@ -85,6 +85,10 @@ fn scan<'a>(
             };
             (text.to_string(), data.sourcepos)
         };
+        // Text with no embed and no tag stays as it is
+        if !((syntax.embeds && literal.contains("![[")) || (syntax.tags && literal.contains('#'))) {
+            continue;
+        }
         // Escapes and entities are already decoded in `literal`, so every
         // match is checked against the source text, and without it nothing changes
         let Some((raw, map)) = source_of(&lines, node, &literal, sourcepos) else {
@@ -213,21 +217,30 @@ fn source_of<'s, 'a>(
 ) -> Option<(Raw<'s>, Option<Vec<usize>>)> {
     if sourcepos.start.line == sourcepos.end.line
         && let Some(index) = sourcepos.start.line.checked_sub(1)
-        && let Some(line) = lines.lines.get(index)
+        && let Some(&line_start) = lines.starts.get(index)
     {
-        let estimate = sourcepos.start.column.saturating_sub(1);
-        for shift in
-            std::iter::once(0).chain((1..=MAX_DRIFT).flat_map(|d| [d as isize, -(d as isize)]))
+        // After a line-broken wiki link comrak can also report the wrong line,
+        // so candidates are absolute offsets, each aligned within its own line
+        let estimate = line_start + sourcepos.start.column.saturating_sub(1);
+        let near = (1..=MAX_DRIFT).flat_map(|d| [estimate.checked_add(d), estimate.checked_sub(d)]);
+        let ahead = (MAX_DRIFT + 1..=MAX_AHEAD).map(|d| estimate.checked_add(d));
+        for at in std::iter::once(Some(estimate))
+            .chain(near)
+            .chain(ahead)
+            .flatten()
         {
-            let Some(start) = estimate.checked_add_signed(shift) else {
+            let row = lines.starts.partition_point(|&s| s <= at).wrapping_sub(1);
+            let (Some(line), Some(&row_start)) = (lines.lines.get(row), lines.starts.get(row))
+            else {
                 continue;
             };
+            let start = at - row_start;
             if let Some((end, map)) = align(line, literal, start) {
                 let raw = Raw {
                     line,
                     start,
                     text: &line[start..end],
-                    offset: lines.starts[index] + start,
+                    offset: at,
                 };
                 return Some((
                     raw,
@@ -240,8 +253,11 @@ fn source_of<'s, 'a>(
     raw_text(lines, sourcepos).map(|raw| (raw, None))
 }
 
-/// How far from comrak's column a text node's source is searched for.
+/// How far either side of comrak's position a text node's source is searched for.
 const MAX_DRIFT: usize = 24;
+/// How far past comrak's position a text node's source is searched for: comrak
+/// can lose a line after a line-broken wiki link.
+const MAX_AHEAD: usize = 1024;
 
 /// Trace `literal` through `line` from byte `from`, undoing what comrak decodes:
 /// backslash escapes, entities and smart punctuation. Returns the end of the
@@ -513,8 +529,11 @@ fn split_embeds_unaligned(
 
     let mut pieces = Vec::new();
     let mut last = 0;
-    for ((start, end, _), (raw_start, raw_end, inner)) in matches.into_iter().zip(raw_matches) {
-        if raw.escaped(raw_start) {
+    for ((start, end, literal_inner), (raw_start, raw_end, inner)) in
+        matches.into_iter().zip(raw_matches)
+    {
+        // Without an alignment the window may be the wrong text: pair only matches that agree
+        if raw.escaped(raw_start) || literal_inner.trim() != inner.replace("\\|", "|").trim() {
             continue;
         }
         // Obsidian escapes the pipe as `\|` inside tables

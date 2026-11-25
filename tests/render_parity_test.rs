@@ -39,6 +39,10 @@ const TOKENS: &[&str] = &[
     "\n2.    [[d]] #li ![[n.png]]",
     "*#em*",
     "==#hl==",
+    "\n\n\t   `x\ny [[A]]`|\n",
+    "\n-  `x\ny [[A]]`",
+    "<!-- [[C]] #c ![[h.png]] -->",
+    "\n\n<div>\n[[H]] #html ![[d.png]]\n</div>\n\n",
 ];
 
 fn fnv(text: &str) -> u64 {

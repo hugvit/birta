@@ -818,3 +818,27 @@ fn footnote_definitions_keep_their_embeds() {
         "the footnote's own embed, not the one in the fence"
     );
 }
+
+#[test]
+fn a_bom_table_block_end_inside_a_multibyte_char_is_fine() {
+    let markdown =
+        "\u{feff}a|b\n--|--\n`[[lambsoup]]`[[lamb&#32;soup]]|日本#日本[x](#frag)[[spaced]][[B]]";
+    assert_matches_render(markdown, &all_on(None), markdown);
+    assert_spans_survive_replacement(markdown);
+}
+
+#[test]
+fn backticks_in_code_blocks_never_pair_with_code_spans() {
+    let markdown = "\n\n\t   `x\ny [[A]]`|\n-  `x\ny [[A]]`";
+    let e = assert_matches_render(markdown, &all_on(None), markdown);
+    assert_eq!(spans_of(markdown, &e).0, ["[[A]]"]);
+    assert_eq!(e.wikilink_spans[0].range, 11..16);
+    assert_spans_survive_replacement(markdown);
+}
+
+#[test]
+fn links_in_html_comments_are_not_candidates() {
+    let markdown = "[[a\nb]] <!-- [[C]] #c -->";
+    let e = assert_matches_render(markdown, &all_on(None), markdown);
+    assert_eq!(spans_of(markdown, &e).0, ["[[a\nb]]"]);
+}

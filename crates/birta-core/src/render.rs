@@ -177,6 +177,7 @@ pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
         .collect();
 
     let mut extracted = Extracted::default();
+    let blocks = obsidian::literal_blocks(root, markdown);
     let mut code_spans: Vec<std::ops::Range<usize>> = Vec::new();
     let mut cursor = 0;
     let mut code_nodes: Vec<_> = root
@@ -195,15 +196,22 @@ pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
         };
         // In source order, so a closing fence is never mistaken for the next opener;
         // footnote definitions come last in the tree, so a miss retries from the top
-        if let Some(range) = obsidian::code_span_after(markdown, cursor, &code.literal, &[]) {
+        let from = cursor.max(obsidian::earliest_start(&line_starts, data.sourcepos));
+        if let Some(range) = obsidian::code_span_after(markdown, from, &code.literal, &blocks) {
             cursor = range.end;
             code_spans.push(range);
-        } else if let Some(range) =
-            obsidian::code_span_after(markdown, 0, &code.literal, &code_spans)
-        {
+        } else if let Some(range) = obsidian::code_span_after(
+            markdown,
+            0,
+            &code.literal,
+            &[&code_spans[..], &blocks[..]].concat(),
+        ) {
             code_spans.push(range);
         }
     }
+    // Code blocks, HTML blocks and HTML comments hold no links
+    code_spans.extend(blocks.iter().cloned());
+    code_spans.extend(html_comments(markdown));
     let opens = link_opens(markdown, &mut code_spans);
     let mut listed = std::collections::HashSet::new();
     let mut links = Vec::new();
@@ -313,6 +321,20 @@ pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
     extracted
 }
 
+/// Every `<!-- … -->` in the source.
+fn html_comments(source: &str) -> Vec<std::ops::Range<usize>> {
+    let mut comments = Vec::new();
+    let mut at = 0;
+    while let Some(open) = source[at..].find("<!--").map(|i| i + at) {
+        let Some(close) = source[open + 4..].find("-->").map(|i| i + open + 4) else {
+            break;
+        };
+        comments.push(open..close + 3);
+        at = close + 3;
+    }
+    comments
+}
+
 /// The source range of a block from its (block-level, reliable) sourcepos.
 fn block_range(
     source: &str,
@@ -322,13 +344,30 @@ fn block_range(
     let start =
         line_starts.get(pos.start.line.checked_sub(1)?)? + pos.start.column.checked_sub(1)?;
     let end = line_starts.get(pos.end.line.checked_sub(1)?)? + pos.end.column;
-    Some(start..end.min(source.len()))
+    // A BOM shifts a table's columns, so the ends can fall inside a character
+    let snap = |mut at: usize| {
+        at = at.min(source.len());
+        while !source.is_char_boundary(at) {
+            at -= 1;
+        }
+        at
+    };
+    Some(snap(start)..snap(end))
 }
 
 /// Every `[[` in the source that could open a wiki link: not the `[[` of an
 /// unescaped `![[` embed, and not inside a code span.
-fn link_opens(source: &str, code_spans: &mut [std::ops::Range<usize>]) -> Vec<usize> {
+fn link_opens(source: &str, code_spans: &mut Vec<std::ops::Range<usize>>) -> Vec<usize> {
+    // Merged, so the one range starting before a position is the only one to check
     code_spans.sort_by_key(|code| code.start);
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
+    for code in code_spans.drain(..) {
+        match merged.last_mut() {
+            Some(last) if code.start <= last.end => last.end = last.end.max(code.end),
+            _ => merged.push(code),
+        }
+    }
+    *code_spans = merged;
     let in_code = |at: usize| {
         let after = code_spans.partition_point(|code| code.start <= at);
         after > 0 && code_spans[after - 1].contains(&at)

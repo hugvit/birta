@@ -89,6 +89,7 @@ fn scan<'a>(
         (pos.line, pos.column)
     });
     let mut sources = vec![None; nodes.len()];
+    let blocks = literal_blocks(root, source);
     let mut cursor = 0;
     for i in order {
         let node = nodes[i];
@@ -96,7 +97,8 @@ fn scan<'a>(
         let literal = match &data.value {
             NodeValue::Text(text) => text.to_string(),
             NodeValue::Code(code) => {
-                if let Some(range) = code_span_after(source, cursor, &code.literal, &[]) {
+                let from = cursor.max(earliest_start(&lines.starts, data.sourcepos));
+                if let Some(range) = code_span_after(source, from, &code.literal, &blocks) {
                     cursor = range.end;
                 }
                 continue;
@@ -809,6 +811,9 @@ pub(crate) fn code_span_after(
         let Some(close) = closing_fence(&source[..limit], at, fence) else {
             continue;
         };
+        if taken.iter().any(|t| t.contains(&close)) {
+            continue;
+        }
         // `\\|` is unescaped only inside table cells
         let content = code_content(&source[at..close]);
         if content == literal || content.replace("\\|", "|") == literal {
@@ -854,4 +859,38 @@ fn code_content(raw: &str) -> String {
         Some(inner) if !text.chars().all(|c| c == ' ') => inner.to_string(),
         _ => text,
     }
+}
+
+/// Source ranges of code blocks and HTML blocks, whole lines. Block positions
+/// are reliable, and nothing inline happens inside these blocks.
+pub(crate) fn literal_blocks<'a>(root: &'a AstNode<'a>, source: &str) -> Vec<Range<usize>> {
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(source.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+    let mut blocks: Vec<Range<usize>> = root
+        .descendants()
+        .filter_map(|node| {
+            let data = node.data.borrow();
+            matches!(
+                data.value,
+                NodeValue::CodeBlock(_) | NodeValue::HtmlBlock(_)
+            )
+            .then_some(())?;
+            let start = *starts.get(data.sourcepos.start.line.checked_sub(1)?)?;
+            let end = starts
+                .get(data.sourcepos.end.line)
+                .map_or(source.len(), |next| next - 1);
+            Some(start..end)
+        })
+        .collect();
+    blocks.sort_by_key(|b| b.start);
+    blocks
+}
+
+/// The byte offset where comrak's reported line for `sourcepos` starts, less a
+/// BOM table's 3 bytes: an inline node never starts before it.
+pub(crate) fn earliest_start(line_starts: &[usize], sourcepos: Sourcepos) -> usize {
+    line_starts
+        .get(sourcepos.start.line.wrapping_sub(1))
+        .map_or(0, |start| start.saturating_sub(3))
 }

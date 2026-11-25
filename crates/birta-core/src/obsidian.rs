@@ -71,19 +71,32 @@ fn scan<'a>(
         embed_notes(root, &lines, syntax, &mut found);
     }
 
-    let candidates: Vec<_> = root
+    let nodes: Vec<_> = root
         .descendants()
-        .filter(|node| matches!(node.data.borrow().value, NodeValue::Text(_)))
-        .filter(|node| !inside_link(node))
+        .filter(|node| {
+            matches!(
+                node.data.borrow().value,
+                NodeValue::Text(_) | NodeValue::Code(_)
+            )
+        })
         .collect();
 
-    for node in candidates {
+    // Text is found in source order: an earlier identical text, a code span or a
+    // link's text can't stand in for a later node
+    let mut cursor = 0;
+    for node in nodes {
         let (literal, sourcepos) = {
             let data = node.data.borrow();
-            let NodeValue::Text(text) = &data.value else {
-                continue;
-            };
-            (text.to_string(), data.sourcepos)
+            match &data.value {
+                NodeValue::Text(text) => (text.to_string(), data.sourcepos),
+                NodeValue::Code(code) => {
+                    if let Some(range) = code_span_after(source, cursor, &code.literal, &[]) {
+                        cursor = range.end;
+                    }
+                    continue;
+                }
+                _ => continue,
+            }
         };
         // Text with no embed and no tag stays as it is
         if !((syntax.embeds && literal.contains("![[")) || (syntax.tags && literal.contains('#'))) {
@@ -91,9 +104,19 @@ fn scan<'a>(
         }
         // Escapes and entities are already decoded in `literal`, so every
         // match is checked against the source text, and without it nothing changes
-        let Some((raw, map)) = source_of(&lines, node, &literal, sourcepos) else {
+        let found_at = source_of(&lines, node, &literal, sourcepos, cursor)
+            // Footnote definitions come last in the tree but not in the source
+            .or_else(|| source_of(&lines, node, &literal, sourcepos, 0));
+        let Some((raw, map)) = found_at else {
             continue;
         };
+        if map.is_some() {
+            cursor = cursor.max(raw.offset + raw.text.len());
+        }
+        // A link's text only moves the cursor; it is never an embed or a tag
+        if inside_link(node) {
+            continue;
+        }
         let mut pieces = vec![Piece::Text(literal.clone())];
         if syntax.embeds && literal.contains("![[") {
             pieces = split_embeds(&literal, raw, map.as_deref(), syntax, &mut found);
@@ -214,6 +237,7 @@ fn source_of<'s, 'a>(
     node: &'a AstNode<'a>,
     literal: &str,
     sourcepos: Sourcepos,
+    min: usize,
 ) -> Option<(Raw<'s>, Option<Vec<usize>>)> {
     if sourcepos.start.line == sourcepos.end.line
         && let Some(index) = sourcepos.start.line.checked_sub(1)
@@ -222,12 +246,15 @@ fn source_of<'s, 'a>(
         // After a line-broken wiki link comrak can also report the wrong line,
         // so candidates are absolute offsets, each aligned within its own line
         let estimate = line_start + sourcepos.start.column.saturating_sub(1);
-        let near = (1..=MAX_DRIFT).flat_map(|d| [estimate.checked_add(d), estimate.checked_sub(d)]);
-        let ahead = (MAX_DRIFT + 1..=MAX_AHEAD).map(|d| estimate.checked_add(d));
+        // comrak only ever reports text too early, except a BOM table's 3 bytes
+        let near =
+            (1..=MAX_BEHIND).flat_map(|d| [estimate.checked_add(d), estimate.checked_sub(d)]);
+        let ahead = (MAX_BEHIND + 1..=MAX_AHEAD).map(|d| estimate.checked_add(d));
         for at in std::iter::once(Some(estimate))
             .chain(near)
             .chain(ahead)
             .flatten()
+            .filter(|&at| at >= min)
         {
             let row = lines.starts.partition_point(|&s| s <= at).wrapping_sub(1);
             let (Some(line), Some(&row_start)) = (lines.lines.get(row), lines.starts.get(row))
@@ -253,8 +280,9 @@ fn source_of<'s, 'a>(
     raw_text(lines, sourcepos).map(|raw| (raw, None))
 }
 
-/// How far either side of comrak's position a text node's source is searched for.
-const MAX_DRIFT: usize = 24;
+/// How far before comrak's position a text node's source is searched for: a
+/// table on the first line of a file with a BOM is reported 3 bytes late.
+const MAX_BEHIND: usize = 3;
 /// How far past comrak's position a text node's source is searched for: comrak
 /// can lose a line after a line-broken wiki link.
 const MAX_AHEAD: usize = 1024;
@@ -397,7 +425,7 @@ fn embed_notes<'a>(
         if !matches!(find_embeds(&literal).as_slice(), [(0, end, _)] if *end == literal.len()) {
             continue;
         }
-        let Some((raw, map)) = source_of(lines, child, &literal, sourcepos) else {
+        let Some((raw, map)) = source_of(lines, child, &literal, sourcepos, 0) else {
             continue;
         };
         let range = match map {
@@ -716,5 +744,81 @@ fn tag_nodes(name: &str, resolver: Option<&dyn Resolver>) -> [Piece; 3] {
 fn push_unique(list: &mut Vec<String>, item: &str) {
     if !list.iter().any(|x| x == item) {
         list.push(item.to_string());
+    }
+}
+
+/// The first code span from `from` whose content is `literal`, backticks
+/// included, outside the spans in `taken`.
+pub(crate) fn code_span_after(
+    source: &str,
+    from: usize,
+    literal: &str,
+    taken: &[std::ops::Range<usize>],
+) -> Option<std::ops::Range<usize>> {
+    let bytes = source.as_bytes();
+    let mut at = from;
+    while let Some(open) = source.get(at..)?.find('`').map(|i| i + at) {
+        let fence = bytes[open..].iter().take_while(|&&b| b == b'`').count();
+        at = open + fence;
+        let escapes = bytes[..open]
+            .iter()
+            .rev()
+            .take_while(|&&b| b == b'\\')
+            .count();
+        if escapes % 2 == 1 || taken.iter().any(|t| t.contains(&open)) {
+            continue;
+        }
+        // The content is the literal plus escapes, padding and line endings
+        let mut limit = (at + 2 * literal.len() + 64).min(source.len());
+        while !source.is_char_boundary(limit) {
+            limit -= 1;
+        }
+        let Some(close) = closing_fence(&source[..limit], at, fence) else {
+            continue;
+        };
+        // `\\|` is unescaped only inside table cells
+        let content = code_content(&source[at..close]);
+        if content == literal || content.replace("\\|", "|") == literal {
+            return Some(open..close + fence);
+        }
+    }
+    None
+}
+
+/// The start of the next run of exactly `fence` backticks from `from`.
+fn closing_fence(source: &str, from: usize, fence: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut at = from;
+    while let Some(next) = source[at..].find('`').map(|i| i + at) {
+        let run = bytes[next..].iter().take_while(|&&b| b == b'`').count();
+        if run == fence {
+            return Some(next);
+        }
+        at = next + run;
+    }
+    None
+}
+
+/// A code span's text as comrak stores it: a line ending and the next line's
+/// indentation and quote markers become one space, and one space is stripped
+/// from each side of padded content.
+fn code_content(raw: &str) -> String {
+    let joined = raw
+        .split('\n')
+        .enumerate()
+        .map(|(i, line)| {
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            if i == 0 {
+                line
+            } else {
+                line.trim_start_matches([' ', '\t', '>'])
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let text = joined;
+    match text.strip_prefix(' ').and_then(|t| t.strip_suffix(' ')) {
+        Some(inner) if !text.chars().all(|c| c == ' ') => inner.to_string(),
+        _ => text,
     }
 }

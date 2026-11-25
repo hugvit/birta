@@ -186,10 +186,12 @@ pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
         };
         // In source order, so a closing fence is never mistaken for the next opener;
         // footnote definitions come last in the tree, so a miss retries from the top
-        if let Some(range) = code_span_after(markdown, cursor, &code.literal, &[]) {
+        if let Some(range) = obsidian::code_span_after(markdown, cursor, &code.literal, &[]) {
             cursor = range.end;
             code_spans.push(range);
-        } else if let Some(range) = code_span_after(markdown, 0, &code.literal, &code_spans) {
+        } else if let Some(range) =
+            obsidian::code_span_after(markdown, 0, &code.literal, &code_spans)
+        {
             code_spans.push(range);
         }
     }
@@ -247,91 +249,17 @@ fn link_opens(source: &str, code_spans: &mut [std::ops::Range<usize>]) -> Vec<us
         let after = code_spans.partition_point(|code| code.start <= at);
         after > 0 && code_spans[after - 1].contains(&at)
     };
-    source
-        .match_indices("[[")
-        .map(|(i, _)| i)
+    let bytes = source.as_bytes();
+    // Overlapping, so `[[[a]]` offers both; a `[` after an odd backslash run is text
+    (0..bytes.len().saturating_sub(1))
+        .filter(|&i| bytes[i] == b'[' && bytes[i + 1] == b'[')
+        .filter(|&i| bytes[..i].iter().rev().take_while(|&&b| b == b'\\').count() % 2 == 0)
         .filter(|&start| {
             let before = &source[..start];
             !before.ends_with('!') || before[..before.len() - 1].ends_with('\\')
         })
         .filter(|&start| !in_code(start))
         .collect()
-}
-
-/// The first code span from `from` whose content is `literal`, backticks
-/// included, outside the spans in `taken`.
-fn code_span_after(
-    source: &str,
-    from: usize,
-    literal: &str,
-    taken: &[std::ops::Range<usize>],
-) -> Option<std::ops::Range<usize>> {
-    let bytes = source.as_bytes();
-    let mut at = from;
-    while let Some(open) = source.get(at..)?.find('`').map(|i| i + at) {
-        let fence = bytes[open..].iter().take_while(|&&b| b == b'`').count();
-        at = open + fence;
-        let escapes = bytes[..open]
-            .iter()
-            .rev()
-            .take_while(|&&b| b == b'\\')
-            .count();
-        if escapes % 2 == 1 || taken.iter().any(|t| t.contains(&open)) {
-            continue;
-        }
-        // The content is the literal plus escapes, padding and line endings
-        let mut limit = (at + 2 * literal.len() + 64).min(source.len());
-        while !source.is_char_boundary(limit) {
-            limit -= 1;
-        }
-        let Some(close) = closing_fence(&source[..limit], at, fence) else {
-            continue;
-        };
-        // `\\|` is unescaped only inside table cells
-        let content = code_content(&source[at..close]);
-        if content == literal || content.replace("\\|", "|") == literal {
-            return Some(open..close + fence);
-        }
-    }
-    None
-}
-
-/// The start of the next run of exactly `fence` backticks from `from`.
-fn closing_fence(source: &str, from: usize, fence: usize) -> Option<usize> {
-    let bytes = source.as_bytes();
-    let mut at = from;
-    while let Some(next) = source[at..].find('`').map(|i| i + at) {
-        let run = bytes[next..].iter().take_while(|&&b| b == b'`').count();
-        if run == fence {
-            return Some(next);
-        }
-        at = next + run;
-    }
-    None
-}
-
-/// A code span's text as comrak stores it: a line ending and the next line's
-/// indentation and quote markers become one space, and one space is stripped
-/// from each side of padded content.
-fn code_content(raw: &str) -> String {
-    let joined = raw
-        .split('\n')
-        .enumerate()
-        .map(|(i, line)| {
-            let line = line.strip_suffix('\r').unwrap_or(line);
-            if i == 0 {
-                line
-            } else {
-                line.trim_start_matches([' ', '\t', '>'])
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let text = joined;
-    match text.strip_prefix(' ').and_then(|t| t.strip_suffix(' ')) {
-        Some(inner) if !text.chars().all(|c| c == ' ') => inner.to_string(),
-        _ => text,
-    }
 }
 
 /// The source range of a wiki link near where comrak reports it. comrak's

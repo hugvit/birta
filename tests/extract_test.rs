@@ -711,3 +711,30 @@ fn a_line_broken_link_does_not_move_embeds_into_code_spans() {
     let e = assert_matches_render(markdown, &all_on(None), markdown);
     assert_eq!(spans_of(markdown, &e).1, ["![[Note|x]]"]);
 }
+
+#[test]
+fn escaped_and_overlapping_brackets_after_a_line_broken_link() {
+    for (markdown, expected) in [
+        ("[[a\nsoup]]`\n\\[[B]][[B]]", vec!["[[a\nsoup]]", "[[B]]"]),
+        ("a\\[[[a]]]", vec!["[[a]]"]),
+    ] {
+        let e = assert_matches_render(markdown, &all_on(None), markdown);
+        assert_eq!(spans_of(markdown, &e).0, expected, "{markdown:?}");
+        assert_spans_survive_replacement(markdown);
+    }
+}
+
+#[test]
+fn text_is_never_matched_to_an_earlier_identical_text() {
+    let markdown = "\\[[E]][![[p.png]]](u)[[c\n]]`[[B]]`[[B]]``[[A]]``#_y![[Note#H]]\n![[p.png]]";
+    let rendered = render(markdown, &all_on(None));
+    assert_eq!(rendered.embeds, ["Note#H", "p.png"]);
+    let e = assert_matches_render(markdown, &all_on(None), markdown);
+    let embeds: Vec<_> = e
+        .embed_spans
+        .iter()
+        .map(|s| (s.target.as_str(), s.range.clone()))
+        .collect();
+    // The image render shows is the last line's, not the link text's
+    assert_eq!(embeds, [("Note#H", 51..62), ("p.png", 63..73)]);
+}

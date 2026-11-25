@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.6](https://github.com/hugvit/birta/compare/v0.10.5...v0.10.6) - 2026-11-25
+
+### Fixed
+
+- *(birta-core)* restore spans 0.3.4 placed for entity-spelled spaces and suspect blocks
+
 ## [0.10.5](https://github.com/hugvit/birta/compare/v0.10.4...v0.10.5) - 2026-11-25
 
 ### Fixed

@@ -179,7 +179,16 @@ pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
     let mut extracted = Extracted::default();
     let mut code_spans: Vec<std::ops::Range<usize>> = Vec::new();
     let mut cursor = 0;
-    for node in root.descendants() {
+    let mut code_nodes: Vec<_> = root
+        .descendants()
+        .filter(|node| matches!(node.data.borrow().value, NodeValue::Code(_)))
+        .collect();
+    // Source order, not tree order: footnote definitions come last in the tree
+    code_nodes.sort_by_key(|node| {
+        let pos = node.data.borrow().sourcepos.start;
+        (pos.line, pos.column)
+    });
+    for node in code_nodes {
         let data = node.data.borrow();
         let NodeValue::Code(code) = &data.value else {
             continue;
@@ -196,8 +205,8 @@ pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
         }
     }
     let opens = link_opens(markdown, &mut code_spans);
-    let mut used = std::collections::HashSet::new();
     let mut listed = std::collections::HashSet::new();
+    let mut links = Vec::new();
     for node in root.descendants() {
         let data = node.data.borrow();
         match &data.value {
@@ -206,22 +215,85 @@ pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
                 if listed.insert(link.url.clone()) {
                     extracted.wikilinks.push(link.url.clone());
                 }
-                if let Some(range) = wikilink_range(
-                    markdown,
-                    &line_starts,
-                    &opens,
-                    data.sourcepos,
-                    &link.url,
-                    &used,
-                ) {
-                    used.insert(range.start);
-                    extracted.wikilink_spans.push(TargetSpan {
-                        target: link.url.clone(),
-                        range,
-                    });
-                }
+                let block = node.ancestors().find(|a| {
+                    matches!(
+                        a.data.borrow().value,
+                        NodeValue::Paragraph | NodeValue::Heading(_) | NodeValue::TableCell
+                    )
+                });
+                let block = block.map(|b| (b as *const _ as usize, b.data.borrow().sourcepos));
+                links.push((data.sourcepos, link.url.clone(), block));
             }
             _ => {}
+        }
+    }
+
+    // After a wiki link that breaks across lines comrak's positions in the rest
+    // of its block can't be trusted, so there links map one to one onto the
+    // block's `[[`, or get no span
+    let mut by_block: std::collections::HashMap<usize, Vec<usize>> = Default::default();
+    for (i, (_, _, block)) in links.iter().enumerate() {
+        if let Some((key, _)) = block {
+            by_block.entry(*key).or_default().push(i);
+        }
+    }
+    let mut decided: std::collections::HashMap<usize, Option<std::ops::Range<usize>>> =
+        Default::default();
+    for members in by_block.values() {
+        let Some((_, block_pos)) = links[members[0]].2 else {
+            continue;
+        };
+        let Some(block) = block_range(markdown, &line_starts, block_pos) else {
+            continue;
+        };
+        let inside = &opens[opens.partition_point(|&o| o < block.start)
+            ..opens.partition_point(|&o| o < block.end)];
+        // A link whose `]]` is on a later line: comrak's positions after it can't be
+        // trusted (a line-crossing `[[` that names no link here is just text)
+        let broken = inside.iter().any(|&open| {
+            markdown[open..block.end]
+                .find("]]")
+                .is_some_and(|close| markdown[open..open + close].contains('\n'))
+                && members.iter().any(|&i| names(markdown, open, &links[i].1))
+        });
+        if !broken {
+            continue;
+        }
+        let spans = (inside.len() == members.len())
+            .then(|| {
+                members
+                    .iter()
+                    .zip(inside)
+                    .map(|(&i, &open)| {
+                        names(markdown, open, &links[i].1).then_some(())?;
+                        let close = markdown[open..].find("]]")?;
+                        Some(open..open + close + 2)
+                    })
+                    .collect::<Option<Vec<_>>>()
+            })
+            .flatten();
+        for (k, &i) in members.iter().enumerate() {
+            decided.insert(i, spans.as_ref().map(|s| s[k].clone()));
+        }
+    }
+
+    // Elsewhere in source order, each span after the last: a lookalike behind an
+    // already-placed link can't be taken, and no span beats a wrong one
+    let mut order: Vec<usize> = (0..links.len()).collect();
+    order.sort_by_key(|&i| (links[i].0.start.line, links[i].0.start.column));
+    let mut cursor = 0;
+    for i in order {
+        let (sourcepos, target, _) = &links[i];
+        let range = match decided.get(&i) {
+            Some(decision) => decision.clone(),
+            None => wikilink_range(markdown, &line_starts, &opens, *sourcepos, target, cursor),
+        };
+        if let Some(range) = range {
+            cursor = cursor.max(range.end);
+            extracted.wikilink_spans.push(TargetSpan {
+                target: target.clone(),
+                range,
+            });
         }
     }
 
@@ -239,6 +311,18 @@ pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
         .map(|(target, range)| TargetSpan { target, range })
         .collect();
     extracted
+}
+
+/// The source range of a block from its (block-level, reliable) sourcepos.
+fn block_range(
+    source: &str,
+    line_starts: &[usize],
+    pos: comrak::nodes::Sourcepos,
+) -> Option<std::ops::Range<usize>> {
+    let start =
+        line_starts.get(pos.start.line.checked_sub(1)?)? + pos.start.column.checked_sub(1)?;
+    let end = line_starts.get(pos.end.line.checked_sub(1)?)? + pos.end.column;
+    Some(start..end.min(source.len()))
 }
 
 /// Every `[[` in the source that could open a wiki link: not the `[[` of an
@@ -275,14 +359,14 @@ fn wikilink_range(
     opens: &[usize],
     sourcepos: comrak::nodes::Sourcepos,
     target: &str,
-    used: &std::collections::HashSet<usize>,
+    min: usize,
 ) -> Option<std::ops::Range<usize>> {
     let (start, estimate, end) = search_window(source, line_starts, sourcepos)?;
     let window = &opens[opens.partition_point(|&o| o < start)..opens.partition_point(|&o| o < end)];
     // Only a `[[` whose text reads as this link's target: a guess could hand
     // the span to a different link, and no span is safer than a wrong one
     let open = nearest_first(window, estimate)
-        .filter(|open| !used.contains(open))
+        .filter(|&open| open >= min)
         .find(|&open| names(source, open, target))?;
     let close = source[open..].find("]]")?;
     Some(open..open + close + 2)

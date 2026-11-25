@@ -492,6 +492,13 @@ fn assert_spans_survive_replacement(markdown: &str) {
     let e = extract(markdown, &all_on(None));
     let mut replaced = String::new();
     let mut at = 0;
+    // A backtick in a replaced span re-pairs code spans or fences around it
+    if e.wikilink_spans
+        .iter()
+        .any(|s| markdown[s.range.clone()].contains('`'))
+    {
+        return;
+    }
     for (n, span) in e.wikilink_spans.iter().enumerate() {
         replaced.push_str(&markdown[at..span.range.start]);
         replaced.push_str(&format!("[[ZZQ{n}]]"));
@@ -506,14 +513,15 @@ fn assert_spans_survive_replacement(markdown: &str) {
             e.wikilink_spans[n]
         );
     }
-    assert_eq!(
-        e.wikilink_spans.len(),
-        render(markdown, &all_on(None))
-            .html
-            .matches("data-wikilink=\"true\"")
-            .count(),
-        "{markdown:?}"
-    );
+    let rendered = render(markdown, &all_on(None));
+    let anchors = rendered.html.matches("data-wikilink=\"true\"").count();
+    // Without a line-broken link every link gets a span; with one, a link may
+    // get none, but never a wrong one
+    if rendered.html.contains("%0A") || markdown.contains("[[") && markdown.contains("\n]]") {
+        assert!(e.wikilink_spans.len() <= anchors, "{markdown:?}");
+    } else {
+        assert_eq!(e.wikilink_spans.len(), anchors, "{markdown:?}");
+    }
 }
 
 #[test]
@@ -548,6 +556,8 @@ fn every_span_is_its_own_link_when_replaced() {
         "x ",
         "&#33;[[f]] ",
         "\\[[e]] ",
+        "[^1] ",
+        "\n\n[^1]: [[F]] ![[a.png]] #fn\n",
     ];
     let mut seed: u64 = 11;
     let mut next = || {
@@ -589,8 +599,11 @@ fn assert_spans_map_to_their_links(markdown: &str) {
     let e = extract(markdown, &all_on(None));
     for span in &e.wikilink_spans {
         let slice = &markdown[span.range.clone()];
-        // A bare `|` re-shapes a table row, so the oracle cannot judge it
-        if markdown.contains("--|") && slice.replace("\\|", "").contains('|') {
+        // A bare `|` re-shapes a table row and a backtick re-pairs code spans or
+        // fences, so the oracle cannot judge those
+        if (markdown.contains("--|") && slice.replace("\\|", "").contains('|'))
+            || slice.contains('`')
+        {
             continue;
         }
         let replaced = format!(
@@ -666,13 +679,22 @@ fn line_broken_links_get_exact_spans_or_none() {
         "🦀",
         "``",
         "[[ü\n]]",
+        "[^1]",
+        "\n\n[^1]: ![[a.png]] #fn [[F]]\n",
+        "[[`",
+        "]]",
+        "|",
+        "\n[^1]:![[Note]]#x",
     ];
     // EXTRACT_FUZZ_DOCS raises the count for a longer local run
     let docs: usize = std::env::var("EXTRACT_FUZZ_DOCS")
         .ok()
         .and_then(|n| n.parse().ok())
         .unwrap_or(120);
-    let mut seed: u64 = 23;
+    let mut seed: u64 = std::env::var("EXTRACT_FUZZ_SEED")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(23);
     let mut next = || {
         seed = seed
             .wrapping_mul(6364136223846793005)
@@ -737,4 +759,62 @@ fn text_is_never_matched_to_an_earlier_identical_text() {
         .collect();
     // The image render shows is the last line's, not the link text's
     assert_eq!(embeds, [("Note#H", 51..62), ("p.png", 63..73)]);
+}
+
+#[test]
+fn a_lookalike_behind_a_placed_link_is_not_taken() {
+    let markdown = "]][[d\n]]\\[[B]][[B]][[`[[a&b]]`[[B]]|\n[[A]][[B]]\\\\![[p.png]]|";
+    let e = assert_matches_render(markdown, &all_on(None), markdown);
+    // The `[[B]]` after the unmatched `[[` is not a link, so no span may sit there
+    assert!(
+        e.wikilink_spans.iter().all(|s| s.range.start != 30),
+        "{:?}",
+        e.wikilink_spans
+    );
+    assert_spans_survive_replacement(markdown);
+    assert_spans_map_to_their_links(markdown);
+}
+
+#[test]
+fn entity_spelled_targets_must_decode_to_the_target() {
+    let markdown = "|[[c\nd]]🦀`[[a]]`[[`[[b\n]][[a]][[` [[&#65;]][[ü\n]][[a]]";
+    let e = assert_matches_render(markdown, &all_on(None), markdown);
+    for span in &e.wikilink_spans {
+        assert_ne!(&markdown[span.range.clone()], "[[&#65;]]", "{span:?}");
+    }
+    assert_spans_survive_replacement(markdown);
+    assert_spans_map_to_their_links(markdown);
+}
+
+#[test]
+fn links_comrak_declines_inside_a_failed_opener_get_no_span() {
+    let markdown = "![[p.png]][[ü\n]]````éé[[A]][[`[[ü\n]][[ü\n]]";
+    let e = assert_matches_render(markdown, &all_on(None), markdown);
+    for span in &e.wikilink_spans {
+        assert_ne!(
+            span.range.start, 33,
+            "the `[[ü` inside `[[`[[ü` is not a link: {span:?}"
+        );
+    }
+    assert_spans_survive_replacement(markdown);
+    assert_spans_map_to_their_links(markdown);
+}
+
+#[test]
+fn footnote_definitions_keep_their_embeds() {
+    // comrak puts footnote definitions last in the tree, before nothing in the source
+    let markdown = "```md\n```\nx[^1]\n[^1]:&#33;[[E]]![[Note]]&#91;&#91;E]]!\\[[E]]\n!\\[[E]]#\\#x![[a.png]]![[b.png]]word\n2.    [[d]]``\"#quote\"![[Note|x]]*#em*";
+    let rendered = render(markdown, &all_on(None));
+    assert_eq!(rendered.embeds, ["Note", "a.png", "b.png"]);
+    assert_eq!(rendered.html.matches("<img").count(), 2);
+    assert_matches_render(markdown, &all_on(None), markdown);
+
+    let markdown = "[^1]:==#hl==&#33;[[E]]![[Note#H]]` ``[[A]]``![[Note]]\n>[^1][x](#frag)\n`[[a_b]]`==#hl==\n```md\n![[Note]]";
+    let e = assert_matches_render(markdown, &all_on(None), markdown);
+    let note = e.embed_spans.iter().find(|s| s.target == "Note").unwrap();
+    assert_eq!(
+        note.range,
+        44..53,
+        "the footnote's own embed, not the one in the fence"
+    );
 }

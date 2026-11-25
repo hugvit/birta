@@ -80,23 +80,28 @@ fn scan<'a>(
             )
         })
         .collect();
-
-    // Text is found in source order: an earlier identical text, a code span or a
-    // link's text can't stand in for a later node
+    // Sources are found in source order, so an earlier identical text, a code span
+    // or a link's text can't stand in for a later node; footnote definitions come
+    // last in the tree, so the order is by position
+    let mut order: Vec<usize> = (0..nodes.len()).collect();
+    order.sort_by_key(|&i| {
+        let pos = nodes[i].data.borrow().sourcepos.start;
+        (pos.line, pos.column)
+    });
+    let mut sources = vec![None; nodes.len()];
     let mut cursor = 0;
-    for node in nodes {
-        let (literal, sourcepos) = {
-            let data = node.data.borrow();
-            match &data.value {
-                NodeValue::Text(text) => (text.to_string(), data.sourcepos),
-                NodeValue::Code(code) => {
-                    if let Some(range) = code_span_after(source, cursor, &code.literal, &[]) {
-                        cursor = range.end;
-                    }
-                    continue;
+    for i in order {
+        let node = nodes[i];
+        let data = node.data.borrow();
+        let literal = match &data.value {
+            NodeValue::Text(text) => text.to_string(),
+            NodeValue::Code(code) => {
+                if let Some(range) = code_span_after(source, cursor, &code.literal, &[]) {
+                    cursor = range.end;
                 }
-                _ => continue,
+                continue;
             }
+            _ => continue,
         };
         // Text with no embed and no tag stays as it is
         if !((syntax.embeds && literal.contains("![[")) || (syntax.tags && literal.contains('#'))) {
@@ -104,15 +109,20 @@ fn scan<'a>(
         }
         // Escapes and entities are already decoded in `literal`, so every
         // match is checked against the source text, and without it nothing changes
-        let found_at = source_of(&lines, node, &literal, sourcepos, cursor)
-            // Footnote definitions come last in the tree but not in the source
-            .or_else(|| source_of(&lines, node, &literal, sourcepos, 0));
-        let Some((raw, map)) = found_at else {
-            continue;
-        };
-        if map.is_some() {
+        let found_at = source_of(&lines, node, &literal, data.sourcepos, cursor)
+            .or_else(|| source_of(&lines, node, &literal, data.sourcepos, 0));
+        if let Some((raw, Some(_))) = &found_at {
             cursor = cursor.max(raw.offset + raw.text.len());
         }
+        sources[i] = found_at.map(|found| (literal, found));
+    }
+
+    // Targets are collected in tree order, as before
+    for (node, source) in nodes.into_iter().zip(sources) {
+        let Some((literal, (raw, map))) = source else {
+            continue;
+        };
+        let sourcepos = node.data.borrow().sourcepos;
         // A link's text only moves the cursor; it is never an embed or a tag
         if inside_link(node) {
             continue;
@@ -327,7 +337,7 @@ fn walk(
         }
         if rc == '&'
             && let Some(len) = entity_len(rest)
-            && !(c == '&' && !rest.starts_with("&amp;") && !rest.starts_with("&#38;"))
+            && entity_decodes_to(&rest[..len], c)
         {
             r += len;
             continue;
@@ -350,6 +360,29 @@ fn walk(
         r += smart.len();
     }
     Some(r)
+}
+
+/// Whether `entity` (`&…;`) can be what comrak decoded to `c`. Numeric
+/// entities are checked exactly and common names by table; another name is
+/// taken for any non-ASCII character, which is what named entities spell.
+fn entity_decodes_to(entity: &str, c: char) -> bool {
+    let name = &entity[1..entity.len() - 1];
+    if let Some(num) = name.strip_prefix('#') {
+        let code = match num.strip_prefix(['x', 'X']) {
+            Some(hex) => u32::from_str_radix(hex, 16).ok(),
+            None => num.parse().ok(),
+        };
+        return code.and_then(char::from_u32) == Some(c);
+    }
+    match name {
+        "amp" => c == '&',
+        "lt" => c == '<',
+        "gt" => c == '>',
+        "quot" => c == '"',
+        "apos" => c == '\'',
+        "nbsp" => c == '\u{a0}',
+        _ => !c.is_ascii(),
+    }
 }
 
 /// The length of an HTML entity (`&name;`, `&#123;`, `&#x7b;`) at the start of `text`.

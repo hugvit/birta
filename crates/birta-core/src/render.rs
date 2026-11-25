@@ -177,19 +177,37 @@ pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
         .collect();
 
     let mut extracted = Extracted::default();
-    let mut code_spans = Vec::new();
-    for node in root.descendants() {
+    let blocks = obsidian::literal_blocks(root, markdown);
+    let mut code_spans: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut cursor = 0;
+    let mut code_nodes: Vec<_> = root
+        .descendants()
+        .filter(|node| matches!(node.data.borrow().value, NodeValue::Code(_)))
+        .collect();
+    // Source order, not tree order: footnote definitions come last in the tree
+    code_nodes.sort_by_key(|node| {
+        let pos = node.data.borrow().sourcepos.start;
+        (pos.line, pos.column)
+    });
+    for node in code_nodes {
         let data = node.data.borrow();
-        if let NodeValue::Code(code) = &data.value
-            && let Some(range) =
-                code_span_range(markdown, &line_starts, data.sourcepos, &code.literal)
-        {
+        let NodeValue::Code(code) = &data.value else {
+            continue;
+        };
+        // In source order, so a closing fence is never mistaken for the next opener
+        let from = cursor.max(obsidian::earliest_start(&line_starts, data.sourcepos));
+        // A guess from elsewhere could cover a real link, so a miss stays a miss
+        if let Some(range) = obsidian::code_span_after(markdown, from, &code.literal, &blocks) {
+            cursor = range.end;
             code_spans.push(range);
         }
     }
+    // Code blocks, HTML blocks and HTML comments hold no links
+    code_spans.extend(blocks.iter().cloned());
+    code_spans.extend(html_comments(markdown));
     let opens = link_opens(markdown, &mut code_spans);
-    let mut used = std::collections::HashSet::new();
     let mut listed = std::collections::HashSet::new();
+    let mut links = Vec::new();
     for node in root.descendants() {
         let data = node.data.borrow();
         match &data.value {
@@ -198,22 +216,85 @@ pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
                 if listed.insert(link.url.clone()) {
                     extracted.wikilinks.push(link.url.clone());
                 }
-                if let Some(range) = wikilink_range(
-                    markdown,
-                    &line_starts,
-                    &opens,
-                    data.sourcepos,
-                    &link.url,
-                    &used,
-                ) {
-                    used.insert(range.start);
-                    extracted.wikilink_spans.push(TargetSpan {
-                        target: link.url.clone(),
-                        range,
-                    });
-                }
+                let block = node.ancestors().find(|a| {
+                    matches!(
+                        a.data.borrow().value,
+                        NodeValue::Paragraph | NodeValue::Heading(_) | NodeValue::TableCell
+                    )
+                });
+                let block = block.map(|b| (b as *const _ as usize, b.data.borrow().sourcepos));
+                links.push((data.sourcepos, link.url.clone(), block));
             }
             _ => {}
+        }
+    }
+
+    // After a wiki link that breaks across lines comrak's positions in the rest
+    // of its block can't be trusted, so there links map one to one onto the
+    // block's `[[`, or get no span
+    let mut by_block: std::collections::HashMap<usize, Vec<usize>> = Default::default();
+    for (i, (_, _, block)) in links.iter().enumerate() {
+        if let Some((key, _)) = block {
+            by_block.entry(*key).or_default().push(i);
+        }
+    }
+    let mut decided: std::collections::HashMap<usize, Option<std::ops::Range<usize>>> =
+        Default::default();
+    for members in by_block.values() {
+        let Some((_, block_pos)) = links[members[0]].2 else {
+            continue;
+        };
+        let Some(block) = block_range(markdown, &line_starts, block_pos) else {
+            continue;
+        };
+        let inside = &opens[opens.partition_point(|&o| o < block.start)
+            ..opens.partition_point(|&o| o < block.end)];
+        // A link whose `]]` is on a later line: comrak's positions after it can't be
+        // trusted (a line-crossing `[[` that names no link here is just text)
+        let broken = inside.iter().any(|&open| {
+            markdown[open..block.end]
+                .find("]]")
+                .is_some_and(|close| markdown[open..open + close].contains('\n'))
+                && members.iter().any(|&i| names(markdown, open, &links[i].1))
+        });
+        if !broken {
+            continue;
+        }
+        let spans = (inside.len() == members.len())
+            .then(|| {
+                members
+                    .iter()
+                    .zip(inside)
+                    .map(|(&i, &open)| {
+                        names(markdown, open, &links[i].1).then_some(())?;
+                        let close = markdown[open..].find("]]")?;
+                        Some(open..open + close + 2)
+                    })
+                    .collect::<Option<Vec<_>>>()
+            })
+            .flatten();
+        for (k, &i) in members.iter().enumerate() {
+            decided.insert(i, spans.as_ref().map(|s| s[k].clone()));
+        }
+    }
+
+    // Elsewhere in source order, each span after the last: a lookalike behind an
+    // already-placed link can't be taken, and no span beats a wrong one
+    let mut order: Vec<usize> = (0..links.len()).collect();
+    order.sort_by_key(|&i| (links[i].0.start.line, links[i].0.start.column));
+    let mut cursor = 0;
+    for i in order {
+        let (sourcepos, target, _) = &links[i];
+        let range = match decided.get(&i) {
+            Some(decision) => decision.clone(),
+            None => wikilink_range(markdown, &line_starts, &opens, *sourcepos, target, cursor),
+        };
+        if let Some(range) = range {
+            cursor = cursor.max(range.end);
+            extracted.wikilink_spans.push(TargetSpan {
+                target: target.clone(),
+                range,
+            });
         }
     }
 
@@ -233,72 +314,78 @@ pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
     extracted
 }
 
+/// Every `<!-- … -->` in the source.
+fn html_comments(source: &str) -> Vec<std::ops::Range<usize>> {
+    let mut comments = Vec::new();
+    let mut at = 0;
+    while let Some(open) = source[at..].find("<!--").map(|i| i + at) {
+        // `\<!--` is text
+        let escapes = source.as_bytes()[..open]
+            .iter()
+            .rev()
+            .take_while(|&&b| b == b'\\')
+            .count();
+        if escapes % 2 == 1 {
+            at = open + 4;
+            continue;
+        }
+        let Some(close) = source[open + 4..].find("-->").map(|i| i + open + 4) else {
+            break;
+        };
+        comments.push(open..close + 3);
+        at = close + 3;
+    }
+    comments
+}
+
+/// The source range of a block from its (block-level, reliable) sourcepos.
+fn block_range(
+    source: &str,
+    line_starts: &[usize],
+    pos: comrak::nodes::Sourcepos,
+) -> Option<std::ops::Range<usize>> {
+    let start =
+        line_starts.get(pos.start.line.checked_sub(1)?)? + pos.start.column.checked_sub(1)?;
+    let end = line_starts.get(pos.end.line.checked_sub(1)?)? + pos.end.column;
+    // A BOM shifts a table's columns, so the ends can fall inside a character
+    let snap = |mut at: usize| {
+        at = at.min(source.len());
+        while !source.is_char_boundary(at) {
+            at -= 1;
+        }
+        at
+    };
+    Some(snap(start)..snap(end))
+}
+
 /// Every `[[` in the source that could open a wiki link: not the `[[` of an
 /// unescaped `![[` embed, and not inside a code span.
-fn link_opens(source: &str, code_spans: &mut [std::ops::Range<usize>]) -> Vec<usize> {
+fn link_opens(source: &str, code_spans: &mut Vec<std::ops::Range<usize>>) -> Vec<usize> {
+    // Merged, so the one range starting before a position is the only one to check
     code_spans.sort_by_key(|code| code.start);
+    let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
+    for code in code_spans.drain(..) {
+        match merged.last_mut() {
+            Some(last) if code.start <= last.end => last.end = last.end.max(code.end),
+            _ => merged.push(code),
+        }
+    }
+    *code_spans = merged;
     let in_code = |at: usize| {
         let after = code_spans.partition_point(|code| code.start <= at);
         after > 0 && code_spans[after - 1].contains(&at)
     };
-    source
-        .match_indices("[[")
-        .map(|(i, _)| i)
+    let bytes = source.as_bytes();
+    // Overlapping, so `[[[a]]` offers both; a `[` after an odd backslash run is text
+    (0..bytes.len().saturating_sub(1))
+        .filter(|&i| bytes[i] == b'[' && bytes[i + 1] == b'[')
+        .filter(|&i| bytes[..i].iter().rev().take_while(|&&b| b == b'\\').count() % 2 == 0)
         .filter(|&start| {
             let before = &source[..start];
             !before.ends_with('!') || before[..before.len() - 1].ends_with('\\')
         })
         .filter(|&start| !in_code(start))
         .collect()
-}
-
-/// The source range of a code span, backticks included, near where comrak
-/// reports it: the backtick-fenced run nearest its position whose content is
-/// `literal`. Columns drift as they do for wiki links.
-fn code_span_range(
-    source: &str,
-    line_starts: &[usize],
-    sourcepos: comrak::nodes::Sourcepos,
-    literal: &str,
-) -> Option<std::ops::Range<usize>> {
-    let (start, estimate, end) = search_window(source, line_starts, sourcepos)?;
-    let bytes = source.as_bytes();
-    let runs: Vec<usize> = (start..end)
-        .filter(|&at| bytes[at] == b'`' && (at == 0 || bytes[at - 1] != b'`'))
-        .collect();
-    nearest_first(&runs, estimate).find_map(|open| {
-        let fence = bytes[open..].iter().take_while(|&&b| b == b'`').count();
-        let close = closing_fence(&source[..end], open + fence, fence)?;
-        (code_content(&source[open + fence..close]) == literal).then_some(open..close + fence)
-    })
-}
-
-/// The start of the next run of exactly `fence` backticks from `from`.
-fn closing_fence(source: &str, from: usize, fence: usize) -> Option<usize> {
-    let bytes = source.as_bytes();
-    let mut at = from;
-    while let Some(next) = source[at..].find('`').map(|i| i + at) {
-        let run = bytes[next..].iter().take_while(|&&b| b == b'`').count();
-        if run == fence {
-            return Some(next);
-        }
-        at = next + run;
-    }
-    None
-}
-
-/// A code span's text as comrak stores it: line endings become spaces, one
-/// space is stripped from each side of padded content, and `\\|` (table cells)
-/// becomes `|`.
-fn code_content(raw: &str) -> String {
-    let text = raw
-        .replace("\r\n", " ")
-        .replace('\n', " ")
-        .replace("\\|", "|");
-    match text.strip_prefix(' ').and_then(|t| t.strip_suffix(' ')) {
-        Some(inner) if !text.chars().all(|c| c == ' ') => inner.to_string(),
-        _ => text,
-    }
 }
 
 /// The source range of a wiki link near where comrak reports it. comrak's
@@ -314,47 +401,58 @@ fn wikilink_range(
     opens: &[usize],
     sourcepos: comrak::nodes::Sourcepos,
     target: &str,
-    used: &std::collections::HashSet<usize>,
+    min: usize,
 ) -> Option<std::ops::Range<usize>> {
     let (start, estimate, end) = search_window(source, line_starts, sourcepos)?;
     let window = &opens[opens.partition_point(|&o| o < start)..opens.partition_point(|&o| o < end)];
-    // comrak's column is exact outside the drift cases, so a `[[` there is the link
-    if let Some(open) = nearest_first(window, estimate).find(|open| !used.contains(open))
-        && open == estimate
-    {
-        let close = source[open..].find("]]")?;
-        return Some(open..open + close + 2);
-    }
-    let mut fallback = None;
-    // Only drift-sized distances: a link whose own `[[` fails to decode must not
-    // take the span of a later link that happens to
-    let found = nearest_first(window, estimate)
-        .filter(|open| !used.contains(open))
-        .take_while(|open| open.abs_diff(estimate) <= SEARCH_BEFORE)
-        .find(|&open| {
-            fallback.get_or_insert(open);
-            names(source, open, target)
-        });
-    let open = match found.or(fallback) {
-        Some(open) => open,
-        // After a line-broken link comrak's estimate can fall further out
-        None => nearest_first(window, estimate).find(|open| !used.contains(open))?,
-    };
+    // Only a `[[` whose text reads as this link's target: a guess could hand
+    // the span to a different link, and no span is safer than a wrong one
+    let open = nearest_first(window, estimate)
+        .filter(|&open| open >= min)
+        .find(|&open| names(source, open, target))?;
     let close = source[open..].find("]]")?;
     Some(open..open + close + 2)
 }
 
 /// Whether the link opening at `open` reads as `target`: comrak trims the
-/// target and decodes its entities and escapes, and an alias follows a `|`,
-/// written `\\|` inside tables.
+/// target, decodes its entities and escapes, and drops a line break's
+/// indentation and quote markers inside it; an alias follows a `|`, written
+/// `\\|` inside tables.
 fn names(source: &str, open: usize, target: &str) -> bool {
-    const SPACE: [char; 4] = [' ', '\t', '\r', '\n'];
-    let inner = &source[open + 2..];
-    let from = open + 2 + (inner.len() - inner.trim_start_matches(SPACE).len());
-    obsidian::decodes_to(source, target, from).is_some_and(|end| {
-        let rest = source[end..].trim_start_matches(SPACE);
-        rest.starts_with("]]") || rest.starts_with('|') || rest.starts_with("\\|")
-    })
+    let mut at = skip_gap(source, open + 2);
+    for (i, part) in target.split('\n').enumerate() {
+        if i > 0 {
+            let rest = source[at..].trim_start_matches([' ', '\t', '\r']);
+            let Some(next) = rest.strip_prefix('\n') else {
+                return false;
+            };
+            let line = source.len() - next.len();
+            at = line + (next.len() - next.trim_start_matches([' ', '\t', '>']).len());
+        }
+        match obsidian::decodes_to(source, part.trim_end_matches(' '), at) {
+            Some(end) => at = end,
+            None => return false,
+        }
+    }
+    let rest = &source[skip_gap(source, at)..];
+    rest.starts_with("]]") || rest.starts_with('|') || rest.starts_with("\\|")
+}
+
+/// Past spaces and line breaks from `at`, with any quote markers that start a
+/// continuation line.
+fn skip_gap(source: &str, mut at: usize) -> usize {
+    let bytes = source.as_bytes();
+    let mut line_start = false;
+    while let Some(&b) = bytes.get(at) {
+        match b {
+            b' ' | b'\t' | b'\r' => {}
+            b'\n' => line_start = true,
+            b'>' if line_start => {}
+            _ => break,
+        }
+        at += 1;
+    }
+    at
 }
 
 /// Where to look for a node comrak reports at `sourcepos`: from a little

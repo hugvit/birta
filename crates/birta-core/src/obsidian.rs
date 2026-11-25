@@ -71,25 +71,64 @@ fn scan<'a>(
         embed_notes(root, &lines, syntax, &mut found);
     }
 
-    let candidates: Vec<_> = root
+    let nodes: Vec<_> = root
         .descendants()
-        .filter(|node| matches!(node.data.borrow().value, NodeValue::Text(_)))
-        .filter(|node| !inside_link(node))
+        .filter(|node| {
+            matches!(
+                node.data.borrow().value,
+                NodeValue::Text(_) | NodeValue::Code(_)
+            )
+        })
         .collect();
-
-    for node in candidates {
-        let (literal, sourcepos) = {
-            let data = node.data.borrow();
-            let NodeValue::Text(text) = &data.value else {
+    // Sources are found in source order, so an earlier identical text, a code span
+    // or a link's text can't stand in for a later node; footnote definitions come
+    // last in the tree, so the order is by position
+    let mut order: Vec<usize> = (0..nodes.len()).collect();
+    order.sort_by_key(|&i| {
+        let pos = nodes[i].data.borrow().sourcepos.start;
+        (pos.line, pos.column)
+    });
+    let mut sources = vec![None; nodes.len()];
+    let blocks = literal_blocks(root, source);
+    let mut cursor = 0;
+    for i in order {
+        let node = nodes[i];
+        let data = node.data.borrow();
+        let literal = match &data.value {
+            NodeValue::Text(text) => text.to_string(),
+            NodeValue::Code(code) => {
+                let from = cursor.max(earliest_start(&lines.starts, data.sourcepos));
+                if let Some(range) = code_span_after(source, from, &code.literal, &blocks) {
+                    cursor = range.end;
+                }
                 continue;
-            };
-            (text.to_string(), data.sourcepos)
+            }
+            _ => continue,
         };
+        // Text with no embed and no tag stays as it is
+        if !((syntax.embeds && literal.contains("![[")) || (syntax.tags && literal.contains('#'))) {
+            continue;
+        }
         // Escapes and entities are already decoded in `literal`, so every
         // match is checked against the source text, and without it nothing changes
-        let Some((raw, map)) = source_of(&lines, node, &literal, sourcepos) else {
+        let found_at = source_of(&lines, node, &literal, data.sourcepos, cursor)
+            .or_else(|| source_of(&lines, node, &literal, data.sourcepos, 0));
+        if let Some((raw, Some(_))) = &found_at {
+            cursor = cursor.max(raw.offset + raw.text.len());
+        }
+        sources[i] = found_at.map(|found| (literal, found));
+    }
+
+    // Targets are collected in tree order, as before
+    for (node, source) in nodes.into_iter().zip(sources) {
+        let Some((literal, (raw, map))) = source else {
             continue;
         };
+        let sourcepos = node.data.borrow().sourcepos;
+        // A link's text only moves the cursor; it is never an embed or a tag
+        if inside_link(node) {
+            continue;
+        }
         let mut pieces = vec![Piece::Text(literal.clone())];
         if syntax.embeds && literal.contains("![[") {
             pieces = split_embeds(&literal, raw, map.as_deref(), syntax, &mut found);
@@ -210,24 +249,37 @@ fn source_of<'s, 'a>(
     node: &'a AstNode<'a>,
     literal: &str,
     sourcepos: Sourcepos,
+    min: usize,
 ) -> Option<(Raw<'s>, Option<Vec<usize>>)> {
     if sourcepos.start.line == sourcepos.end.line
         && let Some(index) = sourcepos.start.line.checked_sub(1)
-        && let Some(line) = lines.lines.get(index)
+        && let Some(&line_start) = lines.starts.get(index)
     {
-        let estimate = sourcepos.start.column.saturating_sub(1);
-        for shift in
-            std::iter::once(0).chain((1..=MAX_DRIFT).flat_map(|d| [d as isize, -(d as isize)]))
+        // After a line-broken wiki link comrak can also report the wrong line,
+        // so candidates are absolute offsets, each aligned within its own line
+        let estimate = line_start + sourcepos.start.column.saturating_sub(1);
+        // comrak only ever reports text too early, except a BOM table's 3 bytes
+        let near =
+            (1..=MAX_BEHIND).flat_map(|d| [estimate.checked_add(d), estimate.checked_sub(d)]);
+        let ahead = (MAX_BEHIND + 1..=MAX_AHEAD).map(|d| estimate.checked_add(d));
+        for at in std::iter::once(Some(estimate))
+            .chain(near)
+            .chain(ahead)
+            .flatten()
+            .filter(|&at| at >= min)
         {
-            let Some(start) = estimate.checked_add_signed(shift) else {
+            let row = lines.starts.partition_point(|&s| s <= at).wrapping_sub(1);
+            let (Some(line), Some(&row_start)) = (lines.lines.get(row), lines.starts.get(row))
+            else {
                 continue;
             };
+            let start = at - row_start;
             if let Some((end, map)) = align(line, literal, start) {
                 let raw = Raw {
                     line,
                     start,
                     text: &line[start..end],
-                    offset: lines.starts[index] + start,
+                    offset: at,
                 };
                 return Some((
                     raw,
@@ -240,8 +292,12 @@ fn source_of<'s, 'a>(
     raw_text(lines, sourcepos).map(|raw| (raw, None))
 }
 
-/// How far from comrak's column a text node's source is searched for.
-const MAX_DRIFT: usize = 24;
+/// How far before comrak's position a text node's source is searched for: a
+/// table on the first line of a file with a BOM is reported 3 bytes late.
+const MAX_BEHIND: usize = 3;
+/// How far past comrak's position a text node's source is searched for: comrak
+/// can lose a line after a line-broken wiki link.
+const MAX_AHEAD: usize = 1024;
 
 /// Trace `literal` through `line` from byte `from`, undoing what comrak decodes:
 /// backslash escapes, entities and smart punctuation. Returns the end of the
@@ -283,7 +339,7 @@ fn walk(
         }
         if rc == '&'
             && let Some(len) = entity_len(rest)
-            && !(c == '&' && !rest.starts_with("&amp;") && !rest.starts_with("&#38;"))
+            && entity_decodes_to(&rest[..len], c)
         {
             r += len;
             continue;
@@ -306,6 +362,29 @@ fn walk(
         r += smart.len();
     }
     Some(r)
+}
+
+/// Whether `entity` (`&…;`) can be what comrak decoded to `c`. Numeric
+/// entities are checked exactly and common names by table; another name is
+/// taken for any non-ASCII character, which is what named entities spell.
+fn entity_decodes_to(entity: &str, c: char) -> bool {
+    let name = &entity[1..entity.len() - 1];
+    if let Some(num) = name.strip_prefix('#') {
+        let code = match num.strip_prefix(['x', 'X']) {
+            Some(hex) => u32::from_str_radix(hex, 16).ok(),
+            None => num.parse().ok(),
+        };
+        return code.and_then(char::from_u32) == Some(c);
+    }
+    match name {
+        "amp" => c == '&',
+        "lt" => c == '<',
+        "gt" => c == '>',
+        "quot" => c == '"',
+        "apos" => c == '\'',
+        "nbsp" => c == '\u{a0}',
+        _ => !c.is_ascii(),
+    }
 }
 
 /// The length of an HTML entity (`&name;`, `&#123;`, `&#x7b;`) at the start of `text`.
@@ -381,7 +460,7 @@ fn embed_notes<'a>(
         if !matches!(find_embeds(&literal).as_slice(), [(0, end, _)] if *end == literal.len()) {
             continue;
         }
-        let Some((raw, map)) = source_of(lines, child, &literal, sourcepos) else {
+        let Some((raw, map)) = source_of(lines, child, &literal, sourcepos, 0) else {
             continue;
         };
         let range = match map {
@@ -513,8 +592,11 @@ fn split_embeds_unaligned(
 
     let mut pieces = Vec::new();
     let mut last = 0;
-    for ((start, end, _), (raw_start, raw_end, inner)) in matches.into_iter().zip(raw_matches) {
-        if raw.escaped(raw_start) {
+    for ((start, end, literal_inner), (raw_start, raw_end, inner)) in
+        matches.into_iter().zip(raw_matches)
+    {
+        // Without an alignment the window may be the wrong text: pair only matches that agree
+        if raw.escaped(raw_start) || literal_inner.trim() != inner.replace("\\|", "|").trim() {
             continue;
         }
         // Obsidian escapes the pipe as `\|` inside tables
@@ -698,4 +780,121 @@ fn push_unique(list: &mut Vec<String>, item: &str) {
     if !list.iter().any(|x| x == item) {
         list.push(item.to_string());
     }
+}
+
+/// The first code span from `from` whose content is `literal`, backticks
+/// included, outside the spans in `taken`.
+pub(crate) fn code_span_after(
+    source: &str,
+    from: usize,
+    literal: &str,
+    taken: &[std::ops::Range<usize>],
+) -> Option<std::ops::Range<usize>> {
+    let bytes = source.as_bytes();
+    // `from` can be a few bytes back from a line start, inside a character
+    let mut at = from.min(source.len());
+    while !source.is_char_boundary(at) {
+        at -= 1;
+    }
+    while let Some(open) = source.get(at..)?.find('`').map(|i| i + at) {
+        let fence = bytes[open..].iter().take_while(|&&b| b == b'`').count();
+        at = open + fence;
+        let escapes = bytes[..open]
+            .iter()
+            .rev()
+            .take_while(|&&b| b == b'\\')
+            .count();
+        if escapes % 2 == 1 || taken.iter().any(|t| t.contains(&open)) {
+            continue;
+        }
+        // The content is the literal plus escapes, padding and line endings
+        let mut limit = (at + 2 * literal.len() + 64).min(source.len());
+        while !source.is_char_boundary(limit) {
+            limit -= 1;
+        }
+        let Some(close) = closing_fence(&source[..limit], at, fence) else {
+            continue;
+        };
+        if taken.iter().any(|t| t.contains(&close)) {
+            continue;
+        }
+        let content = code_content(&source[at..close]);
+        // `\\|` is unescaped only inside table cells; a CRLF's `\r` is kept by comrak,
+        // but matching without it too costs nothing
+        let matches = |text: &str| text == literal || text.replace("\\|", "|") == literal;
+        if matches(&content) || matches(&content.replace("\r ", " ")) {
+            return Some(open..close + fence);
+        }
+    }
+    None
+}
+
+/// The start of the next run of exactly `fence` backticks from `from`.
+fn closing_fence(source: &str, from: usize, fence: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut at = from;
+    while let Some(next) = source[at..].find('`').map(|i| i + at) {
+        let run = bytes[next..].iter().take_while(|&&b| b == b'`').count();
+        if run == fence {
+            return Some(next);
+        }
+        at = next + run;
+    }
+    None
+}
+
+/// A code span's text as comrak stores it: each `\n` and the next line's
+/// indentation and quote markers become one space (a CRLF's `\r` stays), and one
+/// space is stripped from each side of padded content.
+fn code_content(raw: &str) -> String {
+    let joined = raw
+        .split('\n')
+        .enumerate()
+        .map(|(i, line)| {
+            if i == 0 {
+                line
+            } else {
+                line.trim_start_matches([' ', '\t', '>'])
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    match joined.strip_prefix(' ').and_then(|t| t.strip_suffix(' ')) {
+        Some(inner) if !joined.chars().all(|c| c == ' ') => inner.to_string(),
+        _ => joined,
+    }
+}
+
+/// Source ranges of code blocks and HTML blocks, whole lines. Block positions
+/// are reliable, and nothing inline happens inside these blocks.
+pub(crate) fn literal_blocks<'a>(root: &'a AstNode<'a>, source: &str) -> Vec<Range<usize>> {
+    let starts: Vec<usize> = std::iter::once(0)
+        .chain(source.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+    let mut blocks: Vec<Range<usize>> = root
+        .descendants()
+        .filter_map(|node| {
+            let data = node.data.borrow();
+            matches!(
+                data.value,
+                NodeValue::CodeBlock(_) | NodeValue::HtmlBlock(_)
+            )
+            .then_some(())?;
+            let start = *starts.get(data.sourcepos.start.line.checked_sub(1)?)?;
+            let end = starts
+                .get(data.sourcepos.end.line)
+                .map_or(source.len(), |next| next - 1);
+            Some(start..end)
+        })
+        .collect();
+    blocks.sort_by_key(|b| b.start);
+    blocks
+}
+
+/// The byte offset where comrak's reported line for `sourcepos` starts, less a
+/// BOM table's 3 bytes: an inline node never starts before it.
+pub(crate) fn earliest_start(line_starts: &[usize], sourcepos: Sourcepos) -> usize {
+    line_starts
+        .get(sourcepos.start.line.wrapping_sub(1))
+        .map_or(0, |start| start.saturating_sub(3))
 }

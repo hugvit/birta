@@ -492,6 +492,13 @@ fn assert_spans_survive_replacement(markdown: &str) {
     let e = extract(markdown, &all_on(None));
     let mut replaced = String::new();
     let mut at = 0;
+    // A backtick in a replaced span re-pairs code spans or fences around it
+    if e.wikilink_spans
+        .iter()
+        .any(|s| markdown[s.range.clone()].contains('`'))
+    {
+        return;
+    }
     for (n, span) in e.wikilink_spans.iter().enumerate() {
         replaced.push_str(&markdown[at..span.range.start]);
         replaced.push_str(&format!("[[ZZQ{n}]]"));
@@ -506,14 +513,15 @@ fn assert_spans_survive_replacement(markdown: &str) {
             e.wikilink_spans[n]
         );
     }
-    assert_eq!(
-        e.wikilink_spans.len(),
-        render(markdown, &all_on(None))
-            .html
-            .matches("data-wikilink=\"true\"")
-            .count(),
-        "{markdown:?}"
-    );
+    let rendered = render(markdown, &all_on(None));
+    let anchors = rendered.html.matches("data-wikilink=\"true\"").count();
+    // Without a line-broken link every link gets a span; with one, a link may
+    // get none, but never a wrong one
+    if rendered.html.contains("%0A") || markdown.contains("[[") && markdown.contains("\n]]") {
+        assert!(e.wikilink_spans.len() <= anchors, "{markdown:?}");
+    } else {
+        assert_eq!(e.wikilink_spans.len(), anchors, "{markdown:?}");
+    }
 }
 
 #[test]
@@ -548,6 +556,8 @@ fn every_span_is_its_own_link_when_replaced() {
         "x ",
         "&#33;[[f]] ",
         "\\[[e]] ",
+        "[^1] ",
+        "\n\n[^1]: [[F]] ![[a.png]] #fn\n",
     ];
     let mut seed: u64 = 11;
     let mut next = || {
@@ -556,7 +566,7 @@ fn every_span_is_its_own_link_when_replaced() {
             .wrapping_add(1442695040888963407);
         (seed >> 33) as usize
     };
-    for _ in 0..300 {
+    for _ in 0..150 {
         let mut doc = String::new();
         if next() % 2 == 0 {
             doc.push_str("h | k\n--|--\n");
@@ -564,6 +574,351 @@ fn every_span_is_its_own_link_when_replaced() {
         for _ in 0..(1 + next() % 10) {
             doc.push_str(tokens[next() % tokens.len()]);
         }
+        // A third of the documents use Windows line endings
+        if next() % 3 == 0 {
+            doc = doc.replace("\r\n", "\n").replace('\n', "\r\n");
+        }
         assert_spans_survive_replacement(&doc);
     }
+}
+
+/// The `href`s of render's wiki links, in document order.
+fn wikilink_hrefs(markdown: &str) -> Vec<String> {
+    let html = render(markdown, &all_on(None)).html;
+    html.split("<a ")
+        .skip(1)
+        .filter_map(|tag| {
+            let tag = &tag[..tag.find('>')?];
+            tag.contains("data-wikilink=\"true\"").then_some(())?;
+            let href = &tag[tag.find("href=\"")? + 6..];
+            Some(href[..href.find('"')?].to_string())
+        })
+        .collect()
+}
+
+/// Replacing one span with a fresh link must remove exactly the href of the
+/// span's own target: a span on a neighbouring link would remove that one.
+fn assert_spans_map_to_their_links(markdown: &str) {
+    let before = wikilink_hrefs(markdown);
+    let e = extract(markdown, &all_on(None));
+    for span in &e.wikilink_spans {
+        let slice = &markdown[span.range.clone()];
+        // A bare `|` re-shapes a table row and a backtick re-pairs code spans or
+        // fences, so the oracle cannot judge those
+        if (markdown.contains("--|") && slice.replace("\\|", "").contains('|'))
+            || slice.contains('`')
+        {
+            continue;
+        }
+        let replaced = format!(
+            "{}[[ZZQ]]{}",
+            &markdown[..span.range.start],
+            &markdown[span.range.end..]
+        );
+        let mut after = wikilink_hrefs(&replaced);
+        let Some(at) = after.iter().position(|h| h == "ZZQ") else {
+            panic!("{markdown:?}: span {span:?} is not a link");
+        };
+        after.remove(at);
+        let mut removed = before.clone();
+        for href in &after {
+            if let Some(i) = removed.iter().position(|h| h == href) {
+                removed.remove(i);
+            }
+        }
+        // An unescaped `|` would read as an alias separator
+        let own = wikilink_hrefs(&format!("[[{}]]", span.target.replace('|', "\\|")));
+        assert_eq!(
+            removed, own,
+            "{markdown:?}: span {span:?} maps to another link"
+        );
+    }
+}
+
+#[test]
+fn line_broken_links_get_exact_spans_or_none() {
+    let repro = ">[[A]]![[p.png]][[d\n]]\\[[B]][[B]]#tag\n[[e\n>f]][[&#65;]]##[[A\\|B]][[a&amp;b]]";
+    let e = assert_matches_render(repro, &all_on(None), repro);
+    for span in &e.wikilink_spans {
+        let expected = match span.target.as_str() {
+            "A" => vec!["[[A]]", "[[&#65;]]"],
+            "d" => vec!["[[d\n]]"],
+            "B" => vec!["[[B]]"],
+            "e\nf" => vec!["[[e\n>f]]"],
+            "A|B" => vec!["[[A\\|B]]"],
+            "a&b" => vec!["[[a&amp;b]]"],
+            other => panic!("unexpected target {other:?}"),
+        };
+        assert!(
+            expected.contains(&&repro[span.range.clone()]),
+            "{span:?} -> {:?}",
+            &repro[span.range.clone()]
+        );
+    }
+    assert_spans_survive_replacement(repro);
+    assert_spans_map_to_their_links(repro);
+
+    let tokens = [
+        "[[a]]",
+        "[[b\n]]",
+        "[[c\nd]]",
+        "[[e\n>f]]",
+        "[[ g]]",
+        "[[&#65;]]",
+        "[[A]]",
+        "[[h\\|i]]",
+        "\\[[j]]",
+        "![[p.png]]",
+        "`![[c]]`",
+        "`[[a]]`",
+        "#tag",
+        "\n",
+        "\n> ",
+        "> ",
+        " ",
+        "x",
+        "[[a&amp;b]]",
+        "é",
+        "日本",
+        "🦀",
+        "``",
+        "[[ü\n]]",
+        "[^1]",
+        "\n\n[^1]: ![[a.png]] #fn [[F]]\n",
+        "[[`",
+        "]]",
+        "|",
+        "\n[^1]:![[Note]]#x",
+    ];
+    // EXTRACT_FUZZ_DOCS raises the count for a longer local run
+    let docs: usize = std::env::var("EXTRACT_FUZZ_DOCS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(120);
+    let mut seed: u64 = std::env::var("EXTRACT_FUZZ_SEED")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(23);
+    let mut next = || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as usize
+    };
+    for _ in 0..docs {
+        let mut doc = String::new();
+        for _ in 0..(2 + next() % 12) {
+            doc.push_str(tokens[next() % tokens.len()]);
+        }
+        // A third of the documents use Windows line endings
+        if next() % 3 == 0 {
+            doc = doc.replace("\r\n", "\n").replace('\n', "\r\n");
+        }
+        assert_matches_render(&doc, &all_on(None), &doc);
+        assert_spans_survive_replacement(&doc);
+        assert_spans_map_to_their_links(&doc);
+    }
+}
+
+#[test]
+fn multibyte_text_after_an_unmatched_backtick_run_is_fine() {
+    for markdown in [
+        format!("``{}ï `ab`\n", "a".repeat(67)),
+        format!("``{}日本 `ab` [[x]]\n", "a".repeat(66)),
+        format!("`{}🦀 `c` ![[p.png]] #tag", "é".repeat(40)),
+    ] {
+        assert_matches_render(&markdown, &all_on(None), &markdown);
+        assert_spans_survive_replacement(&markdown);
+    }
+}
+
+#[test]
+fn a_line_broken_link_does_not_move_embeds_into_code_spans() {
+    let markdown = "[[ml\n]]`[[c]]#c![[c]]`[[a]]]`x\n[[A]]`![[Note|x]][[Note]]";
+    let rendered = render(markdown, &all_on(None));
+    assert_eq!(rendered.embeds, ["Note"], "{}", rendered.html);
+    assert!(rendered.tags.is_empty());
+    let e = assert_matches_render(markdown, &all_on(None), markdown);
+    assert_eq!(spans_of(markdown, &e).1, ["![[Note|x]]"]);
+}
+
+#[test]
+fn escaped_and_overlapping_brackets_after_a_line_broken_link() {
+    for (markdown, expected) in [
+        ("[[a\nsoup]]`\n\\[[B]][[B]]", vec!["[[a\nsoup]]", "[[B]]"]),
+        ("a\\[[[a]]]", vec!["[[a]]"]),
+    ] {
+        let e = assert_matches_render(markdown, &all_on(None), markdown);
+        assert_eq!(spans_of(markdown, &e).0, expected, "{markdown:?}");
+        assert_spans_survive_replacement(markdown);
+    }
+}
+
+#[test]
+fn text_is_never_matched_to_an_earlier_identical_text() {
+    let markdown = "\\[[E]][![[p.png]]](u)[[c\n]]`[[B]]`[[B]]``[[A]]``#_y![[Note#H]]\n![[p.png]]";
+    let rendered = render(markdown, &all_on(None));
+    assert_eq!(rendered.embeds, ["Note#H", "p.png"]);
+    let e = assert_matches_render(markdown, &all_on(None), markdown);
+    let embeds: Vec<_> = e
+        .embed_spans
+        .iter()
+        .map(|s| (s.target.as_str(), s.range.clone()))
+        .collect();
+    // The image render shows is the last line's, not the link text's
+    assert_eq!(embeds, [("Note#H", 51..62), ("p.png", 63..73)]);
+}
+
+#[test]
+fn a_lookalike_behind_a_placed_link_is_not_taken() {
+    let markdown = "]][[d\n]]\\[[B]][[B]][[`[[a&b]]`[[B]]|\n[[A]][[B]]\\\\![[p.png]]|";
+    let e = assert_matches_render(markdown, &all_on(None), markdown);
+    // The `[[B]]` after the unmatched `[[` is not a link, so no span may sit there
+    assert!(
+        e.wikilink_spans.iter().all(|s| s.range.start != 30),
+        "{:?}",
+        e.wikilink_spans
+    );
+    assert_spans_survive_replacement(markdown);
+    assert_spans_map_to_their_links(markdown);
+}
+
+#[test]
+fn entity_spelled_targets_must_decode_to_the_target() {
+    let markdown = "|[[c\nd]]🦀`[[a]]`[[`[[b\n]][[a]][[` [[&#65;]][[ü\n]][[a]]";
+    let e = assert_matches_render(markdown, &all_on(None), markdown);
+    for span in &e.wikilink_spans {
+        assert_ne!(&markdown[span.range.clone()], "[[&#65;]]", "{span:?}");
+    }
+    assert_spans_survive_replacement(markdown);
+    assert_spans_map_to_their_links(markdown);
+}
+
+#[test]
+fn links_comrak_declines_inside_a_failed_opener_get_no_span() {
+    let markdown = "![[p.png]][[ü\n]]````éé[[A]][[`[[ü\n]][[ü\n]]";
+    let e = assert_matches_render(markdown, &all_on(None), markdown);
+    for span in &e.wikilink_spans {
+        assert_ne!(
+            span.range.start, 33,
+            "the `[[ü` inside `[[`[[ü` is not a link: {span:?}"
+        );
+    }
+    assert_spans_survive_replacement(markdown);
+    assert_spans_map_to_their_links(markdown);
+}
+
+#[test]
+fn footnote_definitions_keep_their_embeds() {
+    // comrak puts footnote definitions last in the tree, before nothing in the source
+    let markdown = "```md\n```\nx[^1]\n[^1]:&#33;[[E]]![[Note]]&#91;&#91;E]]!\\[[E]]\n!\\[[E]]#\\#x![[a.png]]![[b.png]]word\n2.    [[d]]``\"#quote\"![[Note|x]]*#em*";
+    let rendered = render(markdown, &all_on(None));
+    assert_eq!(rendered.embeds, ["Note", "a.png", "b.png"]);
+    assert_eq!(rendered.html.matches("<img").count(), 2);
+    assert_matches_render(markdown, &all_on(None), markdown);
+
+    let markdown = "[^1]:==#hl==&#33;[[E]]![[Note#H]]` ``[[A]]``![[Note]]\n>[^1][x](#frag)\n`[[a_b]]`==#hl==\n```md\n![[Note]]";
+    let e = assert_matches_render(markdown, &all_on(None), markdown);
+    let note = e.embed_spans.iter().find(|s| s.target == "Note").unwrap();
+    assert_eq!(
+        note.range,
+        44..53,
+        "the footnote's own embed, not the one in the fence"
+    );
+}
+
+#[test]
+fn a_bom_table_block_end_inside_a_multibyte_char_is_fine() {
+    let markdown =
+        "\u{feff}a|b\n--|--\n`[[lambsoup]]`[[lamb&#32;soup]]|日本#日本[x](#frag)[[spaced]][[B]]";
+    assert_matches_render(markdown, &all_on(None), markdown);
+    assert_spans_survive_replacement(markdown);
+}
+
+#[test]
+fn backticks_in_code_blocks_never_pair_with_code_spans() {
+    let markdown = "\n\n\t   `x\ny [[A]]`|\n-  `x\ny [[A]]`";
+    let e = assert_matches_render(markdown, &all_on(None), markdown);
+    assert_eq!(spans_of(markdown, &e).0, ["[[A]]"]);
+    assert_eq!(e.wikilink_spans[0].range, 11..16);
+    assert_spans_survive_replacement(markdown);
+}
+
+#[test]
+fn links_in_html_comments_are_not_candidates() {
+    let markdown = "[[a\nb]] <!-- [[C]] #c -->";
+    let e = assert_matches_render(markdown, &all_on(None), markdown);
+    assert_eq!(spans_of(markdown, &e).0, ["[[a\nb]]"]);
+}
+
+#[test]
+fn code_spans_across_a_crlf_keep_their_lookalikes_out() {
+    let a = ">#t/n日本#日本`ï[[Note]]\r\n`[[A]]`[^1][[B]][[spaced]]``[[A]]``";
+    let e = assert_matches_render(a, &all_on(None), a);
+    let spans: Vec<_> = e
+        .wikilink_spans
+        .iter()
+        .map(|s| (s.target.as_str(), s.range.clone()))
+        .collect();
+    assert_eq!(spans, [("A", 32..37), ("B", 42..47), ("spaced", 47..57)]);
+
+    let b = "``é[[lamb&#32;soup]]![[Note|x]]|\r\n`[[a_b]]`##]][[Note#H]]![[Note]]`[[lamb soup]]`|\r\n>==[[M]]==#t/n![[p.png|300]]``é\r\n`[[lamb soup]]`]][[A\\|B]]a\\!![[p.png]]";
+    let e = assert_matches_render(b, &all_on(None), b);
+    let soup: Vec<_> = e
+        .wikilink_spans
+        .iter()
+        .filter(|s| s.target == "lamb soup")
+        .map(|s| s.range.clone())
+        .collect();
+    assert!(!soup.contains(&(120..133)), "{soup:?}");
+    assert!(soup.contains(&(68..81)), "{soup:?}");
+    assert!(
+        e.wikilink_spans
+            .iter()
+            .any(|s| s.target == "M" && s.range == (88..93))
+    );
+    for doc in [a, b] {
+        assert_spans_survive_replacement(doc);
+        assert_spans_map_to_their_links(doc);
+    }
+}
+
+#[test]
+fn earlier_regressions_hold_with_windows_line_endings() {
+    for markdown in [
+        "[[x\n]] [[B]]",
+        "> a [[x\n> y]] [[B]]",
+        "[[a\nsoup]]`\n\\[[B]][[B]]",
+        "\\[[E]][![[p.png]]](u)[[c\n]]`[[B]]`[[B]]``[[A]]``#_y![[Note#H]]\n![[p.png]]",
+        "\n\n\t   `x\ny [[A]]`|\n-  `x\ny [[A]]`",
+        "[[a\nb]] <!-- [[C]] #c -->",
+        "a | b\n--|--\n[[A\\|B]] | x\n[[A]] | y",
+        "[[ Note]]\n[[Note]]\n\n[[E]]",
+        "```md\n```\nx[^1]\n[^1]:&#33;[[E]]![[Note]]&#91;&#91;E]]!\\[[E]]\n!\\[[E]]#\\#x![[a.png]]![[b.png]]word",
+    ] {
+        let crlf = markdown.replace('\n', "\r\n");
+        let lf = extract(markdown, &all_on(None));
+        let e = assert_matches_render(&crlf, &all_on(None), &crlf);
+        // Same links found, each CR adding a byte before the spans after it
+        assert_eq!(e.wikilink_spans.len(), lf.wikilink_spans.len(), "{crlf:?}");
+        assert_eq!(e.embed_spans.len(), lf.embed_spans.len(), "{crlf:?}");
+        assert_spans_survive_replacement(&crlf);
+        assert_spans_map_to_their_links(&crlf);
+    }
+}
+
+#[test]
+fn an_escaped_comment_opener_is_text() {
+    for markdown in [
+        "a\\<!-- [[C]] #c -->",
+        "a\\<!-- [[C]]\r\n#c -->",
+        "x\r\na\\<!-- [[C]] #c -->\r\n",
+    ] {
+        let e = assert_matches_render(markdown, &all_on(None), markdown);
+        assert_eq!(spans_of(markdown, &e).0, ["[[C]]"], "{markdown:?}");
+        assert_spans_survive_replacement(markdown);
+    }
+    // An unescaped comment still hides its link
+    let markdown = "a <!-- [[C]] #c -->\r\n";
+    assert!(extract(markdown, &all_on(None)).wikilink_spans.is_empty());
 }

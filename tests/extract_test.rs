@@ -906,3 +906,19 @@ fn earlier_regressions_hold_with_windows_line_endings() {
         assert_spans_map_to_their_links(&crlf);
     }
 }
+
+#[test]
+fn an_escaped_comment_opener_is_text() {
+    for markdown in [
+        "a\\<!-- [[C]] #c -->",
+        "a\\<!-- [[C]]\r\n#c -->",
+        "x\r\na\\<!-- [[C]] #c -->\r\n",
+    ] {
+        let e = assert_matches_render(markdown, &all_on(None), markdown);
+        assert_eq!(spans_of(markdown, &e).0, ["[[C]]"], "{markdown:?}");
+        assert_spans_survive_replacement(markdown);
+    }
+    // An unescaped comment still hides its link
+    let markdown = "a <!-- [[C]] #c -->\r\n";
+    assert!(extract(markdown, &all_on(None)).wikilink_spans.is_empty());
+}

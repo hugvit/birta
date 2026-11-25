@@ -319,6 +319,16 @@ fn html_comments(source: &str) -> Vec<std::ops::Range<usize>> {
     let mut comments = Vec::new();
     let mut at = 0;
     while let Some(open) = source[at..].find("<!--").map(|i| i + at) {
+        // `\<!--` is text
+        let escapes = source.as_bytes()[..open]
+            .iter()
+            .rev()
+            .take_while(|&&b| b == b'\\')
+            .count();
+        if escapes % 2 == 1 {
+            at = open + 4;
+            continue;
+        }
         let Some(close) = source[open + 4..].find("-->").map(|i| i + open + 4) else {
             break;
         };

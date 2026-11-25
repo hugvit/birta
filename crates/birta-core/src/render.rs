@@ -260,21 +260,93 @@ pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
         if !broken {
             continue;
         }
-        let spans = (inside.len() == members.len())
+        let close_of = |open: usize| markdown[open..].find("]]").map(|c| open..open + c + 2);
+        // Positions are exact up to the first line-broken link, where drift starts
+        let first_break = inside
+            .iter()
+            .copied()
+            .filter(|&open| {
+                markdown[open..block.end]
+                    .find("]]")
+                    .is_some_and(|close| markdown[open..open + close].contains('\n'))
+                    && members.iter().any(|&i| names(markdown, open, &links[i].1))
+            })
+            .min()
+            .unwrap_or(block.end);
+        let mut members = members.clone();
+        let mut inside: Vec<usize> = inside.to_vec();
+        members.retain(|&i| {
+            let (pos, target, _) = &links[i];
+            let at = line_starts
+                .get(pos.start.line.wrapping_sub(1))
+                .map(|start| start + pos.start.column.saturating_sub(1));
+            match at {
+                Some(at)
+                    if at <= first_break && inside.contains(&at) && names(markdown, at, target) =>
+                {
+                    decided.insert(i, close_of(at));
+                    inside.retain(|&o| o != at);
+                    false
+                }
+                _ => true,
+            }
+        });
+        let inside = &inside[..];
+        let whole = (inside.len() == members.len())
             .then(|| {
                 members
                     .iter()
                     .zip(inside)
                     .map(|(&i, &open)| {
                         names(markdown, open, &links[i].1).then_some(())?;
-                        let close = markdown[open..].find("]]")?;
-                        Some(open..open + close + 2)
+                        close_of(open)
                     })
                     .collect::<Option<Vec<_>>>()
             })
             .flatten();
-        for (k, &i) in members.iter().enumerate() {
-            decided.insert(i, spans.as_ref().map(|s| s[k].clone()));
+        if let Some(spans) = whole {
+            for (&i, span) in members.iter().zip(spans) {
+                decided.insert(i, Some(span));
+            }
+            continue;
+        }
+        // Otherwise per target: its links map in order onto the `[[` naming it when
+        // the counts agree and no such `[[` also names another target here
+        let mut targets: Vec<&str> = members.iter().map(|&i| links[i].1.as_str()).collect();
+        targets.sort_unstable();
+        targets.dedup();
+        let named: Vec<Vec<&str>> = inside
+            .iter()
+            .map(|&open| {
+                targets
+                    .iter()
+                    .copied()
+                    .filter(|t| names(markdown, open, t))
+                    .collect()
+            })
+            .collect();
+        for target in targets {
+            let own: Vec<usize> = members
+                .iter()
+                .copied()
+                .filter(|&i| links[i].1 == target)
+                .collect();
+            let opens: Vec<usize> = inside
+                .iter()
+                .zip(&named)
+                .filter(|(_, names)| names.contains(&target))
+                .map(|(&open, _)| open)
+                .collect();
+            let unambiguous = opens.len() == own.len()
+                && inside
+                    .iter()
+                    .zip(&named)
+                    .filter(|(open, _)| opens.contains(open))
+                    .all(|(_, names)| names.len() == 1);
+            for (k, &i) in own.iter().enumerate() {
+                let span = unambiguous.then(|| close_of(opens[k])).flatten();
+                decided.insert(i, span);
+            }
         }
     }
 
@@ -420,6 +492,7 @@ fn wikilink_range(
 /// `\\|` inside tables.
 fn names(source: &str, open: usize, target: &str) -> bool {
     let mut at = skip_gap(source, open + 2);
+    let parts = target.split('\n').count();
     for (i, part) in target.split('\n').enumerate() {
         if i > 0 {
             let rest = source[at..].trim_start_matches([' ', '\t', '\r']);
@@ -429,7 +502,14 @@ fn names(source: &str, open: usize, target: &str) -> bool {
             let line = source.len() - next.len();
             at = line + (next.len() - next.trim_start_matches([' ', '\t', '>']).len());
         }
-        match obsidian::decodes_to(source, part.trim_end_matches(' '), at) {
+        // comrak drops the spaces ending a line inside the target, but the target's
+        // own end keeps only what is spelled out (`&#32;`)
+        let decoded = obsidian::decodes_to(source, part, at).or_else(|| {
+            (i + 1 < parts)
+                .then(|| obsidian::decodes_to(source, part.trim_end_matches(' '), at))
+                .flatten()
+        });
+        match decoded {
             Some(end) => at = end,
             None => return false,
         }

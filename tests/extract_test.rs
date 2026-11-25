@@ -626,8 +626,10 @@ fn assert_spans_map_to_their_links(markdown: &str) {
                 removed.remove(i);
             }
         }
-        // An unescaped `|` would read as an alias separator
-        let own = wikilink_hrefs(&format!("[[{}]]", span.target.replace('|', "\\|")));
+        // An unescaped `|` would read as an alias separator; spaces spelled as
+        // entities survive comrak's trimming
+        let rebuilt = span.target.replace('|', "\\|").replace(' ', "&#32;");
+        let own = wikilink_hrefs(&format!("[[{rebuilt}]]"));
         assert_eq!(
             removed, own,
             "{markdown:?}: span {span:?} maps to another link"
@@ -921,4 +923,49 @@ fn an_escaped_comment_opener_is_text() {
     // An unescaped comment still hides its link
     let markdown = "a <!-- [[C]] #c -->\r\n";
     assert!(extract(markdown, &all_on(None)).wikilink_spans.is_empty());
+}
+
+#[test]
+fn an_entity_spelled_trailing_space_keeps_the_span() {
+    for (markdown, expected) in [
+        (
+            "see [[Note&#32;]] and [[E]]",
+            vec!["[[Note&#32;]]", "[[E]]"],
+        ),
+        (
+            "see [[Note&#32;]] and [[E]]\r\n",
+            vec!["[[Note&#32;]]", "[[E]]"],
+        ),
+        (
+            "> [[a\n> b]] [[Note&#32;]]",
+            vec!["[[a\n> b]]", "[[Note&#32;]]"],
+        ),
+        (
+            "> [[a\r\n> b]] [[Note&#32;]]\r\n",
+            vec!["[[a\r\n> b]]", "[[Note&#32;]]"],
+        ),
+    ] {
+        let e = assert_matches_render(markdown, &all_on(None), markdown);
+        assert_eq!(spans_of(markdown, &e).0, expected, "{markdown:?}");
+        assert_spans_map_to_their_links(markdown);
+    }
+}
+
+#[test]
+fn unambiguous_links_in_a_suspect_block_keep_their_spans() {
+    for markdown in [
+        "[[Note]][[ \n\tNote]][[  [[ \n\tNote]] [[E]] [[F]]",
+        "[[Note]][[ \r\n\tNote]][[  [[ \r\n\tNote]] [[E]] [[F]]",
+    ] {
+        let e = assert_matches_render(markdown, &all_on(None), markdown);
+        let spans = spans_of(markdown, &e).0;
+        // The first two are exact before the break; E and F name one `[[` each
+        assert!(spans.starts_with(&["[[Note]]"]), "{spans:?}");
+        assert!(
+            spans.contains(&"[[E]]") && spans.contains(&"[[F]]"),
+            "{spans:?}"
+        );
+        assert_spans_survive_replacement(markdown);
+        assert_spans_map_to_their_links(markdown);
+    }
 }

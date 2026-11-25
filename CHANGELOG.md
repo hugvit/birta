@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.4](https://github.com/hugvit/birta/compare/v0.10.3...v0.10.4) - 2026-11-25
+
+### Fixed
+
+- *(birta-core)* never let one wiki link take another's span
+- *(birta-core)* keep wiki link spans off code-span lookalikes and linear in link count
+
 ## [0.10.3](https://github.com/hugvit/birta/compare/v0.10.2...v0.10.3) - 2026-11-24
 
 ### Added

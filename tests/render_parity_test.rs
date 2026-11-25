@@ -76,6 +76,10 @@ fn render_matches_the_last_release_on_normal_documents() {
         for _ in 0..(2 + next() % 14) {
             doc.push_str(TOKENS[next() % TOKENS.len()]);
         }
+        // A third of the documents use Windows line endings
+        if next() % 3 == 0 {
+            doc = doc.replace('\n', "\r\n");
+        }
         let r = render(&doc, &opts);
         summary.push_str(&format!(
             "{i} {:?} {:?} {:?} {:016x}\n",

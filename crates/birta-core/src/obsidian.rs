@@ -791,7 +791,11 @@ pub(crate) fn code_span_after(
     taken: &[std::ops::Range<usize>],
 ) -> Option<std::ops::Range<usize>> {
     let bytes = source.as_bytes();
-    let mut at = from;
+    // `from` can be a few bytes back from a line start, inside a character
+    let mut at = from.min(source.len());
+    while !source.is_char_boundary(at) {
+        at -= 1;
+    }
     while let Some(open) = source.get(at..)?.find('`').map(|i| i + at) {
         let fence = bytes[open..].iter().take_while(|&&b| b == b'`').count();
         at = open + fence;
@@ -814,9 +818,11 @@ pub(crate) fn code_span_after(
         if taken.iter().any(|t| t.contains(&close)) {
             continue;
         }
-        // `\\|` is unescaped only inside table cells
         let content = code_content(&source[at..close]);
-        if content == literal || content.replace("\\|", "|") == literal {
+        // `\\|` is unescaped only inside table cells; a CRLF's `\r` is kept by comrak,
+        // but matching without it too costs nothing
+        let matches = |text: &str| text == literal || text.replace("\\|", "|") == literal;
+        if matches(&content) || matches(&content.replace("\r ", " ")) {
             return Some(open..close + fence);
         }
     }
@@ -837,15 +843,14 @@ fn closing_fence(source: &str, from: usize, fence: usize) -> Option<usize> {
     None
 }
 
-/// A code span's text as comrak stores it: a line ending and the next line's
-/// indentation and quote markers become one space, and one space is stripped
-/// from each side of padded content.
+/// A code span's text as comrak stores it: each `\n` and the next line's
+/// indentation and quote markers become one space (a CRLF's `\r` stays), and one
+/// space is stripped from each side of padded content.
 fn code_content(raw: &str) -> String {
     let joined = raw
         .split('\n')
         .enumerate()
         .map(|(i, line)| {
-            let line = line.strip_suffix('\r').unwrap_or(line);
             if i == 0 {
                 line
             } else {
@@ -854,10 +859,9 @@ fn code_content(raw: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ");
-    let text = joined;
-    match text.strip_prefix(' ').and_then(|t| t.strip_suffix(' ')) {
-        Some(inner) if !text.chars().all(|c| c == ' ') => inner.to_string(),
-        _ => text,
+    match joined.strip_prefix(' ').and_then(|t| t.strip_suffix(' ')) {
+        Some(inner) if !joined.chars().all(|c| c == ' ') => inner.to_string(),
+        _ => joined,
     }
 }
 

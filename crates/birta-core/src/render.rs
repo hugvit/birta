@@ -194,18 +194,11 @@ pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
         let NodeValue::Code(code) = &data.value else {
             continue;
         };
-        // In source order, so a closing fence is never mistaken for the next opener;
-        // footnote definitions come last in the tree, so a miss retries from the top
+        // In source order, so a closing fence is never mistaken for the next opener
         let from = cursor.max(obsidian::earliest_start(&line_starts, data.sourcepos));
+        // A guess from elsewhere could cover a real link, so a miss stays a miss
         if let Some(range) = obsidian::code_span_after(markdown, from, &code.literal, &blocks) {
             cursor = range.end;
-            code_spans.push(range);
-        } else if let Some(range) = obsidian::code_span_after(
-            markdown,
-            0,
-            &code.literal,
-            &[&code_spans[..], &blocks[..]].concat(),
-        ) {
             code_spans.push(range);
         }
     }

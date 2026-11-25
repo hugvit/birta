@@ -574,6 +574,10 @@ fn every_span_is_its_own_link_when_replaced() {
         for _ in 0..(1 + next() % 10) {
             doc.push_str(tokens[next() % tokens.len()]);
         }
+        // A third of the documents use Windows line endings
+        if next() % 3 == 0 {
+            doc = doc.replace("\r\n", "\n").replace('\n', "\r\n");
+        }
         assert_spans_survive_replacement(&doc);
     }
 }
@@ -705,6 +709,10 @@ fn line_broken_links_get_exact_spans_or_none() {
         let mut doc = String::new();
         for _ in 0..(2 + next() % 12) {
             doc.push_str(tokens[next() % tokens.len()]);
+        }
+        // A third of the documents use Windows line endings
+        if next() % 3 == 0 {
+            doc = doc.replace("\r\n", "\n").replace('\n', "\r\n");
         }
         assert_matches_render(&doc, &all_on(None), &doc);
         assert_spans_survive_replacement(&doc);
@@ -841,4 +849,60 @@ fn links_in_html_comments_are_not_candidates() {
     let markdown = "[[a\nb]] <!-- [[C]] #c -->";
     let e = assert_matches_render(markdown, &all_on(None), markdown);
     assert_eq!(spans_of(markdown, &e).0, ["[[a\nb]]"]);
+}
+
+#[test]
+fn code_spans_across_a_crlf_keep_their_lookalikes_out() {
+    let a = ">#t/n日本#日本`ï[[Note]]\r\n`[[A]]`[^1][[B]][[spaced]]``[[A]]``";
+    let e = assert_matches_render(a, &all_on(None), a);
+    let spans: Vec<_> = e
+        .wikilink_spans
+        .iter()
+        .map(|s| (s.target.as_str(), s.range.clone()))
+        .collect();
+    assert_eq!(spans, [("A", 32..37), ("B", 42..47), ("spaced", 47..57)]);
+
+    let b = "``é[[lamb&#32;soup]]![[Note|x]]|\r\n`[[a_b]]`##]][[Note#H]]![[Note]]`[[lamb soup]]`|\r\n>==[[M]]==#t/n![[p.png|300]]``é\r\n`[[lamb soup]]`]][[A\\|B]]a\\!![[p.png]]";
+    let e = assert_matches_render(b, &all_on(None), b);
+    let soup: Vec<_> = e
+        .wikilink_spans
+        .iter()
+        .filter(|s| s.target == "lamb soup")
+        .map(|s| s.range.clone())
+        .collect();
+    assert!(!soup.contains(&(120..133)), "{soup:?}");
+    assert!(soup.contains(&(68..81)), "{soup:?}");
+    assert!(
+        e.wikilink_spans
+            .iter()
+            .any(|s| s.target == "M" && s.range == (88..93))
+    );
+    for doc in [a, b] {
+        assert_spans_survive_replacement(doc);
+        assert_spans_map_to_their_links(doc);
+    }
+}
+
+#[test]
+fn earlier_regressions_hold_with_windows_line_endings() {
+    for markdown in [
+        "[[x\n]] [[B]]",
+        "> a [[x\n> y]] [[B]]",
+        "[[a\nsoup]]`\n\\[[B]][[B]]",
+        "\\[[E]][![[p.png]]](u)[[c\n]]`[[B]]`[[B]]``[[A]]``#_y![[Note#H]]\n![[p.png]]",
+        "\n\n\t   `x\ny [[A]]`|\n-  `x\ny [[A]]`",
+        "[[a\nb]] <!-- [[C]] #c -->",
+        "a | b\n--|--\n[[A\\|B]] | x\n[[A]] | y",
+        "[[ Note]]\n[[Note]]\n\n[[E]]",
+        "```md\n```\nx[^1]\n[^1]:&#33;[[E]]![[Note]]&#91;&#91;E]]!\\[[E]]\n!\\[[E]]#\\#x![[a.png]]![[b.png]]word",
+    ] {
+        let crlf = markdown.replace('\n', "\r\n");
+        let lf = extract(markdown, &all_on(None));
+        let e = assert_matches_render(&crlf, &all_on(None), &crlf);
+        // Same links found, each CR adding a byte before the spans after it
+        assert_eq!(e.wikilink_spans.len(), lf.wikilink_spans.len(), "{crlf:?}");
+        assert_eq!(e.embed_spans.len(), lf.embed_spans.len(), "{crlf:?}");
+        assert_spans_survive_replacement(&crlf);
+        assert_spans_map_to_their_links(&crlf);
+    }
 }

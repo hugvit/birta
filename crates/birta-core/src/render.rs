@@ -177,13 +177,19 @@ pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
         .collect();
 
     let mut extracted = Extracted::default();
-    let mut code_spans = Vec::new();
+    let mut code_spans: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut cursor = 0;
     for node in root.descendants() {
         let data = node.data.borrow();
-        if let NodeValue::Code(code) = &data.value
-            && let Some(range) =
-                code_span_range(markdown, &line_starts, data.sourcepos, &code.literal)
-        {
+        let NodeValue::Code(code) = &data.value else {
+            continue;
+        };
+        // In source order, so a closing fence is never mistaken for the next opener;
+        // footnote definitions come last in the tree, so a miss retries from the top
+        if let Some(range) = code_span_after(markdown, cursor, &code.literal, &[]) {
+            cursor = range.end;
+            code_spans.push(range);
+        } else if let Some(range) = code_span_after(markdown, 0, &code.literal, &code_spans) {
             code_spans.push(range);
         }
     }
@@ -252,25 +258,37 @@ fn link_opens(source: &str, code_spans: &mut [std::ops::Range<usize>]) -> Vec<us
         .collect()
 }
 
-/// The source range of a code span, backticks included, near where comrak
-/// reports it: the backtick-fenced run nearest its position whose content is
-/// `literal`. Columns drift as they do for wiki links.
-fn code_span_range(
+/// The first code span from `from` whose content is `literal`, backticks
+/// included, outside the spans in `taken`.
+fn code_span_after(
     source: &str,
-    line_starts: &[usize],
-    sourcepos: comrak::nodes::Sourcepos,
+    from: usize,
     literal: &str,
+    taken: &[std::ops::Range<usize>],
 ) -> Option<std::ops::Range<usize>> {
-    let (start, estimate, end) = search_window(source, line_starts, sourcepos)?;
     let bytes = source.as_bytes();
-    let runs: Vec<usize> = (start..end)
-        .filter(|&at| bytes[at] == b'`' && (at == 0 || bytes[at - 1] != b'`'))
-        .collect();
-    nearest_first(&runs, estimate).find_map(|open| {
+    let mut at = from;
+    while let Some(open) = source.get(at..)?.find('`').map(|i| i + at) {
         let fence = bytes[open..].iter().take_while(|&&b| b == b'`').count();
-        let close = closing_fence(&source[..end], open + fence, fence)?;
-        (code_content(&source[open + fence..close]) == literal).then_some(open..close + fence)
-    })
+        at = open + fence;
+        let escapes = bytes[..open]
+            .iter()
+            .rev()
+            .take_while(|&&b| b == b'\\')
+            .count();
+        if escapes % 2 == 1 || taken.iter().any(|t| t.contains(&open)) {
+            continue;
+        }
+        // The content is the literal plus escapes, padding and line endings
+        let limit = (at + 2 * literal.len() + 64).min(source.len());
+        let Some(close) = closing_fence(&source[..limit], at, fence) else {
+            continue;
+        };
+        if code_content(&source[at..close]) == literal {
+            return Some(open..close + fence);
+        }
+    }
+    None
 }
 
 /// The start of the next run of exactly `fence` backticks from `from`.
@@ -318,43 +336,54 @@ fn wikilink_range(
 ) -> Option<std::ops::Range<usize>> {
     let (start, estimate, end) = search_window(source, line_starts, sourcepos)?;
     let window = &opens[opens.partition_point(|&o| o < start)..opens.partition_point(|&o| o < end)];
-    // comrak's column is exact outside the drift cases, so a `[[` there is the link
-    if let Some(open) = nearest_first(window, estimate).find(|open| !used.contains(open))
-        && open == estimate
-    {
-        let close = source[open..].find("]]")?;
-        return Some(open..open + close + 2);
-    }
-    let mut fallback = None;
-    // Only drift-sized distances: a link whose own `[[` fails to decode must not
-    // take the span of a later link that happens to
-    let found = nearest_first(window, estimate)
+    // Only a `[[` whose text reads as this link's target: a guess could hand
+    // the span to a different link, and no span is safer than a wrong one
+    let open = nearest_first(window, estimate)
         .filter(|open| !used.contains(open))
-        .take_while(|open| open.abs_diff(estimate) <= SEARCH_BEFORE)
-        .find(|&open| {
-            fallback.get_or_insert(open);
-            names(source, open, target)
-        });
-    let open = match found.or(fallback) {
-        Some(open) => open,
-        // After a line-broken link comrak's estimate can fall further out
-        None => nearest_first(window, estimate).find(|open| !used.contains(open))?,
-    };
+        .find(|&open| names(source, open, target))?;
     let close = source[open..].find("]]")?;
     Some(open..open + close + 2)
 }
 
 /// Whether the link opening at `open` reads as `target`: comrak trims the
-/// target and decodes its entities and escapes, and an alias follows a `|`,
-/// written `\\|` inside tables.
+/// target, decodes its entities and escapes, and drops a line break's
+/// indentation and quote markers inside it; an alias follows a `|`, written
+/// `\\|` inside tables.
 fn names(source: &str, open: usize, target: &str) -> bool {
-    const SPACE: [char; 4] = [' ', '\t', '\r', '\n'];
-    let inner = &source[open + 2..];
-    let from = open + 2 + (inner.len() - inner.trim_start_matches(SPACE).len());
-    obsidian::decodes_to(source, target, from).is_some_and(|end| {
-        let rest = source[end..].trim_start_matches(SPACE);
-        rest.starts_with("]]") || rest.starts_with('|') || rest.starts_with("\\|")
-    })
+    let mut at = skip_gap(source, open + 2);
+    for (i, part) in target.split('\n').enumerate() {
+        if i > 0 {
+            let rest = source[at..].trim_start_matches([' ', '\t', '\r']);
+            let Some(next) = rest.strip_prefix('\n') else {
+                return false;
+            };
+            let line = source.len() - next.len();
+            at = line + (next.len() - next.trim_start_matches([' ', '\t', '>']).len());
+        }
+        match obsidian::decodes_to(source, part.trim_end_matches(' '), at) {
+            Some(end) => at = end,
+            None => return false,
+        }
+    }
+    let rest = &source[skip_gap(source, at)..];
+    rest.starts_with("]]") || rest.starts_with('|') || rest.starts_with("\\|")
+}
+
+/// Past spaces and line breaks from `at`, with any quote markers that start a
+/// continuation line.
+fn skip_gap(source: &str, mut at: usize) -> usize {
+    let bytes = source.as_bytes();
+    let mut line_start = false;
+    while let Some(&b) = bytes.get(at) {
+        match b {
+            b' ' | b'\t' | b'\r' => {}
+            b'\n' => line_start = true,
+            b'>' if line_start => {}
+            _ => break,
+        }
+        at += 1;
+    }
+    at
 }
 
 /// Where to look for a node comrak reports at `sourcepos`: from a little

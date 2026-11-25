@@ -567,3 +567,120 @@ fn every_span_is_its_own_link_when_replaced() {
         assert_spans_survive_replacement(&doc);
     }
 }
+
+/// The `href`s of render's wiki links, in document order.
+fn wikilink_hrefs(markdown: &str) -> Vec<String> {
+    let html = render(markdown, &all_on(None)).html;
+    html.split("<a ")
+        .skip(1)
+        .filter_map(|tag| {
+            let tag = &tag[..tag.find('>')?];
+            tag.contains("data-wikilink=\"true\"").then_some(())?;
+            let href = &tag[tag.find("href=\"")? + 6..];
+            Some(href[..href.find('"')?].to_string())
+        })
+        .collect()
+}
+
+/// Replacing one span with a fresh link must remove exactly the href of the
+/// span's own target: a span on a neighbouring link would remove that one.
+fn assert_spans_map_to_their_links(markdown: &str) {
+    let before = wikilink_hrefs(markdown);
+    let e = extract(markdown, &all_on(None));
+    for span in &e.wikilink_spans {
+        let slice = &markdown[span.range.clone()];
+        // A bare `|` re-shapes a table row, so the oracle cannot judge it
+        if markdown.contains("--|") && slice.replace("\\|", "").contains('|') {
+            continue;
+        }
+        let replaced = format!(
+            "{}[[ZZQ]]{}",
+            &markdown[..span.range.start],
+            &markdown[span.range.end..]
+        );
+        let mut after = wikilink_hrefs(&replaced);
+        let Some(at) = after.iter().position(|h| h == "ZZQ") else {
+            panic!("{markdown:?}: span {span:?} is not a link");
+        };
+        after.remove(at);
+        let mut removed = before.clone();
+        for href in &after {
+            if let Some(i) = removed.iter().position(|h| h == href) {
+                removed.remove(i);
+            }
+        }
+        // An unescaped `|` would read as an alias separator
+        let own = wikilink_hrefs(&format!("[[{}]]", span.target.replace('|', "\\|")));
+        assert_eq!(
+            removed, own,
+            "{markdown:?}: span {span:?} maps to another link"
+        );
+    }
+}
+
+#[test]
+fn line_broken_links_get_exact_spans_or_none() {
+    let repro = ">[[A]]![[p.png]][[d\n]]\\[[B]][[B]]#tag\n[[e\n>f]][[&#65;]]##[[A\\|B]][[a&amp;b]]";
+    let e = assert_matches_render(repro, &all_on(None), repro);
+    for span in &e.wikilink_spans {
+        let expected = match span.target.as_str() {
+            "A" => vec!["[[A]]", "[[&#65;]]"],
+            "d" => vec!["[[d\n]]"],
+            "B" => vec!["[[B]]"],
+            "e\nf" => vec!["[[e\n>f]]"],
+            "A|B" => vec!["[[A\\|B]]"],
+            "a&b" => vec!["[[a&amp;b]]"],
+            other => panic!("unexpected target {other:?}"),
+        };
+        assert!(
+            expected.contains(&&repro[span.range.clone()]),
+            "{span:?} -> {:?}",
+            &repro[span.range.clone()]
+        );
+    }
+    assert_spans_survive_replacement(repro);
+    assert_spans_map_to_their_links(repro);
+
+    let tokens = [
+        "[[a]]",
+        "[[b\n]]",
+        "[[c\nd]]",
+        "[[e\n>f]]",
+        "[[ g]]",
+        "[[&#65;]]",
+        "[[A]]",
+        "[[h\\|i]]",
+        "\\[[j]]",
+        "![[p.png]]",
+        "`![[c]]`",
+        "`[[a]]`",
+        "#tag",
+        "\n",
+        "\n> ",
+        "> ",
+        " ",
+        "x",
+        "[[a&amp;b]]",
+    ];
+    // EXTRACT_FUZZ_DOCS raises the count for a longer local run
+    let docs: usize = std::env::var("EXTRACT_FUZZ_DOCS")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(250);
+    let mut seed: u64 = 23;
+    let mut next = || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as usize
+    };
+    for _ in 0..docs {
+        let mut doc = String::new();
+        for _ in 0..(2 + next() % 12) {
+            doc.push_str(tokens[next() % tokens.len()]);
+        }
+        assert_matches_render(&doc, &all_on(None), &doc);
+        assert_spans_survive_replacement(&doc);
+        assert_spans_map_to_their_links(&doc);
+    }
+}

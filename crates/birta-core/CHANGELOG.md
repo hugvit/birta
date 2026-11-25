@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5](https://github.com/hugvit/birta/compare/birta-core-v0.3.4...birta-core-v0.3.5) - 2026-11-25
+
+### Fixed
+
+- *(birta-core)* treat a backslash-escaped comment opener as text
+- *(birta-core)* match code spans across CRLF line breaks as comrak reads them
+- *(birta-core)* keep code spans out of code blocks and never slice inside a character
+- *(birta-core)* keep footnote embeds and give suspect line-broken blocks exact spans or none
+- *(birta-core)* find Obsidian syntax in source order and skip escaped link brackets
+- *(birta-core)* find Obsidian syntax after line-broken wiki links without misreading code spans
+- *(birta-core)* give line-broken wiki links exact spans or none
+
 ## [0.3.4](https://github.com/hugvit/birta/compare/birta-core-v0.3.3...birta-core-v0.3.4) - 2026-11-25
 
 ### Fixed

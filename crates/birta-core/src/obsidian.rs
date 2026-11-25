@@ -247,12 +247,31 @@ const MAX_DRIFT: usize = 24;
 /// backslash escapes, entities and smart punctuation. Returns the end of the
 /// source and, for each byte offset of `literal` on a char boundary, its source
 /// offset in `line` (`usize::MAX` elsewhere).
-fn align(line: &str, literal: &str, from: usize) -> Option<(usize, Vec<usize>)> {
+pub(crate) fn align(line: &str, literal: &str, from: usize) -> Option<(usize, Vec<usize>)> {
     let mut map = vec![usize::MAX; literal.len() + 1];
+    let end = walk(line, literal, from, |l, r| map[l] = r)?;
+    map[literal.len()] = end;
+    Some((end, map))
+}
+
+/// Where `literal` ends in `text` when it decodes from byte `from`, as [`align`]
+/// traces it, without recording the map.
+pub(crate) fn decodes_to(text: &str, literal: &str, from: usize) -> Option<usize> {
+    walk(text, literal, from, |_, _| {})
+}
+
+/// Step through `literal` and its source together, reporting each literal
+/// char's offset and the source offset it came from.
+fn walk(
+    line: &str,
+    literal: &str,
+    from: usize,
+    mut visit: impl FnMut(usize, usize),
+) -> Option<usize> {
     let mut r = from;
     for (l, c) in literal.char_indices() {
         let rest = line.get(r..)?;
-        map[l] = r;
+        visit(l, r);
         let rc = rest.chars().next()?;
         if rc == '\\'
             && let Some(next) = rest[1..].chars().next()
@@ -286,8 +305,7 @@ fn align(line: &str, literal: &str, from: usize) -> Option<(usize, Vec<usize>)> 
         }
         r += smart.len();
     }
-    map[literal.len()] = r;
-    Some((r, map))
+    Some(r)
 }
 
 /// The length of an HTML entity (`&name;`, `&#123;`, `&#x7b;`) at the start of `text`.

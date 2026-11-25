@@ -74,4 +74,28 @@ fn main() {
         "extract: {extracted:?} ({:.1}x faster)",
         rendered.as_secs_f64() / extracted.as_secs_f64()
     );
+
+    // One link-heavy note: span lookup must stay linear in its link count
+    for links in [1_000, 4_000, 16_000] {
+        let note = many_links(links);
+        let (time, found) = best_of(3, std::slice::from_ref(&note), |n| {
+            extract(n, &opts).wikilink_spans.len()
+        });
+        assert_eq!(found, links);
+        println!("one note, {links:>6} links: extract {time:?}");
+    }
+}
+
+fn many_links(links: usize) -> String {
+    let mut s = String::new();
+    for i in 0..links {
+        s.push_str(&format!("[[Note {}]] ", i % 97));
+        if i % 10 == 0 {
+            s.push_str("`[[code lookalike]]` ");
+        }
+        if i % 25 == 24 {
+            s.push('\n');
+        }
+    }
+    s
 }

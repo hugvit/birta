@@ -177,19 +177,36 @@ pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
         .collect();
 
     let mut extracted = Extracted::default();
-    let mut used = Vec::new();
+    let mut code_spans = Vec::new();
+    for node in root.descendants() {
+        let data = node.data.borrow();
+        if let NodeValue::Code(code) = &data.value
+            && let Some(range) =
+                code_span_range(markdown, &line_starts, data.sourcepos, &code.literal)
+        {
+            code_spans.push(range);
+        }
+    }
+    let opens = link_opens(markdown, &mut code_spans);
+    let mut used = std::collections::HashSet::new();
+    let mut listed = std::collections::HashSet::new();
     for node in root.descendants() {
         let data = node.data.borrow();
         match &data.value {
             NodeValue::FrontMatter(raw) => extracted.front_matter = Some(raw.clone()),
             NodeValue::WikiLink(link) => {
-                if !extracted.wikilinks.contains(&link.url) {
+                if listed.insert(link.url.clone()) {
                     extracted.wikilinks.push(link.url.clone());
                 }
-                if let Some(range) =
-                    wikilink_range(markdown, &line_starts, data.sourcepos, &link.url, &used)
-                {
-                    used.push(range.start);
+                if let Some(range) = wikilink_range(
+                    markdown,
+                    &line_starts,
+                    &opens,
+                    data.sourcepos,
+                    &link.url,
+                    &used,
+                ) {
+                    used.insert(range.start);
                     extracted.wikilink_spans.push(TargetSpan {
                         target: link.url.clone(),
                         range,
@@ -216,48 +233,165 @@ pub fn extract(markdown: &str, opts: &RenderOptions<'_>) -> Extracted {
     extracted
 }
 
-/// The source range of a wiki link near where comrak reports it. comrak's
-/// columns drift inside tables (each `\|` shifts later text left; a table on the
-/// first line of a file with a BOM is shifted right), its end falls short after
-/// `\|`, and after a link that breaks across lines it keeps counting columns on
-/// the first line. So the link is the unused `[[target` nearest the reported
-/// position, from that line on, running to the next `]]`.
-fn wikilink_range(
-    source: &str,
-    line_starts: &[usize],
-    sourcepos: comrak::nodes::Sourcepos,
-    target: &str,
-    used: &[usize],
-) -> Option<std::ops::Range<usize>> {
-    let line_start = *line_starts.get(sourcepos.start.line.checked_sub(1)?)?;
-    let estimate = line_start + sourcepos.start.column.saturating_sub(1);
-    let mut window_end = (estimate + WIKILINK_SEARCH).min(source.len());
-    while !source.is_char_boundary(window_end) {
-        window_end -= 1;
-    }
-    let window = source.get(line_start..window_end)?;
-
-    let opens: Vec<usize> = window
+/// Every `[[` in the source that could open a wiki link: not the `[[` of an
+/// unescaped `![[` embed, and not inside a code span.
+fn link_opens(source: &str, code_spans: &mut [std::ops::Range<usize>]) -> Vec<usize> {
+    code_spans.sort_by_key(|code| code.start);
+    let in_code = |at: usize| {
+        let after = code_spans.partition_point(|code| code.start <= at);
+        after > 0 && code_spans[after - 1].contains(&at)
+    };
+    source
         .match_indices("[[")
-        .map(|(i, _)| line_start + i)
-        .filter(|start| !used.contains(start))
-        // `![[` is an embed unless its `!` is escaped
+        .map(|(i, _)| i)
         .filter(|&start| {
             let before = &source[..start];
             !before.ends_with('!') || before[..before.len() - 1].ends_with('\\')
         })
-        .collect();
-    let named = |start: &&usize| source[**start + 2..].starts_with(target);
-    let nearest = |starts: &mut dyn Iterator<Item = &usize>| {
-        starts.copied().min_by_key(|start| start.abs_diff(estimate))
-    };
-    let start = nearest(&mut opens.iter().filter(named)).or_else(|| nearest(&mut opens.iter()))?;
-    let close = source[start..].find("]]")?;
-    Some(start..start + close + 2)
+        .filter(|&start| !in_code(start))
+        .collect()
 }
 
-/// How far past comrak's reported position a wiki link is looked for.
-const WIKILINK_SEARCH: usize = 1024;
+/// The source range of a code span, backticks included, near where comrak
+/// reports it: the backtick-fenced run nearest its position whose content is
+/// `literal`. Columns drift as they do for wiki links.
+fn code_span_range(
+    source: &str,
+    line_starts: &[usize],
+    sourcepos: comrak::nodes::Sourcepos,
+    literal: &str,
+) -> Option<std::ops::Range<usize>> {
+    let (start, estimate, end) = search_window(source, line_starts, sourcepos)?;
+    let bytes = source.as_bytes();
+    let runs: Vec<usize> = (start..end)
+        .filter(|&at| bytes[at] == b'`' && (at == 0 || bytes[at - 1] != b'`'))
+        .collect();
+    nearest_first(&runs, estimate).find_map(|open| {
+        let fence = bytes[open..].iter().take_while(|&&b| b == b'`').count();
+        let close = closing_fence(&source[..end], open + fence, fence)?;
+        (code_content(&source[open + fence..close]) == literal).then_some(open..close + fence)
+    })
+}
+
+/// The start of the next run of exactly `fence` backticks from `from`.
+fn closing_fence(source: &str, from: usize, fence: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut at = from;
+    while let Some(next) = source[at..].find('`').map(|i| i + at) {
+        let run = bytes[next..].iter().take_while(|&&b| b == b'`').count();
+        if run == fence {
+            return Some(next);
+        }
+        at = next + run;
+    }
+    None
+}
+
+/// A code span's text as comrak stores it: line endings become spaces, one
+/// space is stripped from each side of padded content, and `\\|` (table cells)
+/// becomes `|`.
+fn code_content(raw: &str) -> String {
+    let text = raw
+        .replace("\r\n", " ")
+        .replace('\n', " ")
+        .replace("\\|", "|");
+    match text.strip_prefix(' ').and_then(|t| t.strip_suffix(' ')) {
+        Some(inner) if !text.chars().all(|c| c == ' ') => inner.to_string(),
+        _ => text,
+    }
+}
+
+/// The source range of a wiki link near where comrak reports it. comrak's
+/// columns drift inside tables (each `\\|` shifts later text left; a table on the
+/// first line of a file with a BOM is shifted right), its end falls short after
+/// `\\|`, and after a link that breaks across lines it keeps counting columns on
+/// the first line. So the link is the unused candidate `[[` nearest the reported
+/// position whose text decodes to `target` (else the nearest at all), and it
+/// runs to the next `]]`.
+fn wikilink_range(
+    source: &str,
+    line_starts: &[usize],
+    opens: &[usize],
+    sourcepos: comrak::nodes::Sourcepos,
+    target: &str,
+    used: &std::collections::HashSet<usize>,
+) -> Option<std::ops::Range<usize>> {
+    let (start, estimate, end) = search_window(source, line_starts, sourcepos)?;
+    let window = &opens[opens.partition_point(|&o| o < start)..opens.partition_point(|&o| o < end)];
+    // comrak's column is exact outside the drift cases, so a `[[` there is the link
+    if let Some(open) = nearest_first(window, estimate).find(|open| !used.contains(open))
+        && open == estimate
+    {
+        let close = source[open..].find("]]")?;
+        return Some(open..open + close + 2);
+    }
+    let mut fallback = None;
+    // Only drift-sized distances: a link whose own `[[` fails to decode must not
+    // take the span of a later link that happens to
+    let found = nearest_first(window, estimate)
+        .filter(|open| !used.contains(open))
+        .take_while(|open| open.abs_diff(estimate) <= SEARCH_BEFORE)
+        .find(|&open| {
+            fallback.get_or_insert(open);
+            names(source, open, target)
+        });
+    let open = match found.or(fallback) {
+        Some(open) => open,
+        // After a line-broken link comrak's estimate can fall further out
+        None => nearest_first(window, estimate).find(|open| !used.contains(open))?,
+    };
+    let close = source[open..].find("]]")?;
+    Some(open..open + close + 2)
+}
+
+/// Whether the link opening at `open` reads as `target`: comrak trims the
+/// target and decodes its entities and escapes, and an alias follows a `|`,
+/// written `\\|` inside tables.
+fn names(source: &str, open: usize, target: &str) -> bool {
+    const SPACE: [char; 4] = [' ', '\t', '\r', '\n'];
+    let inner = &source[open + 2..];
+    let from = open + 2 + (inner.len() - inner.trim_start_matches(SPACE).len());
+    obsidian::decodes_to(source, target, from).is_some_and(|end| {
+        let rest = source[end..].trim_start_matches(SPACE);
+        rest.starts_with("]]") || rest.starts_with('|') || rest.starts_with("\\|")
+    })
+}
+
+/// Where to look for a node comrak reports at `sourcepos`: from a little
+/// before its column (drift can move it either way) to well past it, which
+/// also covers the columns comrak keeps counting after a line-broken link.
+fn search_window(
+    source: &str,
+    line_starts: &[usize],
+    sourcepos: comrak::nodes::Sourcepos,
+) -> Option<(usize, usize, usize)> {
+    let line_start = *line_starts.get(sourcepos.start.line.checked_sub(1)?)?;
+    let estimate = (line_start + sourcepos.start.column.saturating_sub(1)).min(source.len());
+    let start = estimate.saturating_sub(SEARCH_BEFORE).max(line_start);
+    let end = (estimate + SEARCH_AFTER).min(source.len());
+    Some((start, estimate, end))
+}
+
+/// The positions in `sorted`, nearest to `estimate` first.
+fn nearest_first(sorted: &[usize], estimate: usize) -> impl Iterator<Item = usize> + '_ {
+    let split = sorted.partition_point(|&p| p < estimate);
+    let (mut left, mut right) = (
+        sorted[..split].iter().rev().peekable(),
+        sorted[split..].iter().peekable(),
+    );
+    std::iter::from_fn(move || match (left.peek(), right.peek()) {
+        (Some(&&l), Some(&&r)) if estimate - l <= r - estimate => left.next().copied(),
+        (_, Some(_)) => right.next().copied(),
+        (Some(_), None) => left.next().copied(),
+        (None, None) => None,
+    })
+}
+
+/// How far before comrak's reported position a node is looked for.
+const SEARCH_BEFORE: usize = 64;
+
+/// How far past comrak's reported position a node is looked for.
+const SEARCH_AFTER: usize = 1024;
 
 /// How deep note embeds may nest inside one another.
 const MAX_EMBED_DEPTH: usize = 3;

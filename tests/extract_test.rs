@@ -352,6 +352,9 @@ fn every_wikilink_occurrence_gets_a_span_in_generated_documents() {
         "| ",
         "\\| ",
         "&#33;[[f]] ",
+        "[[lamb&#32;soup]] ",
+        "`[[lamb soup]]` ",
+        "`x\\|y` ",
         "\r\n",
     ];
     let mut seed: u64 = 7;
@@ -381,6 +384,14 @@ fn every_wikilink_occurrence_gets_a_span_in_generated_documents() {
                 "{doc:?}: {text:?}"
             );
         }
+        // A literal `[[…]]` in a code span is never a link's span
+        for span in &e.wikilink_spans {
+            assert!(
+                !doc[..span.range.start].ends_with('`'),
+                "{doc:?}: {:?}",
+                e.wikilink_spans
+            );
+        }
         let anchors = rendered.html.matches("data-wikilink=\"true\"").count();
         assert_eq!(
             e.wikilink_spans.len(),
@@ -388,5 +399,171 @@ fn every_wikilink_occurrence_gets_a_span_in_generated_documents() {
             "{doc:?}: {:?}",
             e.wikilink_spans
         );
+    }
+}
+
+#[test]
+fn spelled_links_beat_literal_lookalikes_in_code_spans() {
+    for (markdown, expected) in [
+        ("[[lamb&#32;soup]] and `[[lamb soup]]`", "[[lamb&#32;soup]]"),
+        (
+            "`[[lamb soup]]` then [[lamb&#32;soup]]",
+            "[[lamb&#32;soup]]",
+        ),
+        ("[[a\\_b]] and `[[a_b]]`", "[[a\\_b]]"),
+        ("a | b\n--|--\nx\\|y `[[c]]` [[c]] | z", "[[c]]"),
+        ("``x ` [[d]]`` [[d]]", "[[d]]"),
+    ] {
+        let e = assert_matches_render(markdown, &all_on(None), markdown);
+        let spans = spans_of(markdown, &e).0;
+        assert_eq!(spans, [expected], "{markdown:?}");
+        // The span is the link itself, never the code span's text
+        let span = &e.wikilink_spans[0];
+        assert!(
+            markdown.rfind(expected) == Some(span.range.start)
+                || markdown.find(expected) == Some(span.range.start)
+        );
+        assert!(!markdown[..span.range.start].ends_with('`'), "{markdown:?}");
+    }
+}
+
+#[test]
+fn many_links_in_one_note_all_get_spans() {
+    // 4,000 links, many sharing targets, with code-span lookalikes between them
+    let mut doc = String::new();
+    for i in 0..4000 {
+        doc.push_str(&format!("[[n{}]] ", i % 97));
+        if i % 10 == 0 {
+            doc.push_str(&format!("`[[n{}]]` ", i % 97));
+        }
+        if i % 25 == 0 {
+            doc.push('\n');
+        }
+    }
+    let e = extract(&doc, &all_on(None));
+    assert_eq!(e.wikilink_spans.len(), 4000);
+    assert_eq!(e.wikilinks.len(), 97);
+    assert!(
+        e.wikilink_spans
+            .iter()
+            .all(|s| !doc[..s.range.start].ends_with('`'))
+    );
+}
+
+#[test]
+fn escaped_alias_pipes_and_padded_targets_keep_their_own_spans() {
+    for (markdown, expected) in [
+        (
+            "a | b\n--|--\n[[A\\|B]] | x\n[[A]] | y",
+            vec!["[[A\\|B]]", "[[A]]"],
+        ),
+        (
+            "a | b\n--|--\n[[A\\|B]] [[A]] | x",
+            vec!["[[A\\|B]]", "[[A]]"],
+        ),
+        (
+            "[[ Note]]\n[[Note]]\n\n[[E]]",
+            vec!["[[ Note]]", "[[Note]]", "[[E]]"],
+        ),
+        (
+            "[[ Note ]] [[Note]] [[E]]",
+            vec!["[[ Note ]]", "[[Note]]", "[[E]]"],
+        ),
+        (
+            "[[\tTabbed|alias]]\n[[Tabbed]]",
+            vec!["[[\tTabbed|alias]]", "[[Tabbed]]"],
+        ),
+    ] {
+        let e = assert_matches_render(markdown, &all_on(None), markdown);
+        assert_eq!(spans_of(markdown, &e).0, expected, "{markdown:?}");
+        for span in &e.wikilink_spans {
+            assert!(
+                markdown[span.range.clone()].contains(span.target.as_str()),
+                "{markdown:?}: {span:?}"
+            );
+        }
+    }
+}
+
+/// Replace every wiki link span with a unique link and render again: each
+/// replacement must come back as a link, so no span points at code, at text
+/// that is not a link, or at a different link's occurrence.
+fn assert_spans_survive_replacement(markdown: &str) {
+    let e = extract(markdown, &all_on(None));
+    let mut replaced = String::new();
+    let mut at = 0;
+    for (n, span) in e.wikilink_spans.iter().enumerate() {
+        replaced.push_str(&markdown[at..span.range.start]);
+        replaced.push_str(&format!("[[ZZQ{n}]]"));
+        at = span.range.end;
+    }
+    replaced.push_str(&markdown[at..]);
+    let links = render(&replaced, &all_on(None)).wikilinks;
+    for n in 0..e.wikilink_spans.len() {
+        assert!(
+            links.contains(&format!("ZZQ{n}")),
+            "{markdown:?}: span {n} {:?} is not a link",
+            e.wikilink_spans[n]
+        );
+    }
+    assert_eq!(
+        e.wikilink_spans.len(),
+        render(markdown, &all_on(None))
+            .html
+            .matches("data-wikilink=\"true\"")
+            .count(),
+        "{markdown:?}"
+    );
+}
+
+#[test]
+fn every_span_is_its_own_link_when_replaced() {
+    for path in fixtures() {
+        assert_spans_survive_replacement(&fs::read_to_string(&path).unwrap());
+    }
+    for markdown in [
+        "[[lamb&#32;soup]] and `[[lamb soup]]`",
+        "a | b\n--|--\n[[A\\|B]] | x\n[[A]] | y",
+        "[[ Note]]\n[[Note]]\n\n[[E]]",
+        "[[x\n]] [[B]]",
+        "> a [[x\n> y]] [[B]]",
+        "x[^1]\n\n[^1]: [[B]]\n\n[[A]]",
+    ] {
+        assert_spans_survive_replacement(markdown);
+    }
+    let tokens = [
+        "[[a]] ",
+        "[[ a]] ",
+        "[[a\\|b]] ",
+        "[[a|b]] ",
+        "[[c\n]] ",
+        "`[[a]]` ",
+        "[[lamb&#32;soup]] ",
+        "`[[lamb soup]]` ",
+        "\n",
+        "\n\n",
+        "> ",
+        "| ",
+        "\\| ",
+        "x ",
+        "&#33;[[f]] ",
+        "\\[[e]] ",
+    ];
+    let mut seed: u64 = 11;
+    let mut next = || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as usize
+    };
+    for _ in 0..300 {
+        let mut doc = String::new();
+        if next() % 2 == 0 {
+            doc.push_str("h | k\n--|--\n");
+        }
+        for _ in 0..(1 + next() % 10) {
+            doc.push_str(tokens[next() % tokens.len()]);
+        }
+        assert_spans_survive_replacement(&doc);
     }
 }

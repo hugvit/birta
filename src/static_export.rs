@@ -160,6 +160,7 @@ pub fn export_bundle(
             static_mode: true,
             keybindings_json: opts.keybindings_json,
             current_path: None,
+            diff: false,
         });
 
         // Write (output stays inside out_dir since safe_rel is `..`-free).

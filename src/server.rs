@@ -13,6 +13,9 @@ use axum::routing::{get, post};
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, RwLock, broadcast};
 
+use birta_core::diff::{DiffOptions, Layout};
+use birta_core::theme::SyntaxTheme;
+
 use crate::render::{Features, Style};
 use crate::theme::{ResolvedTheme, ThemeRegistry, Variant};
 use crate::{render, template, watcher};
@@ -47,12 +50,64 @@ pub struct ServerOptions {
     pub variant_explicit: bool,
 }
 
+/// The two files compared by `--diff`, with their column labels.
+pub(crate) struct DiffSource {
+    pub(crate) old: PathBuf,
+    pub(crate) new: PathBuf,
+    pub(crate) labels: [String; 2],
+    pub(crate) layout: Layout,
+}
+
+impl DiffSource {
+    /// Re-read both files and diff them.
+    pub(crate) fn render(&self, syntax: Option<&SyntaxTheme>) -> std::io::Result<String> {
+        let old = std::fs::read_to_string(&self.old)?;
+        let new = std::fs::read_to_string(&self.new)?;
+        let opts = DiffOptions {
+            syntax_theme: syntax,
+            context: Some(3),
+            layout: self.layout,
+            labels: Some([&self.labels[0], &self.labels[1]]),
+            ..Default::default()
+        };
+        Ok(birta_core::diff::diff(&old, &new, &opts).html)
+    }
+}
+
+fn file_name(path: &StdPath) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Column labels: the file names, marked old and new when they match (as
+/// with `git difftool`, whose OLD is a temp copy of the same file).
+fn diff_labels(old: &StdPath, new: &StdPath) -> [String; 2] {
+    let (old_name, new_name) = (file_name(old), file_name(new));
+    if old_name == new_name {
+        [format!("{old_name} (old)"), format!("{new_name} (new)")]
+    } else {
+        [old_name, new_name]
+    }
+}
+
+fn diff_title(old: &StdPath, new: &StdPath) -> String {
+    let (old_name, new_name) = (file_name(old), file_name(new));
+    if old_name == new_name {
+        new_name
+    } else {
+        format!("{old_name} \u{2194} {new_name}")
+    }
+}
+
 pub(crate) struct AppState {
     pub(crate) base_dir: PathBuf,
     pub(crate) source_file: Option<PathBuf>,
     pub(crate) filename: String,
     /// Relative path of the initial file from base_dir (e.g. "README.md").
     pub(crate) initial_relpath: Option<String>,
+    /// Set when serving `--diff OLD NEW` instead of a markdown file.
+    pub(crate) diff: Option<DiffSource>,
     pub(crate) custom_css: Option<String>,
     /// Raw rendered HTML (not JSON-wrapped).
     pub(crate) current_html: RwLock<String>,
@@ -138,6 +193,7 @@ pub async fn run_stdin(markdown: &str, opts: ServerOptions) -> anyhow::Result<()
         source_file: None,
         filename: "stdin".to_string(),
         initial_relpath: None,
+        diff: None,
         custom_css: opts.custom_css,
         current_html: RwLock::new(content_html),
         current_source_html: RwLock::new(source_html),
@@ -222,6 +278,7 @@ pub async fn start(
         source_file: Some(canonical_file),
         filename,
         initial_relpath,
+        diff: None,
         custom_css: opts.custom_css,
         current_html: RwLock::new(content_html),
         current_source_html: RwLock::new(source_html),
@@ -257,6 +314,100 @@ pub async fn start(
 
     let state_for_watcher = Arc::clone(&state);
     let _debouncer = watcher::watch_dir(state.base_dir.clone(), tx, state_for_watcher)?;
+
+    let app = router(state.clone());
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(state))
+        .await?;
+
+    Ok(())
+}
+
+/// Serve a live diff of two files.
+pub async fn run_diff(
+    old: PathBuf,
+    new: PathBuf,
+    layout: Layout,
+    opts: ServerOptions,
+) -> anyhow::Result<()> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], opts.port));
+    let listener = TcpListener::bind(addr).await?;
+    let actual_addr = listener.local_addr()?;
+
+    eprintln!(
+        "birta: serving {} at http://{actual_addr}",
+        diff_title(&old, &new)
+    );
+
+    if !opts.no_open {
+        let url = format!("http://{actual_addr}");
+        if let Err(e) = open::that(&url) {
+            eprintln!("birta: could not open browser: {e}");
+        }
+    }
+
+    start_diff(old, new, layout, listener, opts).await
+}
+
+/// Start serving a diff of `old` against `new` on the given listener.
+pub async fn start_diff(
+    old: PathBuf,
+    new: PathBuf,
+    layout: Layout,
+    listener: TcpListener,
+    opts: ServerOptions,
+) -> anyhow::Result<()> {
+    let source = DiffSource {
+        labels: diff_labels(&old, &new),
+        old: old.canonicalize()?,
+        new: new.canonicalize()?,
+        layout,
+    };
+    let content_html = source.render(opts.theme.active_data().syntax.as_ref())?;
+    let base_dir = source
+        .new
+        .parent()
+        .map(StdPath::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let watched = vec![source.old.clone(), source.new.clone()];
+
+    let mut registry = ThemeRegistry::new(opts.theme);
+    if opts.enable_swap {
+        registry.discover_all(&crate::theme::search());
+    }
+
+    let (tx, _rx) = broadcast::channel::<ContentUpdate>(16);
+    let (theme_tx, _) = broadcast::channel::<String>(16);
+    let (scroll_tx, _) = broadcast::channel::<u32>(16);
+
+    let state = Arc::new(AppState {
+        base_dir,
+        source_file: None,
+        filename: diff_title(&old, &new),
+        initial_relpath: None,
+        diff: Some(source),
+        custom_css: opts.custom_css,
+        current_html: RwLock::new(content_html),
+        current_source_html: RwLock::new(String::new()),
+        current_file_stats: RwLock::new(String::new()),
+        tx: tx.clone(),
+        theme_tx,
+        scroll_tx,
+        connections: AtomicUsize::new(0),
+        all_disconnected: Notify::new(),
+        registry: RwLock::new(registry),
+        enable_toggle: opts.enable_toggle,
+        font_css: opts.font_css,
+        show_header: opts.show_header,
+        reading_mode: opts.reading_mode,
+        raw_mode: false,
+        features: opts.features,
+        variant_explicit: opts.variant_explicit,
+        keybindings_json: opts.keybindings_json,
+        last_request: AtomicU64::new(now_secs()),
+    });
+
+    let _debouncer = watcher::watch_files(watched, tx, Arc::clone(&state))?;
 
     let app = router(state.clone());
     axum::serve(listener, app)
@@ -367,6 +518,7 @@ async fn index_handler(State(state): State<Arc<AppState>>) -> Response {
         static_mode: false,
         keybindings_json: &state.keybindings_json,
         current_path: None,
+        diff: state.diff.is_some(),
     });
     Html(page).into_response()
 }
@@ -451,6 +603,7 @@ async fn view_handler(Path(path): Path<String>, State(state): State<Arc<AppState
         static_mode: false,
         keybindings_json: &state.keybindings_json,
         current_path: Some(&path),
+        diff: false,
     });
     Html(page).into_response()
 }
@@ -538,7 +691,15 @@ async fn broadcast_theme_update(state: &AppState) {
     let active = theme.active_data();
 
     // Re-render markdown with new syntax theme
-    let (html, source) = if let Some(source_file) = &state.source_file {
+    let (html, source) = if let Some(diff) = &state.diff {
+        match diff.render(active.syntax.as_ref()) {
+            Ok(html) => (html, String::new()),
+            Err(e) => {
+                eprintln!("birta: failed to re-read files for theme change: {e}");
+                return;
+            }
+        }
+    } else if let Some(source_file) = &state.source_file {
         match std::fs::read_to_string(source_file) {
             Ok(markdown) => {
                 let rendered = if let Some(relpath) = &state.initial_relpath {
@@ -819,6 +980,7 @@ mod tests {
             source_file: None,
             filename: "test.md".to_string(),
             initial_relpath: None,
+            diff: None,
             custom_css: None,
             current_html: RwLock::new("<p>hello</p>".to_string()),
             current_source_html: RwLock::new(String::new()),
@@ -902,6 +1064,7 @@ mod tests {
             source_file: None,
             filename: "test.md".to_string(),
             initial_relpath: None,
+            diff: None,
             custom_css: None,
             current_html: RwLock::new("<p>hello</p>".to_string()),
             current_source_html: RwLock::new(String::new()),
@@ -1063,6 +1226,7 @@ mod tests {
             source_file: None,
             filename: "test.md".to_string(),
             initial_relpath: Some("test.md".to_string()),
+            diff: None,
             custom_css: None,
             current_html: RwLock::new("<p>hello</p>".to_string()),
             current_source_html: RwLock::new(String::new()),
@@ -1097,5 +1261,19 @@ mod tests {
 
         assert_eq!(response.status(), 307);
         assert_eq!(response.headers()["location"], "/view/test.md");
+    }
+
+    #[test]
+    fn diff_labels_mark_matching_names() {
+        let blob = StdPath::new("/tmp/git-blob-x/notes.md");
+        let file = StdPath::new("notes.md");
+        assert_eq!(
+            diff_labels(blob, file),
+            ["notes.md (old)", "notes.md (new)"]
+        );
+        assert_eq!(diff_title(blob, file), "notes.md");
+        let (a, b) = (StdPath::new("a/old.md"), StdPath::new("b/new.md"));
+        assert_eq!(diff_labels(a, b), ["old.md", "new.md"]);
+        assert_eq!(diff_title(a, b), "old.md \u{2194} new.md");
     }
 }

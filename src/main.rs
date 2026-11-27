@@ -13,6 +13,7 @@ use clap::Parser;
   birta --theme catppuccin README.md     Use a specific theme
   birta --light --no-header README.md    Light mode, no chrome
   birta --reading-mode README.md         Distraction-free reading
+  birta --diff old.md new.md             Live diff of two files
   birta --list-themes                    Show available themes
   cat notes.md | birta -                 Preview from stdin
 
@@ -23,6 +24,21 @@ use clap::Parser;
 struct Cli {
     /// Markdown file to preview, or "-" for stdin
     file: Option<PathBuf>,
+
+    // -- Diff -----------------------------------------------------------------
+    /// Show a live diff of OLD against NEW instead of a preview
+    #[arg(
+        long,
+        num_args = 2,
+        value_names = ["OLD", "NEW"],
+        conflicts_with_all = ["file", "static_mode"],
+        help_heading = "Diff"
+    )]
+    diff: Option<Vec<PathBuf>>,
+
+    /// Diff layout; auto is side by side when the window is wide enough [default: auto]
+    #[arg(long, value_enum, help_heading = "Diff")]
+    diff_layout: Option<DiffLayout>,
 
     // -- Server ---------------------------------------------------------------
     /// Port to serve on [default: auto-assign]
@@ -112,6 +128,24 @@ struct Cli {
     bind: Vec<String>,
 }
 
+#[derive(Clone, Copy, Default, clap::ValueEnum)]
+enum DiffLayout {
+    #[default]
+    Auto,
+    Unified,
+    Split,
+}
+
+impl From<DiffLayout> for birta_core::diff::Layout {
+    fn from(layout: DiffLayout) -> Self {
+        match layout {
+            DiffLayout::Auto => Self::Auto,
+            DiffLayout::Unified => Self::Unified,
+            DiffLayout::Split => Self::Split,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -136,9 +170,26 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let file = cli
-        .file
-        .ok_or_else(|| anyhow::anyhow!("missing required argument: FILE"))?;
+    // Checked here: clap waives `requires` when the required arg conflicts with FILE
+    if cli.diff_layout.is_some() && cli.diff.is_none() {
+        anyhow::bail!("--diff-layout needs --diff <OLD> <NEW>");
+    }
+    let diff_files = match cli.diff {
+        Some(paths) => {
+            for path in &paths {
+                if !path.exists() {
+                    anyhow::bail!("file not found: {}", path.display());
+                }
+            }
+            Some(paths)
+        }
+        None => None,
+    };
+    let file = match (&diff_files, cli.file) {
+        (Some(_), _) => None,
+        (None, Some(file)) => Some(file),
+        (None, None) => anyhow::bail!("missing required argument: FILE"),
+    };
 
     let config = birta::config::load();
 
@@ -199,6 +250,30 @@ async fn main() -> anyhow::Result<()> {
     let mut keybindings = config.keybindings.clone();
     keybindings.apply_overrides(&cli.bind);
     let keybindings_json = keybindings.to_json();
+
+    let Some(file) = file else {
+        let opts = birta::server::ServerOptions {
+            port: merged.port,
+            no_open: merged.no_open,
+            custom_css,
+            font_css,
+            theme,
+            enable_swap: merged.enable_swap,
+            enable_toggle: merged.enable_toggle,
+            show_header: merged.show_header,
+            reading_mode: merged.reading_mode,
+            raw_mode: merged.raw_mode,
+            features: merged.features,
+            keybindings_json,
+            variant_explicit,
+        };
+        let [old, new]: [PathBuf; 2] = diff_files
+            .unwrap_or_default()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("--diff takes exactly two files"))?;
+        return birta::server::run_diff(old, new, cli.diff_layout.unwrap_or_default().into(), opts)
+            .await;
+    };
 
     if file.as_os_str() == "-" {
         let mut markdown = String::new();

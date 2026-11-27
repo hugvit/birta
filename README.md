@@ -45,6 +45,7 @@
 - **GitHub-style rendering** — full GFM compliance via comrak, including tables, task lists, footnotes, alerts, and math
 - **Live reload** — file changes push to the browser instantly over WebSocket
 - **Raw mode** — toggle between rendered preview and syntax-highlighted source with line numbers
+- **Live diff** — `birta --diff old.md new.md` shows a highlighted source diff, side by side or unified, and updates as either file changes
 - **11 bundled themes** — github, catppuccin, dracula, gruvbox, nord, rose-pine, tokyo-night, and more, with runtime hot-swap
 - **Syntax highlighting** — server-side via syntect, with per-theme tmTheme support
 - **Reading mode** — distraction-free viewing with scroll progress indicator
@@ -141,6 +142,30 @@ birta --static --out ./site README.md    # writes the bundle to ./site
 ```
 
 The bundle mirrors your source tree as `.html` files with relative links, so it works offline and can be zipped or moved.
+
+Diff two files, live: the view updates when either file changes:
+
+```bash
+birta --diff old.md new.md
+birta --diff --diff-layout unified old.md new.md   # auto (default), unified or split
+```
+
+`auto` shows the diff side by side when the window is wide enough and unified when it's narrow.
+
+Use birta as a `git difftool` for markdown:
+
+```bash
+git difftool -x 'birta --diff' -y -- README.md
+```
+
+Or set it up once in `~/.gitconfig` and run `git difftool -t birta -y -- '*.md'`:
+
+```ini
+[difftool "birta"]
+    cmd = birta --diff "$LOCAL" "$REMOTE"
+```
+
+Git opens one file at a time: birta exits a few seconds after you close its tab, and then the next file opens.
 
 List all available themes:
 

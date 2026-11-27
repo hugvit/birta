@@ -99,3 +99,78 @@ pub(crate) fn watch_dir(
 
     Ok(debouncer)
 }
+
+/// Watch the files of `state.diff` and broadcast a fresh diff when either changes.
+///
+/// Watches each file's parent directory, because editors that save by
+/// renaming replace the file and a watch on the file itself would go stale.
+pub(crate) fn watch_diff(
+    tx: broadcast::Sender<ContentUpdate>,
+    state: Arc<AppState>,
+) -> anyhow::Result<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>> {
+    let files: HashSet<PathBuf> = state
+        .diff
+        .as_ref()
+        .map(|diff| diff.files().into_iter().collect())
+        .unwrap_or_default();
+    let dirs: HashSet<PathBuf> = files
+        .iter()
+        .filter_map(|f| f.parent().map(PathBuf::from))
+        .collect();
+    let rt = tokio::runtime::Handle::current();
+
+    let mut debouncer = new_debouncer(
+        std::time::Duration::from_millis(200),
+        move |events: Result<Vec<notify_debouncer_mini::DebouncedEvent>, notify::Error>| {
+            let events = match events {
+                Ok(events) => events,
+                Err(e) => {
+                    eprintln!("birta: watcher error: {e}");
+                    return;
+                }
+            };
+            let touched = events.iter().any(|event| {
+                event.kind == DebouncedEventKind::Any
+                    && event
+                        .path
+                        .canonicalize()
+                        .is_ok_and(|path| files.contains(&path))
+            });
+            let Some(diff) = state.diff.as_ref().filter(|_| touched) else {
+                return;
+            };
+
+            let html = rt.block_on(async {
+                let reg = state.registry.read().await;
+                diff.render(reg.active().active_data().syntax.as_ref())
+            });
+            let html = match html {
+                Ok(html) => html,
+                Err(e) => {
+                    eprintln!("birta: {e:#}");
+                    return;
+                }
+            };
+            rt.block_on(async {
+                *state.current_html.write().await = html.clone();
+            });
+            let _ = tx.send(ContentUpdate {
+                relpath: String::new(),
+                rendered_html: html,
+                source_html: String::new(),
+                file_stats: String::new(),
+            });
+        },
+    )?;
+
+    for dir in &dirs {
+        if let Err(e) = debouncer
+            .watcher()
+            .watch(dir, notify::RecursiveMode::NonRecursive)
+        {
+            eprintln!("birta: warning: watching {} failed: {e}", dir.display());
+        }
+    }
+
+    Ok(debouncer)
+}

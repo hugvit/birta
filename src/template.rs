@@ -23,6 +23,8 @@ pub struct PageOptions<'a> {
     pub static_mode: bool,
     pub keybindings_json: &'a str,
     pub current_path: Option<&'a str>,
+    /// `content_html` is a `birta_core::diff` result rather than rendered markdown.
+    pub diff: bool,
 }
 
 pub fn render_page(opts: &PageOptions<'_>) -> String {
@@ -106,6 +108,16 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
     let variants_json =
         serde_json::to_string(&theme.variant_names()).unwrap_or_else(|_| "[]".to_string());
 
+    // The diff runs edge to edge in the file box, as on GitHub
+    let diff_css = if opts.diff {
+        format!(
+            "{}\n.container .markdown-body {{ padding: 0; border-radius: 0 0 6px 6px; overflow: hidden; }}",
+            css::DIFF
+        )
+    } else {
+        String::new()
+    };
+
     fill_template(
         VIEWER_HTML,
         &[
@@ -114,6 +126,8 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
             ("PAGE_CSS", css::PAGE),
             ("SYNTAX_CSS", syntax_css),
             ("ALERTS_CSS", css::ALERTS),
+            ("DIFF_CSS", &diff_css),
+            ("DIFF_MODE", if opts.diff { "true" } else { "false" }),
             ("THEME_VARS_CSS", &theme_vars_css),
             ("FONT_CSS", font_css.unwrap_or("")),
             ("CUSTOM_CSS", &custom_style),
@@ -132,7 +146,7 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
             ("ACTIVE_THEME", &theme.name),
             ("THEME_OPTIONS", &theme_options),
             ("VARIANTS_JSON", &variants_json),
-            ("FILENAME", filename),
+            ("FILENAME", &escape_html(filename)),
             ("FILE_STATS", opts.file_stats),
             (
                 "STATIC_MODE",
@@ -141,13 +155,24 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
             ("KEYBINDINGS_JSON", opts.keybindings_json),
             (
                 "INITIAL_VIEW",
-                if opts.raw_mode { "raw" } else { "preview" },
+                if opts.raw_mode && !opts.diff {
+                    "raw"
+                } else {
+                    "preview"
+                },
             ),
             ("CURRENT_PATH", opts.current_path.unwrap_or("")),
             ("SOURCE_HTML", opts.source_html.unwrap_or("")),
             ("CONTENT", content_html),
         ],
     )
+}
+
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// Fills `{{KEY}}` placeholders in a single pass, so substituted values are
@@ -219,6 +244,7 @@ mod tests {
             static_mode: false,
             keybindings_json: "{}",
             current_path: None,
+            diff: false,
         })
     }
 
@@ -283,6 +309,7 @@ mod tests {
             static_mode,
             keybindings_json: "{}",
             current_path: None,
+            diff: false,
         })
     }
 
@@ -412,6 +439,7 @@ mod tests {
             static_mode: false,
             keybindings_json: "{}",
             current_path: None,
+            diff: false,
         })
     }
 
@@ -493,6 +521,7 @@ mod tests {
             static_mode: false,
             keybindings_json: "{}",
             current_path: None,
+            diff: false,
         })
     }
 
@@ -566,5 +595,30 @@ mod tests {
             !html_tag.contains("data-birta-theme"),
             "github theme should not set data-birta-theme attribute on html element"
         );
+    }
+
+    #[test]
+    fn filename_is_escaped() {
+        let theme = github_theme();
+        let page = render_page(&PageOptions {
+            filename: "<img src=x onerror=alert(1)>.md",
+            file_stats: "",
+            content_html: "",
+            source_html: None,
+            custom_css: None,
+            font_css: None,
+            show_header: true,
+            reading_mode: false,
+            raw_mode: false,
+            theme: &theme,
+            theme_names: &[],
+            variant_explicit: false,
+            static_mode: false,
+            keybindings_json: "{}",
+            current_path: None,
+            diff: false,
+        });
+        assert!(!page.contains("<img src=x"));
+        assert!(page.contains("&lt;img src=x onerror=alert(1)&gt;.md"));
     }
 }

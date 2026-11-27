@@ -13,6 +13,9 @@ use axum::routing::{get, post};
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, RwLock, broadcast};
 
+use birta_core::diff::{DiffOptions, Layout};
+use birta_core::theme::SyntaxTheme;
+
 use crate::render::{Features, Style};
 use crate::theme::{ResolvedTheme, ThemeRegistry, Variant};
 use crate::{render, template, watcher};
@@ -47,12 +50,107 @@ pub struct ServerOptions {
     pub variant_explicit: bool,
 }
 
+/// One side of a diff. Pipes and devices (`<(git show ...)`, `/dev/null`) are
+/// read once, since reading them again yields nothing.
+enum DiffSide {
+    File(PathBuf),
+    Fixed(String),
+}
+
+impl DiffSide {
+    fn open(path: &StdPath) -> anyhow::Result<Self> {
+        let text = read_side(path)?;
+        if path.metadata().is_ok_and(|m| m.is_file()) {
+            Ok(DiffSide::File(path.canonicalize()?))
+        } else {
+            Ok(DiffSide::Fixed(text))
+        }
+    }
+
+    fn text(&self) -> anyhow::Result<String> {
+        match self {
+            DiffSide::File(path) => read_side(path),
+            DiffSide::Fixed(text) => Ok(text.clone()),
+        }
+    }
+}
+
+fn read_side(path: &StdPath) -> anyhow::Result<String> {
+    use anyhow::Context;
+    std::fs::read_to_string(path).with_context(|| format!("could not read {}", path.display()))
+}
+
+/// The two sides compared by `--diff`, with their column labels.
+pub(crate) struct DiffSource {
+    old: DiffSide,
+    new: DiffSide,
+    labels: [String; 2],
+    title: String,
+    layout: Layout,
+}
+
+impl DiffSource {
+    /// Read both sides once, so an unreadable side fails before serving.
+    pub(crate) fn open(old: &StdPath, new: &StdPath, layout: Layout) -> anyhow::Result<Self> {
+        let (old_name, new_name) = (side_name(old), side_name(new));
+        let (labels, title) = if old_name == new_name {
+            // As with `git difftool`, whose OLD is a temp copy of the same file
+            let labels = [format!("{old_name} (old)"), format!("{new_name} (new)")];
+            (labels, new_name)
+        } else {
+            let title = format!("{old_name} \u{2194} {new_name}");
+            ([old_name, new_name], title)
+        };
+        Ok(DiffSource {
+            old: DiffSide::open(old)?,
+            new: DiffSide::open(new)?,
+            labels,
+            title,
+            layout,
+        })
+    }
+
+    /// The files to watch; fixed sides never change.
+    pub(crate) fn files(&self) -> Vec<PathBuf> {
+        [&self.old, &self.new]
+            .into_iter()
+            .filter_map(|side| match side {
+                DiffSide::File(path) => Some(path.clone()),
+                DiffSide::Fixed(_) => None,
+            })
+            .collect()
+    }
+
+    /// Re-read both sides and diff them.
+    pub(crate) fn render(&self, syntax: Option<&SyntaxTheme>) -> anyhow::Result<String> {
+        let (old, new) = (self.old.text()?, self.new.text()?);
+        let opts = DiffOptions {
+            syntax_theme: syntax,
+            context: Some(3),
+            layout: self.layout,
+            labels: Some([&self.labels[0], &self.labels[1]]),
+            ..Default::default()
+        };
+        Ok(birta_core::diff::diff(&old, &new, &opts).html)
+    }
+}
+
+/// A file's name, or the whole path for a pipe or device, whose name says nothing.
+fn side_name(path: &StdPath) -> String {
+    match path.file_name() {
+        Some(name) if path.is_file() => name.to_string_lossy().into_owned(),
+        _ => path.display().to_string(),
+    }
+}
+
 pub(crate) struct AppState {
     pub(crate) base_dir: PathBuf,
     pub(crate) source_file: Option<PathBuf>,
     pub(crate) filename: String,
     /// Relative path of the initial file from base_dir (e.g. "README.md").
     pub(crate) initial_relpath: Option<String>,
+    /// Set when serving `--diff OLD NEW` instead of a markdown file.
+    pub(crate) diff: Option<DiffSource>,
     pub(crate) custom_css: Option<String>,
     /// Raw rendered HTML (not JSON-wrapped).
     pub(crate) current_html: RwLock<String>,
@@ -138,6 +236,7 @@ pub async fn run_stdin(markdown: &str, opts: ServerOptions) -> anyhow::Result<()
         source_file: None,
         filename: "stdin".to_string(),
         initial_relpath: None,
+        diff: None,
         custom_css: opts.custom_css,
         current_html: RwLock::new(content_html),
         current_source_html: RwLock::new(source_html),
@@ -222,6 +321,7 @@ pub async fn start(
         source_file: Some(canonical_file),
         filename,
         initial_relpath,
+        diff: None,
         custom_css: opts.custom_css,
         current_html: RwLock::new(content_html),
         current_source_html: RwLock::new(source_html),
@@ -257,6 +357,96 @@ pub async fn start(
 
     let state_for_watcher = Arc::clone(&state);
     let _debouncer = watcher::watch_dir(state.base_dir.clone(), tx, state_for_watcher)?;
+
+    let app = router(state.clone());
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(state))
+        .await?;
+
+    Ok(())
+}
+
+/// Serve a live diff of two files.
+pub async fn run_diff(
+    old: PathBuf,
+    new: PathBuf,
+    layout: Layout,
+    opts: ServerOptions,
+) -> anyhow::Result<()> {
+    let source = DiffSource::open(&old, &new, layout)?;
+    let addr = SocketAddr::from(([127, 0, 0, 1], opts.port));
+    let listener = TcpListener::bind(addr).await?;
+    let actual_addr = listener.local_addr()?;
+
+    eprintln!("birta: serving {} at http://{actual_addr}", source.title);
+
+    if !opts.no_open {
+        let url = format!("http://{actual_addr}");
+        if let Err(e) = open::that(&url) {
+            eprintln!("birta: could not open browser: {e}");
+        }
+    }
+
+    serve_diff(source, listener, opts).await
+}
+
+/// Start serving a diff of `old` against `new` on the given listener.
+pub async fn start_diff(
+    old: PathBuf,
+    new: PathBuf,
+    layout: Layout,
+    listener: TcpListener,
+    opts: ServerOptions,
+) -> anyhow::Result<()> {
+    serve_diff(DiffSource::open(&old, &new, layout)?, listener, opts).await
+}
+
+async fn serve_diff(
+    source: DiffSource,
+    listener: TcpListener,
+    opts: ServerOptions,
+) -> anyhow::Result<()> {
+    let content_html = source.render(opts.theme.active_data().syntax.as_ref())?;
+    // Diff mode serves no files besides the page, so this is never read
+    let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    let mut registry = ThemeRegistry::new(opts.theme);
+    if opts.enable_swap {
+        registry.discover_all(&crate::theme::search());
+    }
+
+    let (tx, _rx) = broadcast::channel::<ContentUpdate>(16);
+    let (theme_tx, _) = broadcast::channel::<String>(16);
+    let (scroll_tx, _) = broadcast::channel::<u32>(16);
+
+    let state = Arc::new(AppState {
+        base_dir,
+        source_file: None,
+        filename: source.title.clone(),
+        initial_relpath: None,
+        diff: Some(source),
+        custom_css: opts.custom_css,
+        current_html: RwLock::new(content_html),
+        current_source_html: RwLock::new(String::new()),
+        current_file_stats: RwLock::new(String::new()),
+        tx: tx.clone(),
+        theme_tx,
+        scroll_tx,
+        connections: AtomicUsize::new(0),
+        all_disconnected: Notify::new(),
+        registry: RwLock::new(registry),
+        enable_toggle: opts.enable_toggle,
+        font_css: opts.font_css,
+        show_header: opts.show_header,
+        reading_mode: opts.reading_mode,
+        raw_mode: false,
+        features: opts.features,
+        variant_explicit: opts.variant_explicit,
+        keybindings_json: opts.keybindings_json,
+        last_request: AtomicU64::new(now_secs()),
+    });
+
+    let _debouncer = watcher::watch_diff(tx, Arc::clone(&state))?;
 
     let app = router(state.clone());
     axum::serve(listener, app)
@@ -322,17 +512,21 @@ async fn auto_shutdown_loop(state: Arc<AppState>) {
 }
 
 fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/", get(index_handler))
-        .route("/view/{*path}", get(view_handler))
-        .route("/render/{*path}", get(render_handler))
         .route("/health", get(|| async { "ok" }))
         .route("/ws", get(ws_handler))
         .route("/scroll/{line}", post(scroll_handler))
-        .route("/local/{*path}", get(local_file_handler))
         .route("/favicon.png", get(favicon_handler))
-        .route("/favicon.ico", get(favicon_handler))
-        .with_state(state)
+        .route("/favicon.ico", get(favicon_handler));
+    // A diff page links to no files, and a /dev/null side must not expose /dev
+    if state.diff.is_none() {
+        router = router
+            .route("/view/{*path}", get(view_handler))
+            .route("/render/{*path}", get(render_handler))
+            .route("/local/{*path}", get(local_file_handler));
+    }
+    router.with_state(state)
 }
 
 async fn favicon_handler() -> Response {
@@ -367,6 +561,7 @@ async fn index_handler(State(state): State<Arc<AppState>>) -> Response {
         static_mode: false,
         keybindings_json: &state.keybindings_json,
         current_path: None,
+        diff: state.diff.is_some(),
     });
     Html(page).into_response()
 }
@@ -451,6 +646,7 @@ async fn view_handler(Path(path): Path<String>, State(state): State<Arc<AppState
         static_mode: false,
         keybindings_json: &state.keybindings_json,
         current_path: Some(&path),
+        diff: false,
     });
     Html(page).into_response()
 }
@@ -538,7 +734,15 @@ async fn broadcast_theme_update(state: &AppState) {
     let active = theme.active_data();
 
     // Re-render markdown with new syntax theme
-    let (html, source) = if let Some(source_file) = &state.source_file {
+    let (html, source) = if let Some(diff) = &state.diff {
+        match diff.render(active.syntax.as_ref()) {
+            Ok(html) => (html, String::new()),
+            Err(e) => {
+                eprintln!("birta: {e:#}");
+                return;
+            }
+        }
+    } else if let Some(source_file) = &state.source_file {
         match std::fs::read_to_string(source_file) {
             Ok(markdown) => {
                 let rendered = if let Some(relpath) = &state.initial_relpath {
@@ -623,6 +827,9 @@ fn toggle_checkbox(
     checked: bool,
     relpath: &str,
 ) -> anyhow::Result<()> {
+    if state.diff.is_some() {
+        anyhow::bail!("a diff has no checkboxes to toggle");
+    }
     let path = if !relpath.is_empty() {
         let joined = state.base_dir.join(relpath);
         let canonical = joined
@@ -819,6 +1026,7 @@ mod tests {
             source_file: None,
             filename: "test.md".to_string(),
             initial_relpath: None,
+            diff: None,
             custom_css: None,
             current_html: RwLock::new("<p>hello</p>".to_string()),
             current_source_html: RwLock::new(String::new()),
@@ -902,6 +1110,7 @@ mod tests {
             source_file: None,
             filename: "test.md".to_string(),
             initial_relpath: None,
+            diff: None,
             custom_css: None,
             current_html: RwLock::new("<p>hello</p>".to_string()),
             current_source_html: RwLock::new(String::new()),
@@ -1063,6 +1272,7 @@ mod tests {
             source_file: None,
             filename: "test.md".to_string(),
             initial_relpath: Some("test.md".to_string()),
+            diff: None,
             custom_css: None,
             current_html: RwLock::new("<p>hello</p>".to_string()),
             current_source_html: RwLock::new(String::new()),
@@ -1097,5 +1307,24 @@ mod tests {
 
         assert_eq!(response.status(), 307);
         assert_eq!(response.headers()["location"], "/view/test.md");
+    }
+
+    #[test]
+    fn diff_labels_mark_matching_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob = dir.path().join("blob");
+        std::fs::create_dir(&blob).unwrap();
+        let (old, new) = (blob.join("notes.md"), dir.path().join("notes.md"));
+        std::fs::write(&old, "a\n").unwrap();
+        std::fs::write(&new, "b\n").unwrap();
+        let source = DiffSource::open(&old, &new, Layout::Auto).unwrap();
+        assert_eq!(source.labels, ["notes.md (old)", "notes.md (new)"]);
+        assert_eq!(source.title, "notes.md");
+
+        let null = StdPath::new("/dev/null");
+        let source = DiffSource::open(null, &new, Layout::Auto).unwrap();
+        assert_eq!(source.labels, ["/dev/null", "notes.md"]);
+        assert_eq!(source.title, "/dev/null \u{2194} notes.md");
+        assert_eq!(source.files(), [new.canonicalize().unwrap()]);
     }
 }

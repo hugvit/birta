@@ -10,6 +10,7 @@
   <style>{{PAGE_CSS}}</style>
   <style>{{SYNTAX_CSS}}</style>
   <style>{{ALERTS_CSS}}</style>
+  <style>{{DIFF_CSS}}</style>
   <style id="theme-vars">{{THEME_VARS_CSS}}</style>
   <style>{{FONT_CSS}}</style>
   {{CUSTOM_CSS}}
@@ -108,6 +109,7 @@
     var KEYBINDINGS = {{KEYBINDINGS_JSON}};
     var CURRENT_PATH = '{{CURRENT_PATH}}';
     var INITIAL_VIEW = '{{INITIAL_VIEW}}';
+    var DIFF_MODE = {{DIFF_MODE}};
 
     var html = document.documentElement;
     var mdBody = document.getElementById('content');
@@ -128,7 +130,14 @@
     var viewMode = (storedView === 'raw' || (!storedView && INITIAL_VIEW === 'raw')) ? 'raw' : 'preview';
     var viewModeBeforeReading = viewMode;
 
+    // A diff has no single source to show raw or copy
+    if (DIFF_MODE) {
+      document.getElementById('view-toggle').style.display = 'none';
+      document.getElementById('copy-md-btn').style.display = 'none';
+    }
+
     function setViewMode(mode) {
+      if (DIFF_MODE) mode = 'preview';
       viewMode = mode;
       var isRaw = mode === 'raw';
       mdBody.style.display = isRaw ? 'none' : '';

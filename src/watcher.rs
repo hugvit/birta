@@ -100,23 +100,24 @@ pub(crate) fn watch_dir(
     Ok(debouncer)
 }
 
-/// Watch specific files and broadcast a fresh diff when either changes.
+/// Watch the files of `state.diff` and broadcast a fresh diff when either changes.
 ///
 /// Watches each file's parent directory, because editors that save by
 /// renaming replace the file and a watch on the file itself would go stale.
-pub(crate) fn watch_files(
-    files: Vec<PathBuf>,
+pub(crate) fn watch_diff(
     tx: broadcast::Sender<ContentUpdate>,
     state: Arc<AppState>,
 ) -> anyhow::Result<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>> {
-    // Device files such as /dev/null (git difftool's side for an added file) never change
-    let files: HashSet<PathBuf> = files.into_iter().filter(|f| f.is_file()).collect();
+    let files: HashSet<PathBuf> = state
+        .diff
+        .as_ref()
+        .map(|diff| diff.files().into_iter().collect())
+        .unwrap_or_default();
     let dirs: HashSet<PathBuf> = files
         .iter()
         .filter_map(|f| f.parent().map(PathBuf::from))
         .collect();
     let rt = tokio::runtime::Handle::current();
-    let watched = files.clone();
 
     let mut debouncer = new_debouncer(
         std::time::Duration::from_millis(200),
@@ -129,10 +130,11 @@ pub(crate) fn watch_files(
                 }
             };
             let touched = events.iter().any(|event| {
-                event
-                    .path
-                    .canonicalize()
-                    .is_ok_and(|path| watched.contains(&path))
+                event.kind == DebouncedEventKind::Any
+                    && event
+                        .path
+                        .canonicalize()
+                        .is_ok_and(|path| files.contains(&path))
             });
             let Some(diff) = state.diff.as_ref().filter(|_| touched) else {
                 return;
@@ -145,7 +147,7 @@ pub(crate) fn watch_files(
             let html = match html {
                 Ok(html) => html,
                 Err(e) => {
-                    eprintln!("birta: could not re-read diff files: {e}");
+                    eprintln!("birta: {e:#}");
                     return;
                 }
             };

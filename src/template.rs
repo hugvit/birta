@@ -146,7 +146,7 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
             ("ACTIVE_THEME", &theme.name),
             ("THEME_OPTIONS", &theme_options),
             ("VARIANTS_JSON", &variants_json),
-            ("FILENAME", filename),
+            ("FILENAME", &escape_html(filename)),
             ("FILE_STATS", opts.file_stats),
             (
                 "STATIC_MODE",
@@ -166,6 +166,13 @@ pub fn render_page(opts: &PageOptions<'_>) -> String {
             ("CONTENT", content_html),
         ],
     )
+}
+
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// Fills `{{KEY}}` placeholders in a single pass, so substituted values are
@@ -588,5 +595,30 @@ mod tests {
             !html_tag.contains("data-birta-theme"),
             "github theme should not set data-birta-theme attribute on html element"
         );
+    }
+
+    #[test]
+    fn filename_is_escaped() {
+        let theme = github_theme();
+        let page = render_page(&PageOptions {
+            filename: "<img src=x onerror=alert(1)>.md",
+            file_stats: "",
+            content_html: "",
+            source_html: None,
+            custom_css: None,
+            font_css: None,
+            show_header: true,
+            reading_mode: false,
+            raw_mode: false,
+            theme: &theme,
+            theme_names: &[],
+            variant_explicit: false,
+            static_mode: false,
+            keybindings_json: "{}",
+            current_path: None,
+            diff: false,
+        });
+        assert!(!page.contains("<img src=x"));
+        assert!(page.contains("&lt;img src=x onerror=alert(1)&gt;.md"));
     }
 }

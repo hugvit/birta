@@ -172,3 +172,58 @@ async fn a_variant_switch_re_diffs_the_files() {
         "{html}"
     );
 }
+
+async fn next_content(
+    ws: &mut (impl StreamExt<Item = Result<Message, impl std::fmt::Debug>> + Unpin),
+) -> String {
+    let msg = timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("timed out waiting for update")
+        .expect("stream ended")
+        .expect("ws error");
+    let Message::Text(text) = msg else {
+        panic!("expected text message, got {msg:?}");
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed["type"], "content");
+    parsed["html"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn saves_by_rename_and_edits_to_old_are_picked_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let (old, new) = write_pair(dir.path(), "# Title\n", "# Title\n\nfirst\n");
+    let port = start_diff_server(&old, &new).await;
+
+    let url = format!("ws://127.0.0.1:{port}/ws");
+    let (mut ws, _) = connect_async(&url).await.expect("failed to connect");
+    let _ = timeout(Duration::from_secs(5), ws.next()).await.unwrap();
+
+    // Editors that save atomically write a temp file and rename it over the original
+    let temp = dir.path().join(".new.md.swp");
+    std::fs::write(&temp, "# Title\n\nrenamed in\n").unwrap();
+    std::fs::rename(&temp, &new).unwrap();
+    let html = next_content(&mut ws).await;
+    assert!(html.contains("renamed in"), "{html}");
+
+    std::fs::write(&old, "# Old title\n").unwrap();
+    let html = next_content(&mut ws).await;
+    assert!(html.contains("Old title"), "{html}");
+}
+
+#[tokio::test]
+async fn diff_mode_serves_no_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let (old, new) = write_pair(dir.path(), "a\n", "b\n");
+    std::fs::write(dir.path().join("photo.png"), b"fake").unwrap();
+    let port = start_diff_server(&old, &new).await;
+
+    for path in ["/local/photo.png", "/view/old.md", "/render/old.md"] {
+        let response = get(port, path).await;
+        assert!(
+            response.starts_with("HTTP/1.0 404"),
+            "{path}: {}",
+            &response[..20]
+        );
+    }
+}

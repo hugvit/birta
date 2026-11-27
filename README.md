@@ -147,10 +147,10 @@ Diff two files, live: the view updates when either file changes:
 
 ```bash
 birta --diff old.md new.md
-birta --diff --diff-layout unified old.md new.md   # auto (default), unified or split
+birta --diff-layout unified --diff old.md new.md   # auto (default), unified or split
 ```
 
-`auto` shows the diff side by side when the window is wide enough and unified when it's narrow.
+`auto` shows the diff side by side when the window is wide enough and unified when it's narrow. Put other flags before `--diff`, since it takes the next two arguments as its files.
 
 Use birta as a `git difftool` for markdown:
 

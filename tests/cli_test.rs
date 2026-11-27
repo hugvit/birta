@@ -74,3 +74,30 @@ fn diff_layout_requires_diff() {
         .failure()
         .stderr(predicate::str::contains("--diff-layout needs --diff"));
 }
+
+#[test]
+fn diff_rejects_a_second_diff_flag() {
+    Command::cargo_bin("birta")
+        .unwrap()
+        .args(["--diff", "a.md", "b.md", "--diff", "c.md", "d.md"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be used multiple times"));
+}
+
+#[test]
+fn diff_reports_an_unreadable_side_by_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let (bad, good) = (dir.path().join("bad.md"), dir.path().join("good.md"));
+    std::fs::write(&bad, b"\xff\xfe not utf-8").unwrap();
+    std::fs::write(&good, "# Good\n").unwrap();
+    Command::cargo_bin("birta")
+        .unwrap()
+        .args(["--no-open", "--diff"])
+        .arg(&bad)
+        .arg(&good)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("could not read").and(predicate::str::contains("bad.md")))
+        .stderr(predicate::str::contains("serving").not());
+}

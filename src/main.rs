@@ -30,6 +30,7 @@ struct Cli {
     #[arg(
         long,
         num_args = 2,
+        action = clap::ArgAction::Set,
         value_names = ["OLD", "NEW"],
         conflicts_with_all = ["file", "static_mode"],
         help_heading = "Diff"
@@ -267,10 +268,10 @@ async fn main() -> anyhow::Result<()> {
             keybindings_json,
             variant_explicit,
         };
-        let [old, new]: [PathBuf; 2] = diff_files
-            .unwrap_or_default()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("--diff takes exactly two files"))?;
+        let Some([old, new]) = diff_files.and_then(|paths| <[PathBuf; 2]>::try_from(paths).ok())
+        else {
+            anyhow::bail!("--diff takes exactly two files");
+        };
         return birta::server::run_diff(old, new, cli.diff_layout.unwrap_or_default().into(), opts)
             .await;
     };

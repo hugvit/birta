@@ -2,9 +2,7 @@ use comrak::plugins::syntect::{SyntectAdapter, SyntectAdapterBuilder};
 use std::sync::OnceLock;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{FontStyle, Style, ThemeSet};
-use syntect::html::{
-    ClassStyle, ClassedHTMLGenerator, IncludeBackground, append_highlighted_html_for_styled_line,
-};
+use syntect::html::{ClassStyle, IncludeBackground, append_highlighted_html_for_styled_line};
 use syntect::parsing::{BasicScopeStackOp, ParseState, Scope, ScopeStack, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
@@ -34,6 +32,8 @@ pub fn adapter_with_theme(syntax_theme: &SyntaxTheme) -> SyntectAdapter {
 /// Returns the inner HTML content (spans + text, no wrapping `<pre>` tag).
 /// In CSS-class mode (no theme), produces `<span class="...">` matching `syntax.css`.
 /// In inline-style mode (with theme), produces `<span style="color:...">` spans.
+/// Lines over 8 KiB (e.g. a data URI) are left unhighlighted; the rest of the
+/// file is highlighted as usual.
 pub fn highlight_source(source: &str, syntax_theme: Option<&SyntaxTheme>) -> String {
     let ss = syntax_set();
     let syntax = ss
@@ -59,20 +59,43 @@ fn syntax_set() -> &'static SyntaxSet {
 }
 
 /// CSS-class mode: produces `<span class="keyword">` etc. matching `syntax.css`.
+///
+/// Same output as syntect's `ClassedHTMLGenerator`, except that lines over
+/// [`HIGHLIGHT_MAX_LINE`] are escaped inside the spans already open, unparsed.
 fn highlight_classed(
     source: &str,
     syntax: &syntect::parsing::SyntaxReference,
     ss: &SyntaxSet,
 ) -> String {
-    let mut generator = ClassedHTMLGenerator::new_with_class_style(syntax, ss, ClassStyle::Spaced);
+    let mut state = ParseState::new(syntax);
+    let mut stack = ScopeStack::new();
+    let mut open_spans: isize = 0;
+    let mut html = String::with_capacity(source.len() * 2);
     for line in LinesWithEndings::from(source) {
-        // Errors here are non-fatal — skip unparseable lines
-        let _ = generator.parse_html_for_line_which_includes_newline(line);
+        if line.len() > HIGHLIGHT_MAX_LINE {
+            html.push_str(&crate::render::html_escape(line));
+            continue;
+        }
+        let spans = state.parse_line(line, ss).ok().and_then(|ops| {
+            syntect::html::line_tokens_to_classed_spans(line, &ops, ClassStyle::Spaced, &mut stack)
+                .ok()
+        });
+        match spans {
+            Some((formatted, delta)) => {
+                open_spans += delta;
+                html.push_str(&formatted);
+            }
+            None => html.push_str(&crate::render::html_escape(line)),
+        }
     }
-    generator.finalize()
+    for _ in 0..open_spans {
+        html.push_str("</span>");
+    }
+    html
 }
 
 /// Inline-style mode: produces `<span style="color:#cf222e">` etc. from a tmTheme.
+/// Lines over [`HIGHLIGHT_MAX_LINE`] are escaped, unparsed.
 fn highlight_styled(
     source: &str,
     syntax: &syntect::parsing::SyntaxReference,
@@ -82,6 +105,10 @@ fn highlight_styled(
     let mut highlighter = HighlightLines::new(syntax, &syntax_theme.theme);
     let mut html = String::new();
     for line in LinesWithEndings::from(source) {
+        if line.len() > HIGHLIGHT_MAX_LINE {
+            html.push_str(&crate::render::html_escape(line));
+            continue;
+        }
         let Ok(regions) = highlighter.highlight_line(line, ss) else {
             html.push_str(&crate::render::html_escape(line));
             continue;
@@ -449,25 +476,72 @@ mod tests {
     }
 
     #[test]
-    fn highlight_source_highlights_long_lines_like_main() {
-        let data_uri = format!("![img](data:image/png;base64,{})", "QUJD".repeat(5_000));
-        let row = format!("| {} |", "cell ".repeat(1_900));
-        let source = format!("# Title\n\n{data_uri}\n\n{row}\n");
-        assert!(data_uri.len() > HIGHLIGHT_MAX_LINE && row.len() > HIGHLIGHT_MAX_LINE);
+    fn highlight_source_matches_syntect_generators() {
+        let source = "---\ntitle: x\n---\n# Title\r\n\n```rust\nfn main() {}\n```\n\n> *quote* `code` [link](url)\n";
 
-        // The pre-cache code path: a fresh syntax set and syntect's own generators
+        // The reference: a fresh syntax set and syntect's own generators
         let ss = SyntaxSet::load_defaults_newlines();
         let syntax = ss.find_syntax_by_extension("md").unwrap();
+        let mut generator = syntect::html::ClassedHTMLGenerator::new_with_class_style(
+            syntax,
+            &ss,
+            ClassStyle::Spaced,
+        );
+        for line in LinesWithEndings::from(source) {
+            generator
+                .parse_html_for_line_which_includes_newline(line)
+                .unwrap();
+        }
+        let classed = generator.finalize().replace('\r', "&#13;");
+        assert_eq!(highlight_source(source, None), classed);
+
+        let theme = default_syntax_theme();
+        let mut highlighter = HighlightLines::new(syntax, &theme.theme);
+        let mut styled = String::new();
+        for line in LinesWithEndings::from(source) {
+            let regions = highlighter.highlight_line(line, &ss).unwrap();
+            append_highlighted_html_for_styled_line(&regions, IncludeBackground::No, &mut styled)
+                .unwrap();
+        }
+        assert_eq!(
+            highlight_source(source, Some(&theme)),
+            styled.replace('\r', "&#13;")
+        );
+    }
+
+    #[test]
+    fn highlight_source_leaves_only_long_lines_plain() {
+        let data_uri = format!("![img](data:image/png;base64,{})", "QUJD".repeat(5_000));
+        let row = format!("| {} <b> |", "cell ".repeat(1_900));
+        let source = format!("# Title\n\n{data_uri}\n\n{row}\n\n**bold**\n");
+        assert!(data_uri.len() > HIGHLIGHT_MAX_LINE && row.len() > HIGHLIGHT_MAX_LINE);
+
         let theme = default_syntax_theme();
         for mode in [None, Some(&theme)] {
-            let expected = match mode {
-                None => highlight_classed(&source, syntax, &ss),
-                Some(st) => highlight_styled(&source, syntax, &ss, st),
+            let html = highlight_source(&source, mode);
+            let lines: Vec<&str> = html.split('\n').collect();
+            assert!(lines[0].contains("<span"), "{}", lines[0]);
+            assert!(lines[6].contains("<span"), "{}", lines[6]);
+            for long in [lines[2], lines[4]] {
+                let text = long.trim_start_matches("</span>");
+                assert!(!text.contains("<span"), "long line was highlighted");
             }
-            .replace('\r', "&#13;");
-            let actual = highlight_source(&source, mode);
-            assert_eq!(actual, expected);
-            assert!(actual.contains("<span"));
+            assert!(lines[4].contains("&lt;b&gt;"));
+            assert_eq!(strip_tags(&html), source);
         }
+    }
+
+    #[test]
+    fn highlight_source_is_fast_on_a_huge_line() {
+        let source = format!("# Title\n\n{}\n", "*a* _b_ `c` [d](e) ".repeat(50_000));
+        let started = std::time::Instant::now();
+        for mode in [None, Some(&default_syntax_theme())] {
+            highlight_source(&source, mode);
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
     }
 }

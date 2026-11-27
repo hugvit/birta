@@ -1,6 +1,6 @@
 [package]
 name = "birta"
-version = "0.10.6"
+version = "0.11.0"
 edition = "2024"
 description = "Preview markdown files in the browser with GitHub-style rendering"
 license = "MIT"
@@ -14,7 +14,7 @@ homepage = "https://github.com/hugvit/birta"
 members = ["crates/birta-core"]
 
 [dependencies]
-birta-core = { version = "0.3.6", path = "crates/birta-core" }
+birta-core = { version = "0.3.7", path = "crates/birta-core" }
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 clap = { version = "4", features = ["derive"] }

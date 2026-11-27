@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7](https://github.com/hugvit/birta/compare/birta-core-v0.3.6...birta-core-v0.3.7) - 2026-11-27
+
+### Fixed
+
+- *(birta-core)* leave over-long lines unhighlighted in highlight_source
+
 ## [0.3.6](https://github.com/hugvit/birta/compare/birta-core-v0.3.5...birta-core-v0.3.6) - 2026-11-25
 
 ### Fixed
